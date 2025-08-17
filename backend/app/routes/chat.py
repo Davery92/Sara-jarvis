@@ -1,0 +1,336 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+from app.core.deps import get_current_user
+from app.core.llm import llm_client
+from app.core.config import settings
+from app.db.session import get_db
+from app.models.user import User
+from app.services.memory_service import MemoryService
+from app.tools.registry import tool_registry
+import logging
+import uuid
+import json
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+class ChatMessage(BaseModel):
+    role: str  # user, assistant, system
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    session_id: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    message: ChatMessage
+    session_id: str
+    citations: List[str] = []
+    tool_effects: List[Dict[str, Any]] = []
+
+
+class ChatRouter:
+    """Router for deciding retrieval based on user query"""
+    
+    def __init__(self):
+        # Simple keyword-based routing rules
+        self.memory_keywords = [
+            "remember", "recall", "what did", "when did", "tell me about",
+            "find", "search", "look up", "mentioned", "said", "discussed"
+        ]
+        
+        self.notes_keywords = [
+            "note", "notes", "wrote", "written", "documented", "saved"
+        ]
+        
+        self.docs_keywords = [
+            "document", "file", "pdf", "uploaded", "doc", "paper"
+        ]
+        
+        self.reminders_keywords = [
+            "remind", "reminder", "due", "schedule", "appointment", "meeting"
+        ]
+        
+        self.chit_chat_keywords = [
+            "hello", "hi", "how are you", "thanks", "thank you", "goodbye", "bye"
+        ]
+    
+    def should_retrieve_memory(self, user_message: str) -> Dict[str, bool]:
+        """Determine what types of retrieval are needed"""
+        
+        message_lower = user_message.lower()
+        
+        # Check for chit-chat patterns
+        is_chit_chat = any(keyword in message_lower for keyword in self.chit_chat_keywords)
+        if is_chit_chat and len(user_message.split()) < 10:
+            return {
+                "needs_memory": False,
+                "needs_notes": False,
+                "needs_docs": False,
+                "needs_context": False
+            }
+        
+        # Check for specific memory needs
+        needs_memory = any(keyword in message_lower for keyword in self.memory_keywords)
+        needs_notes = any(keyword in message_lower for keyword in self.notes_keywords)
+        needs_docs = any(keyword in message_lower for keyword in self.docs_keywords)
+        needs_context = any(keyword in message_lower for keyword in self.reminders_keywords)
+        
+        # If nothing specific, but it's a question, enable memory search
+        if not any([needs_memory, needs_notes, needs_docs]) and ("?" in user_message or message_lower.startswith(("what", "when", "where", "how", "why", "who"))):
+            needs_memory = True
+        
+        return {
+            "needs_memory": needs_memory,
+            "needs_notes": needs_notes, 
+            "needs_docs": needs_docs,
+            "needs_context": needs_context or needs_memory or needs_notes or needs_docs
+        }
+
+
+chat_router = ChatRouter()
+
+
+@router.post("/", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Main chat endpoint with selective RAG"""
+    
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
+    
+    # Get or create session ID
+    session_id = request.session_id or str(uuid.uuid4())
+    
+    # Get the latest user message
+    user_message = None
+    for msg in reversed(request.messages):
+        if msg.role == "user":
+            user_message = msg.content
+            break
+    
+    if not user_message:
+        raise HTTPException(status_code=400, detail="No user message found")
+    
+    memory_service = MemoryService(db)
+    
+    try:
+        # Store user message as episode
+        await memory_service.store_episode(
+            user_id=str(current_user.id),
+            source="chat",
+            role="user",
+            content=user_message,
+            meta={"session_id": session_id}
+        )
+        
+        # Determine retrieval needs
+        retrieval_needs = chat_router.should_retrieve_memory(user_message)
+        
+        # Prepare context
+        context_parts = []
+        citations = []
+        
+        if retrieval_needs["needs_context"]:
+            # Determine which scopes to search
+            scopes = []
+            if retrieval_needs["needs_memory"]:
+                scopes.extend(["episodes", "summaries"])
+            if retrieval_needs["needs_notes"]:
+                scopes.append("notes")
+            if retrieval_needs["needs_docs"]:
+                scopes.append("docs")
+            
+            if scopes:
+                # Search memory
+                memory_results = await memory_service.search_memory(
+                    user_id=str(current_user.id),
+                    query=user_message,
+                    scopes=scopes,
+                    limit=8
+                )
+                
+                if memory_results:
+                    context_parts.append("## Relevant Context")
+                    for result in memory_results:
+                        if result["type"] == "episode":
+                            context_parts.append(f"- {result['text']} (from {result['source']})")
+                            citations.append(f"mem:{result['episode_id']}")
+                        elif result["type"] == "summary":
+                            context_parts.append(f"- {result['text']} (summary: {result['scope']})")
+                            citations.append(f"sem:{result['summary_id']}")
+                        elif result["type"] == "note":
+                            context_parts.append(f"- Note '{result['title']}': {result['text'][:200]}...")
+                            citations.append(f"note:{result['note_id']}")
+                        elif result["type"] == "document":
+                            context_parts.append(f"- Document '{result['doc_title']}': {result['text'][:200]}...")
+                            citations.append(f"doc:{result['doc_id']}#{result['chunk_idx']}")
+        
+        # Prepare messages for LLM
+        system_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant. You have access to tools to manage notes, reminders, timers, calendar events, and search through personal memory.
+
+When you use information from memory or documents, cite them using the format provided in the context. Keep responses conversational and helpful.
+
+Available tools: notes management, reminders, timers, calendar events, and memory search."""
+        
+        llm_messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add context if we found any
+        if context_parts:
+            context_message = "\n".join(context_parts)
+            llm_messages.append({"role": "system", "content": context_message})
+        
+        # Add conversation history (last 6 messages to keep context manageable)
+        recent_messages = request.messages[-6:]
+        for msg in recent_messages:
+            llm_messages.append({"role": msg.role, "content": msg.content})
+        
+        # Get tool schemas
+        tools = tool_registry.get_openai_schemas()
+        
+        # Call LLM
+        response = await llm_client.chat_completion(
+            messages=llm_messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=0.7
+        )
+        
+        assistant_message = response["choices"][0]["message"]
+        tool_effects = []
+        
+        # Handle tool calls
+        if assistant_message.get("tool_calls"):
+            for tool_call in assistant_message["tool_calls"]:
+                tool_name = tool_call["function"]["name"]
+                tool_params = json.loads(tool_call["function"]["arguments"])
+                
+                # Execute tool
+                tool_result = await tool_registry.execute_tool(
+                    name=tool_name,
+                    user_id=str(current_user.id),
+                    parameters=tool_params
+                )
+                
+                if tool_result.success:
+                    tool_effects.append({
+                        "tool": tool_name,
+                        "action": tool_result.message,
+                        "data": tool_result.data
+                    })
+                    
+                    # Add tool citations
+                    if tool_result.citations:
+                        citations.extend(tool_result.citations)
+                
+                # Add tool result to conversation for final response
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps({
+                        "success": tool_result.success,
+                        "message": tool_result.message,
+                        "data": tool_result.data
+                    })
+                })
+            
+            # Get final response after tool execution
+            final_response = await llm_client.chat_completion(
+                messages=llm_messages,
+                temperature=0.7
+            )
+            final_message = final_response["choices"][0]["message"]["content"]
+        else:
+            final_message = assistant_message["content"]
+        
+        # Store assistant response as episode
+        await memory_service.store_episode(
+            user_id=str(current_user.id),
+            source="chat",
+            role="assistant",
+            content=final_message,
+            meta={
+                "session_id": session_id,
+                "tool_calls": len(assistant_message.get("tool_calls", [])),
+                "citations": citations
+            }
+        )
+        
+        # Update session summary
+        if len(request.messages) >= 4:  # Update summary every few turns
+            from app.models.episode import Episode
+            recent_episodes = db.query(Episode).filter(
+                Episode.user_id == str(current_user.id),
+                Episode.meta["session_id"].astext == session_id
+            ).order_by(Episode.created_at.desc()).limit(10).all()
+            
+            if recent_episodes:
+                await memory_service.create_session_summary(
+                    user_id=str(current_user.id),
+                    session_id=session_id,
+                    episodes=recent_episodes
+                )
+        
+        return ChatResponse(
+            message=ChatMessage(role="assistant", content=final_message),
+            session_id=session_id,
+            citations=list(set(citations)),  # Remove duplicates
+            tool_effects=tool_effects
+        )
+        
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
+
+
+@router.get("/sessions")
+async def list_chat_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List recent chat sessions"""
+    
+    try:
+        # Get recent sessions from episode metadata
+        from sqlalchemy import text
+        
+        sql = text("""
+            SELECT 
+                meta->>'session_id' as session_id,
+                MIN(created_at) as started_at,
+                MAX(created_at) as last_activity,
+                COUNT(*) as message_count
+            FROM episode 
+            WHERE user_id = :user_id 
+                AND source = 'chat'
+                AND meta->>'session_id' IS NOT NULL
+            GROUP BY meta->>'session_id'
+            ORDER BY MAX(created_at) DESC
+            LIMIT 20
+        """)
+        
+        result = db.execute(sql, {"user_id": str(current_user.id)})
+        
+        sessions = []
+        for row in result.fetchall():
+            sessions.append({
+                "session_id": row.session_id,
+                "started_at": row.started_at.isoformat(),
+                "last_activity": row.last_activity.isoformat(),
+                "message_count": row.message_count
+            })
+        
+        return {"sessions": sessions}
+        
+    except Exception as e:
+        logger.error(f"Failed to list sessions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve sessions")

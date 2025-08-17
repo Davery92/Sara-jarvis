@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Awesome Dashboard</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"/>
+<style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+        }
+        .bg-card {
+            background-color: #161b22;
+        }
+        .border-card {
+            border-color: #30363d;
+        }
+    </style>
+</head>
+<body class="p-8">
+<div class="flex space-x-8">
+<aside class="flex flex-col items-center space-y-6 bg-card border border-card rounded-xl p-4" style="height: fit-content;">
+<div class="p-3 bg-white text-black rounded-lg font-bold text-2xl">a</div>
+<nav class="flex flex-col items-center space-y-6">
+<a class="flex flex-col items-center text-teal-400" href="#">
+<span class="material-icons">home</span>
+<span class="text-xs">Home</span>
+</a>
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">chat</span>
+<span class="text-xs">Chat</span>
+</a>
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">notes</span>
+<span class="text-xs">Notes</span>
+</a>
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">description</span>
+<span class="text-xs">Documents</span>
+</a>
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">calendar_today</span>
+<span class="text-xs">Calendar</span>
+</a>
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">settings</span>
+<span class="text-xs">Settings</span>
+</a>
+</nav>
+<div class="mt-auto">
+<a class="flex flex-col items-center text-gray-400 hover:text-white" href="#">
+<span class="material-icons">logout</span>
+</a>
+</div>
+</aside>
+<main class="flex-1">
+<header class="flex justify-between items-center mb-8">
+<h1 class="text-4xl font-bold">awesome</h1>
+<button class="text-gray-400">
+<span class="material-icons text-3xl">menu</span>
+</button>
+</header>
+<div class="grid grid-cols-3 gap-8">
+<div class="col-span-2 space-y-8">
+<div class="bg-card border border-card rounded-xl p-6">
+<h2 class="text-lg font-semibold mb-4">PROJECT CHARTER</h2>
+<h3 class="font-semibold mb-2">Goal:</h3>
+<p class="text-gray-400 mb-4">A personal hub you can log into from any device to:</p>
+<ul class="space-y-2 text-gray-400 list-disc list-inside">
+<li>capture &amp; browse notes (Obsidian-ish)</li>
+<li>create reminders, timers, and calendar events</li>
+<li>chat with AI that can use your 'memory' (notes ++ docs) via RAG</li>
+<li>upload documents (any common format) and vectorize them</li>
+<li>store everything that flows through the AI</li>
+<li>keep memory 'human-like', recent &gt; old; old gets compacted. important stays vivid</li>
+</ul>
+</div>
+<div class="grid grid-cols-4 gap-8">
+<div class="bg-card border border-card rounded-xl p-6 text-center">
+<h3 class="text-gray-400 font-medium">NOTES</h3>
+<p class="text-5xl font-bold my-2">128</p>
+<p class="text-sm text-gray-500">notes</p>
+</div>
+<div class="bg-card border border-card rounded-xl p-6 text-center">
+<h3 class="text-gray-400 font-medium">REMINDERS</h3>
+<p class="text-5xl font-bold my-2">4</p>
+<p class="text-sm text-gray-500">reminders</p>
+</div>
+<div class="bg-card border border-card rounded-xl p-6">
+<h3 class="text-gray-400 font-medium mb-2">CALENDAR</h3>
+<p class="text-white font-semibold">April 2024</p>
+<div class="text-xs text-gray-500 mt-2">
+<div class="grid grid-cols-7 text-center">
+<span>S</span><span>M</span><span>A</span><span>T</span><span>W</span><span>T</span><span>F</span>
+<span class="text-gray-600">31</span><span class="text-white">1</span><span class="text-white">2</span><span class="text-white">3</span><span class="text-white">4</span><span class="text-white">5</span><span class="text-white">6</span>
+<span class="text-white">7</span><span class="text-white">8</span><span class="text-white">9</span><span class="text-white">10</span><span class="text-white">11</span><span class="text-white">12</span><span class="text-white">13</span>
+<span class="text-white">14</span><span class="text-white">15</span><span class="text-white">16</span><span class="text-white">17</span><span class="text-white">18</span><span class="text-white">19</span><span class="text-white">20</span>
+<span class="text-white">21</span><span class="text-white">22</span><span class="text-white">23</span><span class="text-white">24</span><span class="text-white">25</span><span class="text-white">26</span><span class="text-white">27</span>
+<span class="text-white">28</span><span class="text-white">29</span><span class="text-white">30</span><span class="text-gray-600">1</span><span class="text-gray-600">2</span><span class="text-gray-600">3</span><span class="text-gray-600">4</span>
+</div>
+</div>
+</div>
+<div class="bg-card border border-card rounded-xl p-6 text-center">
+<h3 class="text-gray-400 font-medium">TIMERS</h3>
+<p class="text-3xl font-mono my-2 text-teal-400">00:12:05</p>
+<p class="text-sm text-gray-500">timer active</p>
+</div>
+</div>
+<div class="bg-card border border-card rounded-xl p-6">
+<h2 class="text-lg font-semibold mb-4">CHAT</h2>
+<div class="flex">
+<input class="flex-grow bg-gray-800 border border-gray-700 rounded-l-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500" placeholder="How can I assist you today?" type="text"/>
+<button class="bg-gray-700 text-white font-semibold px-6 rounded-r-lg hover:bg-gray-600">SEND</button>
+</div>
+</div>
+</div>
+<div class="col-span-1 space-y-8">
+<div class="bg-card border border-card rounded-xl p-6">
+<h2 class="text-lg font-semibold mb-4">SYSTEM ARCHITECTURE</h2>
+<div class="space-y-4">
+<div class="flex items-center space-x-3">
+<span class="material-icons text-teal-400">dns</span>
+<span class="font-medium">React</span>
+</div>
+<div class="flex items-center space-x-3">
+<span class="material-icons text-teal-400">dns</span>
+<span class="font-medium">FastAPI</span>
+</div>
+</div>
+<div class="border-t border-gray-700 my-4"></div>
+<div class="space-y-4">
+<div class="flex items-center space-x-3">
+<span class="material-icons text-teal-400">storage</span>
+<span class="font-medium">Postgres + pgvector</span>
+</div>
+</div>
+</div>
+<div class="bg-card border border-card rounded-xl p-6">
+<h2 class="text-lg font-semibold mb-4">CHAT</h2>
+<div class="space-y-3">
+<a class="flex justify-between items-center bg-gray-800 p-3 rounded-lg hover:bg-gray-700" href="#">
+<div class="flex items-center space-x-3">
+<span class="material-icons text-gray-400">picture_as_pdf</span>
+<span>Project.pdf</span>
+</div>
+<span class="material-icons text-gray-500">chevron_right</span>
+</a>
+<a class="flex justify-between items-center bg-gray-800 p-3 rounded-lg hover:bg-gray-700" href="#">
+<div class="flex items-center space-x-3">
+<span class="material-icons text-gray-400">description</span>
+<span>Reference.docx</span>
+</div>
+<span class="material-icons text-gray-500">chevron_right</span>
+</a>
+<a class="flex justify-between items-center bg-gray-800 p-3 rounded-lg hover:bg-gray-700" href="#">
+<div class="flex items-center space-x-3">
+<span class="material-icons text-gray-400">article</span>
+<span>Notes.txt</span>
+</div>
+<span class="material-icons text-gray-500">chevron_right</span>
+</a>
+</div>
+</div>
+<div class="bg-card border border-card rounded-xl p-6">
+<h2 class="text-lg font-semibold">DOCUMENTS</h2>
+</div>
+</div>
+</div>
+</main>
+</div>
+
+</body></html>

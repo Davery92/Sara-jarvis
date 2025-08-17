@@ -1,0 +1,54 @@
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Float, Integer, JSON
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.db.base import Base
+import uuid
+
+
+class Episode(Base):
+    __tablename__ = "episode"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String, nullable=False)  # chat, note, doc, system, tool
+    role = Column(String, nullable=False)    # user, assistant, system, tool
+    content = Column(Text, nullable=False)
+    meta = Column(JSON, default={})         # session_id, tool_name, note_id, doc_id, etc.
+    importance = Column(Float, default=0.0)  # 0.0 to 1.0
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    user = relationship("User")
+    memory_vectors = relationship("MemoryVector", back_populates="episode", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<Episode(source='{self.source}', role='{self.role}', content='{self.content[:30]}...')>"
+
+
+class MemoryVector(Base):
+    __tablename__ = "memory_vector"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    # Store embedding as JSON string for SQLite compatibility
+    embedding = Column(Text, nullable=False)  # JSON string of float array
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    episode = relationship("Episode", back_populates="memory_vectors")
+    
+    def __repr__(self):
+        return f"<MemoryVector(episode_id='{self.episode_id}', chunk_index={self.chunk_index})>"
+
+
+class MemoryHot(Base):
+    __tablename__ = "memory_hot"
+
+    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), primary_key=True)
+    last_accessed = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    accesses = Column(Integer, nullable=False, default=1)
+    
+    def __repr__(self):
+        return f"<MemoryHot(episode_id='{self.episode_id}', accesses={self.accesses})>"

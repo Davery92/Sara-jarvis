@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "10.185.1.180:3000:3000"
+    environment:
+      - VITE_API_URL=https://sara.avery.cloud/api
+      - VITE_ASSISTANT_NAME=Sara
+      - VITE_DOMAIN=sara.avery.cloud
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    ports:
+      - "10.185.1.180:8000:8000"
+    environment:
+      - OPENAI_BASE_URL=http://100.104.68.115:11434/v1
+      - OPENAI_MODEL=gpt-oss:120b
+      - OPENAI_API_KEY=dummy
+      - EMBEDDING_BASE_URL=http://100.104.68.115:11434
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - ASSISTANT_NAME=Sara
+      - DOMAIN=sara.avery.cloud
+      - COOKIE_DOMAIN=.sara.avery.cloud
+      - CORS_ORIGINS=["https://sara.avery.cloud"]
+      - DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub
+      - MINIO_URL=http://minio:9000
+      - MINIO_BUCKET=sara-docs
+      - MINIO_ACCESS_KEY=sara
+      - MINIO_SECRET_KEY=sara123
+      - JWT_SECRET=sara-hub-jwt-secret-change-in-production
+      - TIMEZONE=America/New_York
+    depends_on:
+      - db
+      - minio
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: sara_hub
+      POSTGRES_USER: sara
+      POSTGRES_PASSWORD: sara123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "10.185.1.180:5432:5432"
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: sara
+      MINIO_ROOT_PASSWORD: sara123
+    ports:
+      - "10.185.1.180:9000:9000"
+      - "10.185.1.180:9001:9001"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  minio_data:

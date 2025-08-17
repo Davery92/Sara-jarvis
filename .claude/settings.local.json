@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(docker compose:*)",
+      "Bash(curl:*)",
+      "Bash(sudo sh:*)",
+      "Bash(snap list:*)",
+      "Bash(node:*)",
+      "Bash(psql:*)",
+      "Bash(apt list:*)",
+      "Bash(chmod:*)",
+      "Bash(./start-sara.sh:*)",
+      "Bash(python3:*)",
+      "Bash(export PATH=\"$HOME/.local/bin:$PATH\")",
+      "Bash(npm run dev:*)",
+      "Bash(find:*)",
+      "Bash(sudo apt:*)",
+      "Bash(sudo apt install:*)",
+      "Bash(pip install:*)",
+      "Bash(PYTHONPATH=/home/david/jarvis/backend python3 -m app.main)",
+      "Bash(npm install:*)",
+      "Bash(docker:*)",
+      "Bash(export OPENAI_MODEL=gpt-oss:120b)",
+      "Bash(export OPENAI_API_KEY=dummy)",
+      "Bash(export EMBEDDING_BASE_URL=http://100.104.68.115:11434)",
+      "Bash(export EMBEDDING_MODEL=bge-m3)",
+      "Bash(export EMBEDDING_DIM=1024)",
+      "Bash(export ASSISTANT_NAME=Sara)",
+      "Bash(rm:*)",
+      "Bash(grep:*)",
+      "Bash(sudo systemctl status:*)",
+      "Bash(ss:*)",
+      "Bash(sudo docker-compose:*)",
+      "Bash(sh:*)",
+      "Bash(systemctl:*)",
+      "Bash(newgrp:*)",
+      "Bash(sudo usermod:*)",
+      "Bash(sg docker:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "/usr/bin",
+      "/run"
+    ]
+  }
+}
