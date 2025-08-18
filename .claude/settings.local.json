@@ -38,7 +38,8 @@
       "Bash(systemctl:*)",
       "Bash(newgrp:*)",
       "Bash(sudo usermod:*)",
-      "Bash(sg docker:*)"
+      "Bash(sg docker:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": [],
     "ask": [],

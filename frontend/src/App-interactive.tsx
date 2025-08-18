@@ -10,6 +10,8 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
   const [view, setView] = useState('login') // login, dashboard, chat, notes, documents, calendar, settings
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+  const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isLogin, setIsLogin] = useState(true)
@@ -603,10 +605,85 @@ function App() {
   }
 
   return (
-    <div className="p-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9', minHeight: '100vh'}}>
-      <div className="flex space-x-8">
-        {/* Sidebar */}
-        <aside className="flex flex-col items-center space-y-6 bg-card border border-card rounded-xl p-4" style={{height: 'fit-content'}}>
+    <div className="p-4 md:p-8 pb-20 md:pb-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9', minHeight: '100vh'}}>
+      <div className="flex flex-col md:flex-row md:space-x-8">
+        
+        {/* Mobile Header */}
+        <div className="md:hidden flex justify-between items-center mb-4">
+          <h1 className="text-2xl font-bold">{APP_CONFIG.assistantName}</h1>
+          <button 
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            className="p-2 text-gray-400 hover:text-white"
+          >
+            <span className="text-2xl">{isMobileMenuOpen ? '✕' : '☰'}</span>
+          </button>
+        </div>
+
+        {/* Mobile Navigation Overlay */}
+        {isMobileMenuOpen && (
+          <div className="md:hidden fixed inset-0 bg-black bg-opacity-50 z-50" onClick={() => setIsMobileMenuOpen(false)}>
+            <div className="bg-gray-900 w-64 h-full p-4" onClick={e => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-6">
+                <div className="p-3 bg-white text-black rounded-lg font-bold text-xl">S</div>
+                <button onClick={() => setIsMobileMenuOpen(false)} className="text-gray-400">✕</button>
+              </div>
+              <nav className="flex flex-col space-y-4">
+                <button
+                  onClick={() => { setView('dashboard'); loadNotes(); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🏠</span>
+                  <span>Home</span>
+                </button>
+                <button
+                  onClick={() => { setView('chat'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">💬</span>
+                  <span>Chat</span>
+                </button>
+                <button
+                  onClick={() => { setView('notes'); loadNotes(); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">📝</span>
+                  <span>Notes</span>
+                </button>
+                <button
+                  onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">📄</span>
+                  <span>Documents</span>
+                </button>
+                <button
+                  onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">📅</span>
+                  <span>Calendar</span>
+                </button>
+                <button
+                  onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">⚙️</span>
+                  <span>Settings</span>
+                </button>
+                <button
+                  onClick={() => { logout(); setIsMobileMenuOpen(false); }}
+                  className="flex items-center space-x-3 p-3 rounded text-gray-400 hover:text-white mt-8 border-t border-gray-700 pt-4"
+                >
+                  <span className="text-xl">🚪</span>
+                  <span>Logout</span>
+                </button>
+              </nav>
+            </div>
+          </div>
+        )}
+
+        {/* Desktop Sidebar */}
+        <aside className="hidden md:flex flex-col items-center space-y-6 bg-card border border-card rounded-xl p-4" style={{height: 'fit-content'}}>
           <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl">S</div>
           <nav className="flex flex-col items-center space-y-6">
             <button
@@ -663,8 +740,8 @@ function App() {
         </aside>
 
         {/* Main Content */}
-        <main className="flex-1">
-          <header className="flex justify-between items-center mb-8">
+        <main className="flex-1 min-w-0">
+          <header className="hidden md:flex justify-between items-center mb-8">
             <h1 className="text-4xl font-bold">{APP_CONFIG.assistantName}</h1>
             <div className="flex items-center space-x-4">
               <span className="text-gray-400 text-sm">Hello, {user?.email}</span>
@@ -672,8 +749,8 @@ function App() {
           </header>
 
           {view === 'dashboard' && (
-            <div className="grid grid-cols-3 gap-8">
-              <div className="col-span-2 space-y-8">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
+              <div className="lg:col-span-2 space-y-4 md:space-y-8">
                 {/* Project Charter */}
                 <div className="bg-card border border-card rounded-xl p-6">
                   <h2 className="text-lg font-semibold mb-4">PERSONAL AI HUB</h2>
@@ -690,7 +767,7 @@ function App() {
                 </div>
 
                 {/* Stats Grid */}
-                <div className="grid grid-cols-4 gap-8">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-8">
                   <div className="bg-card border border-card rounded-xl p-6 text-center">
                     <h3 className="text-gray-400 font-medium">NOTES</h3>
                     <p className="text-5xl font-bold my-2">{notes.length}</p>
@@ -813,7 +890,7 @@ function App() {
               </div>
 
               {/* Right Sidebar */}
-              <div className="col-span-1 space-y-8">
+              <div className="lg:col-span-1 space-y-4 md:space-y-8">
                 {/* Active Items */}
                 <div className="bg-card border border-card rounded-xl p-6">
                   <h2 className="text-lg font-semibold mb-4">ACTIVE TIMERS</h2>
@@ -871,8 +948,8 @@ function App() {
                     <div className="space-y-3">
                       {notes.slice(0, 3).map((note) => (
                         <div key={note.id} className="bg-gray-800 p-3 rounded-lg">
-                          <p className="text-sm text-gray-300 line-clamp-2">
-                            {note.content}
+                          <p className="text-sm text-gray-300 font-medium">
+                            {note.title || 'Untitled Note'}
                           </p>
                           <div className="text-xs text-gray-500 mt-1">
                             {new Date(note.created_at).toLocaleDateString()}
@@ -889,8 +966,8 @@ function App() {
           )}
 
           {view === 'chat' && (
-            <div className="flex flex-col h-[calc(100vh-12rem)]">
-              <div className="bg-card border border-card rounded-t-xl p-6 border-b-0">
+            <div className="flex flex-col h-[calc(100vh-8rem)] md:h-[calc(100vh-12rem)]">
+              <div className="bg-card border border-card rounded-t-xl p-4 md:p-6 border-b-0">
                 <div className="flex justify-between items-center">
                   <h2 className="text-lg font-semibold">CHAT WITH SARA</h2>
                   <button
@@ -904,12 +981,12 @@ function App() {
               </div>
               
               <div className="flex-1 bg-card border border-card border-t-0 border-b-0 overflow-hidden">
-                <div className="h-full p-6 overflow-y-auto space-y-4">
+                <div className="h-full p-4 md:p-6 overflow-y-auto space-y-4">
                   {chatMessages.map((msg, index) => {
                     console.log(`🔍 Rendering message ${index}:`, msg.role, msg.content?.length || 0, 'chars')
                     return (
                       <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
+                        <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
                         {msg.role === 'assistant' && (
                           <div className="flex items-center mb-2">
                             <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-sm font-medium mr-2">
@@ -1032,8 +1109,8 @@ function App() {
               </div>
               
               <div className="bg-card border border-card rounded-b-xl border-t-0">
-                <form onSubmit={sendMessage} className="p-6">
-                  <div className="flex space-x-4">
+                <form onSubmit={sendMessage} className="p-4 md:p-6">
+                  <div className="flex space-x-2 md:space-x-4">
                     <input
                       type="text"
                       value={message}
@@ -1056,9 +1133,22 @@ function App() {
           )}
 
           {view === 'notes' && (
-            <div className="h-[calc(100vh-12rem)] bg-gray-900 text-white flex rounded-xl overflow-hidden">
-              {/* Sidebar */}
-              <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
+            <div className="h-[calc(100vh-12rem)] md:h-[calc(100vh-12rem)] bg-gray-900 text-white rounded-xl overflow-hidden relative">
+              
+              {/* Mobile Notes Header */}
+              <div className="md:hidden bg-gray-800 p-4 border-b border-gray-700 flex justify-between items-center">
+                <h2 className="text-lg font-semibold">📝 Notes</h2>
+                <button 
+                  onClick={() => setIsMobileNotesSidebarOpen(!isMobileNotesSidebarOpen)}
+                  className="p-2 text-gray-400 hover:text-white"
+                >
+                  <span className="text-xl">{isMobileNotesSidebarOpen ? '✕' : '☰'}</span>
+                </button>
+              </div>
+
+              <div className="flex h-full md:h-auto">
+                {/* Desktop Sidebar - always visible */}
+                <div className="hidden md:flex w-80 bg-gray-800 border-r border-gray-700 flex-col">
                 {/* Header */}
                 <div className="p-4 border-b border-gray-700">
                   <h2 className="text-lg font-semibold mb-3">📝 Notes - Obsidian Style</h2>
@@ -1114,37 +1204,135 @@ function App() {
                   </div>
                 </div>
 
-                {/* Tree */}
-                <div className="flex-1 overflow-y-auto p-2">
-                  {notes.length === 0 ? (
-                    <div className="text-center text-gray-400 mt-8">
-                      <div className="text-4xl mb-2 opacity-50">📝</div>
-                      <p>No notes yet</p>
-                      <p className="text-xs">Create your first note or folder</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      {notes.map(note => (
-                        <div 
-                          key={note.id}
-                          className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded"
-                          onClick={() => {
-                            setEditingNote(note.id)
-                            setEditNoteTitle(note.title || '')
-                            setEditNoteContent(note.content)
-                          }}
-                        >
-                          <div className="w-4 h-4 mr-1" />
-                          <span className="text-green-400 mr-2">📄</span>
-                          <span className="text-sm text-gray-200 truncate">
-                            {note.title || note.content.substring(0, 30) + '...' || 'Untitled'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  {/* Tree */}
+                  <div className="flex-1 overflow-y-auto p-2">
+                    {notes.length === 0 ? (
+                      <div className="text-center text-gray-400 mt-8">
+                        <div className="text-4xl mb-2 opacity-50">📝</div>
+                        <p>No notes yet</p>
+                        <p className="text-xs">Create your first note or folder</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        {notes.map(note => (
+                          <div 
+                            key={note.id}
+                            className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded"
+                            onClick={() => {
+                              setEditingNote(note.id)
+                              setEditNoteTitle(note.title || '')
+                              setEditNoteContent(note.content)
+                            }}
+                          >
+                            <div className="w-4 h-4 mr-1" />
+                            <span className="text-green-400 mr-2">📄</span>
+                            <span className="text-sm text-gray-200 truncate">
+                              {note.title || note.content.substring(0, 30) + '...' || 'Untitled'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+
+                {/* Mobile Sidebar - overlay */}
+                {isMobileNotesSidebarOpen && (
+                  <div className="md:hidden absolute inset-0 bg-black bg-opacity-50 z-10" onClick={() => setIsMobileNotesSidebarOpen(false)}>
+                    <div className="bg-gray-800 w-64 h-full border-r border-gray-700 flex flex-col" onClick={e => e.stopPropagation()}>
+                      {/* Header */}
+                      <div className="p-4 border-b border-gray-700">
+                        <div className="flex justify-between items-center mb-3">
+                          <h2 className="text-lg font-semibold">📝 Notes</h2>
+                          <button onClick={() => setIsMobileNotesSidebarOpen(false)} className="text-gray-400">✕</button>
+                        </div>
+                        
+                        {/* Search */}
+                        <div className="relative mb-3">
+                          <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400">🔍</span>
+                          <input
+                            type="text"
+                            placeholder="Search notes..."
+                            className="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => {
+                              const name = prompt('Folder name:')
+                              if (name) console.log('Create folder:', name)
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                          >
+                            📁 Folder
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const title = prompt('Note title:')
+                              if (title) {
+                                try {
+                                  const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    credentials: 'include',
+                                    body: JSON.stringify({ title: title, content: '' })
+                                  })
+                                  if (response.ok) {
+                                    const note = await response.json()
+                                    setNotes(prev => [note, ...prev])
+                                    setEditingNote(note.id)
+                                    setEditNoteTitle(note.title || '')
+                                    setEditNoteContent(note.content || '')
+                                    setIsMobileNotesSidebarOpen(false)
+                                  }
+                                } catch (error) {
+                                  console.error('Failed to create note:', error)
+                                }
+                              }
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm"
+                          >
+                            ➕ Note
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Tree */}
+                      <div className="flex-1 overflow-y-auto p-2">
+                        {notes.length === 0 ? (
+                          <div className="text-center text-gray-400 mt-8">
+                            <div className="text-4xl mb-2 opacity-50">📝</div>
+                            <p>No notes yet</p>
+                            <p className="text-xs">Create your first note or folder</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            {notes.map(note => (
+                              <div 
+                                key={note.id}
+                                className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded"
+                                onClick={() => {
+                                  setEditingNote(note.id)
+                                  setEditNoteTitle(note.title || '')
+                                  setEditNoteContent(note.content)
+                                  setIsMobileNotesSidebarOpen(false)
+                                }}
+                              >
+                                <div className="w-4 h-4 mr-1" />
+                                <span className="text-green-400 mr-2">📄</span>
+                                <span className="text-sm text-gray-200 truncate">
+                                  {note.title || note.content.substring(0, 30) + '...' || 'Untitled'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
               {/* Main content */}
               <div className="flex-1 flex flex-col">
@@ -1209,6 +1397,7 @@ function App() {
                 )}
               </div>
             </div>
+          </div>
           )}
 
           {view === 'documents' && (
@@ -1350,6 +1539,47 @@ function App() {
         </main>
       </div>
       
+      {/* Mobile Bottom Navigation */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40">
+        <div className="flex justify-around py-2">
+          <button
+            onClick={() => { setView('dashboard'); loadNotes(); }}
+            className={`flex flex-col items-center p-2 ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">home</span>
+            <span className="text-xs">Home</span>
+          </button>
+          <button
+            onClick={() => setView('chat')}
+            className={`flex flex-col items-center p-2 ${view === 'chat' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">chat</span>
+            <span className="text-xs">Chat</span>
+          </button>
+          <button
+            onClick={() => { setView('notes'); loadNotes(); }}
+            className={`flex flex-col items-center p-2 ${view === 'notes' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">notes</span>
+            <span className="text-xs">Notes</span>
+          </button>
+          <button
+            onClick={() => { setView('documents'); loadDocuments(); }}
+            className={`flex flex-col items-center p-2 ${view === 'documents' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">description</span>
+            <span className="text-xs">Docs</span>
+          </button>
+          <button
+            onClick={() => setView('calendar')}
+            className={`flex flex-col items-center p-2 ${view === 'calendar' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">calendar_today</span>
+            <span className="text-xs">Calendar</span>
+          </button>
+        </div>
+      </nav>
+
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-50 space-y-2">
         {toasts.map((toast) => (
