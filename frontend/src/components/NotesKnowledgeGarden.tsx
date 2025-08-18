@@ -1,0 +1,551 @@
+import React, { useState, useEffect } from 'react'
+import { APP_CONFIG } from '../config'
+import KnowledgeGraph from './KnowledgeGraph'
+import TimelineView from './TimelineView'
+import MemoryManager from './MemoryManager'
+import { findBacklinks, findRelatedNotes, getContentLinks } from '../utils/linkParser'
+import { detectAndCreateConnections, suggestSemanticConnections } from '../utils/connectionDetector'
+
+interface Note {
+  id: number
+  title: string
+  content: string
+  created_at: string
+  updated_at: string
+  folder_id?: number
+}
+
+interface NotesKnowledgeGardenProps {
+  notes: Note[]
+  setNotes: React.Dispatch<React.SetStateAction<Note[]>>
+  editingNote: number | null
+  setEditingNote: React.Dispatch<React.SetStateAction<number | null>>
+  editNoteContent: string
+  setEditNoteContent: React.Dispatch<React.SetStateAction<string>>
+  editNoteTitle: string
+  setEditNoteTitle: React.Dispatch<React.SetStateAction<string>>
+}
+
+export default function NotesKnowledgeGarden({
+  notes,
+  setNotes,
+  editingNote,
+  setEditingNote,
+  editNoteContent,
+  setEditNoteContent,
+  editNoteTitle,
+  setEditNoteTitle
+}: NotesKnowledgeGardenProps) {
+  const [currentView, setCurrentView] = useState<'notes' | 'graph' | 'timeline' | 'search' | 'settings' | 'memory'>('notes')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [backlinks, setBacklinks] = useState<Note[]>([])
+  const [relatedNotes, setRelatedNotes] = useState<Note[]>([])
+  const [connectionSuggestions, setConnectionSuggestions] = useState<{ note: Note, similarity: number }[]>([])
+  const [memoryContext, setMemoryContext] = useState<any[]>([])
+  const [loadingMemory, setLoadingMemory] = useState(false)
+
+  const currentNote = editingNote ? notes.find(n => n.id === editingNote) : null
+
+  // Find backlinks and related notes for current note
+  useEffect(() => {
+    if (currentNote) {
+      // Use our new link parsing utilities
+      const foundBacklinks = findBacklinks(currentNote, notes)
+      setBacklinks(foundBacklinks)
+
+      // Find semantically related notes
+      const related = findRelatedNotes(currentNote, notes, 0.05) // Lower threshold for more results
+      setRelatedNotes(related)
+
+      // Get connection suggestions
+      suggestSemanticConnections(currentNote.id, notes).then(suggestions => {
+        setConnectionSuggestions(suggestions)
+      })
+
+      // Fetch related memory episodes
+      fetchMemoryContext(currentNote)
+    }
+  }, [currentNote, notes])
+
+  const fetchMemoryContext = async (note: Note) => {
+    if (!note.title && !note.content) return
+
+    setLoadingMemory(true)
+    try {
+      // Create a search query from note title and key content words
+      const searchQuery = note.title || note.content.substring(0, 100)
+      
+      const response = await fetch(`${APP_CONFIG.apiUrl}/memory/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          query: searchQuery,
+          scopes: ['episodes'],
+          limit: 5
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setMemoryContext(data.results || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch memory context:', error)
+    } finally {
+      setLoadingMemory(false)
+    }
+  }
+
+  const createNewNote = async () => {
+    const title = prompt('Note title:')
+    if (title) {
+      try {
+        const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ title, content: '' })
+        })
+        if (response.ok) {
+          const note = await response.json()
+          setNotes(prev => [note, ...prev])
+          setEditingNote(note.id)
+          setEditNoteTitle(note.title || '')
+          setEditNoteContent(note.content || '')
+        }
+      } catch (error) {
+        console.error('Failed to create note:', error)
+      }
+    }
+  }
+
+  const saveNote = async () => {
+    if (!editingNote) return
+    
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/notes/${editingNote}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ 
+          title: editNoteTitle, 
+          content: editNoteContent 
+        })
+      })
+      if (response.ok) {
+        const updatedNote = await response.json()
+        setNotes(prev => prev.map(note => 
+          note.id === editingNote ? updatedNote : note
+        ))
+
+        // Auto-detect and create connections after saving
+        const updatedNotes = notes.map(note => 
+          note.id === editingNote ? { ...updatedNote, id: parseInt(updatedNote.id) } : note
+        )
+        detectAndCreateConnections(editingNote, updatedNotes)
+      }
+    } catch (error) {
+      console.error('Failed to save note:', error)
+    }
+  }
+
+  // Auto-save when content changes
+  useEffect(() => {
+    if (editingNote && (editNoteContent || editNoteTitle)) {
+      const timeoutId = setTimeout(saveNote, 1000)
+      return () => clearTimeout(timeoutId)
+    }
+  }, [editNoteContent, editNoteTitle])
+
+  return (
+    <div className="flex h-screen w-full bg-[#18181b] text-[#f8fafc]">
+      {/* Left Sidebar */}
+      <aside className="flex w-64 flex-col border-r border-[#3f3f46] p-4">
+        <div className="mb-6 flex items-center gap-2">
+          <div className="h-8 w-8 bg-[#0d7ff2] rounded flex items-center justify-center">
+            <span className="text-white font-bold text-sm">S</span>
+          </div>
+          <h1 className="text-xl font-bold">Sara Notes</h1>
+        </div>
+
+        <nav className="flex flex-col gap-1">
+          <button
+            onClick={() => setCurrentView('notes')}
+            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
+              currentView === 'notes' 
+                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
+            }`}
+          >
+            Notes
+          </button>
+          
+          <button
+            onClick={() => setCurrentView('graph')}
+            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
+              currentView === 'graph' 
+                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
+            }`}
+          >
+            Graph View
+          </button>
+          
+          <button
+            onClick={() => setCurrentView('timeline')}
+            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
+              currentView === 'timeline' 
+                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
+            }`}
+          >
+            Timeline
+          </button>
+          
+          <button
+            onClick={() => setCurrentView('search')}
+            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
+              currentView === 'search' 
+                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
+            }`}
+          >
+            Search
+          </button>
+          
+          <button
+            onClick={() => setCurrentView('settings')}
+            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
+              currentView === 'settings' 
+                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
+            }`}
+          >
+            Settings
+          </button>
+        </nav>
+
+        <button 
+          onClick={createNewNote}
+          className="mt-auto flex w-full items-center justify-center gap-2 rounded-md bg-[#0d7ff2] py-2 font-semibold text-[#f8fafc] hover:bg-[#0c6fd1]"
+        >
+          <span className="material-symbols-outlined">add</span>
+          New Note
+        </button>
+
+        {/* Notes List */}
+        <div className="mt-4 flex-1 overflow-y-auto">
+          <div className="space-y-1">
+            {notes.map(note => (
+              <div 
+                key={note.id}
+                onClick={() => {
+                  setEditingNote(note.id)
+                  setEditNoteTitle(note.title || '')
+                  setEditNoteContent(note.content || '')
+                }}
+                className={`cursor-pointer rounded p-2 text-sm hover:bg-[#27272a] ${
+                  editingNote === note.id ? 'bg-[#27272a]' : ''
+                }`}
+              >
+                <div className="font-medium truncate">
+                  {note.title || 'Untitled'}
+                </div>
+                <div className="text-[#a1a1aa] text-xs truncate">
+                  {note.content.substring(0, 50)}...
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex flex-1 flex-col">
+        {/* Header */}
+        <header className="flex h-14 items-center border-b border-[#3f3f46] px-6">
+          <div className="relative w-full max-w-md">
+            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#a1a1aa]">search</span>
+            <input 
+              className="w-full rounded-md border-none bg-[#3f3f46] pl-10 pr-4 py-2 text-sm text-[#f8fafc] placeholder:text-[#a1a1aa] focus:ring-2 focus:ring-[#0d7ff2] focus:ring-offset-2 focus:ring-offset-[#18181b]" 
+              type="text" 
+              placeholder="Search notes..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+        </header>
+
+        <div className="flex flex-1">
+          {/* Editor */}
+          <div className="flex-1 p-6">
+            {currentView === 'notes' && editingNote ? (
+              <div className="rounded-lg border border-[#3f3f46] bg-[#27272a] h-full">
+                {/* Title */}
+                <div className="p-4">
+                  <input 
+                    className="w-full resize-none border-none bg-transparent text-lg font-medium text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none" 
+                    placeholder="Note title..."
+                    value={editNoteTitle}
+                    onChange={(e) => setEditNoteTitle(e.target.value)}
+                  />
+                </div>
+                
+                {/* Content */}
+                <div className="border-t border-[#3f3f46] p-4 flex-1">
+                  <textarea 
+                    className="min-h-[400px] w-full resize-none border-none bg-transparent text-sm text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none" 
+                    placeholder="Start typing your notes here..."
+                    value={editNoteContent}
+                    onChange={(e) => setEditNoteContent(e.target.value)}
+                  />
+                </div>
+                
+                {/* Footer */}
+                <div className="border-t border-[#3f3f46] px-4 py-2">
+                  <p className="text-xs text-[#a1a1aa]">
+                    Last edited: {currentNote ? new Date(currentNote.updated_at).toLocaleString() : ''}
+                  </p>
+                </div>
+              </div>
+            ) : currentView === 'graph' ? (
+              <KnowledgeGraph
+                notes={notes}
+                selectedNoteId={editingNote}
+                onNodeClick={(nodeId, nodeType) => {
+                  if (nodeType === 'note') {
+                    const noteIdString = nodeId.replace('note-', '')
+                    const noteId = parseInt(noteIdString)
+                    const note = notes.find(n => n.id === noteId)
+                    if (note) {
+                      setEditingNote(noteId)
+                      setEditNoteTitle(note.title || '')
+                      setEditNoteContent(note.content || '')
+                      setCurrentView('notes') // Switch back to notes view when clicking a node
+                    }
+                  } else if (nodeType === 'episode') {
+                    // For episodes, we could switch to timeline view or show episode details
+                    setCurrentView('timeline')
+                  } else if (nodeType === 'document') {
+                    // For documents, we could switch to document view or show document details
+                    console.log('Document clicked:', nodeId)
+                    // Could implement document navigation here
+                  }
+                }}
+              />
+            ) : currentView === 'timeline' ? (
+              <TimelineView
+                notes={notes}
+                onItemClick={(item) => {
+                  if (item.type === 'note' && item.metadata?.note_id) {
+                    const noteId = item.metadata.note_id
+                    const note = notes.find(n => n.id === noteId)
+                    if (note) {
+                      setEditingNote(noteId)
+                      setEditNoteTitle(note.title || '')
+                      setEditNoteContent(note.content || '')
+                      setCurrentView('notes') // Switch to notes view
+                    }
+                  }
+                }}
+              />
+            ) : currentView === 'settings' ? (
+              <div className="space-y-6">
+                <div className="bg-[#27272a] rounded-lg border border-[#3f3f46] p-6">
+                  <h3 className="text-lg font-medium text-[#f8fafc] mb-4">Knowledge Garden Settings</h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-3 bg-[#18181b] rounded border border-[#3f3f46]">
+                      <div>
+                        <h4 className="text-sm font-medium text-[#f8fafc]">Memory Management</h4>
+                        <p className="text-xs text-[#a1a1aa]">Curate and manage your AI's episodic memories</p>
+                      </div>
+                      <button
+                        onClick={() => setCurrentView('memory')}
+                        className="px-3 py-1 text-sm bg-[#0d7ff2] text-white rounded hover:bg-[#0c6fd1]"
+                      >
+                        Manage
+                      </button>
+                    </div>
+                    
+                    <div className="flex items-center justify-between p-3 bg-[#18181b] rounded border border-[#3f3f46]">
+                      <div>
+                        <h4 className="text-sm font-medium text-[#f8fafc]">Auto-Connection Detection</h4>
+                        <p className="text-xs text-[#a1a1aa]">Automatically detect and create note connections</p>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          const { updateAllConnections } = await import('../utils/connectionDetector')
+                          updateAllConnections(notes)
+                        }}
+                        className="px-3 py-1 text-sm bg-[#4ade80] text-white rounded hover:bg-[#16a34a]"
+                      >
+                        Scan All
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between p-3 bg-[#18181b] rounded border border-[#3f3f46]">
+                      <div>
+                        <h4 className="text-sm font-medium text-[#f8fafc]">Knowledge Stats</h4>
+                        <p className="text-xs text-[#a1a1aa]">{notes.length} notes in your knowledge garden</p>
+                      </div>
+                      <div className="text-sm text-[#0d7ff2]">
+                        {notes.length} items
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : currentView === 'memory' ? (
+              <MemoryManager onClose={() => setCurrentView('settings')} />
+            ) : (
+              <div className="flex items-center justify-center h-full bg-[#27272a] rounded-lg border border-[#3f3f46]">
+                <div className="text-center">
+                  <span className="material-symbols-outlined text-6xl text-[#a1a1aa] mb-4 block">description</span>
+                  <h3 className="text-lg font-medium mb-2">Select a note to edit</h3>
+                  <p className="text-[#a1a1aa]">Choose a note from the sidebar or create a new one</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Sidebar - Context Panel */}
+          {currentView === 'notes' && editingNote && (
+            <aside className="w-72 border-l border-[#3f3f46] p-4">
+              <div className="space-y-6">
+                {/* Backlinks */}
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-[#a1a1aa]">Backlinks</h3>
+                  <div className="space-y-2">
+                    {backlinks.length > 0 ? (
+                      backlinks.map(note => (
+                        <button
+                          key={note.id}
+                          onClick={() => {
+                            setEditingNote(note.id)
+                            setEditNoteTitle(note.title || '')
+                            setEditNoteContent(note.content || '')
+                          }}
+                          className="block w-full text-left rounded-md p-2 text-sm text-[#f8fafc] hover:bg-[#3f3f46]"
+                        >
+                          {note.title || 'Untitled'}
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-xs text-[#a1a1aa]">No backlinks found</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Related Notes */}
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-[#a1a1aa]">Related Notes</h3>
+                  <div className="space-y-2">
+                    {relatedNotes.length > 0 ? (
+                      relatedNotes.map(note => (
+                        <button
+                          key={note.id}
+                          onClick={() => {
+                            setEditingNote(note.id)
+                            setEditNoteTitle(note.title || '')
+                            setEditNoteContent(note.content || '')
+                          }}
+                          className="block w-full text-left rounded-md p-2 text-sm text-[#f8fafc] hover:bg-[#3f3f46]"
+                        >
+                          {note.title || 'Untitled'}
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-xs text-[#a1a1aa]">No related notes found</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Connection Suggestions */}
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-[#a1a1aa]">Connection Suggestions</h3>
+                  <div className="space-y-2">
+                    {connectionSuggestions.length > 0 ? (
+                      connectionSuggestions.map(({ note, similarity }) => (
+                        <div key={note.id} className="flex items-center justify-between p-2 rounded-md bg-[#27272a] border border-[#3f3f46]">
+                          <button
+                            onClick={() => {
+                              setEditingNote(note.id)
+                              setEditNoteTitle(note.title || '')
+                              setEditNoteContent(note.content || '')
+                            }}
+                            className="flex-1 text-left text-sm text-[#f8fafc] hover:text-[#0d7ff2]"
+                          >
+                            {note.title || 'Untitled'}
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-[#a1a1aa]">{Math.round(similarity * 100)}%</span>
+                            <button
+                              onClick={async () => {
+                                if (currentNote) {
+                                  const { createManualConnection } = await import('../utils/connectionDetector')
+                                  const success = await createManualConnection(currentNote.id, note.id, 'semantic')
+                                  if (success) {
+                                    // Refresh suggestions by removing this one
+                                    setConnectionSuggestions(prev => prev.filter(s => s.note.id !== note.id))
+                                  }
+                                }
+                              }}
+                              className="text-xs text-[#0d7ff2] hover:text-[#0c6fd1] px-1"
+                              title="Create connection"
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-[#a1a1aa]">No suggestions available</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Memory Context */}
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-[#a1a1aa]">Memory Context</h3>
+                  <div className="space-y-2">
+                    {loadingMemory ? (
+                      <div className="text-xs text-[#a1a1aa] bg-[#27272a] p-3 rounded border border-[#3f3f46]">
+                        <p>Loading memories...</p>
+                      </div>
+                    ) : memoryContext.length > 0 ? (
+                      memoryContext.map((memory, index) => (
+                        <div key={index} className="bg-[#27272a] p-3 rounded border border-[#3f3f46]">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs font-medium text-[#0d7ff2]">
+                              {memory.metadata?.role || 'Memory'}
+                            </span>
+                            <span className="text-xs text-[#a1a1aa]">
+                              {Math.round(memory.score * 100)}% match
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#f8fafc] line-clamp-3">
+                            {memory.text}
+                          </p>
+                          {memory.metadata?.timestamp && (
+                            <p className="text-xs text-[#a1a1aa] mt-1">
+                              {new Date(memory.metadata.timestamp).toLocaleDateString()}
+                            </p>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-xs text-[#a1a1aa] bg-[#27272a] p-3 rounded border border-[#3f3f46]">
+                        <p>No related memories found</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </aside>
+          )}
+        </div>
+      </main>
+    </div>
+  )
+}

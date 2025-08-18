@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<link crossorigin="" href="https://fonts.gstatic.com/" rel="preconnect"/>
+<link as="style" href="https://fonts.googleapis.com/css2?display=swap&amp;family=Inter%3Awght%40400%3B500%3B600%3B700&amp;family=Noto+Sans%3Awght%40400%3B500%3B700%3B900" onload="this.rel='stylesheet'" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet"/>
+<title>Stitch Design</title>
+<link href="data:image/x-icon;base64," rel="icon" type="image/x-icon"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<style type="text/tailwindcss">
+      :root {
+        --background: #18181b;
+        --foreground: #f8fafc;
+        --card: #27272a;
+        --card-foreground: #f8fafc;
+        --popover: #27272a;
+        --popover-foreground: #f8fafc;
+        --primary: #0d7ff2;
+        --primary-foreground: #f8fafc;
+        --secondary: #3f3f46;
+        --secondary-foreground: #f8fafc;
+        --muted: #3f3f46;
+        --muted-foreground: #a1a1aa;
+        --accent: #3f3f46;
+        --accent-foreground: #f8fafc;
+        --border: #3f3f46;
+        --input: #3f3f46;
+        --ring: #0d7ff2;
+      }
+      body {
+        font-family: 'Inter', "Noto Sans", sans-serif;
+      }
+    </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)]">
+<div class="flex h-screen w-full">
+<aside class="flex w-64 flex-col border-r border-[var(--border)] p-4">
+<div class="mb-6 flex items-center gap-2">
+<img alt="Logo" class="h-8 w-8" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBzmiO11UO0vAyF47GACtBA_EX8lofAVJHFobYfpLauFmBC05XNZ-IzneUORqNl2fr4Q6nxI2nyqpfzooQrzviltLCo538xcmQVqGfKlTiPMuOe-TT818GzLBzA3oLAt_K5QCZwJ_B3H6qRNsZpuqiQc2fdGrH_zIFD7yy-tOt3oi1jC7iDGSu1PljvO43qpZG1XS2NipyUhMKTkOkq6UKvjTHVfi4zyFGEI2GhswLLkMcahdlHcfHQOcVCOwEZ7k6EDHE3XeWxzEc"/>
+<h1 class="text-xl font-bold">Obsidian</h1>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-3 rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent-foreground)]" href="#">
+<span class="material-symbols-outlined">description</span>
+            Notes
+          </a>
+<a class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" href="#">
+<span class="material-symbols-outlined">hub</span>
+            Graph View
+          </a>
+<a class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" href="#">
+<span class="material-symbols-outlined">search</span>
+            Search
+          </a>
+<a class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]" href="#">
+<span class="material-symbols-outlined">settings</span>
+            Settings
+          </a>
+</nav>
+<button class="mt-auto flex w-full items-center justify-center gap-2 rounded-md bg-[var(--primary)] py-2 font-semibold text-[var(--primary-foreground)]">
+<span class="material-symbols-outlined">add</span>
+          New Note
+        </button>
+</aside>
+<main class="flex flex-1 flex-col">
+<header class="flex h-14 items-center border-b border-[var(--border)] px-6">
+<div class="relative w-full max-w-md">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]">search</span>
+<input class="w-full rounded-md border-none bg-[var(--input)] pl-10 pr-4 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]" type="text" value="Meeting Notes"/>
+</div>
+</header>
+<div class="flex flex-1">
+<div class="flex-1 p-6">
+<div class="rounded-lg border border-[var(--border)] bg-[var(--card)]">
+<div class="p-4">
+<textarea class="w-full resize-none border-none bg-transparent text-lg font-medium text-[var(--card-foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none" rows="1"># Meeting Notes - 2024-01-26</textarea>
+</div>
+<div class="border-t border-[var(--border)] p-4">
+<textarea class="min-h-[400px] w-full resize-none border-none bg-transparent text-sm text-[var(--card-foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none" placeholder="Start typing your notes here...">- Project kickoff discussion
+- Review of Q4 results
+- Planning for next quarter's goals
+### Action Items
+- [ ] Finalize the project proposal by EOD.
+- [ ] Schedule a follow-up meeting with the design team.
+- [ ] Update the budget report with the latest figures.</textarea>
+</div>
+<div class="border-t border-[var(--border)] px-4 py-2">
+<p class="text-xs text-[var(--muted-foreground)]">Last edited: 2024-01-26 10:30 AM</p>
+</div>
+</div>
+</div>
+<aside class="w-72 border-l border-[var(--border)] p-4">
+<div class="space-y-6">
+<div>
+<h3 class="mb-2 text-sm font-semibold text-[var(--muted-foreground)]">Backlinks</h3>
+<div class="space-y-2">
+<a class="block rounded-md p-2 text-sm text-[var(--foreground)] hover:bg-[var(--accent)]" href="#">Project Proposal</a>
+<a class="block rounded-md p-2 text-sm text-[var(--foreground)] hover:bg-[var(--accent)]" href="#">Budget Report</a>
+</div>
+</div>
+<div>
+<h3 class="mb-2 text-sm font-semibold text-[var(--muted-foreground)]">Related Notes</h3>
+<div class="space-y-2">
+<a class="block rounded-md p-2 text-sm text-[var(--foreground)] hover:bg-[var(--accent)]" href="#">Team Meeting Agenda</a>
+<a class="block rounded-md p-2 text-sm text-[var(--foreground)] hover:bg-[var(--accent)]" href="#">Project Kickoff Notes</a>
+</div>
+</div>
+</div>
+</aside>
+</div>
+</main>
+</div>
+
+</body></html>

@@ -42,6 +42,7 @@ psql postgresql://sara:sara123@10.185.1.180:5432/sara_hub
 # Run migration scripts
 python3 backend/migrate_users.py        # Migrate from SQLite to PostgreSQL
 python3 backend/add_folder_column.py    # Update database schema
+python3 backend/add_note_connections.py # Add knowledge garden connections table
 ```
 
 ## Architecture Overview
@@ -73,11 +74,22 @@ Sara is a personal AI hub with human-like memory built as a full-stack applicati
 
 ### Critical Implementation Details
 
-#### Notes System
-- **Current UI**: Obsidian-style two-panel interface (sidebar + editor)
+#### Notes System (Knowledge Garden)
+- **Current UI**: Full Obsidian-style knowledge garden interface with multiple views:
+  - **Notes View**: Three-panel layout (sidebar + editor + context panel)
+  - **Graph View**: Interactive D3.js visualization of notes and connections
+  - **Timeline View**: Chronological exploration of notes and memories
+  - **Settings**: Memory management and knowledge garden configuration
 - **Backend**: Supports hierarchical folders with parent_id relationships
-- **Database**: Note model has folder_id field for organization
-- **API**: Full CRUD endpoints for notes and folders
+- **Database**: Note model with folder_id + new note_connection table for bidirectional links
+- **API**: Full CRUD endpoints for notes, folders, and connections
+- **Knowledge Features**:
+  - **Bidirectional Linking**: `[[Note Title]]` syntax with auto-detection
+  - **Connection Types**: Reference (explicit links), Semantic (content similarity), Temporal
+  - **Auto-Connection Detection**: Automatically creates connections when notes are saved
+  - **Connection Suggestions**: Semantic similarity recommendations with manual approval
+  - **Memory Context**: Shows related episodic memories for each note
+  - **Backlinks & Related Notes**: Automatically detected relationships
 
 #### Memory & RAG System
 - **Episodes**: All interactions stored as episodes with importance scores
@@ -108,6 +120,9 @@ Sara is a personal AI hub with human-like memory built as a full-stack applicati
 - **Users**: Authentication and user data
 - **Notes**: Content with optional folder organization
 - **Folders**: Hierarchical structure with parent_id
+- **NoteConnections**: Knowledge garden connections between notes
+  - source_note_id, target_note_id, connection_type (reference/semantic/temporal)
+  - strength (0-100), auto_generated flag, user_id for ownership
 - **Episodes**: Memory system with embeddings (vector column)
 - **Documents**: File uploads with MinIO storage
 - **Reminders/Timers**: Time-based features
@@ -128,6 +143,35 @@ Tools are registered in `app/tools/registry.py`:
 4. **CORS**: Must include both development and production origins
 5. **Embeddings**: Uses bge-m3 model via OpenAI-compatible endpoint
 6. **Authentication**: Uses HTTP-only cookies, not localStorage tokens
+
+### Knowledge Garden Components
+
+#### Frontend Components
+- `frontend/src/components/NotesKnowledgeGarden.tsx`: Main knowledge garden interface
+- `frontend/src/components/KnowledgeGraph.tsx`: D3.js interactive graph visualization
+- `frontend/src/components/TimelineView.tsx`: Chronological memory/note timeline
+- `frontend/src/components/MemoryManager.tsx`: Memory curation and management tools
+
+#### Utilities & Services
+- `frontend/src/utils/linkParser.ts`: Bidirectional link parsing and detection
+- `frontend/src/utils/connectionDetector.ts`: Auto-connection detection and suggestions
+
+#### Backend APIs
+- `/notes/{id}/connections`: CRUD operations for note connections
+- `/notes/graph-data`: Graph visualization data endpoint
+- `/memory/episodes`: Memory management endpoints (list, update, delete)
+
+#### Key Features Implemented
+1. **Bidirectional Linking**: Auto-detects `[[Note Title]]` syntax and note title mentions
+2. **Connection Types**: Reference (explicit), Semantic (similarity), Temporal (time-based)
+3. **Auto-Detection**: Automatically creates connections when notes are saved
+4. **Visual Graph**: Interactive D3.js visualization with physics simulation
+5. **Timeline Exploration**: Chronological view of notes and memories
+6. **Memory Context**: Shows related episodes for each note
+7. **Connection Suggestions**: AI-powered similarity recommendations
+8. **Manual Curation**: Edit/delete memories, adjust importance scores
+9. **Search & Filter**: Full-text search across notes and memories
+10. **Settings Panel**: Knowledge garden management and statistics
 
 ### File Structure Highlights
 - `frontend/src/App-interactive.tsx`: Main application component

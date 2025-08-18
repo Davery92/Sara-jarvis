@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -97,6 +97,18 @@ class Folder(Base):
     name = Column(String, nullable=False)
     parent_id = Column(String, nullable=True)  # Self-referencing for hierarchy
     sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
+
+class NoteConnection(Base):
+    __tablename__ = "note_connection"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    source_note_id = Column(String, nullable=False)  # Note that contains the link/reference
+    target_note_id = Column(String, nullable=False)  # Note being referenced
+    connection_type = Column(String, nullable=False)  # 'reference', 'semantic', 'temporal'
+    strength = Column(Integer, default=50)  # 0-100 strength score
+    auto_generated = Column(String, default="true")  # true for auto-detected, false for manual
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
@@ -197,6 +209,22 @@ class NoteResponse(BaseModel):
     title: str
     content: str
     folder_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class NoteConnectionCreate(BaseModel):
+    target_note_id: str
+    connection_type: str  # 'reference', 'semantic', 'temporal'
+    strength: int = 50  # 0-100
+    auto_generated: bool = True
+
+class NoteConnectionResponse(BaseModel):
+    id: str
+    source_note_id: str
+    target_note_id: str
+    connection_type: str
+    strength: int
+    auto_generated: bool
     created_at: str
     updated_at: str
 
@@ -1918,10 +1946,191 @@ async def delete_note(note_id: str, current_user: User = Depends(get_current_use
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     
+    # Also delete associated connections
+    db.query(NoteConnection).filter(
+        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
+        NoteConnection.user_id == current_user.id
+    ).delete()
+    
     db.delete(note)
     db.commit()
     
     return {"message": "Note deleted successfully"}
+
+# Note Connection endpoints
+@app.get("/notes/{note_id}/connections", response_model=list[NoteConnectionResponse])
+async def get_note_connections(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all connections for a specific note (both outgoing and incoming)"""
+    # Verify note exists and belongs to user
+    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    
+    connections = db.query(NoteConnection).filter(
+        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
+        NoteConnection.user_id == current_user.id
+    ).all()
+    
+    return [
+        NoteConnectionResponse(
+            id=conn.id,
+            source_note_id=conn.source_note_id,
+            target_note_id=conn.target_note_id,
+            connection_type=conn.connection_type,
+            strength=conn.strength,
+            auto_generated=conn.auto_generated == "true",
+            created_at=conn.created_at.isoformat(),
+            updated_at=conn.updated_at.isoformat()
+        )
+        for conn in connections
+    ]
+
+@app.post("/notes/{note_id}/connections", response_model=NoteConnectionResponse)
+async def create_note_connection(
+    note_id: str, 
+    connection_data: NoteConnectionCreate, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """Create a connection from one note to another"""
+    # Verify both notes exist and belong to user
+    source_note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
+    if not source_note:
+        raise HTTPException(status_code=404, detail="Source note not found")
+    
+    target_note = db.query(Note).filter(Note.id == connection_data.target_note_id, Note.user_id == current_user.id).first()
+    if not target_note:
+        raise HTTPException(status_code=404, detail="Target note not found")
+    
+    # Check if connection already exists
+    existing = db.query(NoteConnection).filter(
+        NoteConnection.source_note_id == note_id,
+        NoteConnection.target_note_id == connection_data.target_note_id,
+        NoteConnection.user_id == current_user.id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=409, detail="Connection already exists")
+    
+    connection = NoteConnection(
+        user_id=current_user.id,
+        source_note_id=note_id,
+        target_note_id=connection_data.target_note_id,
+        connection_type=connection_data.connection_type,
+        strength=connection_data.strength,
+        auto_generated="true" if connection_data.auto_generated else "false"
+    )
+    
+    db.add(connection)
+    db.commit()
+    db.refresh(connection)
+    
+    return NoteConnectionResponse(
+        id=connection.id,
+        source_note_id=connection.source_note_id,
+        target_note_id=connection.target_note_id,
+        connection_type=connection.connection_type,
+        strength=connection.strength,
+        auto_generated=connection.auto_generated == "true",
+        created_at=connection.created_at.isoformat(),
+        updated_at=connection.updated_at.isoformat()
+    )
+
+@app.delete("/notes/{note_id}/connections/{connection_id}")
+async def delete_note_connection(
+    note_id: str, 
+    connection_id: str, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """Delete a specific note connection"""
+    connection = db.query(NoteConnection).filter(
+        NoteConnection.id == connection_id,
+        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
+        NoteConnection.user_id == current_user.id
+    ).first()
+    
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    
+    db.delete(connection)
+    db.commit()
+    
+    return {"message": "Connection deleted successfully"}
+
+@app.get("/notes/graph-data")
+async def get_notes_graph_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all notes and connections for graph visualization"""
+    notes = db.query(Note).filter(Note.user_id == current_user.id).all()
+    connections = db.query(NoteConnection).filter(NoteConnection.user_id == current_user.id).all()
+    
+    return {
+        "nodes": [
+            {
+                "id": note.id,
+                "title": note.title,
+                "content": note.content[:200] + "..." if len(note.content) > 200 else note.content,
+                "type": "note",
+                "created_at": note.created_at.isoformat(),
+                "updated_at": note.updated_at.isoformat()
+            }
+            for note in notes
+        ],
+        "links": [
+            {
+                "id": conn.id,
+                "source": conn.source_note_id,
+                "target": conn.target_note_id,
+                "type": conn.connection_type,
+                "strength": conn.strength / 100.0,  # Normalize to 0-1
+                "auto_generated": conn.auto_generated == "true"
+            }
+            for conn in connections
+        ]
+    }
+
+# Memory Management endpoints
+@app.get("/memory/episodes")
+async def get_episodes(
+    page: int = 1,
+    per_page: int = 20,
+    min_importance: float = None,
+    max_importance: float = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get episodes with pagination and filtering"""
+    # Note: This requires memory service integration
+    # For now, return empty response
+    return {
+        "episodes": [],
+        "total": 0,
+        "page": page,
+        "per_page": per_page
+    }
+
+@app.delete("/memory/episodes/{episode_id}")
+async def delete_episode(
+    episode_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a specific episode"""
+    # Note: This requires memory service integration
+    # For now, return success
+    return {"message": "Episode deletion not yet implemented"}
+
+@app.patch("/memory/episodes/{episode_id}")
+async def update_episode(
+    episode_id: str,
+    importance: float,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update episode importance"""
+    # Note: This requires memory service integration
+    # For now, return success
+    return {"message": "Episode update not yet implemented"}
 
 # Folder endpoints
 @app.post("/folders", response_model=FolderResponse)
@@ -2498,6 +2707,118 @@ async def search_memory(
     except Exception as e:
         logger.error(f"Memory search error: {e}")
         raise HTTPException(status_code=500, detail=f"Memory search failed: {str(e)}")
+
+@app.get("/analytics/dashboard")
+async def get_analytics_dashboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get comprehensive analytics dashboard data"""
+    try:
+        # Database size and health
+        try:
+            # Simplified database size query
+            db_size_query = text("SELECT pg_size_pretty(pg_database_size(current_database())) as size")
+            db_size_result = db.execute(db_size_query).fetchone()
+            db_size = db_size_result.size if db_size_result else "Unknown"
+            
+            # Get connection count
+            conn_query = text("SELECT count(*) as connections FROM pg_stat_activity WHERE datname = current_database()")
+            conn_result = db.execute(conn_query).fetchone()
+            db_connections = conn_result.connections if conn_result else 0
+        except Exception as e:
+            logger.error(f"Database query error: {e}")
+            db_size = "Unknown"
+            db_connections = 0
+        
+        # Total messages and conversations
+        total_conversations = db.query(Conversation).filter(Conversation.user_id == current_user.id).count()
+        total_messages = db.query(ConversationTurn).filter(ConversationTurn.user_id == current_user.id).count()
+        
+        # Memory/archival counts
+        messages_with_embeddings = db.query(ConversationTurn).filter(
+            ConversationTurn.user_id == current_user.id,
+            ConversationTurn.embedding.isnot(None)
+        ).count()
+        
+        # System health checks
+        try:
+            # Test embedding service
+            embedding_test = await embedding_service.generate_embedding("test")
+            embedding_health = len(embedding_test) == EMBEDDING_DIM
+        except:
+            embedding_health = False
+            
+        # Database health
+        try:
+            db.execute(text("SELECT 1"))
+            db_health = True
+            logger.info("Database health check: PASS")
+        except Exception as e:
+            logger.error(f"Database health check failed: {e}")
+            db_health = False
+            
+        # AI system metrics (get from recent logs)
+        recent_chats = db.query(ConversationTurn).filter(
+            ConversationTurn.user_id == current_user.id,
+            ConversationTurn.role == "assistant",
+            ConversationTurn.created_at >= datetime.now() - timedelta(days=7)
+        ).count()
+        
+        # Tool usage stats (simplified)
+        tool_calls_successful = recent_chats  # Approximation
+        
+        # User activity stats
+        notes_count = db.query(Note).filter(Note.user_id == current_user.id).count()
+        reminders_count = db.query(Reminder).filter(
+            Reminder.user_id == current_user.id,
+            Reminder.is_completed == "false"
+        ).count()
+        documents_count = db.query(Document).filter(Document.user_id == current_user.id).count()
+        active_timers = db.query(Timer).filter(
+            Timer.user_id == current_user.id,
+            Timer.is_active == "true"
+        ).count()
+        
+        # Recent activity
+        last_conversation = db.query(Conversation).filter(
+            Conversation.user_id == current_user.id
+        ).order_by(Conversation.updated_at.desc()).first()
+        
+        last_activity = last_conversation.updated_at if last_conversation else None
+        
+        return {
+            "database": {
+                "size": db_size,
+                "connections": db_connections,
+                "health": db_health
+            },
+            "memory": {
+                "total_conversations": total_conversations,
+                "total_messages": total_messages,
+                "archived_count": messages_with_embeddings,
+                "archival_percentage": round((messages_with_embeddings / max(total_messages, 1)) * 100, 1)
+            },
+            "ai_system": {
+                "embedding_service_health": embedding_health,
+                "successful_responses_7d": recent_chats,
+                "tool_calls_successful_7d": tool_calls_successful,
+                "last_activity": last_activity.isoformat() if last_activity else None
+            },
+            "user_data": {
+                "notes": notes_count,
+                "active_reminders": reminders_count,
+                "documents": documents_count,
+                "active_timers": active_timers
+            },
+            "system_health": {
+                "overall": db_health and embedding_health,
+                "database": db_health,
+                "ai_services": embedding_health,
+                "status": "healthy" if (db_health and embedding_health) else "degraded"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Analytics dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=f"Analytics failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

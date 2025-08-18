@@ -5,6 +5,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
 import MermaidDiagram from './components/MermaidDiagram'
+import NotesKnowledgeGarden from './components/NotesKnowledgeGarden'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -35,6 +36,7 @@ function App() {
   const [documents, setDocuments] = useState([])
   const [selectedFile, setSelectedFile] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [analytics, setAnalytics] = useState(null)
 
   // Check authentication on load
   useEffect(() => {
@@ -78,6 +80,14 @@ function App() {
       return () => clearInterval(interval)
     }
   }, [isAuthenticated])
+
+  // Load analytics when view changes to dashboard
+  useEffect(() => {
+    if (isAuthenticated && view === 'dashboard') {
+      console.log('Dashboard view activated, loading analytics...')
+      loadAnalytics()
+    }
+  }, [isAuthenticated, view])
 
   const loadTimersAndReminders = async () => {
     try {
@@ -420,6 +430,27 @@ function App() {
     }
   }
 
+  const loadAnalytics = async () => {
+    try {
+      console.log('Loading analytics...')
+      const response = await fetch(`${APP_CONFIG.apiUrl}/analytics/dashboard`, {
+        credentials: 'include'
+      })
+      console.log('Analytics response status:', response.status)
+      if (response.ok) {
+        const analyticsData = await response.json()
+        console.log('Analytics data loaded:', analyticsData)
+        setAnalytics(analyticsData)
+      } else {
+        console.error('Analytics response error:', response.status, response.statusText)
+        const errorText = await response.text()
+        console.error('Error details:', errorText)
+      }
+    } catch (error) {
+      console.error('Failed to load analytics:', error)
+    }
+  }
+
   const uploadDocument = async (file) => {
     if (!file) return
     
@@ -629,7 +660,7 @@ function App() {
               </div>
               <nav className="flex flex-col space-y-4">
                 <button
-                  onClick={() => { setView('dashboard'); loadNotes(); setIsMobileMenuOpen(false); }}
+                  onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="text-xl">🏠</span>
@@ -687,7 +718,7 @@ function App() {
           <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl">S</div>
           <nav className="flex flex-col items-center space-y-6">
             <button
-              onClick={() => { setView('dashboard'); loadNotes(); }}
+              onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); }}
               className={`flex flex-col items-center ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
               <span className="material-icons">home</span>
@@ -751,19 +782,107 @@ function App() {
           {view === 'dashboard' && (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
               <div className="lg:col-span-2 space-y-4 md:space-y-8">
-                {/* Project Charter */}
+                {/* System Monitoring & Analytics */}
                 <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">PERSONAL AI HUB</h2>
-                  <h3 className="font-semibold mb-2">Capabilities:</h3>
-                  <p className="text-gray-400 mb-4">Your intelligent personal assistant that can:</p>
-                  <ul className="space-y-2 text-gray-400 list-disc list-inside">
-                    <li>capture & browse notes with AI-powered search</li>
-                    <li>create reminders, timers, and calendar events</li>
-                    <li>chat with AI that remembers your preferences</li>
-                    <li>upload and search through documents</li>
-                    <li>learn from every conversation to assist you better</li>
-                    <li>provide contextual help based on your data</li>
-                  </ul>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold">SYSTEM MONITORING & ANALYTICS</h2>
+                    <div className={`px-3 py-1 rounded-full text-xs font-medium ${
+                      analytics?.system_health?.status === 'healthy' 
+                        ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                    }`}>
+                      {analytics?.system_health?.status?.toUpperCase() || 'LOADING...'}
+                    </div>
+                  </div>
+                  
+                  {analytics ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-4">
+                        <h3 className="font-semibold text-gray-300">Memory System</h3>
+                        <div className="space-y-2 text-sm text-gray-400">
+                          <div className="flex justify-between">
+                            <span>Total Messages:</span>
+                            <span className="text-white font-medium">{analytics.memory.total_messages.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Conversations:</span>
+                            <span className="text-white font-medium">{analytics.memory.total_conversations}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Archived:</span>
+                            <span className="text-white font-medium">{analytics.memory.archived_count} ({analytics.memory.archival_percentage}%)</span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <h3 className="font-semibold text-gray-300">AI System Performance</h3>
+                        <div className="space-y-2 text-sm text-gray-400">
+                          <div className="flex justify-between">
+                            <span>Responses (7d):</span>
+                            <span className="text-white font-medium">{analytics.ai_system.successful_responses_7d}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Tool Calls (7d):</span>
+                            <span className="text-white font-medium">{analytics.ai_system.tool_calls_successful_7d}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Embedding Service:</span>
+                            <span className={`font-medium ${analytics.ai_system.embedding_service_health ? 'text-green-400' : 'text-red-400'}`}>
+                              {analytics.ai_system.embedding_service_health ? 'HEALTHY' : 'DOWN'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <h3 className="font-semibold text-gray-300">Database Health</h3>
+                        <div className="space-y-2 text-sm text-gray-400">
+                          <div className="flex justify-between">
+                            <span>Size:</span>
+                            <span className="text-white font-medium">{analytics.database.size}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Connections:</span>
+                            <span className="text-white font-medium">{analytics.database.connections}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Status:</span>
+                            <span className={`font-medium ${analytics.database.health ? 'text-green-400' : 'text-red-400'}`}>
+                              {analytics.database.health ? 'HEALTHY' : 'ERROR'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <h3 className="font-semibold text-gray-300">User Activity</h3>
+                        <div className="space-y-2 text-sm text-gray-400">
+                          <div className="flex justify-between">
+                            <span>Active Timers:</span>
+                            <span className="text-white font-medium">{analytics.user_data.active_timers}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Pending Reminders:</span>
+                            <span className="text-white font-medium">{analytics.user_data.active_reminders}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Last Activity:</span>
+                            <span className="text-white font-medium">
+                              {analytics.ai_system.last_activity 
+                                ? new Date(analytics.ai_system.last_activity).toLocaleDateString()
+                                : 'Never'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-center text-gray-400 py-8">
+                      <div className="animate-spin inline-block w-6 h-6 border-2 border-gray-400 border-t-transparent rounded-full mb-2"></div>
+                      <p>Loading analytics...</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Stats Grid */}
@@ -1133,271 +1252,16 @@ function App() {
           )}
 
           {view === 'notes' && (
-            <div className="h-[calc(100vh-12rem)] md:h-[calc(100vh-12rem)] bg-gray-900 text-white rounded-xl overflow-hidden relative">
-              
-              {/* Mobile Notes Header */}
-              <div className="md:hidden bg-gray-800 p-4 border-b border-gray-700 flex justify-between items-center">
-                <h2 className="text-lg font-semibold">📝 Notes</h2>
-                <button 
-                  onClick={() => setIsMobileNotesSidebarOpen(!isMobileNotesSidebarOpen)}
-                  className="p-2 text-gray-400 hover:text-white"
-                >
-                  <span className="text-xl">{isMobileNotesSidebarOpen ? '✕' : '☰'}</span>
-                </button>
-              </div>
-
-              <div className="flex h-full md:h-auto">
-                {/* Desktop Sidebar - always visible */}
-                <div className="hidden md:flex w-80 bg-gray-800 border-r border-gray-700 flex-col">
-                {/* Header */}
-                <div className="p-4 border-b border-gray-700">
-                  <h2 className="text-lg font-semibold mb-3">📝 Notes - Obsidian Style</h2>
-                  
-                  {/* Search */}
-                  <div className="relative mb-3">
-                    <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400">🔍</span>
-                    <input
-                      type="text"
-                      placeholder="Search notes..."
-                      className="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-
-                  {/* Action buttons */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => {
-                        const name = prompt('Folder name:')
-                        if (name) console.log('Create folder:', name)
-                      }}
-                      className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded text-sm"
-                    >
-                      📁 Folder
-                    </button>
-                    <button
-                      onClick={async () => {
-                        const title = prompt('Note title:')
-                        if (title) {
-                          try {
-                            const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              credentials: 'include',
-                              body: JSON.stringify({ title: title, content: '' })
-                            })
-                            if (response.ok) {
-                              const note = await response.json()
-                              setNotes(prev => [note, ...prev])
-                              setEditingNote(note.id)
-                              setEditNoteTitle(note.title || '')
-                              setEditNoteContent(note.content || '')
-                            }
-                          } catch (error) {
-                            console.error('Failed to create note:', error)
-                          }
-                        }
-                      }}
-                      className="flex items-center px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm"
-                    >
-                      ➕ Note
-                    </button>
-                  </div>
-                </div>
-
-                  {/* Tree */}
-                  <div className="flex-1 overflow-y-auto p-2">
-                    {notes.length === 0 ? (
-                      <div className="text-center text-gray-400 mt-8">
-                        <div className="text-4xl mb-2 opacity-50">📝</div>
-                        <p>No notes yet</p>
-                        <p className="text-xs">Create your first note or folder</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-1">
-                        {notes.map(note => (
-                          <div 
-                            key={note.id}
-                            className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded"
-                            onClick={() => {
-                              setEditingNote(note.id)
-                              setEditNoteTitle(note.title || '')
-                              setEditNoteContent(note.content)
-                            }}
-                          >
-                            <div className="w-4 h-4 mr-1" />
-                            <span className="text-green-400 mr-2">📄</span>
-                            <span className="text-sm text-gray-200 truncate">
-                              {note.title || note.content.substring(0, 30) + '...' || 'Untitled'}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Mobile Sidebar - overlay */}
-                {isMobileNotesSidebarOpen && (
-                  <div className="md:hidden absolute inset-0 bg-black bg-opacity-50 z-10" onClick={() => setIsMobileNotesSidebarOpen(false)}>
-                    <div className="bg-gray-800 w-64 h-full border-r border-gray-700 flex flex-col" onClick={e => e.stopPropagation()}>
-                      {/* Header */}
-                      <div className="p-4 border-b border-gray-700">
-                        <div className="flex justify-between items-center mb-3">
-                          <h2 className="text-lg font-semibold">📝 Notes</h2>
-                          <button onClick={() => setIsMobileNotesSidebarOpen(false)} className="text-gray-400">✕</button>
-                        </div>
-                        
-                        {/* Search */}
-                        <div className="relative mb-3">
-                          <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400">🔍</span>
-                          <input
-                            type="text"
-                            placeholder="Search notes..."
-                            className="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-
-                        {/* Action buttons */}
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => {
-                              const name = prompt('Folder name:')
-                              if (name) console.log('Create folder:', name)
-                            }}
-                            className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded text-sm"
-                          >
-                            📁 Folder
-                          </button>
-                          <button
-                            onClick={async () => {
-                              const title = prompt('Note title:')
-                              if (title) {
-                                try {
-                                  const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    credentials: 'include',
-                                    body: JSON.stringify({ title: title, content: '' })
-                                  })
-                                  if (response.ok) {
-                                    const note = await response.json()
-                                    setNotes(prev => [note, ...prev])
-                                    setEditingNote(note.id)
-                                    setEditNoteTitle(note.title || '')
-                                    setEditNoteContent(note.content || '')
-                                    setIsMobileNotesSidebarOpen(false)
-                                  }
-                                } catch (error) {
-                                  console.error('Failed to create note:', error)
-                                }
-                              }
-                            }}
-                            className="flex items-center px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm"
-                          >
-                            ➕ Note
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Tree */}
-                      <div className="flex-1 overflow-y-auto p-2">
-                        {notes.length === 0 ? (
-                          <div className="text-center text-gray-400 mt-8">
-                            <div className="text-4xl mb-2 opacity-50">📝</div>
-                            <p>No notes yet</p>
-                            <p className="text-xs">Create your first note or folder</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-1">
-                            {notes.map(note => (
-                              <div 
-                                key={note.id}
-                                className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded"
-                                onClick={() => {
-                                  setEditingNote(note.id)
-                                  setEditNoteTitle(note.title || '')
-                                  setEditNoteContent(note.content)
-                                  setIsMobileNotesSidebarOpen(false)
-                                }}
-                              >
-                                <div className="w-4 h-4 mr-1" />
-                                <span className="text-green-400 mr-2">📄</span>
-                                <span className="text-sm text-gray-200 truncate">
-                                  {note.title || note.content.substring(0, 30) + '...' || 'Untitled'}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-              {/* Main content */}
-              <div className="flex-1 flex flex-col">
-                {editingNote ? (
-                  <>
-                    {/* Note header */}
-                    <div className="p-4 border-b border-gray-700 bg-gray-800">
-                      <input
-                        type="text"
-                        value={editNoteTitle}
-                        onChange={(e) => setEditNoteTitle(e.target.value)}
-                        placeholder="Note title..."
-                        className="text-xl font-semibold bg-transparent border-none focus:outline-none text-white placeholder-gray-400 w-full"
-                      />
-                      <div className="flex space-x-2 mt-2">
-                        <button
-                          onClick={() => {
-                            const note = notes.find(n => n.id === editingNote)
-                            if (note) updateNote(note.id)
-                          }}
-                          disabled={loading}
-                          className="bg-teal-600 hover:bg-teal-700 text-white text-sm px-3 py-1 rounded transition-colors"
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={() => {
-                            const note = notes.find(n => n.id === editingNote)
-                            if (note && confirm('Delete this note?')) deleteNote(note.id)
-                          }}
-                          className="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-1 rounded transition-colors"
-                        >
-                          Delete
-                        </button>
-                        <button
-                          onClick={() => setEditingNote(null)}
-                          className="bg-gray-600 hover:bg-gray-700 text-white text-sm px-3 py-1 rounded transition-colors"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Note content */}
-                    <div className="flex-1 p-4">
-                      <textarea
-                        value={editNoteContent}
-                        onChange={(e) => setEditNoteContent(e.target.value)}
-                        className="w-full h-full bg-gray-800 border border-gray-600 rounded-lg p-4 text-gray-200 resize-none focus:outline-none focus:ring-2 focus:ring-teal-500"
-                        placeholder="Start writing your note..."
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex-1 flex items-center justify-center text-gray-400">
-                    <div className="text-center">
-                      <div className="text-6xl mb-4 opacity-50">📄</div>
-                      <h3 className="text-lg font-medium mb-2">Select a note to view</h3>
-                      <p className="text-sm">Choose a note from the sidebar or create a new one</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+            <NotesKnowledgeGarden
+              notes={notes}
+              setNotes={setNotes}
+              editingNote={editingNote}
+              setEditingNote={setEditingNote}
+              editNoteContent={editNoteContent}
+              setEditNoteContent={setEditNoteContent}
+              editNoteTitle={editNoteTitle}
+              setEditNoteTitle={setEditNoteTitle}
+            />
           )}
 
           {view === 'documents' && (
@@ -1543,7 +1407,7 @@ function App() {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40">
         <div className="flex justify-around py-2">
           <button
-            onClick={() => { setView('dashboard'); loadNotes(); }}
+            onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); }}
             className={`flex flex-col items-center p-2 ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">home</span>
