@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState, memo, useMemo } from 'react'
 import mermaid from 'mermaid'
 
 interface MermaidDiagramProps {
@@ -6,22 +6,32 @@ interface MermaidDiagramProps {
   id: string
 }
 
-const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
+const MermaidDiagram: React.FC<MermaidDiagramProps> = memo(({ chart, id }) => {
   const ref = useRef<HTMLDivElement>(null)
   const [hasError, setHasError] = useState(false)
+  const renderedChartRef = useRef<string>('')
+  const isRenderingRef = useRef(false)
   
-  // console.log('🚀 MermaidDiagram component mounted with props:', { id, chartLength: chart.length, chartPreview: chart.substring(0, 100) + '...' })
+  // Memoize the chart content to prevent unnecessary re-renders
+  const chartContent = useMemo(() => chart.trim(), [chart])
 
   useEffect(() => {
-    if (hasError) return
-    
     let mounted = true
     
     const renderDiagram = async () => {
-      if (!ref.current || !chart || !mounted) return
+      if (!ref.current || !chartContent || !mounted) return
+      
+      // Prevent re-rendering the same content
+      const currentContent = chartContent + id
+      if (renderedChartRef.current === currentContent || isRenderingRef.current) {
+        console.log('🔄 Skipping Mermaid re-render - content unchanged')
+        return
+      }
+      
+      isRenderingRef.current = true
+      console.log('🎨 Rendering new Mermaid content:', chartContent.substring(0, 50) + '...')
       
       try {
-        // console.log('🔧 Initializing Mermaid...')
         // Initialize mermaid with minimal working config
         mermaid.initialize({
           startOnLoad: false,
@@ -36,16 +46,13 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
         const uniqueId = `mermaid-${id.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
         
         // Validate chart syntax before rendering
-        if (!chart.trim()) {
+        if (!chartContent) {
           throw new Error('Empty chart content')
         }
         
-        console.log('🎨 Rendering Mermaid chart:', chart.substring(0, 100) + '...')
-        console.log('🆔 Using unique ID:', uniqueId)
-        
         // Render the mermaid diagram
         if (ref.current && mounted) {
-          const { svg } = await mermaid.render(uniqueId, chart)
+          const { svg } = await mermaid.render(uniqueId, chartContent)
           console.log('✅ Mermaid SVG generated (length:', svg.length, '):', svg.substring(0, 300) + '...')
           
           // Check if SVG contains actual content by looking for common mermaid elements
@@ -62,6 +69,10 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
             // Insert SVG directly into the container
             ref.current.innerHTML = svg
             console.log('🎯 SVG inserted into container, content length:', ref.current.innerHTML.length)
+            
+            // Mark as successfully rendered and store content
+            renderedChartRef.current = currentContent
+            isRenderingRef.current = false
             
             // Check SVG dimensions and fix height issue
             const svgElement = ref.current.querySelector('svg')
@@ -100,7 +111,22 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
         
       } catch (error) {
         console.error('Mermaid rendering error:', error)
-        if (mounted) {
+        console.error('Chart content:', chartContent)
+        console.error('Chart length:', chartContent.length)
+        console.error('Chart first 200 chars:', chartContent.substring(0, 200))
+        isRenderingRef.current = false
+        if (mounted && ref.current) {
+          // Show error inline instead of crashing
+          const errorMessage = typeof error === 'object' && error ? (error as any).message || String(error) : String(error)
+          ref.current.innerHTML = `
+            <div style="padding: 16px; background: #fee; border: 1px solid #fcc; border-radius: 8px; color: #c00;">
+              <strong>Mermaid Rendering Error</strong><br/>
+              <details style="margin-top: 8px;">
+                <summary style="cursor: pointer;">Show error details</summary>
+                <pre style="margin-top: 8px; font-size: 12px; overflow-x: auto;">${errorMessage}</pre>
+              </details>
+            </div>
+          `
           setHasError(true)
         }
       }
@@ -112,8 +138,9 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
     return () => {
       mounted = false
       clearTimeout(timeoutId)
+      isRenderingRef.current = false
     }
-  }, [chart, id, hasError])
+  }, [chartContent, id])
 
   if (hasError) {
     return (
@@ -122,7 +149,7 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
         <p className="text-sm">Failed to render Mermaid diagram. Please check the syntax.</p>
         <details className="mt-2">
           <summary className="cursor-pointer text-sm">Show diagram code</summary>
-          <pre className="mt-2 text-xs bg-gray-800 p-2 rounded overflow-x-auto">{chart}</pre>
+          <pre className="mt-2 text-xs bg-gray-800 p-2 rounded overflow-x-auto">{chartContent}</pre>
         </details>
       </div>
     )
@@ -137,6 +164,6 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = ({ chart, id }) => {
       }}
     />
   )
-}
+})
 
 export default MermaidDiagram

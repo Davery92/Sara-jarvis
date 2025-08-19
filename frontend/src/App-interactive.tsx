@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -6,6 +6,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
 import MermaidDiagram from './components/MermaidDiagram'
 import NotesKnowledgeGarden from './components/NotesKnowledgeGarden'
+import KnowledgeGraph from './components/KnowledgeGraph'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -37,6 +38,8 @@ function App() {
   const [selectedFile, setSelectedFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [analytics, setAnalytics] = useState(null)
+  const [editingDocumentId, setEditingDocumentId] = useState(null)
+  const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
 
   // Check authentication on load
   useEffect(() => {
@@ -55,8 +58,8 @@ function App() {
         setCurrentTime(now)
       }
       
-      // Increment timer tick to force re-render of timer displays
-      setTimerTick(prev => prev + 1)
+      // Increment timer tick to force re-render of timer displays (disabled to prevent constant re-renders)
+      // setTimerTick(prev => prev + 1)
       
       // Check for timer completions globally (to avoid duplicates)
       timers.forEach(timer => {
@@ -68,7 +71,7 @@ function App() {
           stopTimer(timer.id)
         }
       })
-    }, 1000)
+    }, 5000) // Reduced from 1s to 5s to prevent constant re-renders
     return () => clearInterval(interval)
   }, [timers, finishedTimers, currentTime])
 
@@ -76,7 +79,7 @@ function App() {
   useEffect(() => {
     if (isAuthenticated) {
       loadTimersAndReminders()
-      const interval = setInterval(loadTimersAndReminders, 30000)
+      const interval = setInterval(loadTimersAndReminders, 60000) // Reduced from 30s to 60s
       return () => clearInterval(interval)
     }
   }, [isAuthenticated])
@@ -529,6 +532,64 @@ function App() {
     }
   }
 
+  const updateDocumentTitle = async (documentId, newTitle) => {
+    if (!newTitle.trim()) return
+    
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/documents/${documentId}?title=${encodeURIComponent(newTitle)}`, {
+        method: 'PUT',
+        credentials: 'include'
+      })
+      
+      if (response.ok) {
+        const updatedDocument = await response.json()
+        setDocuments(prev => prev.map(doc => 
+          doc.id === documentId ? updatedDocument : doc
+        ))
+        setEditingDocumentId(null)
+        setEditingDocumentTitle('')
+        showToast('Document title updated successfully', 'success')
+      } else {
+        showToast('Failed to update document title', 'error')
+      }
+    } catch (error) {
+      console.error('Update error:', error)
+      showToast('Failed to update document title', 'error')
+    }
+  }
+
+  const startEditDocumentTitle = (doc) => {
+    setEditingDocumentId(doc.id)
+    setEditingDocumentTitle(doc.title || doc.original_filename)
+  }
+
+  const cancelEditDocumentTitle = () => {
+    setEditingDocumentId(null)
+    setEditingDocumentTitle('')
+  }
+
+  // Memoize the onNodeClick function to prevent unnecessary re-renders of the knowledge graph
+  const handleGraphNodeClick = useCallback((nodeId, nodeType) => {
+    if (nodeType === 'note') {
+      const noteIdString = nodeId.replace('note-', '')
+      const noteId = parseInt(noteIdString)
+      const note = notes.find(n => n.id === noteId)
+      if (note) {
+        setEditingNote(noteId)
+        setEditNoteTitle(note.title || '')
+        setEditNoteContent(note.content || '')
+        setView('notes') // Switch to notes view when clicking a note node
+      }
+    } else if (nodeType === 'episode') {
+      console.log('Episode clicked:', nodeId)
+      // Could implement episode details view
+    } else if (nodeType === 'document') {
+      console.log('Document clicked:', nodeId)
+      // Could navigate to document view
+      setView('documents')
+    }
+  }, [notes, setEditingNote, setEditNoteTitle, setEditNoteContent, setView])
+
   const clearChat = () => {
     setChatMessages([{
       role: 'assistant',
@@ -681,6 +742,13 @@ function App() {
                   <span>Notes</span>
                 </button>
                 <button
+                  onClick={() => { setView('graph'); loadNotes(); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'graph' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🕸️</span>
+                  <span>Knowledge Graph</span>
+                </button>
+                <button
                   onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -737,6 +805,13 @@ function App() {
             >
               <span className="material-icons">notes</span>
               <span className="text-xs">Notes</span>
+            </button>
+            <button
+              onClick={() => { setView('graph'); loadNotes(); }}
+              className={`flex flex-col items-center ${view === 'graph' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">hub</span>
+              <span className="text-xs">Graph</span>
             </button>
             <button
               onClick={() => { setView('documents'); loadDocuments(); }}
@@ -1264,6 +1339,23 @@ function App() {
             />
           )}
 
+          {view === 'graph' && (
+            <div className="bg-card border border-card rounded-xl p-6 h-[calc(100vh-8rem)] md:h-[calc(100vh-12rem)]">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold">KNOWLEDGE GRAPH</h2>
+                <p className="text-sm text-gray-400">Interactive visualization of your knowledge network</p>
+              </div>
+              <div className="h-[calc(100%-3rem)]">
+                <KnowledgeGraph
+                  notes={notes}
+                  selectedNoteId={editingNote}
+                  useApiData={true}
+                  onNodeClick={handleGraphNodeClick}
+                />
+              </div>
+            </div>
+          )}
+
           {view === 'documents' && (
             <div className="space-y-6">
               {/* Document Upload Section */}
@@ -1335,8 +1427,51 @@ function App() {
                                'description'}
                             </span>
                             <div className="flex-1">
-                              <p className="text-white font-medium">{doc.original_filename}</p>
-                              <div className="flex items-center space-x-4 text-sm text-gray-400">
+                              {editingDocumentId === doc.id ? (
+                                <div className="flex items-center space-x-2">
+                                  <input
+                                    type="text"
+                                    value={editingDocumentTitle}
+                                    onChange={(e) => setEditingDocumentTitle(e.target.value)}
+                                    className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                                    onKeyPress={(e) => {
+                                      if (e.key === 'Enter') {
+                                        updateDocumentTitle(doc.id, editingDocumentTitle)
+                                      }
+                                      if (e.key === 'Escape') {
+                                        cancelEditDocumentTitle()
+                                      }
+                                    }}
+                                    autoFocus
+                                  />
+                                  <button
+                                    onClick={() => updateDocumentTitle(doc.id, editingDocumentTitle)}
+                                    className="text-green-400 hover:text-green-300 p-1"
+                                    title="Save"
+                                  >
+                                    <span className="material-icons text-sm">check</span>
+                                  </button>
+                                  <button
+                                    onClick={cancelEditDocumentTitle}
+                                    className="text-gray-400 hover:text-gray-300 p-1"
+                                    title="Cancel"
+                                  >
+                                    <span className="material-icons text-sm">close</span>
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center space-x-2">
+                                  <p className="text-white font-medium flex-1">{doc.title || doc.original_filename}</p>
+                                  <button
+                                    onClick={() => startEditDocumentTitle(doc)}
+                                    className="text-gray-400 hover:text-gray-300 p-1"
+                                    title="Edit title"
+                                  >
+                                    <span className="material-icons text-sm">edit</span>
+                                  </button>
+                                </div>
+                              )}
+                              <div className="flex items-center space-x-4 text-sm text-gray-400 mt-1">
                                 <span>{(doc.file_size / 1024 / 1024).toFixed(2)} MB</span>
                                 <span>•</span>
                                 <span>Uploaded {new Date(doc.created_at).toLocaleDateString()}</span>
@@ -1426,6 +1561,13 @@ function App() {
           >
             <span className="material-icons text-lg">notes</span>
             <span className="text-xs">Notes</span>
+          </button>
+          <button
+            onClick={() => { setView('graph'); loadNotes(); }}
+            className={`flex flex-col items-center p-2 ${view === 'graph' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">hub</span>
+            <span className="text-xs">Graph</span>
           </button>
           <button
             onClick={() => { setView('documents'); loadDocuments(); }}

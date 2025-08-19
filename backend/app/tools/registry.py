@@ -5,6 +5,12 @@ from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool
+from app.tools.knowledge_graph import (
+    KnowledgeGraphSearchTool, 
+    ConnectionFinderTool, 
+    KnowledgeClusterTool,
+    KnowledgeGapAnalysisTool
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,6 +47,12 @@ class ToolRegistry:
             # Calendar
             CalendarListTool(),
             CalendarCreateTool(),
+            
+            # Knowledge Graph
+            KnowledgeGraphSearchTool(),
+            ConnectionFinderTool(),
+            KnowledgeClusterTool(),
+            KnowledgeGapAnalysisTool(),
         ]
         
         for tool in tools:

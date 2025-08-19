@@ -66,10 +66,35 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
   const [loading, setLoading] = useState(false)
   const [visibleTypes, setVisibleTypes] = useState<Set<string>>(new Set(['note', 'episode', 'document']))
 
-  // Fetch episodes and documents
+  // Fetch graph data from Neo4j
   useEffect(() => {
-    const fetchAllData = async () => {
+    const fetchGraphData = async () => {
       setLoading(true)
+      try {
+        // Try to fetch from Neo4j knowledge graph first
+        const graphResponse = await fetch(`${APP_CONFIG.apiUrl}/knowledge-graph/?depth=2`, {
+          credentials: 'include'
+        })
+        
+        if (graphResponse.ok) {
+          const graphData = await graphResponse.json()
+          setGraphData(graphData)
+          console.log('✅ Loaded graph data from Neo4j:', graphData)
+        } else {
+          // Fallback to old method if Neo4j is not available
+          console.warn('Neo4j not available, falling back to PostgreSQL data')
+          await fetchFallbackData()
+        }
+      } catch (error) {
+        console.error('Failed to fetch Neo4j graph data:', error)
+        // Fallback to old method
+        await fetchFallbackData()
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    const fetchFallbackData = async () => {
       try {
         // Fetch episodes
         const episodesResponse = await fetch(`${APP_CONFIG.apiUrl}/memory/episodes?page=1&per_page=100`, {
@@ -89,17 +114,15 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           setDocuments(documentsData || [])
         }
       } catch (error) {
-        console.error('Failed to fetch graph data:', error)
-      } finally {
-        setLoading(false)
+        console.error('Failed to fetch fallback data:', error)
       }
     }
 
-    fetchAllData()
+    fetchGraphData()
   }, [])
 
   useEffect(() => {
-    if (!svgRef.current || (notes.length === 0 && episodes.length === 0 && documents.length === 0)) return
+    if (!svgRef.current) return
 
     // Clear previous graph
     d3.select(svgRef.current).selectAll("*").remove()
@@ -110,154 +133,108 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
 
     svg.attr("width", width).attr("height", height)
 
-    // Create unified graph data from all content types
-    const allNodes: GraphNode[] = []
+    let nodes: GraphNode[] = []
+    let links: GraphLink[] = []
 
-    // Add notes
-    if (visibleTypes.has('note')) {
-      const noteNodes: GraphNode[] = notes.map(note => ({
-        id: `note-${note.id}`,
-        title: note.title || 'Untitled',
-        type: 'note',
-        importance: Math.min(note.content.length / 100, 5),
-        content: note.content,
-        group: 1,
-        metadata: {
-          created_at: note.created_at
-        }
-      }))
-      allNodes.push(...noteNodes)
-    }
+    // Use Neo4j data if available, otherwise fall back to PostgreSQL data
+    if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+      // Convert Neo4j graph data to D3 format
+      nodes = graphData.nodes
+        .filter(node => {
+          const nodeType = determineNodeTypeFromLabels(node.labels)
+          return visibleTypes.has(nodeType)
+        })
+        .map(node => {
+          const nodeType = determineNodeTypeFromLabels(node.labels)
+          const props = node.properties
+          
+          return {
+            id: props.id,
+            title: getNodeTitle(props, nodeType),
+            type: nodeType,
+            importance: calculateNodeImportance(props, nodeType),
+            content: getNodeContent(props, nodeType),
+            group: getNodeGroup(nodeType),
+            metadata: props
+          }
+        })
 
-    // Add episodes
-    if (visibleTypes.has('episode')) {
-      const episodeNodes: GraphNode[] = episodes.map(episode => ({
-        id: `episode-${episode.id}`,
-        title: `${episode.role}: ${episode.content.substring(0, 30)}...`,
-        type: 'episode',
-        importance: episode.importance || 0.5,
-        content: episode.content,
-        group: 2,
-        metadata: {
-          role: episode.role,
-          source: episode.source,
-          created_at: episode.created_at
-        }
-      }))
-      allNodes.push(...episodeNodes)
-    }
+      // Convert relationships to links
+      links = graphData.relationships
+        .filter(rel => {
+          // Only include links where both nodes are visible
+          const sourceVisible = nodes.some(n => n.id === rel.source)
+          const targetVisible = nodes.some(n => n.id === rel.target)
+          return sourceVisible && targetVisible
+        })
+        .map(rel => ({
+          source: rel.source,
+          target: rel.target,
+          strength: rel.properties?.strength || rel.properties?.similarity || 0.5,
+          type: mapRelationshipType(rel.type)
+        }))
 
-    // Add documents
-    if (visibleTypes.has('document')) {
-      const documentNodes: GraphNode[] = documents.map(doc => ({
-        id: `document-${doc.id}`,
-        title: doc.title || 'Untitled Document',
-        type: 'document',
-        importance: Math.min(doc.content_text?.length / 200 || 0, 5),
-        content: doc.content_text,
-        group: 3,
-        metadata: {
-          mime_type: doc.mime_type,
-          created_at: doc.created_at
-        }
-      }))
-      allNodes.push(...documentNodes)
-    }
-
-    const nodes = allNodes
-
-    // Generate cross-type connections
-    const links: GraphLink[] = []
-    const processedConnections = new Set<string>()
-
-    // Function to create semantic connections between any two content items
-    const createSemanticConnection = (item1: GraphNode, item2: GraphNode) => {
-      if (!item1.content || !item2.content) return
+      console.log('📊 Using Neo4j graph data:', { nodes: nodes.length, links: links.length })
+    } else {
+      // Fallback to old PostgreSQL-based method
+      console.log('📊 Using fallback PostgreSQL data')
       
-      const similarity = calculateSemanticSimilarity(item1.content, item2.content)
-      if (similarity > 0.1) { // Threshold for cross-type connections
-        const connectionKey = `${item1.id}-${item2.id}`
-        const reverseKey = `${item2.id}-${item1.id}`
-        
-        if (!processedConnections.has(connectionKey) && !processedConnections.has(reverseKey)) {
-          links.push({
-            source: item1.id,
-            target: item2.id,
-            strength: similarity,
-            type: 'semantic'
-          })
-          processedConnections.add(connectionKey)
-        }
+      // Add notes
+      if (visibleTypes.has('note')) {
+        const noteNodes: GraphNode[] = notes.map(note => ({
+          id: `note-${note.id}`,
+          title: note.title || 'Untitled',
+          type: 'note',
+          importance: Math.min(note.content.length / 100, 5),
+          content: note.content,
+          group: 1,
+          metadata: {
+            created_at: note.created_at
+          }
+        }))
+        nodes.push(...noteNodes)
       }
-    }
 
-    // Create temporal connections based on creation time proximity
-    const createTemporalConnection = (item1: GraphNode, item2: GraphNode) => {
-      const date1 = new Date(item1.metadata?.created_at || 0)
-      const date2 = new Date(item2.metadata?.created_at || 0)
-      const timeDiff = Math.abs(date1.getTime() - date2.getTime())
-      const hoursDiff = timeDiff / (1000 * 60 * 60)
-      
-      // Connect items created within 24 hours of each other
-      if (hoursDiff <= 24) {
-        const connectionKey = `${item1.id}-${item2.id}`
-        const reverseKey = `${item2.id}-${item1.id}`
-        
-        if (!processedConnections.has(connectionKey) && !processedConnections.has(reverseKey)) {
-          const strength = Math.max(0.1, 1 - (hoursDiff / 24))
-          links.push({
-            source: item1.id,
-            target: item2.id,
-            strength: strength,
-            type: 'temporal'
-          })
-          processedConnections.add(connectionKey)
-        }
+      // Add episodes
+      if (visibleTypes.has('episode')) {
+        const episodeNodes: GraphNode[] = episodes.map(episode => ({
+          id: `episode-${episode.id}`,
+          title: `${episode.role}: ${episode.content.substring(0, 30)}...`,
+          type: 'episode',
+          importance: episode.importance || 0.5,
+          content: episode.content,
+          group: 2,
+          metadata: {
+            role: episode.role,
+            source: episode.source,
+            created_at: episode.created_at
+          }
+        }))
+        nodes.push(...episodeNodes)
       }
+
+      // Add documents
+      if (visibleTypes.has('document')) {
+        const documentNodes: GraphNode[] = documents.map(doc => ({
+          id: `document-${doc.id}`,
+          title: doc.title || 'Untitled Document',
+          type: 'document',
+          importance: Math.min(doc.content_text?.length / 200 || 0, 5),
+          content: doc.content_text,
+          group: 3,
+          metadata: {
+            mime_type: doc.mime_type,
+            created_at: doc.created_at
+          }
+        }))
+        nodes.push(...documentNodes)
+      }
+
+      // Generate fallback connections (existing logic)
+      links = generateFallbackConnections(nodes)
     }
 
-    // Generate note-to-note connections using existing parser
-    notes.forEach(note => {
-      const connections = generateNoteConnections(note, notes)
-      connections.forEach(conn => {
-        const connectionKey = `note-${conn.sourceId}-note-${conn.targetId}`
-        const reverseKey = `note-${conn.targetId}-note-${conn.sourceId}`
-        
-        if (!processedConnections.has(connectionKey) && !processedConnections.has(reverseKey)) {
-          links.push({
-            source: `note-${conn.sourceId}`,
-            target: `note-${conn.targetId}`,
-            strength: conn.strength,
-            type: conn.type
-          })
-          processedConnections.add(connectionKey)
-        }
-      })
-    })
-
-    // Generate cross-type semantic connections
-    nodes.forEach((node1, i) => {
-      nodes.slice(i + 1).forEach(node2 => {
-        // Skip if same type and already processed by note parser
-        if (node1.type === 'note' && node2.type === 'note') return
-        
-        createSemanticConnection(node1, node2)
-        createTemporalConnection(node1, node2)
-      })
-    })
-
-    // Helper function for semantic similarity (imported from linkParser)
-    function calculateSemanticSimilarity(text1: string, text2: string): number {
-      const words1 = text1.toLowerCase().split(/\s+/).filter(w => w.length > 3)
-      const words2 = text2.toLowerCase().split(/\s+/).filter(w => w.length > 3)
-      
-      if (words1.length === 0 || words2.length === 0) return 0
-      
-      const commonWords = words1.filter(word => words2.includes(word))
-      const totalWords = new Set([...words1, ...words2]).size
-      
-      return commonWords.length / totalWords
-    }
+    if (nodes.length === 0) return
 
     // Create force simulation
     const simulation = d3.forceSimulation<GraphNode>(nodes)
@@ -391,11 +368,149 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       simulation.stop()
     }
 
-  }, [notes, episodes, documents, selectedNoteId, onNodeClick, visibleTypes])
+  }, [notes, episodes, documents, selectedNoteId, onNodeClick, visibleTypes, graphData])
 
-  const totalItems = (visibleTypes.has('note') ? notes.length : 0) + 
-                     (visibleTypes.has('episode') ? episodes.length : 0) + 
-                     (visibleTypes.has('document') ? documents.length : 0)
+  // Helper functions for Neo4j data conversion
+  const determineNodeTypeFromLabels = (labels: string[]): string => {
+    if (labels.includes('Note')) return 'note'
+    if (labels.includes('Episode')) return 'episode'
+    if (labels.includes('Document')) return 'document'
+    return 'unknown'
+  }
+
+  const getNodeTitle = (props: any, nodeType: string): string => {
+    if (props.title) return props.title
+    if (nodeType === 'episode') {
+      return `${props.role || 'user'}: ${(props.content || '').substring(0, 30)}...`
+    }
+    if (props.content) return props.content.substring(0, 40) + '...'
+    return 'Untitled'
+  }
+
+  const calculateNodeImportance = (props: any, nodeType: string): number => {
+    if (props.importance) return props.importance
+    if (nodeType === 'note') return Math.min((props.content?.length || 0) / 100, 5)
+    if (nodeType === 'episode') return props.importance || 0.5
+    if (nodeType === 'document') return Math.min((props.content_text?.length || 0) / 200, 5)
+    return 1
+  }
+
+  const getNodeContent = (props: any, nodeType: string): string => {
+    return props.content || props.content_text || ''
+  }
+
+  const getNodeGroup = (nodeType: string): number => {
+    switch (nodeType) {
+      case 'note': return 1
+      case 'episode': return 2
+      case 'document': return 3
+      default: return 0
+    }
+  }
+
+  const mapRelationshipType = (neoType: string): 'reference' | 'semantic' | 'temporal' => {
+    if (neoType === 'REFERENCES') return 'reference'
+    if (neoType === 'TEMPORAL_NEAR') return 'temporal'
+    return 'semantic'
+  }
+
+  const generateFallbackConnections = (nodes: GraphNode[]): GraphLink[] => {
+    const links: GraphLink[] = []
+    const processedConnections = new Set<string>()
+
+    // Generate note-to-note connections using existing parser
+    notes.forEach(note => {
+      const connections = generateNoteConnections(note, notes)
+      connections.forEach(conn => {
+        const connectionKey = `note-${conn.sourceId}-note-${conn.targetId}`
+        const reverseKey = `note-${conn.targetId}-note-${conn.sourceId}`
+        
+        if (!processedConnections.has(connectionKey) && !processedConnections.has(reverseKey)) {
+          links.push({
+            source: `note-${conn.sourceId}`,
+            target: `note-${conn.targetId}`,
+            strength: conn.strength,
+            type: conn.type
+          })
+          processedConnections.add(connectionKey)
+        }
+      })
+    })
+
+    // Generate cross-type semantic connections
+    nodes.forEach((node1, i) => {
+      nodes.slice(i + 1).forEach(node2 => {
+        // Skip if same type and already processed by note parser
+        if (node1.type === 'note' && node2.type === 'note') return
+        
+        if (node1.content && node2.content) {
+          const similarity = calculateSemanticSimilarity(node1.content, node2.content)
+          if (similarity > 0.1) {
+            const connectionKey = `${node1.id}-${node2.id}`
+            const reverseKey = `${node2.id}-${node1.id}`
+            
+            if (!processedConnections.has(connectionKey) && !processedConnections.has(reverseKey)) {
+              links.push({
+                source: node1.id,
+                target: node2.id,
+                strength: similarity,
+                type: 'semantic'
+              })
+              processedConnections.add(connectionKey)
+            }
+          }
+        }
+      })
+    })
+
+    return links
+  }
+
+  // Helper function for semantic similarity (from linkParser)
+  const calculateSemanticSimilarity = (text1: string, text2: string): number => {
+    const words1 = text1.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+    const words2 = text2.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+    
+    if (words1.length === 0 || words2.length === 0) return 0
+    
+    const commonWords = words1.filter(word => words2.includes(word))
+    const totalWords = new Set([...words1, ...words2]).size
+    
+    return commonWords.length / totalWords
+  }
+
+  const getTotalItems = (): number => {
+    if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+      return graphData.nodes.filter(node => {
+        const nodeType = determineNodeTypeFromLabels(node.labels)
+        return visibleTypes.has(nodeType)
+      }).length
+    }
+    return (visibleTypes.has('note') ? notes.length : 0) + 
+           (visibleTypes.has('episode') ? episodes.length : 0) + 
+           (visibleTypes.has('document') ? documents.length : 0)
+  }
+
+  const getNodeCounts = () => {
+    if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+      const counts = { note: 0, episode: 0, document: 0 }
+      graphData.nodes.forEach(node => {
+        const nodeType = determineNodeTypeFromLabels(node.labels)
+        if (nodeType in counts) {
+          counts[nodeType as keyof typeof counts]++
+        }
+      })
+      return counts
+    }
+    return {
+      note: notes.length,
+      episode: episodes.length,
+      document: documents.length
+    }
+  }
+
+  const totalItems = getTotalItems()
+  const nodeCounts = getNodeCounts()
 
   const toggleContentType = (type: string) => {
     setVisibleTypes(prev => {
@@ -433,7 +548,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
                   : 'bg-transparent text-[#4ade80] border-[#4ade80] hover:bg-[#4ade80] hover:text-black'
               }`}
             >
-              Notes ({notes.length})
+              Notes ({nodeCounts.note})
             </button>
             <button
               onClick={() => toggleContentType('episode')}
@@ -443,7 +558,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
                   : 'bg-transparent text-[#0d7ff2] border-[#0d7ff2] hover:bg-[#0d7ff2] hover:text-white'
               }`}
             >
-              Episodes ({episodes.length})
+              Episodes ({nodeCounts.episode})
             </button>
             <button
               onClick={() => toggleContentType('document')}
@@ -453,7 +568,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
                   : 'bg-transparent text-[#f59e0b] border-[#f59e0b] hover:bg-[#f59e0b] hover:text-black'
               }`}
             >
-              Docs ({documents.length})
+              Docs ({nodeCounts.document})
             </button>
           </div>
         </div>

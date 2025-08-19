@@ -141,6 +141,7 @@ class Document(Base):
     user_id = Column(String, nullable=False)
     filename = Column(String, nullable=False)
     original_filename = Column(String, nullable=False)
+    title = Column(String, default="")  # User-editable title
     file_path = Column(String, nullable=False)
     file_size = Column(Integer, nullable=False)
     mime_type = Column(String, nullable=False)
@@ -296,6 +297,7 @@ class DocumentResponse(BaseModel):
     id: str
     filename: str
     original_filename: str
+    title: str = ""  # User-editable title
     file_size: int
     mime_type: str
     content_text: str = ""
@@ -421,8 +423,8 @@ class SimpleLLMClient:
             result = response.json()
             message = result["choices"][0]["message"]
             
-            # Handle tool calls with recursive support (max 3 rounds to prevent infinite loops)
-            max_tool_rounds = 3
+            # Handle tool calls with recursive support (max 10 rounds for complex queries)
+            max_tool_rounds = 10
             current_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
             
             for round_num in range(max_tool_rounds):
@@ -460,6 +462,12 @@ class SimpleLLMClient:
                     # Enhanced debugging
                     logger.info(f"🔍 Round {round_num + 1} - Message keys: {list(message.keys())}")
                     logger.info(f"🔍 Round {round_num + 1} - Content length: {len(message.get('content', '')) if message.get('content') else 0}")
+                    logger.info(f"🔍 Round {round_num + 1} - Content preview: {repr(message.get('content', ''))[:100]}")
+                    logger.info(f"🔍 Round {round_num + 1} - Has tool_calls: {bool(message.get('tool_calls'))}")
+                    if message.get('tool_calls'):
+                        logger.info(f"🔍 Round {round_num + 1} - Tool calls: {[tc.get('function', {}).get('name') for tc in message.get('tool_calls', [])]}")
+                    if hasattr(message, 'reasoning'):
+                        logger.info(f"🔍 Round {round_num + 1} - Reasoning: {message.get('reasoning', '')[:100]}")
                     
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
@@ -474,10 +482,20 @@ class SimpleLLMClient:
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
             
-            # If we hit max rounds, return whatever we have
-            response_content = message.get("content", "I apologize, but I encountered an issue processing your request.")
+            # If we hit max rounds, force a proper response
+            logger.warning(f"Hit max tool rounds with message: {message}")
+            
+            # Try to get the reasoning or any available content
+            response_content = message.get("content", "")
+            if not response_content and message.get("reasoning"):
+                response_content = message.get("reasoning", "")
+            
+            # If still no content, force a reasonable response
+            if not response_content:
+                response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
+            
             await self.store_conversation(messages, response_content, user_id)
-            logger.warning(f"Hit max tool rounds, returning: {len(response_content)}")
+            logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
                 
         except Exception as e:
@@ -524,8 +542,27 @@ class SimpleLLMClient:
         }
 
     async def search_notes_tool(self, query, user_id):
-        """Search notes for the user"""
+        """Search notes using Neo4j knowledge graph (with PostgreSQL fallback)"""
         try:
+            # Try Neo4j search first
+            from app.services.neo4j_service import neo4j_service
+            if neo4j_service.driver:
+                search_results = await neo4j_service.search_knowledge_graph(
+                    user_id=user_id,
+                    query=query,
+                    content_types=["Note"],
+                    limit=10
+                )
+                
+                if search_results:
+                    results = []
+                    for node in search_results:
+                        title = node.get('title', 'Untitled')
+                        content = node.get('content', '')[:200]
+                        results.append(f"Note: {title}\nContent: {content}...")
+                    return "\n\n".join(results)
+            
+            # Fallback to PostgreSQL
             db = SessionLocal()
             try:
                 notes = db.query(Note).filter(
@@ -548,11 +585,44 @@ class SimpleLLMClient:
             return f"Error searching notes: {str(e)}"
 
     async def create_note_tool(self, title, content, user_id):
-        """Create a new note for the user"""
+        """Create a new note using Neo4j-first architecture with intelligent processing"""
+        note_id = str(__import__('uuid').uuid4())
+        
         try:
+            # Neo4j-first approach: Create note in Neo4j immediately
+            from app.services.neo4j_service import neo4j_service
+            from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
+            
+            # Ensure Neo4j connection
+            if neo4j_service.driver:
+                try:
+                    # Create note in Neo4j graph
+                    await neo4j_service.create_note(
+                        note_id=note_id,
+                        user_id=user_id,
+                        title=title or "Untitled",
+                        content=content
+                    )
+                    
+                    # Queue for intelligent processing
+                    await intelligence_pipeline.queue_fast_processing(
+                        content_id=note_id,
+                        content_type=ContentType.NOTE,
+                        metadata={
+                            "user_id": user_id,
+                            "title": title
+                        }
+                    )
+                    
+                    logger.info(f"✅ Tool: Note {note_id} created in Neo4j and queued for processing")
+                except Exception as neo_error:
+                    logger.warning(f"Neo4j note creation failed in tool: {neo_error}")
+            
+            # Background sync to PostgreSQL (backup)
             db = SessionLocal()
             try:
                 note = Note(
+                    id=note_id,
                     user_id=user_id,
                     title=title or "",
                     content=content
@@ -561,7 +631,7 @@ class SimpleLLMClient:
                 db.commit()
                 db.refresh(note)
                 
-                return f"Created note: {note.title or 'Untitled'}"
+                return f"Created note: {note.title or 'Untitled'} (with intelligent graph processing)"
             finally:
                 db.close()
         except Exception as e:
@@ -740,8 +810,33 @@ class SimpleLLMClient:
             return f"Error stopping timer: {str(e)}"
 
     async def search_documents_tool(self, query, user_id):
-        """🧠 Advanced hybrid search through uploaded documents using semantic similarity + text matching"""
+        """🧠 Advanced hybrid search through uploaded documents using Neo4j knowledge graph + PostgreSQL fallback"""
         try:
+            # Try Neo4j search first for enhanced document discovery
+            from app.services.neo4j_service import neo4j_service
+            if neo4j_service.driver:
+                try:
+                    search_results = await neo4j_service.search_knowledge_graph(
+                        user_id=user_id,
+                        query=query,
+                        content_types=["Document"],
+                        limit=5
+                    )
+                    
+                    if search_results:
+                        results = []
+                        for node in search_results:
+                            title = node.get('title', 'Unknown Document')
+                            content = node.get('content_text', '')[:300]
+                            results.append(f"From {title}: {content}...")
+                        
+                        # If Neo4j found results, return them
+                        if results:
+                            return f"Found {len(results)} relevant results about '{query}' in your documents.\n\n" + "\n\n".join(results)
+                except Exception as e:
+                    logger.warning(f"Neo4j document search failed: {e}")
+            
+            # Fallback to PostgreSQL vector search
             db = SessionLocal()
             try:
                 # Check if user has documents
@@ -1552,6 +1647,34 @@ app = FastAPI(
     version="1.0.0-simple"
 )
 
+# Initialize Neo4j on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on application startup"""
+    try:
+        # Initialize Neo4j service
+        from app.services.neo4j_service import neo4j_service
+        await neo4j_service.connect()
+        logger.info("✅ Neo4j knowledge graph service initialized")
+        
+        # Initialize intelligence pipeline
+        from app.services.intelligence_pipeline import intelligence_pipeline
+        await intelligence_pipeline.start_workers()
+        logger.info("🧠 Intelligence pipeline workers started")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Services initialization failed (will use fallback): {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on application shutdown"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        neo4j_service.close()
+        logger.info("🔌 Neo4j connection closed")
+    except Exception as e:
+        logger.warning(f"Neo4j shutdown warning: {e}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,  # Use specific origins for credentials
@@ -1846,6 +1969,9 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                 f"When referencing information from documents, use search_documents and include citations when available. "
                 f"You can create beautiful Mermaid diagrams using ```mermaid code blocks for flowcharts, mind maps, timelines, tables, and data visualization. "
                 f"Use Mermaid diagrams when presenting complex data, relationships, or processes to make them more visually appealing. "
+                f"CRITICAL: After using tools, ALWAYS provide a helpful, conversational response based on the results. "
+                f"Never end with just tool calls - always follow up with a natural response that addresses the user's question. "
+                f"If tools return information, summarize it helpfully. If no relevant information is found, say so politely. "
                 f"For timers, always convert durations to minutes correctly: "
                 f"2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Always be helpful and concise."
     )
@@ -1898,7 +2024,50 @@ async def list_notes(current_user: User = Depends(get_current_user), db: Session
 
 @app.post("/notes", response_model=NoteResponse)
 async def create_note(note_data: NoteCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Neo4j-first approach: Create note in Neo4j immediately
+    note_id = str(uuid.uuid4())
+    
+    try:
+        # 1. Create note in Neo4j first with basic properties
+        from app.services.neo4j_service import neo4j_service
+        from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
+        
+        # Ensure Neo4j connection
+        if not neo4j_service.driver:
+            await neo4j_service.connect()
+        
+        # Create note in Neo4j graph
+        neo4j_result = await neo4j_service.create_note(
+            note_id=note_id,
+            user_id=current_user.id,
+            title=note_data.title or "Untitled",
+            content=note_data.content,
+            folder_id=note_data.folder_id
+        )
+        
+        # 2. Start intelligence pipeline workers if not already running
+        await intelligence_pipeline.start_workers()
+        
+        # 3. Queue for fast processing (embeddings, obvious connections)
+        await intelligence_pipeline.queue_fast_processing(
+            content_id=note_id,
+            content_type=ContentType.NOTE,
+            metadata={
+                "user_id": current_user.id,
+                "title": note_data.title,
+                "folder_id": note_data.folder_id
+            }
+        )
+        
+        logger.info(f"✅ Note {note_id} created in Neo4j and queued for intelligent processing")
+        
+    except Exception as neo_error:
+        logger.error(f"❌ Neo4j note creation failed: {neo_error}")
+        # Continue with PostgreSQL fallback
+    
+    # 4. Background sync to PostgreSQL (backup)
     note = Note(
+        id=note_id,
         user_id=current_user.id,
         title=note_data.title,
         content=note_data.content,
@@ -1923,6 +2092,42 @@ async def update_note(note_id: str, note_data: NoteCreate, current_user: User = 
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     
+    # Neo4j-first approach: Update note in Neo4j and re-process
+    try:
+        from app.services.neo4j_service import neo4j_service
+        from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
+        
+        # Ensure Neo4j connection
+        if not neo4j_service.driver:
+            await neo4j_service.connect()
+        
+        # Update note in Neo4j graph
+        await neo4j_service.create_note(
+            note_id=note_id,
+            user_id=current_user.id,
+            title=note_data.title or "Untitled",
+            content=note_data.content,
+            folder_id=note_data.folder_id
+        )
+        
+        # Re-process with intelligence pipeline for updated content
+        await intelligence_pipeline.queue_fast_processing(
+            content_id=note_id,
+            content_type=ContentType.NOTE,
+            metadata={
+                "user_id": current_user.id,
+                "title": note_data.title,
+                "folder_id": note_data.folder_id,
+                "is_update": True
+            }
+        )
+        
+        logger.info(f"✅ Note {note_id} updated in Neo4j and re-queued for processing")
+        
+    except Exception as neo_error:
+        logger.error(f"❌ Neo4j note update failed: {neo_error}")
+    
+    # Update PostgreSQL (backup)
     note.title = note_data.title
     note.content = note_data.content
     if note_data.folder_id is not None:
@@ -2399,7 +2604,9 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Upload a document and process it for RAG"""
+    """Upload a document with Neo4j-first intelligent processing"""
+    doc_id = str(uuid.uuid4())
+    
     try:
         # Create uploads directory if it doesn't exist
         uploads_dir = "uploads"
@@ -2415,103 +2622,132 @@ async def upload_document(
         async with aiofiles.open(file_path, 'wb') as f:
             await f.write(file_content)
         
-        # Create document record
+        # Extract text immediately
+        processor = DocumentProcessor()
+        extracted_text = ""
+        
+        if file.content_type == "application/pdf":
+            try:
+                extracted_text = processor.extract_text(file_path, file.content_type)
+                if not extracted_text or len(extracted_text.strip()) < 10:
+                    extracted_text = f"PDF document: {file.filename} (text extraction may have limited success)"
+            except Exception as e:
+                logger.warning(f"PDF extraction failed: {e}")
+                extracted_text = f"PDF document: {file.filename} (text extraction failed)"
+        elif file.content_type in ["text/plain", "text/markdown"]:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    extracted_text = f.read()
+            except Exception as e:
+                logger.warning(f"Text file extraction failed: {e}")
+                extracted_text = "Could not extract text from file"
+        elif "word" in (file.content_type or "") or file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            try:
+                extracted_text = processor.extract_text(file_path, file.content_type)
+                if not extracted_text:
+                    extracted_text = f"Word document: {file.filename}"
+            except Exception as e:
+                logger.warning(f"Word document extraction failed: {e}")
+                extracted_text = f"Word document: {file.filename}"
+        else:
+            extracted_text = f"Document: {file.filename}"
+        
+        # Neo4j-first approach: Create document in Neo4j immediately
+        try:
+            from app.services.neo4j_service import neo4j_service
+            from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
+            
+            # Ensure Neo4j connection
+            if not neo4j_service.driver:
+                await neo4j_service.connect()
+            
+            # Create document in Neo4j graph with extracted content
+            neo4j_result = await neo4j_service.create_document(
+                doc_id=doc_id,
+                user_id=current_user.id,
+                title=file.filename or "Untitled Document",
+                content_text=extracted_text,
+                mime_type=file.content_type or "application/octet-stream",
+                file_path=file_path
+            )
+            
+            # Start intelligence pipeline workers if not already running
+            await intelligence_pipeline.start_workers()
+            
+            # Queue for fast processing (embeddings, obvious connections)
+            await intelligence_pipeline.queue_fast_processing(
+                content_id=doc_id,
+                content_type=ContentType.DOCUMENT,
+                metadata={
+                    "user_id": current_user.id,
+                    "title": file.filename,
+                    "mime_type": file.content_type,
+                    "file_path": file_path,
+                    "file_size": len(file_content)
+                }
+            )
+            
+            logger.info(f"✅ Document {doc_id} created in Neo4j and queued for intelligent processing")
+            
+        except Exception as neo_error:
+            logger.error(f"❌ Neo4j document creation failed: {neo_error}")
+            # Continue with PostgreSQL fallback
+        
+        # Background sync to PostgreSQL (backup)
         document = Document(
+            id=doc_id,
             user_id=current_user.id,
             filename=unique_filename,
             original_filename=file.filename or "unknown",
+            title=file.filename or "Untitled Document",  # Add title for backward compatibility
             file_path=file_path,
             file_size=len(file_content),
             mime_type=file.content_type or "application/octet-stream",
-            is_processed="false"
+            content_text=extracted_text[:50000] if extracted_text else "",  # Store 50KB preview
+            is_processed="true"  # Mark as processed since we extracted text
         )
         
         db.add(document)
         db.commit()
         db.refresh(document)
         
-        # Process document in background
+        # Legacy chunking for PostgreSQL compatibility (reduced priority)
         try:
-            processor = DocumentProcessor()
-            
-            # Extract text based on file type
-            extracted_text = ""
-            if document.mime_type == "application/pdf":
-                try:
-                    # Use robust PDF extraction
-                    extracted_text = processor.extract_text(file_path, document.mime_type)
-                    if not extracted_text or len(extracted_text.strip()) < 10:
-                        extracted_text = f"PDF document uploaded: {document.original_filename} (text extraction may have limited success)"
-                except Exception as e:
-                    logger.warning(f"PDF extraction failed for {document.filename}: {e}")
-                    extracted_text = f"PDF document uploaded: {document.original_filename} (text extraction failed)"
-            elif document.mime_type in ["text/plain", "text/markdown"]:
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        extracted_text = f.read()
-                except Exception as e:
-                    logger.warning(f"Text file extraction failed for {document.filename}: {e}")
-                    extracted_text = "Could not extract text from file"
-            elif "word" in document.mime_type or document.mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                try:
-                    extracted_text = processor.extract_text(file_path, document.mime_type)
-                    if not extracted_text:
-                        extracted_text = f"Word document uploaded: {document.original_filename}"
-                except Exception as e:
-                    logger.warning(f"Word document extraction failed for {document.filename}: {e}")
-                    extracted_text = f"Word document uploaded: {document.original_filename}"
-            else:
-                extracted_text = f"Document uploaded: {document.original_filename}"
-            
-            # Store content (keep substantial preview and full text for chunking)
-            document.content_text = extracted_text[:50000] if extracted_text else ""  # Store 50KB for preview
-            document.is_processed = "true"
-            
-            # Improved chunking for better text processing
-            chunks = []
-            if extracted_text and len(extracted_text.strip()) > 0:
-                chunks = processor.chunk_text(extracted_text)
-            
-            # Save chunks to database with embeddings (handle large documents properly)
-            max_chunks = 1000  # Allow up to 1000 chunks for large documents
+            chunks = processor.chunk_text(extracted_text) if extracted_text else []
+            max_chunks = 100  # Reduced since Neo4j is primary
             processed_chunks = chunks[:max_chunks]
             
-            # Generate embeddings for all chunks
-            logger.info(f"Generating embeddings for {len(processed_chunks)} chunks...")
-            chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
-            
-            # Save chunks with embeddings to database
-            for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
-                # Format embedding based on database type
-                if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                    embedding_data = embedding  # pgvector format
-                else:
-                    # SQLite: store as JSON string
-                    import json
-                    embedding_data = json.dumps(embedding) if embedding else None
+            if processed_chunks:
+                # Generate embeddings for chunks
+                chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
                 
-                chunk = DocumentChunk(
-                    document_id=document.id,
-                    user_id=current_user.id,
-                    chunk_index=i,
-                    chunk_text=chunk_text,
-                    embedding=embedding_data
-                )
-                db.add(chunk)
-            
-            db.commit()
-            
-            logger.info(f"Successfully processed document {document.filename}: {len(processed_chunks)} chunks created with embeddings")
-            
-        except Exception as e:
-            logger.error(f"Error processing document {document.filename}: {e}")
-            document.is_processed = "error"
-            db.commit()
+                # Save chunks to PostgreSQL
+                for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
+                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                        embedding_data = embedding
+                    else:
+                        embedding_data = json.dumps(embedding) if embedding else None
+                    
+                    chunk = DocumentChunk(
+                        document_id=document.id,
+                        user_id=current_user.id,
+                        chunk_index=i,
+                        chunk_text=chunk_text,
+                        embedding=embedding_data
+                    )
+                    db.add(chunk)
+                
+                db.commit()
+                logger.info(f"📄 Legacy chunking completed: {len(processed_chunks)} chunks")
+        
+        except Exception as chunk_error:
+            logger.warning(f"⚠️ Legacy chunking failed (Neo4j processing continues): {chunk_error}")
         
         return DocumentResponse(
             id=document.id,
             filename=document.filename,
             original_filename=document.original_filename,
+            title=document.title or document.original_filename,
             file_size=document.file_size,
             mime_type=document.mime_type,
             content_text=document.content_text,
@@ -2524,6 +2760,7 @@ async def upload_document(
         logger.error(f"Document upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
 
+
 @app.get("/documents", response_model=list[DocumentResponse])
 async def get_documents(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get all documents for the current user"""
@@ -2534,6 +2771,7 @@ async def get_documents(current_user: User = Depends(get_current_user), db: Sess
             id=doc.id,
             filename=doc.filename,
             original_filename=doc.original_filename,
+            title=getattr(doc, 'title', '') or doc.original_filename,  # Fallback for existing docs
             file_size=doc.file_size,
             mime_type=doc.mime_type,
             content_text=doc.content_text,
@@ -2606,6 +2844,48 @@ async def delete_document(
     db.commit()
     
     return {"message": "Document deleted successfully"}
+
+@app.put("/documents/{document_id}", response_model=DocumentResponse)
+async def update_document(
+    document_id: str,
+    title: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update document title"""
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.user_id == current_user.id
+    ).first()
+    
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Update document title
+    document.title = title
+    db.commit()
+    db.refresh(document)
+    
+    # Update Neo4j if available
+    try:
+        from app.services.neo4j_service import neo4j_service
+        if neo4j_service.driver:
+            await neo4j_service.update_document_title(document_id, title)
+    except Exception as e:
+        logger.warning(f"Failed to update document title in Neo4j: {e}")
+    
+    return DocumentResponse(
+        id=document.id,
+        filename=document.filename,
+        original_filename=document.original_filename,
+        title=document.title,
+        mime_type=document.mime_type,
+        file_size=document.file_size,
+        is_processed=document.is_processed,
+        content_text=document.content_text,
+        created_at=document.created_at.isoformat(),
+        updated_at=document.updated_at.isoformat()
+    )
 
 @app.get("/documents/search")
 async def search_documents(
@@ -2707,6 +2987,132 @@ async def search_memory(
     except Exception as e:
         logger.error(f"Memory search error: {e}")
         raise HTTPException(status_code=500, detail=f"Memory search failed: {str(e)}")
+
+# Knowledge Graph Endpoints
+@app.get("/knowledge-graph/health")
+async def knowledge_graph_health():
+    """Check Neo4j connection health"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        await neo4j_service.verify_connection()
+        return {
+            "status": "healthy",
+            "neo4j_connected": True,
+            "message": "Knowledge graph is operational"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy", 
+            "neo4j_connected": False,
+            "error": str(e),
+            "message": "Knowledge graph connection failed"
+        }
+
+@app.get("/knowledge-graph/")
+async def get_user_knowledge_graph(
+    depth: int = 2,
+    current_user: User = Depends(get_current_user)
+):
+    """Get the complete knowledge graph for the current user"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        graph_data = await neo4j_service.get_user_knowledge_graph(
+            user_id=current_user.id,
+            depth=depth
+        )
+        
+        return {
+            "nodes": graph_data.get("nodes", []),
+            "relationships": graph_data.get("relationships", []),
+            "total_nodes": len(graph_data.get("nodes", [])),
+            "total_relationships": len(graph_data.get("relationships", []))
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get knowledge graph: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge graph: {str(e)}")
+
+@app.post("/knowledge-graph/search")
+async def search_knowledge_graph(
+    request: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Search across all content types in the knowledge graph"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        query = request.get("query")
+        content_types = request.get("content_types")
+        limit = request.get("limit", 20)
+        
+        if not query:
+            raise HTTPException(status_code=400, detail="Search query is required")
+        
+        search_results = await neo4j_service.search_knowledge_graph(
+            user_id=current_user.id,
+            query=query,
+            content_types=content_types,
+            limit=limit
+        )
+        
+        # Format results for frontend consumption
+        formatted_results = []
+        for item in search_results:
+            # Determine primary content type
+            primary_type = item.get("node_types", ["Unknown"])[0].lower()
+            
+            formatted_results.append({
+                "id": item.get("id"),
+                "type": primary_type,
+                "title": item.get("title") or item.get("content", "")[:50] + "...",
+                "content": item.get("content") or item.get("content_text", ""),
+                "created_at": item.get("created_at"),
+                "metadata": {
+                    "node_types": item.get("node_types", []),
+                    "properties": {k: v for k, v in item.items() if k not in ["id", "content", "content_text", "title", "created_at"]}
+                }
+            })
+        
+        return {
+            "query": query,
+            "results": formatted_results,
+            "total_found": len(formatted_results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Knowledge graph search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.post("/knowledge-graph/connected-content")
+async def get_connected_content(
+    request: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Find all content connected to a specific node"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        node_id = request.get("node_id")
+        depth = request.get("depth", 2)
+        relationship_types = request.get("relationship_types")
+        
+        if not node_id:
+            raise HTTPException(status_code=400, detail="Node ID is required")
+        
+        connected_items = await neo4j_service.find_connected_content(
+            node_id=node_id,
+            user_id=current_user.id,
+            depth=depth,
+            relationship_types=relationship_types
+        )
+        
+        return {
+            "source_node_id": node_id,
+            "connected_content": connected_items,
+            "total_connections": len(connected_items)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get connected content: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get connected content: {str(e)}")
 
 @app.get("/analytics/dashboard")
 async def get_analytics_dashboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

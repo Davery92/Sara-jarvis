@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../hooks/useAuth'
 import { apiClient, ChatMessage, Citation, ToolEffect } from '../api/client'
 import { APP_CONFIG } from '../config'
+import MarkdownRenderer from '../components/MarkdownRenderer'
+import ErrorBoundary from '../components/ErrorBoundary'
 
 export default function Chat() {
   const { user } = useAuth()
@@ -173,17 +175,26 @@ export default function Chat() {
             ))
           )}
 
-          {/* Typing indicator */}
+          {/* Enhanced typing indicator with tool usage */}
           {isTyping && (
             <div className="flex items-start space-x-3">
               <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
                 <span className="text-white font-medium text-sm">{APP_CONFIG.assistantName.charAt(0)}</span>
               </div>
               <div className="bg-white rounded-lg px-4 py-3 shadow-sm border border-gray-200">
-                <div className="flex space-x-1">
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="flex items-center space-x-3">
+                  <div className="flex space-x-1">
+                    <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
+                    <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                    <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                  </div>
+                  <div className="flex items-center space-x-2 text-sm text-gray-600">
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Using tools to find the best answer...</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -264,7 +275,13 @@ function MessageBubble({ message }: MessageBubbleProps) {
             ? 'bg-indigo-600 text-white border-indigo-600' 
             : 'bg-white text-gray-900 border-gray-200'
         }`}>
-          <div className="whitespace-pre-wrap">{message.content}</div>
+          {isUser ? (
+            <div className="whitespace-pre-wrap">{message.content}</div>
+          ) : (
+            <ErrorBoundary>
+              <MarkdownRenderer content={message.content} />
+            </ErrorBoundary>
+          )}
         </div>
 
         {/* Citations */}
