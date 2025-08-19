@@ -48,6 +48,14 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sara_hub.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "sara-hub-jwt-secret-development")
 JWT_ALGORITHM = "HS256"
 CORS_ORIGINS = ["https://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000", "http://sara.avery.cloud"]
+
+# NTFY Configuration
+NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
+NTFY_ENABLED = os.getenv("NTFY_ENABLED", "true").lower() == "true"
+NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
+NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
+NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
+NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://100.104.68.115:11434")
@@ -882,6 +890,10 @@ class SimpleLLMClient:
                 timer.is_active = "false"
                 timer.is_completed = "true"
                 db.commit()
+                
+                # Send NTFY notification for timer completion
+                duration_str = f"{timer.duration_minutes}min"
+                await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id)
                 
                 return f"Stopped timer '{timer.title}'"
             finally:
@@ -1720,6 +1732,158 @@ class DocumentProcessor:
             return False
 
 document_processor = DocumentProcessor()
+
+# NTFY Notification Service
+class NTFYService:
+    """Service for sending mobile notifications via NTFY"""
+    
+    def __init__(self):
+        self.server_url = NTFY_SERVER_URL
+        self.enabled = NTFY_ENABLED
+        self.timers_topic = NTFY_TIMERS_TOPIC
+        self.reminders_topic = NTFY_REMINDERS_TOPIC
+        self.documents_topic = NTFY_DOCUMENTS_TOPIC
+        self.system_topic = NTFY_SYSTEM_TOPIC
+        
+        if self.enabled:
+            logger.info(f"✅ NTFY service initialized: {self.server_url}")
+        else:
+            logger.info("⚠️ NTFY service disabled")
+    
+    async def send_notification(
+        self,
+        topic: str,
+        title: str,
+        message: str,
+        priority: str = "default",
+        tags: list = None,
+        actions: list = None
+    ) -> bool:
+        """Send a notification to NTFY server"""
+        if not self.enabled:
+            logger.debug("NTFY disabled, skipping notification")
+            return False
+        
+        try:
+            headers = {
+                "Title": title,
+                "Priority": priority,
+            }
+            
+            if tags:
+                headers["Tags"] = ",".join(tags)
+            
+            if actions:
+                # Format actions for NTFY
+                action_strings = []
+                for action in actions:
+                    if action.get("type") == "view":
+                        action_strings.append(f"view, {action['label']}, {action['url']}")
+                    elif action.get("type") == "http":
+                        method = action.get("method", "POST")
+                        body = action.get("body", "")
+                        action_strings.append(f"http, {action['label']}, {action['url']}, method={method}, body={body}")
+                
+                if action_strings:
+                    headers["Actions"] = "; ".join(action_strings)
+            
+            url = f"{self.server_url}/{topic}"
+            
+            async with httpx.AsyncClient() as client:
+                # Add proper encoding headers
+                headers["Content-Type"] = "text/plain; charset=utf-8"
+                
+                response = await client.post(
+                    url, 
+                    headers=headers, 
+                    content=message.encode('utf-8')
+                )
+                
+                if response.status_code == 200:
+                    logger.info(f"NTFY notification sent to {topic}: {title}")
+                    return True
+                else:
+                    logger.error(f"NTFY notification failed: {response.status_code} - {response.text}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"NTFY notification error: {e}")
+            return False
+    
+    async def send_timer_notification(self, title: str, duration: str, timer_id: str = None) -> bool:
+        """Send timer completion notification"""
+        actions = [
+            {
+                "type": "view",
+                "label": "Open Sara",
+                "url": "https://sara.avery.cloud"
+            }
+        ]
+        
+        if timer_id:
+            actions.append({
+                "type": "http", 
+                "label": "Dismiss",
+                "url": f"https://sara.avery.cloud/api/timers/{timer_id}/complete",
+                "method": "PATCH"
+            })
+        
+        return await self.send_notification(
+            topic=self.timers_topic,
+            title="Timer Finished!",
+            message=f"Your {duration} timer '{title}' has completed.",
+            priority="high",
+            tags=["timer", "sara", "urgent"],
+            actions=actions
+        )
+    
+    async def send_reminder_notification(self, title: str, reminder_time: str, reminder_id: str = None) -> bool:
+        """Send reminder notification"""
+        actions = [
+            {
+                "type": "view",
+                "label": "Open Sara", 
+                "url": "https://sara.avery.cloud"
+            }
+        ]
+        
+        if reminder_id:
+            actions.append({
+                "type": "http",
+                "label": "Mark Complete",
+                "url": f"https://sara.avery.cloud/api/reminders/{reminder_id}/complete",
+                "method": "PATCH"
+            })
+        
+        return await self.send_notification(
+            topic=self.reminders_topic,
+            title=f"🔔 Reminder",
+            message=f"Don't forget: {title}",
+            priority="default",
+            tags=["reminder", "sara", "productivity"],
+            actions=actions
+        )
+    
+    async def send_document_notification(self, title: str, action: str = "processed") -> bool:
+        """Send document processing notification"""
+        actions = [
+            {
+                "type": "view",
+                "label": "View Documents",
+                "url": "https://sara.avery.cloud"
+            }
+        ]
+        
+        return await self.send_notification(
+            topic=self.documents_topic,
+            title=f"📄 Document {action.title()}",
+            message=f"Document '{title}' has been {action}.",
+            priority="default",
+            tags=["document", "sara"],
+            actions=actions
+        )
+
+ntfy_service = NTFYService()
 
 # FastAPI app
 app = FastAPI(
@@ -2644,6 +2808,26 @@ async def complete_reminder(reminder_id: str, current_user: User = Depends(get_c
     
     return {"message": f"Marked reminder '{reminder.title}' as completed"}
 
+@app.post("/reminders/{reminder_id}/notify")
+async def send_reminder_notification(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Send NTFY notification for a due reminder"""
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+    
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    
+    # Send NTFY notification
+    reminder_time = reminder.reminder_time.strftime("%I:%M %p")
+    success = await ntfy_service.send_reminder_notification(reminder.title, reminder_time, reminder_id)
+    
+    if success:
+        return {"message": f"Notification sent for reminder '{reminder.title}'"}
+    else:
+        return {"message": f"Failed to send notification for reminder '{reminder.title}'"}
+
 @app.get("/timers", response_model=list[TimerResponse])
 async def list_timers(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     timers = db.query(Timer).filter(
@@ -2712,6 +2896,10 @@ async def stop_timer(timer_id: str, current_user: User = Depends(get_current_use
     timer.is_active = "false"
     timer.is_completed = "true"
     db.commit()
+    
+    # Send NTFY notification for timer completion
+    duration_str = f"{timer.duration_minutes}min"
+    await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id)
     
     return {"message": f"Stopped timer '{timer.title}'"}
 

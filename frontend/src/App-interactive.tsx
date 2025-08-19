@@ -9,6 +9,46 @@ import NotesKnowledgeGarden from './components/NotesKnowledgeGarden'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import Settings from './pages/Settings'
 
+// LiveTimer component that updates every second without causing parent re-renders
+function LiveTimer({ endTime, className = "" }) {
+  const [timeLeft, setTimeLeft] = useState("")
+  
+  useEffect(() => {
+    const updateTimer = () => {
+      const now = new Date()
+      const end = new Date(endTime)
+      const diff = end - now
+      
+      if (diff <= 0) {
+        setTimeLeft('FINISHED')
+        return
+      }
+      
+      const hours = Math.floor(diff / (1000 * 60 * 60))
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000)
+      
+      if (hours > 0) {
+        setTimeLeft(`${hours}h ${minutes}m ${seconds}s`)
+      } else if (minutes > 0) {
+        setTimeLeft(`${minutes}m ${seconds}s`)
+      } else {
+        setTimeLeft(`${seconds}s`)
+      }
+    }
+    
+    // Update immediately
+    updateTimer()
+    
+    // Then update every second
+    const interval = setInterval(updateTimer, 1000)
+    
+    return () => clearInterval(interval)
+  }, [endTime])
+  
+  return <span className={className}>{timeLeft}</span>
+}
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
@@ -136,7 +176,7 @@ function App() {
           // If reminder is due (within 30 seconds) and we haven't notified yet
           if (timeDiff < 30000 && !notifiedReminders.has(reminder.id)) {
             setNotifiedReminders(prev => new Set([...prev, reminder.id]))
-            showToast(`🔔 Reminder: ${reminder.title}`, 'info')
+            showToast(`🔔 Reminder: ${reminder.title}`, 'info', true)
           }
         })
         
@@ -1006,7 +1046,7 @@ function App() {
                     {timers.length > 0 ? (
                       <div>
                         <p className="text-3xl font-mono my-2 text-teal-400">
-                          {formatTimeLeft(timers[0].end_time)}
+                          <LiveTimer endTime={timers[0].end_time} />
                         </p>
                         <p className="text-sm text-gray-500">{timers[0].title}</p>
                         <button
@@ -1111,9 +1151,10 @@ function App() {
                         <div key={timer.id} className="bg-gray-800 p-3 rounded-lg">
                           <div className="flex justify-between items-center">
                             <span className="font-medium">{timer.title}</span>
-                            <span className="text-teal-400 font-mono text-sm">
-                              {formatTimeLeft(timer.end_time)}
-                            </span>
+                            <LiveTimer 
+                              endTime={timer.end_time} 
+                              className="text-teal-400 font-mono text-sm"
+                            />
                           </div>
                         </div>
                       ))}
