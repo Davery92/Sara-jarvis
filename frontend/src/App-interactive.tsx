@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -7,6 +7,7 @@ import { APP_CONFIG } from './config'
 import MermaidDiagram from './components/MermaidDiagram'
 import NotesKnowledgeGarden from './components/NotesKnowledgeGarden'
 import KnowledgeGraph from './components/KnowledgeGraph'
+import Settings from './pages/Settings'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -40,6 +41,9 @@ function App() {
   const [analytics, setAnalytics] = useState(null)
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
+  
+  // Ref for auto-scrolling chat messages
+  const chatMessagesEndRef = useRef(null)
 
   // Check authentication on load
   useEffect(() => {
@@ -91,6 +95,19 @@ function App() {
       loadAnalytics()
     }
   }, [isAuthenticated, view])
+
+  // Auto-scroll chat to bottom when messages change
+  useEffect(() => {
+    if (view === 'chat' && chatMessagesEndRef.current) {
+      setTimeout(() => {
+        chatMessagesEndRef.current?.scrollIntoView({ 
+          behavior: 'smooth',
+          block: 'end',
+          inline: 'nearest'
+        })
+      }, 100)
+    }
+  }, [chatMessages, view, loading])
 
   const loadTimersAndReminders = async () => {
     try {
@@ -1299,6 +1316,8 @@ function App() {
                       </div>
                     </div>
                   )}
+                  {/* Auto-scroll target */}
+                  <div ref={chatMessagesEndRef} />
                 </div>
               </div>
               
@@ -1530,10 +1549,7 @@ function App() {
           )}
 
           {view === 'settings' && (
-            <div className="bg-card border border-card rounded-xl p-6">
-              <h2 className="text-lg font-semibold mb-4">SETTINGS</h2>
-              <p className="text-gray-400 text-center py-8">Settings panel coming soon...</p>
-            </div>
+            <Settings />
           )}
         </main>
       </div>

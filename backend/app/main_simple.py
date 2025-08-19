@@ -440,6 +440,14 @@ class SimpleLLMClient:
                     current_messages.append(message)
                     current_messages.extend(tool_responses)
                     
+                    # Truncate messages if conversation is getting too long to prevent 500 errors
+                    max_messages = 20  # Keep only recent context to prevent payload bloat
+                    if len(current_messages) > max_messages:
+                        # Keep system message (first) and recent messages
+                        truncated_messages = [current_messages[0]] + current_messages[-max_messages+1:]
+                        logger.info(f"⚠️ Truncated conversation from {len(current_messages)} to {len(truncated_messages)} messages")
+                        current_messages = truncated_messages
+                    
                     # Make follow-up request
                     follow_up_payload = {
                         "model": OPENAI_MODEL,
@@ -513,6 +521,10 @@ class SimpleLLMClient:
             result = await self.search_notes_tool(arguments["query"], user_id)
         elif function_name == "create_note":
             result = await self.create_note_tool(arguments.get("title", ""), arguments["content"], user_id)
+        elif function_name == "list_notes":
+            result = await self.list_notes_tool(user_id)
+        elif function_name == "delete_note":
+            result = await self.delete_note_tool(arguments["note_id"], user_id)
         elif function_name == "create_reminder":
             result = await self.create_reminder_tool(arguments["title"], arguments.get("description", ""), arguments["reminder_time"], user_id)
         elif function_name == "list_reminders":
@@ -637,6 +649,75 @@ class SimpleLLMClient:
         except Exception as e:
             logger.error(f"Error creating note: {e}")
             return f"Error creating note: {str(e)}"
+
+    async def list_notes_tool(self, user_id):
+        """List all notes for the user"""
+        try:
+            # First try Neo4j
+            from app.services.neo4j_service import neo4j_service
+            if neo4j_service.driver:
+                try:
+                    notes = await neo4j_service.get_user_notes(user_id)
+                    if notes:
+                        formatted_notes = []
+                        for note in notes:
+                            title = note.get('title', 'Untitled')
+                            note_id = note.get('id', '')
+                            content_preview = note.get('content', '')[:100] + "..." if len(note.get('content', '')) > 100 else note.get('content', '')
+                            formatted_notes.append(f"• {title} (ID: {note_id})\n  {content_preview}")
+                        return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
+                except Exception as neo_error:
+                    logger.warning(f"Neo4j list notes failed: {neo_error}")
+            
+            # Fallback to PostgreSQL
+            db = SessionLocal()
+            try:
+                notes = db.query(Note).filter(Note.user_id == user_id).order_by(Note.created_at.desc()).all()
+                if not notes:
+                    return "You don't have any notes yet."
+                
+                formatted_notes = []
+                for note in notes:
+                    title = note.title or "Untitled"
+                    content_preview = note.content[:100] + "..." if len(note.content) > 100 else note.content
+                    formatted_notes.append(f"• {title} (ID: {note.id})\n  {content_preview}")
+                
+                return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Error listing notes: {e}")
+            return f"Error listing notes: {str(e)}"
+
+    async def delete_note_tool(self, note_id, user_id):
+        """Delete a specific note by ID"""
+        try:
+            # Delete from Neo4j first
+            from app.services.neo4j_service import neo4j_service
+            if neo4j_service.driver:
+                try:
+                    await neo4j_service.delete_note(note_id, user_id)
+                    logger.info(f"✅ Tool: Note {note_id} deleted from Neo4j")
+                except Exception as neo_error:
+                    logger.warning(f"Neo4j note deletion failed: {neo_error}")
+            
+            # Delete from PostgreSQL
+            db = SessionLocal()
+            try:
+                note = db.query(Note).filter(Note.id == note_id, Note.user_id == user_id).first()
+                if not note:
+                    return f"Note with ID {note_id} not found."
+                
+                note_title = note.title or "Untitled"
+                db.delete(note)
+                db.commit()
+                
+                return f"Deleted note: {note_title}"
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Error deleting note: {e}")
+            return f"Error deleting note: {str(e)}"
 
     async def create_reminder_tool(self, title, description, reminder_time, user_id):
         """Create a new reminder for the user"""
@@ -1817,6 +1898,35 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         {
             "type": "function",
             "function": {
+                "name": "list_notes",
+                "description": "List all user's notes with their titles and IDs",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_note",
+                "description": "Delete a specific note by its ID",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": {
+                            "type": "string",
+                            "description": "The ID of the note to delete"
+                        }
+                    },
+                    "required": ["note_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_reminder",
                 "description": "Create a reminder for the user at a specific time",
                 "parameters": {
@@ -2839,6 +2949,14 @@ async def delete_document(
     except Exception as e:
         logger.warning(f"Could not delete file {document.file_path}: {e}")
     
+    # Delete from Neo4j first
+    try:
+        from app.services.neo4j_service import neo4j_service
+        await neo4j_service.delete_document(document_id, current_user.id)
+        logger.info(f"✅ Document {document_id} deleted from Neo4j")
+    except Exception as e:
+        logger.warning(f"Failed to delete document from Neo4j: {e}")
+    
     # Delete document record
     db.delete(document)
     db.commit()
@@ -3225,6 +3343,112 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
     except Exception as e:
         logger.error(f"Analytics dashboard error: {e}")
         raise HTTPException(status_code=500, detail=f"Analytics failed: {str(e)}")
+
+# Settings endpoints
+@app.get("/settings/ai")
+async def get_ai_settings(current_user: User = Depends(get_current_user)):
+    """Get current AI configuration settings"""
+    return {
+        "openai_base_url": OPENAI_BASE_URL,
+        "openai_model": OPENAI_MODEL,
+        "embedding_base_url": EMBEDDING_BASE_URL,
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_dimension": EMBEDDING_DIM
+    }
+
+class AISettingsUpdate(BaseModel):
+    openai_base_url: Optional[str] = None
+    openai_model: Optional[str] = None
+    embedding_base_url: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embedding_dimension: Optional[int] = None
+
+@app.put("/settings/ai")
+async def update_ai_settings(
+    settings: AISettingsUpdate,
+    current_user: User = Depends(get_current_user)
+):
+    """Update AI configuration settings (requires restart to take effect)"""
+    global OPENAI_BASE_URL, OPENAI_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    
+    updated_settings = {}
+    
+    if settings.openai_base_url is not None:
+        OPENAI_BASE_URL = settings.openai_base_url
+        updated_settings["openai_base_url"] = settings.openai_base_url
+        
+    if settings.openai_model is not None:
+        OPENAI_MODEL = settings.openai_model
+        updated_settings["openai_model"] = settings.openai_model
+        
+    if settings.embedding_base_url is not None:
+        EMBEDDING_BASE_URL = settings.embedding_base_url
+        updated_settings["embedding_base_url"] = settings.embedding_base_url
+        
+    if settings.embedding_model is not None:
+        EMBEDDING_MODEL = settings.embedding_model
+        updated_settings["embedding_model"] = settings.embedding_model
+        
+    if settings.embedding_dimension is not None:
+        EMBEDDING_DIM = settings.embedding_dimension
+        updated_settings["embedding_dimension"] = settings.embedding_dimension
+    
+    # Reinitialize services with new settings
+    global llm_client, embedding_service
+    llm_client = SimpleLLMClient()
+    embedding_service = EmbeddingService()
+    
+    logger.info(f"AI settings updated by user {current_user.email}: {updated_settings}")
+    
+    return {
+        "message": "AI settings updated successfully",
+        "updated_settings": updated_settings,
+        "note": "Some changes may require application restart to take full effect"
+    }
+
+@app.post("/settings/ai/test")
+async def test_ai_settings(current_user: User = Depends(get_current_user)):
+    """Test current AI configuration"""
+    test_results = {}
+    
+    try:
+        # Test LLM connection
+        test_messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello, just testing the connection. Please respond with 'Connection successful'."}
+        ]
+        
+        response = await httpx.AsyncClient().post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            json={
+                "model": OPENAI_MODEL,
+                "messages": test_messages,
+                "max_tokens": 50
+            },
+            headers={"Authorization": "Bearer dummy"},
+            timeout=10.0
+        )
+        
+        if response.status_code == 200:
+            test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
+        else:
+            test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {response.status_code}"}
+            
+    except Exception as e:
+        test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {str(e)}"}
+    
+    try:
+        # Test embedding service
+        embedding = await embedding_service.generate_embedding("test")
+        if embedding and len(embedding) == EMBEDDING_DIM:
+            test_results["embedding"] = {"status": "success", "message": f"Embedding service working (dimension: {len(embedding)})"}
+        else:
+            test_results["embedding"] = {"status": "error", "message": "Embedding service returned invalid response"}
+            
+    except Exception as e:
+        test_results["embedding"] = {"status": "error", "message": f"Embedding service failed: {str(e)}"}
+    
+    return test_results
 
 if __name__ == "__main__":
     import uvicorn

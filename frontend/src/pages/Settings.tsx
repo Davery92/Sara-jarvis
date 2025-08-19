@@ -1,367 +1,285 @@
-import { useState } from 'react'
-import { useAuth } from '../hooks/useAuth'
-import { APP_CONFIG } from '../config'
+import { useState, useEffect } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { apiClient, AISettings, AISettingsUpdate } from '../api/client'
 
 export default function Settings() {
-  const { user, updateProfile, logout } = useAuth()
-  const [activeTab, setActiveTab] = useState<'profile' | 'preferences' | 'security' | 'about'>('profile')
-  const [isEditing, setIsEditing] = useState(false)
-  const [formData, setFormData] = useState({
-    name: user?.name || '',
-    email: user?.email || '',
+  const [formData, setFormData] = useState<AISettingsUpdate>({})
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const queryClient = useQueryClient()
+
+  // Fetch current AI settings
+  const { data: settings, isLoading } = useQuery({
+    queryKey: ['settings', 'ai'],
+    queryFn: () => apiClient.getAISettings(),
   })
-  const [preferences, setPreferences] = useState({
-    theme: user?.preferences?.theme || 'light' as 'light' | 'dark',
-    notifications: user?.preferences?.notifications ?? true,
-    timezone: user?.preferences?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+
+  // Update settings mutation
+  const updateSettingsMutation = useMutation({
+    mutationFn: (data: AISettingsUpdate) => apiClient.updateAISettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings', 'ai'] })
+      setTestResult({ success: true, message: 'Settings updated successfully!' })
+      setTimeout(() => setTestResult(null), 3000)
+    },
+    onError: (error: any) => {
+      setTestResult({ success: false, message: error.response?.data?.detail || 'Failed to update settings' })
+      setTimeout(() => setTestResult(null), 5000)
+    },
   })
-  const [isSaving, setIsSaving] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  const handleProfileSave = async () => {
-    if (!formData.name.trim()) {
-      setMessage({ type: 'error', text: 'Name is required' })
-      return
-    }
+  // Test settings mutation
+  const testSettingsMutation = useMutation({
+    mutationFn: () => apiClient.testAISettings(),
+    onSuccess: () => {
+      setTestResult({ success: true, message: 'Connection test successful!' })
+      setTimeout(() => setTestResult(null), 3000)
+    },
+    onError: (error: any) => {
+      setTestResult({ success: false, message: error.response?.data?.detail || 'Connection test failed' })
+      setTimeout(() => setTestResult(null), 5000)
+    },
+  })
 
-    setIsSaving(true)
-    try {
-      await updateProfile({
-        name: formData.name.trim(),
-        email: formData.email.trim(),
+  // Initialize form data when settings load
+  useEffect(() => {
+    if (settings) {
+      setFormData({
+        openai_base_url: settings.openai_base_url,
+        openai_model: settings.openai_model,
+        embedding_base_url: settings.embedding_base_url,
+        embedding_model: settings.embedding_model,
+        embedding_dimension: settings.embedding_dimension,
       })
-      setIsEditing(false)
-      setMessage({ type: 'success', text: 'Profile updated successfully' })
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to update profile' })
-    } finally {
-      setIsSaving(false)
     }
+  }, [settings])
+
+  const handleInputChange = (field: keyof AISettingsUpdate, value: string | number) => {
+    setFormData(prev => ({
+      ...prev,
+      [field]: value
+    }))
   }
 
-  const handlePreferencesSave = async () => {
-    setIsSaving(true)
-    try {
-      await updateProfile({
-        preferences,
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    updateSettingsMutation.mutate(formData)
+  }
+
+  const handleTestConnection = () => {
+    testSettingsMutation.mutate()
+  }
+
+  const handleReset = () => {
+    if (settings) {
+      setFormData({
+        openai_base_url: settings.openai_base_url,
+        openai_model: settings.openai_model,
+        embedding_base_url: settings.embedding_base_url,
+        embedding_model: settings.embedding_model,
+        embedding_dimension: settings.embedding_dimension,
       })
-      setMessage({ type: 'success', text: 'Preferences updated successfully' })
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to update preferences' })
-    } finally {
-      setIsSaving(false)
     }
   }
 
-  const handleLogout = async () => {
-    if (window.confirm('Are you sure you want to sign out?')) {
-      try {
-        await logout()
-      } catch (error) {
-        setMessage({ type: 'error', text: 'Failed to sign out' })
-      }
-    }
+  if (isLoading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading settings...</p>
+        </div>
+      </div>
+    )
   }
-
-  const timezones = [
-    'America/New_York',
-    'America/Chicago',
-    'America/Denver',
-    'America/Los_Angeles',
-    'America/Phoenix',
-    'America/Anchorage',
-    'Pacific/Honolulu',
-    'Europe/London',
-    'Europe/Paris',
-    'Europe/Berlin',
-    'Asia/Tokyo',
-    'Asia/Shanghai',
-    'Asia/Kolkata',
-    'Australia/Sydney',
-    'UTC',
-  ]
-
-  const tabs = [
-    { id: 'profile', name: 'Profile', icon: '👤' },
-    { id: 'preferences', name: 'Preferences', icon: '⚙️' },
-    { id: 'security', name: 'Security', icon: '🔒' },
-    { id: 'about', name: 'About', icon: 'ℹ️' },
-  ] as const
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-        <p className="text-gray-600 mt-2">Manage your account and preferences</p>
-      </div>
+    <div className="flex-1 py-8">
+      <div className="max-w-4xl mx-auto px-4">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-2xl font-bold text-white mb-2">Settings</h1>
+          <p className="text-gray-400">Configure AI models and embedding services</p>
+        </div>
 
-      {/* Message */}
-      {message && (
-        <div className={`mb-6 p-4 rounded-lg ${
-          message.type === 'success' 
-            ? 'bg-green-50 border border-green-200' 
-            : 'bg-red-50 border border-red-200'
-        }`}>
-          <div className="flex">
-            <div className="flex-shrink-0">
-              {message.type === 'success' ? (
-                <svg className="h-5 w-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              ) : (
-                <svg className="h-5 w-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              )}
-            </div>
-            <div className="ml-3">
-              <p className={`text-sm ${
-                message.type === 'success' ? 'text-green-800' : 'text-red-800'
-              }`}>
-                {message.text}
-              </p>
+        {/* Test Result Alert */}
+        {testResult && (
+          <div className={`mb-6 p-4 rounded-lg ${
+            testResult.success 
+              ? 'bg-green-900/20 border border-green-500/30 text-green-400' 
+              : 'bg-red-900/20 border border-red-500/30 text-red-400'
+          }`}>
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                {testResult.success ? (
+                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                ) : (
+                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </div>
+              <div className="ml-3">
+                <p className="text-sm font-medium">{testResult.message}</p>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-        {/* Tabs */}
-        <div className="border-b border-gray-200">
-          <nav className="-mb-px flex">
-            {tabs.map((tab) => (
+        {/* Settings Form */}
+        <div className="bg-card border border-card rounded-xl">
+          <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            {/* AI Model Settings */}
+            <div>
+              <h3 className="text-lg font-medium text-white mb-4">AI Model Configuration</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label htmlFor="openai_base_url" className="block text-sm font-medium text-gray-300 mb-2">
+                    AI Base URL
+                  </label>
+                  <input
+                    type="url"
+                    id="openai_base_url"
+                    value={formData.openai_base_url || ''}
+                    onChange={(e) => handleInputChange('openai_base_url', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.openai_base_url || 'http://localhost:11434/v1'}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">OpenAI-compatible API endpoint</p>
+                </div>
+
+                <div>
+                  <label htmlFor="openai_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    AI Model
+                  </label>
+                  <input
+                    type="text"
+                    id="openai_model"
+                    value={formData.openai_model || ''}
+                    onChange={(e) => handleInputChange('openai_model', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.openai_model || 'gpt-oss:120b'}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Model name to use for chat and reasoning</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Embedding Settings */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Embedding Configuration</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label htmlFor="embedding_base_url" className="block text-sm font-medium text-gray-300 mb-2">
+                    Embedding Base URL
+                  </label>
+                  <input
+                    type="url"
+                    id="embedding_base_url"
+                    value={formData.embedding_base_url || ''}
+                    onChange={(e) => handleInputChange('embedding_base_url', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.embedding_base_url || 'http://localhost:11434'}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Embedding service endpoint</p>
+                </div>
+
+                <div>
+                  <label htmlFor="embedding_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    Embedding Model
+                  </label>
+                  <input
+                    type="text"
+                    id="embedding_model"
+                    value={formData.embedding_model || ''}
+                    onChange={(e) => handleInputChange('embedding_model', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.embedding_model || 'bge-m3'}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Model for generating embeddings</p>
+                </div>
+
+                <div>
+                  <label htmlFor="embedding_dimension" className="block text-sm font-medium text-gray-300 mb-2">
+                    Embedding Dimension
+                  </label>
+                  <input
+                    type="number"
+                    id="embedding_dimension"
+                    value={formData.embedding_dimension || ''}
+                    onChange={(e) => handleInputChange('embedding_dimension', parseInt(e.target.value))}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.embedding_dimension?.toString() || '1024'}
+                    min="1"
+                    max="4096"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Vector dimension for embeddings</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="border-t border-gray-700 pt-6 flex flex-col sm:flex-row sm:justify-between sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
+              <div className="flex space-x-3">
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={testSettingsMutation.isPending}
+                  className="px-4 py-2 text-sm font-medium text-teal-400 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                >
+                  {testSettingsMutation.isPending ? (
+                    <div className="flex items-center space-x-2">
+                      <div className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
+                      <span>Testing...</span>
+                    </div>
+                  ) : (
+                    'Test Connection'
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors duration-200"
+                >
+                  Reset
+                </button>
+              </div>
+
               <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`py-4 px-6 text-sm font-medium border-b-2 transition-colors duration-200 ${
-                  activeTab === tab.id
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
+                type="submit"
+                disabled={updateSettingsMutation.isPending}
+                className="px-6 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
               >
-                <span className="mr-2">{tab.icon}</span>
-                {tab.name}
+                {updateSettingsMutation.isPending ? (
+                  <div className="flex items-center space-x-2">
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>Saving...</span>
+                  </div>
+                ) : (
+                  'Save Settings'
+                )}
               </button>
-            ))}
-          </nav>
+            </div>
+          </form>
         </div>
 
-        {/* Tab Content */}
-        <div className="p-6">
-          {activeTab === 'profile' && (
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Profile Information</h2>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={formData.name}
-                      onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                    />
-                  ) : (
-                    <p className="text-gray-900 py-2">{user?.name}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
-                  <p className="text-gray-900 py-2">{user?.email}</p>
-                  <p className="text-sm text-gray-500">Email address cannot be changed</p>
-                </div>
-
-                <div className="flex items-center space-x-3 pt-4">
-                  {isEditing ? (
-                    <>
-                      <button
-                        onClick={handleProfileSave}
-                        disabled={isSaving}
-                        className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
-                      >
-                        {isSaving ? 'Saving...' : 'Save Changes'}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setIsEditing(false)
-                          setFormData({
-                            name: user?.name || '',
-                            email: user?.email || '',
-                          })
-                        }}
-                        className="text-gray-500 hover:text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-100 transition-colors duration-200"
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={() => setIsEditing(true)}
-                      className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors duration-200"
-                    >
-                      Edit Profile
-                    </button>
-                  )}
-                </div>
+        {/* Information */}
+        <div className="mt-8 bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <svg className="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div className="ml-3">
+              <h3 className="text-sm font-medium text-blue-400">Information</h3>
+              <div className="mt-1 text-sm text-blue-300">
+                <p>Changes to these settings will affect how Sara processes your requests and generates responses. Make sure your AI and embedding services are accessible before saving.</p>
               </div>
             </div>
-          )}
-
-          {activeTab === 'preferences' && (
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Preferences</h2>
-              
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Theme</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {(['light', 'dark'] as const).map((theme) => (
-                      <button
-                        key={theme}
-                        onClick={() => setPreferences(prev => ({ ...prev, theme }))}
-                        className={`p-3 border rounded-lg text-left transition-colors duration-200 ${
-                          preferences.theme === theme
-                            ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="flex items-center">
-                          <span className="mr-2">{theme === 'light' ? '☀️' : '🌙'}</span>
-                          <span className="font-medium capitalize">{theme}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Timezone</label>
-                  <select
-                    value={preferences.timezone}
-                    onChange={(e) => setPreferences(prev => ({ ...prev, timezone: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                  >
-                    {timezones.map((tz) => (
-                      <option key={tz} value={tz}>{tz}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <label className="text-sm font-medium text-gray-700">Notifications</label>
-                      <p className="text-sm text-gray-500">Receive email notifications for reminders and events</p>
-                    </div>
-                    <button
-                      onClick={() => setPreferences(prev => ({ ...prev, notifications: !prev.notifications }))}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
-                        preferences.notifications ? 'bg-indigo-600' : 'bg-gray-200'
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ${
-                          preferences.notifications ? 'translate-x-6' : 'translate-x-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="pt-4">
-                  <button
-                    onClick={handlePreferencesSave}
-                    disabled={isSaving}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
-                  >
-                    {isSaving ? 'Saving...' : 'Save Preferences'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'security' && (
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Security</h2>
-              
-              <div className="space-y-6">
-                <div className="border border-gray-200 rounded-lg p-4">
-                  <h3 className="font-medium text-gray-900 mb-2">Password</h3>
-                  <p className="text-sm text-gray-600 mb-3">
-                    Change your password to keep your account secure
-                  </p>
-                  <button className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors duration-200">
-                    Change Password
-                  </button>
-                </div>
-
-                <div className="border border-red-200 rounded-lg p-4">
-                  <h3 className="font-medium text-red-900 mb-2">Sign Out</h3>
-                  <p className="text-sm text-red-600 mb-3">
-                    Sign out of your account on this device
-                  </p>
-                  <button
-                    onClick={handleLogout}
-                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
-                  >
-                    Sign Out
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'about' && (
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">About {APP_CONFIG.assistantName}</h2>
-              
-              <div className="space-y-6">
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center mx-auto mb-4">
-                    <span className="text-white font-bold text-2xl">{APP_CONFIG.assistantName.charAt(0)}</span>
-                  </div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-2">{APP_CONFIG.ui.title}</h3>
-                  <p className="text-gray-600">{APP_CONFIG.ui.subtitle}</p>
-                </div>
-
-                <div className="border-t border-gray-200 pt-6">
-                  <dl className="space-y-4">
-                    <div>
-                      <dt className="text-sm font-medium text-gray-500">Version</dt>
-                      <dd className="text-sm text-gray-900">1.0.0</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-gray-500">Domain</dt>
-                      <dd className="text-sm text-gray-900">{APP_CONFIG.domain}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-gray-500">Features</dt>
-                      <dd className="text-sm text-gray-900">
-                        <ul className="list-disc list-inside space-y-1">
-                          <li>AI-powered chat assistant</li>
-                          <li>Personal knowledge management</li>
-                          <li>Document processing and search</li>
-                          <li>Notes and reminders</li>
-                          <li>Calendar integration</li>
-                          <li>Memory and context retention</li>
-                        </ul>
-                      </dd>
-                    </div>
-                  </dl>
-                </div>
-
-                <div className="border-t border-gray-200 pt-6 text-center">
-                  <p className="text-sm text-gray-500">
-                    Built with modern web technologies for the best user experience
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
+          </div>
         </div>
       </div>
     </div>

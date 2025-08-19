@@ -78,6 +78,22 @@ export interface CalendarEvent {
   created_at: Date
 }
 
+export interface AISettings {
+  openai_base_url: string
+  openai_model: string
+  embedding_base_url: string
+  embedding_model: string
+  embedding_dimension: number
+}
+
+export interface AISettingsUpdate {
+  openai_base_url?: string
+  openai_model?: string
+  embedding_base_url?: string
+  embedding_model?: string
+  embedding_dimension?: number
+}
+
 class ApiClient {
   private client: AxiosInstance
 
@@ -270,6 +286,22 @@ class ApiClient {
 
   async addMemory(content: string, tags?: string[]): Promise<any> {
     const response = await this.client.post('/memory', { content, tags })
+    return response.data
+  }
+
+  // Settings endpoints
+  async getAISettings(): Promise<AISettings> {
+    const response = await this.client.get('/settings/ai')
+    return response.data
+  }
+
+  async updateAISettings(settings: AISettingsUpdate): Promise<any> {
+    const response = await this.client.put('/settings/ai', settings)
+    return response.data
+  }
+
+  async testAISettings(): Promise<any> {
+    const response = await this.client.post('/settings/ai/test')
     return response.data
   }
 }

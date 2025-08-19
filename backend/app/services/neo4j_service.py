@@ -444,20 +444,20 @@ class Neo4jService:
             MATCH (u)-[:CREATED|:UPLOADED|:PARTICIPATED_IN]-(node)
             {type_filter}
             WHERE 
-                toLower(coalesce(node.title, '')) CONTAINS toLower($query)
-                OR toLower(coalesce(node.content, '')) CONTAINS toLower($query)
-                OR toLower(coalesce(node.content_text, '')) CONTAINS toLower($query)
+                toLower(coalesce(node.title, '')) CONTAINS toLower($search_query)
+                OR toLower(coalesce(node.content, '')) CONTAINS toLower($search_query)
+                OR toLower(coalesce(node.content_text, '')) CONTAINS toLower($search_query)
             RETURN node, labels(node) as node_types
             ORDER BY 
                 CASE 
-                    WHEN toLower(coalesce(node.title, '')) CONTAINS toLower($query) THEN 1
+                    WHEN toLower(coalesce(node.title, '')) CONTAINS toLower($search_query) THEN 1
                     ELSE 2
                 END,
                 node.created_at DESC
             LIMIT $limit
             """
             
-            result = session.run(query_cypher, user_id=user_id, query=query, limit=limit)
+            result = session.run(query_cypher, user_id=user_id, search_query=query, limit=limit)
             
             search_results = []
             for record in result:
@@ -558,6 +558,20 @@ class Neo4jService:
             
             result = session.run(query, document_id=document_id, title=title)
             return result.single() is not None
+    
+    async def delete_document(self, document_id: str, user_id: str) -> bool:
+        """Delete document and all its relationships from Neo4j"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})-[:OWNS]->(d:Document {id: $document_id})
+            OPTIONAL MATCH (d)-[r]-()
+            DELETE r, d
+            RETURN count(d) as deleted_count
+            """
+            
+            result = session.run(query, document_id=document_id, user_id=user_id)
+            record = result.single()
+            return record and record["deleted_count"] > 0
     
     async def update_processing_status(self, node_id: str, status: str) -> bool:
         """Update processing status of a node"""

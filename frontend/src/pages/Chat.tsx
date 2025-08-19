@@ -14,6 +14,26 @@ export default function Chat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
 
+  // Scroll to bottom helper function
+  const scrollToBottom = (delay = 100) => {
+    setTimeout(() => {
+      if (messagesEndRef.current) {
+        // Primary method: scrollIntoView
+        messagesEndRef.current.scrollIntoView({ 
+          behavior: 'smooth',
+          block: 'end',
+          inline: 'nearest'
+        })
+      } else {
+        // Fallback: scroll the container directly
+        const messagesContainer = document.querySelector('.overflow-y-auto')
+        if (messagesContainer) {
+          messagesContainer.scrollTop = messagesContainer.scrollHeight
+        }
+      }
+    }, delay)
+  }
+
   // Fetch chat history
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ['chat', 'history'],
@@ -29,6 +49,8 @@ export default function Chat() {
     onSuccess: (newMessage) => {
       queryClient.setQueryData(['chat', 'history'], (old: ChatMessage[] = []) => [...old, newMessage])
       setIsTyping(false)
+      // Force scroll after successful message
+      scrollToBottom(150)
     },
     onError: () => {
       setIsTyping(false)
@@ -43,9 +65,9 @@ export default function Chat() {
     },
   })
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    scrollToBottom(100)
   }, [messages, isTyping])
 
   // Auto-resize textarea
@@ -73,6 +95,9 @@ export default function Chat() {
         timestamp: new Date(),
       }
     ])
+
+    // Scroll to bottom after adding user message
+    scrollToBottom(50)
 
     try {
       await sendMessageMutation.mutateAsync(userMessage)

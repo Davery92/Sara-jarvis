@@ -36,7 +36,7 @@ export default function NotesKnowledgeGarden({
   editNoteTitle,
   setEditNoteTitle
 }: NotesKnowledgeGardenProps) {
-  const [currentView, setCurrentView] = useState<'notes' | 'graph' | 'timeline' | 'search' | 'settings' | 'memory'>('notes')
+  const [currentView, setCurrentView] = useState<'notes' | 'timeline' | 'search' | 'settings' | 'memory'>('notes')
   const [searchQuery, setSearchQuery] = useState('')
   const [backlinks, setBacklinks] = useState<Note[]>([])
   const [relatedNotes, setRelatedNotes] = useState<Note[]>([])
@@ -181,16 +181,6 @@ export default function NotesKnowledgeGarden({
             Notes
           </button>
           
-          <button
-            onClick={() => setCurrentView('graph')}
-            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
-              currentView === 'graph' 
-                ? 'bg-[#3f3f46] text-[#f8fafc]' 
-                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
-            }`}
-          >
-            Graph View
-          </button>
           
           <button
             onClick={() => setCurrentView('timeline')}
@@ -240,21 +230,51 @@ export default function NotesKnowledgeGarden({
             {notes.map(note => (
               <div 
                 key={note.id}
-                onClick={() => {
-                  setEditingNote(note.id)
-                  setEditNoteTitle(note.title || '')
-                  setEditNoteContent(note.content || '')
-                }}
-                className={`cursor-pointer rounded p-2 text-sm hover:bg-[#27272a] ${
+                className={`group relative rounded p-2 text-sm hover:bg-[#27272a] ${
                   editingNote === note.id ? 'bg-[#27272a]' : ''
                 }`}
               >
-                <div className="font-medium truncate">
-                  {note.title || 'Untitled'}
+                <div 
+                  onClick={() => {
+                    setEditingNote(note.id)
+                    setEditNoteTitle(note.title || '')
+                    setEditNoteContent(note.content || '')
+                  }}
+                  className="cursor-pointer"
+                >
+                  <div className="font-medium truncate pr-8">
+                    {note.title || 'Untitled'}
+                  </div>
+                  <div className="text-[#a1a1aa] text-xs truncate">
+                    {note.content.substring(0, 50)}...
+                  </div>
                 </div>
-                <div className="text-[#a1a1aa] text-xs truncate">
-                  {note.content.substring(0, 50)}...
-                </div>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    if (window.confirm(`Are you sure you want to delete "${note.title || 'Untitled'}"?`)) {
+                      try {
+                        const { apiClient } = await import('../api/client')
+                        await apiClient.deleteNote(note.id.toString())
+                        setNotes(prev => prev.filter(n => n.id !== note.id))
+                        if (editingNote === note.id) {
+                          setEditingNote(null)
+                          setEditNoteTitle('')
+                          setEditNoteContent('')
+                        }
+                      } catch (error) {
+                        console.error('Failed to delete note:', error)
+                        alert('Failed to delete note. Please try again.')
+                      }
+                    }
+                  }}
+                  className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-600/20 text-red-400 hover:text-red-300 transition-all duration-200"
+                  title="Delete note"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
               </div>
             ))}
           </div>
@@ -266,7 +286,9 @@ export default function NotesKnowledgeGarden({
         {/* Header */}
         <header className="flex h-14 items-center border-b border-[#3f3f46] px-6">
           <div className="relative w-full max-w-md">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#a1a1aa]">search</span>
+            <svg className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#a1a1aa]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
             <input 
               className="w-full rounded-md border-none bg-[#3f3f46] pl-10 pr-4 py-2 text-sm text-[#f8fafc] placeholder:text-[#a1a1aa] focus:ring-2 focus:ring-[#0d7ff2] focus:ring-offset-2 focus:ring-offset-[#18181b]" 
               type="text" 
@@ -283,13 +305,36 @@ export default function NotesKnowledgeGarden({
             {currentView === 'notes' && editingNote ? (
               <div className="rounded-lg border border-[#3f3f46] bg-[#27272a] h-full">
                 {/* Title */}
-                <div className="p-4">
+                <div className="p-4 relative">
                   <input 
-                    className="w-full resize-none border-none bg-transparent text-lg font-medium text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none" 
+                    className="w-full resize-none border-none bg-transparent text-lg font-medium text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none pr-10" 
                     placeholder="Note title..."
                     value={editNoteTitle}
                     onChange={(e) => setEditNoteTitle(e.target.value)}
                   />
+                  <button
+                    onClick={async () => {
+                      if (window.confirm(`Are you sure you want to delete "${editNoteTitle || 'Untitled'}"?`)) {
+                        try {
+                          const { apiClient } = await import('../api/client')
+                          await apiClient.deleteNote(editingNote!.toString())
+                          setNotes(prev => prev.filter(n => n.id !== editingNote))
+                          setEditingNote(null)
+                          setEditNoteTitle('')
+                          setEditNoteContent('')
+                        } catch (error) {
+                          console.error('Failed to delete note:', error)
+                          alert('Failed to delete note. Please try again.')
+                        }
+                      }
+                    }}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-red-600/20 text-red-400 hover:text-red-300 transition-colors duration-200"
+                    title="Delete note"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
                 </div>
                 
                 {/* Content */}
@@ -309,31 +354,6 @@ export default function NotesKnowledgeGarden({
                   </p>
                 </div>
               </div>
-            ) : currentView === 'graph' ? (
-              <KnowledgeGraph
-                notes={notes}
-                selectedNoteId={editingNote}
-                onNodeClick={(nodeId, nodeType) => {
-                  if (nodeType === 'note') {
-                    const noteIdString = nodeId.replace('note-', '')
-                    const noteId = parseInt(noteIdString)
-                    const note = notes.find(n => n.id === noteId)
-                    if (note) {
-                      setEditingNote(noteId)
-                      setEditNoteTitle(note.title || '')
-                      setEditNoteContent(note.content || '')
-                      setCurrentView('notes') // Switch back to notes view when clicking a node
-                    }
-                  } else if (nodeType === 'episode') {
-                    // For episodes, we could switch to timeline view or show episode details
-                    setCurrentView('timeline')
-                  } else if (nodeType === 'document') {
-                    // For documents, we could switch to document view or show document details
-                    console.log('Document clicked:', nodeId)
-                    // Could implement document navigation here
-                  }
-                }}
-              />
             ) : currentView === 'timeline' ? (
               <TimelineView
                 notes={notes}
