@@ -45,7 +45,9 @@
       "Bash(NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" python3 app/main_simple.py)",
       "Bash(pkill -f \"python.*main_simple.py\")",
       "Bash(NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" OPENAI_BASE_URL=http://100.104.68.115:11434/v1 OPENAI_MODEL=gpt-oss:120b OPENAI_API_KEY=dummy EMBEDDING_BASE_URL=http://100.104.68.115:11434 EMBEDDING_MODEL=bge-m3 EMBEDDING_DIM=1024 ASSISTANT_NAME=Sara python3 app/main_simple.py)",
-      "Bash(PYTHONPATH=/home/david/jarvis/backend NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" OPENAI_BASE_URL=http://100.104.68.115:11434/v1 OPENAI_MODEL=gpt-oss:120b OPENAI_API_KEY=dummy EMBEDDING_BASE_URL=http://100.104.68.115:11434 EMBEDDING_MODEL=bge-m3 EMBEDDING_DIM=1024 ASSISTANT_NAME=Sara python3 backend/app/main_simple.py)"
+      "Bash(PYTHONPATH=/home/david/jarvis/backend NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" OPENAI_BASE_URL=http://100.104.68.115:11434/v1 OPENAI_MODEL=gpt-oss:120b OPENAI_API_KEY=dummy EMBEDDING_BASE_URL=http://100.104.68.115:11434 EMBEDDING_MODEL=bge-m3 EMBEDDING_DIM=1024 ASSISTANT_NAME=Sara python3 backend/app/main_simple.py)",
+      "Bash(PYTHONPATH=/home/david/jarvis/backend NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" python3 cleanup_orphaned_neo4j_data.py --confirm --force)",
+      "Bash(PYTHONPATH=/home/david/jarvis/backend NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret DATABASE_URL=\"postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub\" python3 data_consistency_check.py)"
     ],
     "deny": [],
     "ask": [],

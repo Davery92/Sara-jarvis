@@ -563,13 +563,27 @@ class Neo4jService:
         """Delete document and all its relationships from Neo4j"""
         with self.driver.session() as session:
             query = """
-            MATCH (u:User {id: $user_id})-[:OWNS]->(d:Document {id: $document_id})
+            MATCH (u:User {id: $user_id})-[:UPLOADED]->(d:Document {id: $document_id})
             OPTIONAL MATCH (d)-[r]-()
             DELETE r, d
             RETURN count(d) as deleted_count
             """
             
             result = session.run(query, document_id=document_id, user_id=user_id)
+            record = result.single()
+            return record and record["deleted_count"] > 0
+    
+    async def delete_note(self, note_id: str, user_id: str) -> bool:
+        """Delete note and all its relationships from Neo4j"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})-[:CREATED]->(n:Note {id: $note_id})
+            OPTIONAL MATCH (n)-[r]-()
+            DELETE r, n
+            RETURN count(n) as deleted_count
+            """
+            
+            result = session.run(query, note_id=note_id, user_id=user_id)
             record = result.single()
             return record and record["deleted_count"] > 0
     

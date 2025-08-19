@@ -271,6 +271,56 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       .attr("stroke-opacity", d => 0.3 + (d.strength * 0.7))
       .attr("stroke-width", d => 1 + Math.sqrt(d.strength) * 2)
       .attr("stroke-dasharray", d => d.type === 'semantic' ? "5,5" : null)
+      .style("cursor", "pointer")
+
+    // Add connection labels (initially hidden)
+    const linkLabels = container.append("g")
+      .selectAll("text")
+      .data(links)
+      .join("text")
+      .attr("font-family", "Inter, sans-serif")
+      .attr("font-size", "10px")
+      .attr("fill", "#f8fafc")
+      .attr("text-anchor", "middle")
+      .attr("pointer-events", "none")
+      .style("opacity", 0)
+      .text(d => {
+        const typeLabels = {
+          'reference': 'Reference',
+          'semantic': 'Semantic',
+          'temporal': 'Temporal'
+        }
+        return typeLabels[d.type] || d.type
+      })
+
+    // Add hover effects for links
+    link.on("mouseenter", function(event, d) {
+      d3.select(this)
+        .transition()
+        .duration(200)
+        .attr("stroke-opacity", 0.8)
+        .attr("stroke-width", (1 + Math.sqrt(d.strength) * 2) * 1.5)
+      
+      // Show label for this link
+      linkLabels.filter(label => label === d)
+        .transition()
+        .duration(200)
+        .style("opacity", 1)
+    })
+    
+    link.on("mouseleave", function(event, d) {
+      d3.select(this)
+        .transition()
+        .duration(200)
+        .attr("stroke-opacity", 0.3 + (d.strength * 0.7))
+        .attr("stroke-width", 1 + Math.sqrt(d.strength) * 2)
+      
+      // Hide label for this link
+      linkLabels.filter(label => label === d)
+        .transition()
+        .duration(200)
+        .style("opacity", 0)
+    })
 
     // Create nodes
     const node = container.append("g")
@@ -359,6 +409,11 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
         .attr("y1", d => (d.source as GraphNode).y!)
         .attr("x2", d => (d.target as GraphNode).x!)
         .attr("y2", d => (d.target as GraphNode).y!)
+
+      // Position link labels at the midpoint of each connection
+      linkLabels
+        .attr("x", d => ((d.source as GraphNode).x! + (d.target as GraphNode).x!) / 2)
+        .attr("y", d => ((d.source as GraphNode).y! + (d.target as GraphNode).y!) / 2)
 
       node.attr("transform", d => `translate(${d.x},${d.y})`)
     })
@@ -534,7 +589,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           )}
         </div>
         
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between mb-3">
           <p className="text-sm text-[#a1a1aa]">
             {totalItems} items • Drag to explore • Click to navigate
           </p>
@@ -572,8 +627,24 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
             </button>
           </div>
         </div>
+        
+        {/* Connection Legend */}
+        <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#0d7ff2]"></div>
+            <span className="text-[#a1a1aa]">Reference</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#4ade80] border-dashed"></div>
+            <span className="text-[#a1a1aa]">Semantic</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#f59e0b]"></div>
+            <span className="text-[#a1a1aa]">Temporal</span>
+          </div>
+        </div>
       </div>
-      <div className="relative w-full h-[calc(100%-80px)]">
+      <div className="relative w-full h-[calc(100%-100px)]">
         <svg
           ref={svgRef}
           className="w-full h-full"

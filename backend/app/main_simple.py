@@ -2261,6 +2261,14 @@ async def delete_note(note_id: str, current_user: User = Depends(get_current_use
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     
+    # Delete from Neo4j first
+    try:
+        from app.services.neo4j_service import neo4j_service
+        await neo4j_service.delete_note(note_id, current_user.id)
+        logger.info(f"✅ Note {note_id} deleted from Neo4j")
+    except Exception as e:
+        logger.warning(f"Failed to delete note from Neo4j: {e}")
+    
     # Also delete associated connections
     db.query(NoteConnection).filter(
         (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
