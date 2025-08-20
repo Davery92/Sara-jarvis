@@ -303,9 +303,9 @@ export default function NotesKnowledgeGarden({
 
         <div className="flex flex-1">
           {/* Editor */}
-          <div className="flex-1 p-6">
+          <div className="flex-1 p-6 min-h-0">
             {currentView === 'notes' && editingNote ? (
-              <div className="rounded-lg border border-[#3f3f46] bg-[#27272a] h-full flex flex-col">
+              <div className="rounded-lg border border-[#3f3f46] bg-[#27272a] h-full flex flex-col min-h-0">
                 {/* Title and Mode Toggle */}
                 <div className="p-4 relative">
                   <input 
@@ -376,17 +376,17 @@ export default function NotesKnowledgeGarden({
                 </div>
                 
                 {/* Content */}
-                <div className="border-t border-[#3f3f46] p-4 flex-1 flex flex-col">
+                <div className="border-t border-[#3f3f46] p-4 flex-1 relative">
                   {noteMode === 'edit' ? (
                     <textarea 
-                      className="flex-1 w-full resize-none border-none bg-transparent text-sm text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none" 
+                      className="absolute inset-0 m-4 resize-none border-none bg-transparent text-sm text-[#f8fafc] placeholder:text-[#a1a1aa] focus:outline-none" 
                       placeholder="Start typing your notes here..."
                       value={editNoteContent}
                       onChange={(e) => setEditNoteContent(e.target.value)}
                     />
                   ) : (
                     <div 
-                      className="flex-1 w-full resize-none border-none bg-transparent text-sm text-[#f8fafc] overflow-y-auto focus:outline-none"
+                      className="absolute inset-0 m-4 overflow-y-auto border-none bg-transparent text-sm text-[#f8fafc] focus:outline-none"
                       style={{ fontFamily: 'inherit' }}
                     >
                       <MarkdownRenderer 

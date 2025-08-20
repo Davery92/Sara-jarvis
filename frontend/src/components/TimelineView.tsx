@@ -12,7 +12,7 @@ interface Note {
 
 interface TimelineItem {
   id: string
-  type: 'note' | 'episode' | 'document'
+  type: 'note' | 'episode' | 'document' | 'insight'
   title: string
   content: string
   timestamp: string
@@ -28,7 +28,7 @@ export default function TimelineView({ notes, onItemClick }: TimelineViewProps) 
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([])
   const [loading, setLoading] = useState(false)
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all')
-  const [typeFilter, setTypeFilter] = useState<'all' | 'notes' | 'episodes' | 'documents'>('all')
+  const [typeFilter, setTypeFilter] = useState<'all' | 'notes' | 'episodes' | 'documents' | 'insights'>('all')
 
   useEffect(() => {
     loadTimelineData()
@@ -77,6 +77,34 @@ export default function TimelineView({ notes, onItemClick }: TimelineViewProps) 
           }
         } catch (error) {
           console.warn('Failed to load episodes for timeline:', error)
+        }
+      }
+
+      // Add dream insights if available
+      if (typeFilter === 'all' || typeFilter === 'insights') {
+        try {
+          const insightsResponse = await fetch(`${APP_CONFIG.apiUrl}/memory/insights`, {
+            credentials: 'include'
+          })
+          
+          if (insightsResponse.ok) {
+            const insightsData = await insightsResponse.json()
+            const insightItems: TimelineItem[] = insightsData.insights.map((insight: any) => ({
+              id: `insight-${insight.id}`,
+              type: 'insight',
+              title: `💡 ${insight.title}`,
+              content: insight.content,
+              timestamp: insight.created_at,
+              metadata: { 
+                type: insight.type,
+                confidence: insight.confidence,
+                helpful: insight.helpful
+              }
+            }))
+            items.push(...insightItems)
+          }
+        } catch (error) {
+          console.warn('Failed to load insights for timeline:', error)
         }
       }
 
@@ -134,6 +162,8 @@ export default function TimelineView({ notes, onItemClick }: TimelineViewProps) 
         return '💭'
       case 'document':
         return '📄'
+      case 'insight':
+        return '🌙'
       default:
         return '•'
     }
@@ -147,6 +177,8 @@ export default function TimelineView({ notes, onItemClick }: TimelineViewProps) 
         return 'border-[#0d7ff2]'
       case 'document':
         return 'border-[#f59e0b]'
+      case 'insight':
+        return 'border-[#8b5cf6]'
       default:
         return 'border-[#3f3f46]'
     }
@@ -177,6 +209,7 @@ export default function TimelineView({ notes, onItemClick }: TimelineViewProps) 
               <option value="notes">Notes Only</option>
               <option value="episodes">Episodes Only</option>
               <option value="documents">Documents Only</option>
+              <option value="insights">Insights Only</option>
             </select>
           </div>
         </div>

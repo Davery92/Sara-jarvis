@@ -81,6 +81,7 @@ export interface CalendarEvent {
 export interface AISettings {
   openai_base_url: string
   openai_model: string
+  openai_notification_model: string
   embedding_base_url: string
   embedding_model: string
   embedding_dimension: number
@@ -89,6 +90,7 @@ export interface AISettings {
 export interface AISettingsUpdate {
   openai_base_url?: string
   openai_model?: string
+  openai_notification_model?: string
   embedding_base_url?: string
   embedding_model?: string
   embedding_dimension?: number
@@ -168,6 +170,58 @@ class ApiClient {
   async sendMessage(content: string): Promise<ChatMessage> {
     const response = await this.client.post('/chat/message', { content })
     return response.data
+  }
+
+  // Streaming chat method
+  async sendMessageStream(content: string, onEvent: (event: any) => void): Promise<void> {
+    const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        messages: [{ role: 'user', content }]
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new Error('No response body reader available')
+    }
+
+    const decoder = new TextDecoder()
+    
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          break
+        }
+        
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const eventData = JSON.parse(line.slice(6))
+              onEvent(eventData)
+            } catch (e) {
+              console.warn('Failed to parse SSE data:', line)
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
   }
 
   async clearChatHistory(): Promise<void> {

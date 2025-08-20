@@ -46,6 +46,7 @@ export default function Settings() {
       setFormData({
         openai_base_url: settings.openai_base_url,
         openai_model: settings.openai_model,
+        openai_notification_model: settings.openai_notification_model,
         embedding_base_url: settings.embedding_base_url,
         embedding_model: settings.embedding_model,
         embedding_dimension: settings.embedding_dimension,
@@ -74,6 +75,7 @@ export default function Settings() {
       setFormData({
         openai_base_url: settings.openai_base_url,
         openai_model: settings.openai_model,
+        openai_notification_model: settings.openai_notification_model,
         embedding_base_url: settings.embedding_base_url,
         embedding_model: settings.embedding_model,
         embedding_dimension: settings.embedding_dimension,
@@ -133,7 +135,7 @@ export default function Settings() {
             {/* AI Model Settings */}
             <div>
               <h3 className="text-lg font-medium text-white mb-4">AI Model Configuration</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                 <div>
                   <label htmlFor="openai_base_url" className="block text-sm font-medium text-gray-300 mb-2">
                     AI Base URL
@@ -151,7 +153,7 @@ export default function Settings() {
 
                 <div>
                   <label htmlFor="openai_model" className="block text-sm font-medium text-gray-300 mb-2">
-                    AI Model
+                    Main AI Model
                   </label>
                   <input
                     type="text"
@@ -162,6 +164,21 @@ export default function Settings() {
                     placeholder={settings?.openai_model || 'gpt-oss:120b'}
                   />
                   <p className="mt-1 text-xs text-gray-400">Model name to use for chat and reasoning</p>
+                </div>
+
+                <div>
+                  <label htmlFor="openai_notification_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    Notification Model
+                  </label>
+                  <input
+                    type="text"
+                    id="openai_notification_model"
+                    value={formData.openai_notification_model || ''}
+                    onChange={(e) => handleInputChange('openai_notification_model', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder={settings?.openai_notification_model || 'gpt-oss:20b'}
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Faster model for generating push notifications</p>
                 </div>
               </div>
             </div>
@@ -276,7 +293,7 @@ export default function Settings() {
             <div className="ml-3">
               <h3 className="text-sm font-medium text-blue-400">Information</h3>
               <div className="mt-1 text-sm text-blue-300">
-                <p>Changes to these settings will affect how Sara processes your requests and generates responses. Make sure your AI and embedding services are accessible before saving.</p>
+                <p>Changes to these settings will affect how Sara processes your requests, generates responses, and creates push notifications. The notification model should be smaller/faster for quick message generation. Make sure your AI and embedding services are accessible before saving.</p>
               </div>
             </div>
           </div>

@@ -60,6 +60,9 @@ class IntelligencePipeline:
         # Start deep processing worker (30+ second tasks)
         asyncio.create_task(self.deep_worker("deep-worker-1"))
         
+        # Start dreaming worker (background consolidation)
+        asyncio.create_task(self.dreaming_worker("dreaming-worker-1"))
+        
         logger.info("✅ Intelligence pipeline workers started")
     
     async def queue_fast_processing(self, content_id: str, content_type: ContentType, 
@@ -162,6 +165,58 @@ class IntelligencePipeline:
                     await neo4j_service.update_processing_status(
                         task.content_id, ProcessingStage.ERROR.value
                     )
+    
+    async def dreaming_worker(self, worker_id: str):
+        """Dreaming worker - handles background memory consolidation and insight generation"""
+        logger.info(f"🌙 Dreaming worker {worker_id} started")
+        
+        # Import dreaming service here to avoid circular imports
+        from app.main_simple import dreaming_service
+        
+        while self.is_running:
+            try:
+                # Dream cycles run every 30 minutes
+                await asyncio.sleep(1800)  # 30 minutes
+                
+                logger.info(f"🌙 {worker_id} starting dream cycle...")
+                
+                # Get all active users (simplified - in production would be more sophisticated)
+                from app.main_simple import SessionLocal, Episode
+                from sqlalchemy import select, func
+                
+                db = SessionLocal()
+                try:
+                    # Get users who have recent activity
+                    from datetime import datetime, timezone, timedelta
+                    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=24)
+                    
+                    active_users_result = db.execute(
+                        select(Episode.user_id)
+                        .where(Episode.created_at >= cutoff_date)
+                        .group_by(Episode.user_id)
+                        .having(func.count(Episode.id) >= 2)  # At least 2 episodes in last 24h
+                    )
+                    active_users = [row[0] for row in active_users_result.fetchall()]
+                finally:
+                    db.close()
+                
+                # Run dream cycle for each active user
+                for user_id in active_users:
+                    try:
+                        logger.info(f"🌙 Running dream cycle for user {user_id}")
+                        await dreaming_service.dream_cycle(user_id)
+                    except Exception as user_error:
+                        logger.error(f"❌ Dream cycle failed for user {user_id}: {user_error}")
+                
+                logger.info(f"🌙 {worker_id} completed dream cycle for {len(active_users)} users")
+                
+            except asyncio.CancelledError:
+                logger.info(f"🌙 {worker_id} was cancelled")
+                break
+            except Exception as e:
+                logger.error(f"❌ {worker_id} dreaming error: {e}")
+                # Continue after error, but wait a bit longer
+                await asyncio.sleep(300)  # 5 minutes before retry
     
     async def perform_fast_analysis(self, task: IntelligenceTask):
         """Perform fast intelligence analysis (2-5 seconds)"""

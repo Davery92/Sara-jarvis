@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, text
+from fastapi.responses import StreamingResponse
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -21,6 +22,8 @@ import json
 import logging
 import os
 import aiofiles
+import asyncio
+import json
 from fastapi import UploadFile
 
 # Configure logging first
@@ -58,6 +61,8 @@ NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
 NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+# Smaller, faster model for notifications (uses same endpoint but different model)
+OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://100.104.68.115:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
@@ -189,6 +194,72 @@ class ConversationTurn(Base):
     message_index = Column(Integer, nullable=False)  # Order in conversation
     # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL  
     embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+# Episodic Memory Models for Advanced Intelligence
+class Episode(Base):
+    """Enhanced episodic memory model with emotional and contextual metadata"""
+    __tablename__ = "episode"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    conversation_id = Column(String, nullable=True)  # Link to conversation if applicable
+    user_id = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)
+    
+    # Intelligence metadata
+    importance = Column(Float, default=0.5)  # AI-scored importance (0-1)
+    emotional_tone = Column(Text, nullable=True)  # JSON: {"primary": "positive", "intensity": 0.7, "emotions": [...]}
+    topics = Column(Text, nullable=True)  # JSON: ["work", "fitness", "learning"]
+    context_tags = Column(Text, nullable=True)  # JSON: ["planning", "reflection", "problem_solving"]
+    
+    # Memory metadata
+    access_count = Column(Integer, default=0)  # How often this episode is retrieved
+    last_accessed = Column(DateTime, nullable=True)
+    memory_type = Column(String, default="conversation")  # conversation, note_creation, action, etc.
+    source = Column(String, default="chat")  # chat, note, document, timer, etc.
+    
+    # Vector embedding for similarity search
+    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
+    
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
+
+class ContextWindow(Base):
+    """Context window configurations for dynamic memory retrieval"""
+    __tablename__ = "context_window"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    window_type = Column(String, nullable=False)  # temporal, topic, emotional, importance, hybrid
+    
+    # Window parameters stored as JSON
+    parameters = Column(Text, nullable=False)  # JSON: {"size": "1d", "topic": "fitness", "min_importance": 0.6}
+    
+    # Usage tracking
+    last_used = Column(DateTime, nullable=True)
+    use_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, server_default=func.now())
+
+class DreamInsight(Base):
+    """Background consolidation insights from Sara's dreaming process"""
+    __tablename__ = "dream_insight"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    
+    # Dream metadata
+    dream_date = Column(DateTime, nullable=False)
+    insight_type = Column(String, nullable=False)  # pattern, connection, summary, trend, forgotten_gem
+    confidence = Column(Float, nullable=False)  # AI confidence in insight (0-1)
+    
+    # Insight content
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    related_episodes = Column(Text, nullable=True)  # JSON list of episode IDs
+    
+    # User interaction
+    surfaced_at = Column(DateTime, nullable=True)  # When shown to user
+    user_feedback = Column(String, nullable=True)  # relevant, not_relevant, interesting
+    
     created_at = Column(DateTime, server_default=func.now())
 
 # Create tables
@@ -389,6 +460,20 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 class SimpleLLMClient:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=60.0)
+        self.event_queue = None
+    
+    def set_event_queue(self, queue):
+        """Set event queue for streaming updates"""
+        self.event_queue = queue
+    
+    async def emit_event(self, event_type, data):
+        """Emit an event to the streaming queue"""
+        if self.event_queue:
+            await self.event_queue.put({
+                "type": event_type,
+                "data": data,
+                "timestamp": datetime.utcnow().isoformat()
+            })
     
     async def chat(self, messages: list):
         try:
@@ -438,11 +523,31 @@ class SimpleLLMClient:
             for round_num in range(max_tool_rounds):
                 if message.get("tool_calls"):
                     logger.info(f"🔧 Tool calling round {round_num + 1}")
+                    
+                    # Emit tool usage event
+                    tool_names = [tc.get("function", {}).get("name", "unknown") for tc in message["tool_calls"]]
+                    await self.emit_event("tool_calls_start", {
+                        "round": round_num + 1,
+                        "tools": tool_names,
+                        "count": len(message["tool_calls"])
+                    })
+                    
                     tool_responses = []
                     
                     for tool_call in message["tool_calls"]:
+                        tool_name = tool_call.get("function", {}).get("name", "unknown")
+                        await self.emit_event("tool_executing", {
+                            "tool": tool_name,
+                            "round": round_num + 1
+                        })
+                        
                         tool_response = await self.execute_tool(tool_call, user_id)
                         tool_responses.append(tool_response)
+                        
+                        await self.emit_event("tool_completed", {
+                            "tool": tool_name,
+                            "round": round_num + 1
+                        })
                     
                     # Add assistant message with tool calls and tool responses
                     current_messages.append(message)
@@ -455,6 +560,12 @@ class SimpleLLMClient:
                         truncated_messages = [current_messages[0]] + current_messages[-max_messages+1:]
                         logger.info(f"⚠️ Truncated conversation from {len(current_messages)} to {len(truncated_messages)} messages")
                         current_messages = truncated_messages
+                    
+                    # Emit thinking event
+                    await self.emit_event("thinking", {
+                        "round": round_num + 1,
+                        "status": "processing_tools"
+                    })
                     
                     # Make follow-up request
                     follow_up_payload = {
@@ -488,12 +599,20 @@ class SimpleLLMClient:
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
                         response_content = message["content"]
+                        await self.emit_event("response_ready", {
+                            "rounds": round_num + 1,
+                            "content_length": len(response_content) if response_content else 0
+                        })
                         await self.store_conversation(messages, response_content, user_id)
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
                 else:
                     # No tool calls, return the content
                     response_content = message["content"]
+                    await self.emit_event("response_ready", {
+                        "rounds": 1,
+                        "content_length": len(response_content) if response_content else 0
+                    })
                     await self.store_conversation(messages, response_content, user_id)
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
@@ -1111,215 +1230,195 @@ class SimpleLLMClient:
             return f"⚠️ Search temporarily unavailable. Error: {str(e)}"
 
     async def search_memory_tool(self, query, user_id):
-        """🧠 Search through Sara's conversation memory for past interactions and context"""
+        """🧠 Search through Sara's enhanced episodic memory with intelligent context windows"""
         try:
+            # Check if user has any episodes
             db = SessionLocal()
             try:
-                # Check if user has conversation history
-                conversations = db.query(Conversation).filter(
-                    Conversation.user_id == user_id
-                ).count()
-                
-                if conversations == 0:
+                episode_count = db.query(Episode).filter(Episode.user_id == user_id).count()
+                if episode_count == 0:
                     return "🆕 This is our first conversation! I don't have any memories to search yet, but I'll remember everything we discuss."
-                
-                # Generate query embedding for semantic search
-                logger.info(f"🔍 Searching Sara's memory for: '{query}'")
-                query_embedding = await embedding_service.generate_embedding(query)
-                
-                semantic_results = []
-                text_results = []
-                
-                # 1. SEMANTIC VECTOR SEARCH through conversation turns
-                if query_embedding:
-                    logger.info("🧠 Performing semantic memory search...")
-                    try:
-                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                            from sqlalchemy import text
-                            memory_query = text("""
-                                SELECT ct.content, ct.role, c.title, ct.created_at,
-                                       (ct.embedding <=> :query_embedding) as distance
-                                FROM conversation_turn ct
-                                JOIN conversation c ON ct.conversation_id = c.id
-                                WHERE ct.user_id = :user_id 
-                                  AND ct.embedding IS NOT NULL
-                                ORDER BY ct.embedding <=> :query_embedding
-                                LIMIT 10
-                            """)
-                            
-                            result = db.execute(memory_query, {
-                                'query_embedding': str(query_embedding),
-                                'user_id': user_id
-                            })
-                            
-                            for row in result:
-                                similarity = 1 - row.distance
-                                if similarity > 0.3:  # Only include reasonably similar results
-                                    semantic_results.append({
-                                        'content': row.content,
-                                        'role': row.role,
-                                        'title': row.title or "Conversation",
-                                        'created_at': row.created_at,
-                                        'similarity': similarity,
-                                        'type': 'SEMANTIC'
-                                    })
-                        else:
-                            # SQLite: Manual similarity calculation using JSON embeddings
-                            import json
-                            import numpy as np
-                            
-                            turns = db.query(ConversationTurn, Conversation).join(
-                                Conversation, ConversationTurn.conversation_id == Conversation.id
-                            ).filter(
-                                ConversationTurn.user_id == user_id,
-                                ConversationTurn.embedding.isnot(None)
-                            ).limit(50).all()  # Get more for manual filtering
-                            
-                            for turn, conv in turns:
-                                try:
-                                    stored_embedding = json.loads(turn.embedding)
-                                    # Calculate cosine similarity
-                                    similarity = np.dot(query_embedding, stored_embedding) / (
-                                        np.linalg.norm(query_embedding) * np.linalg.norm(stored_embedding)
-                                    )
-                                    
-                                    if similarity > 0.3:  # Only include reasonably similar results
-                                        semantic_results.append({
-                                            'content': turn.content,
-                                            'role': turn.role,
-                                            'title': conv.title or "Conversation",
-                                            'created_at': turn.created_at,
-                                            'similarity': float(similarity),
-                                            'type': 'SEMANTIC'
-                                        })
-                                except Exception as e:
-                                    logger.warning(f"Error processing memory embedding for turn {turn.id}: {e}")
-                                    continue
-                            
-                            # Sort by similarity
-                            semantic_results.sort(key=lambda x: x['similarity'], reverse=True)
-                            semantic_results = semantic_results[:10]  # Top 10 results
-                            
-                        logger.info(f"🎯 Found {len(semantic_results)} semantic memory matches")
-                            
-                    except Exception as e:
-                        logger.warning(f"Vector memory search failed, using text search: {e}")
-                
-                # 2. TEXT SEARCH through conversations (fallback + supplementary)
-                logger.info("📝 Performing text-based memory search...")
-                
-                # Search conversation turns
-                turns = db.query(ConversationTurn, Conversation).join(
-                    Conversation, ConversationTurn.conversation_id == Conversation.id
-                ).filter(
-                    ConversationTurn.user_id == user_id,
-                    ConversationTurn.content.ilike(f"%{query}%")
-                ).order_by(ConversationTurn.created_at.desc()).limit(8).all()
-                
-                for turn, conversation in turns:
-                    text_results.append({
-                        'content': turn.content,
-                        'role': turn.role,
-                        'title': conversation.title or "Conversation",
-                        'created_at': turn.created_at,
-                        'similarity': 0.8,  # Good score for text matches
-                        'type': 'TEXT'
-                    })
-                
-                # 3. COMBINE AND RANK RESULTS
-                all_results = semantic_results + text_results
-                
-                # Remove duplicates and sort by similarity
-                seen_content = set()
-                unique_results = []
-                for result in all_results:
-                    content_key = (result['content'][:100], result['role'])
-                    if content_key not in seen_content:
-                        seen_content.add(content_key)
-                        unique_results.append(result)
-                
-                # Sort by similarity score and recency
-                unique_results.sort(key=lambda x: (x['similarity'], x['created_at']), reverse=True)
-                
-                if not unique_results:
-                    return f"🤔 I searched my memory but couldn't find anything specifically about '{query}'. What would you like to know?"
-                
-                # 4. FORMAT INTELLIGENT MEMORY RESPONSE
-                total_results = len(unique_results)
-                semantic_count = len([r for r in unique_results if r['type'] == 'SEMANTIC'])
-                
-                response_parts = [f"🧠 **Sara's Memory Search: {total_results} memories found for '{query}'**"]
-                if semantic_count > 0:
-                    response_parts.append(f"✨ {semantic_count} semantic memories using AI understanding")
-                response_parts.append("")
-                
-                # Show top results
-                for i, result in enumerate(unique_results[:6]):  # Top 6 memory results
-                    role_emoji = "👤" if result['role'] == "user" else "🤖"
-                    search_type = result['type']
-                    similarity = result['similarity']
-                    
-                    # Format timestamp
-                    try:
-                        time_str = result['created_at'].strftime('%Y-%m-%d %H:%M')
-                    except:
-                        time_str = "Recent"
-                    
-                    # Format based on search type
-                    if search_type == 'SEMANTIC':
-                        response_parts.append(f"🧠 *AI Memory Match* (Confidence: {similarity:.1%}) - {time_str}")
-                    else:
-                        response_parts.append(f"📝 *Text Memory Match* (Confidence: {similarity:.1%}) - {time_str}")
-                    
-                    # Clean and present content
-                    content = result['content'].strip()
-                    if len(content) > 200:
-                        content = content[:200] + "..."
-                    
-                    response_parts.append(f"{role_emoji} {content}")
-                    response_parts.append("")
-                
-                # Add contextual note
-                response_parts.append(f"💭 *I remember {conversations} total conversations we've had together.*")
-                
-                return "\n".join(response_parts)
-                
             finally:
                 db.close()
+            
+            # Use intelligent memory search with auto context window selection
+            episodes = await intelligent_memory_service.intelligent_memory_search(
+                user_id=user_id,
+                query=query,
+                auto_window=True
+            )
+            
+            # Also search dream insights for relevant patterns/connections
+            dream_insights = await self._search_dream_insights(query, user_id)
+            
+            if not episodes and not dream_insights:
+                return f"🤔 I searched my memory using intelligent context windows but couldn't find anything specifically about '{query}'. What would you like to know?"
+            
+            # Format the intelligent memory response  
+            response_parts = [f"🧠 **Sara's Intelligent Memory Search: {len(episodes)} memories found for '{query}'**"]
+            response_parts.append("✨ Using AI context window selection and emotional analysis")
+            
+            if dream_insights:
+                response_parts.append(f"💭 Found {len(dream_insights)} relevant insights from background analysis")
+            
+            response_parts.append("")
+            
+            for i, episode in enumerate(episodes[:6]):  # Top 6 memory results
+                role_emoji = "👤" if episode['role'] == "user" else "🤖"
+                
+                # Parse emotional and topic metadata
+                try:
+                    emotional_data = json.loads(episode['emotional_tone']) if episode['emotional_tone'] else {}
+                    topics_data = json.loads(episode['topics']) if episode['topics'] else []
+                except:
+                    emotional_data = {}
+                    topics_data = []
+                
+                # Format timestamp
+                try:
+                    time_str = episode['created_at'].strftime('%Y-%m-%d %H:%M')
+                except:
+                    time_str = "Recent"
+                
+                # Create rich context header
+                context_parts = []
+                if emotional_data.get('primary_emotion'):
+                    emotion = emotional_data.get('primary_emotion')
+                    intensity = emotional_data.get('intensity', 0.5)
+                    context_parts.append(f"Emotion: {emotion} ({intensity:.1%})")
+                
+                if topics_data:
+                    context_parts.append(f"Topics: {', '.join(topics_data[:2])}")
+                
+                importance = episode['importance'] or 0.5
+                context_parts.append(f"Importance: {importance:.1%}")
+                
+                context_str = " | ".join(context_parts) if context_parts else ""
+                
+                # Header with rich metadata
+                response_parts.append(f"🧠 *Memory #{i+1}* - {time_str}")
+                if context_str:
+                    response_parts.append(f"   📊 {context_str}")
+                
+                # Clean and present content
+                content = episode['content'].strip()
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                
+                response_parts.append(f"{role_emoji} {content}")
+                response_parts.append("")
+            
+            # Add dream insights if found
+            if dream_insights:
+                response_parts.append("💭 **Background Intelligence Insights:**")
+                for insight in dream_insights[:3]:  # Top 3 insights
+                    confidence_str = f"({insight.confidence:.0%})" if insight.confidence else ""
+                    response_parts.append(f"🌙 *{insight.title}* {confidence_str}")
+                    response_parts.append(f"   {insight.content[:150]}...")
+                    response_parts.append("")
+            
+            # Add contextual insights
+            total_episodes = episode_count
+            response_parts.append(f"💭 *I have {total_episodes} total memories of our interactions together.*")
+            
+            # Add window information if available
+            if hasattr(intelligent_memory_service.window_manager, 'last_window_info'):
+                window_info = intelligent_memory_service.window_manager.last_window_info
+                response_parts.append(f"🔍 *Used {window_info} context window for this search.*")
+            
+            return "\n".join(response_parts)
+            
         except Exception as e:
-            logger.error(f"Error in memory search: {e}")
-            return f"🤔 My memory search is temporarily unavailable. Error: {str(e)}"
+            logger.error(f"Error in intelligent memory search: {e}")
+            return f"🤔 My intelligent memory search is temporarily unavailable. Error: {str(e)}"
 
-    async def store_conversation(self, messages, response_content, user_id):
-        """Store the conversation in episodic memory"""
+    async def _search_dream_insights(self, query: str, user_id: str) -> list:
+        """Search dream insights for relevant patterns and connections"""
         try:
             db = SessionLocal()
             try:
-                # Find or create conversation for this session
-                # For now, create a new conversation for each chat interaction
-                # In a real app, you'd want to group related messages into conversations
+                # Search insights by title and content
+                query_lower = query.lower()
                 
+                # Search for insights that match the query  
+                insights = db.query(DreamInsight).filter(
+                    DreamInsight.user_id == user_id
+                ).filter(
+                    or_(
+                        DreamInsight.title.ilike(f"%{query_lower}%"),
+                        DreamInsight.content.ilike(f"%{query_lower}%"),
+                        DreamInsight.insight_type.ilike(f"%{query_lower}%")
+                    )
+                ).order_by(DreamInsight.confidence.desc(), DreamInsight.dream_date.desc()).limit(5).all()
+                
+                return insights
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"Error searching dream insights: {e}")
+            return []
+
+    async def store_conversation(self, messages, response_content, user_id):
+        """Store the conversation in enhanced episodic memory with emotional and topical analysis"""
+        try:
+            # Create a conversation ID for grouping related episodes
+            conversation_id = str(uuid.uuid4())
+            
+            # Store each message as an episode using the intelligent memory service
+            for message in messages:
+                if message.role in ["user", "assistant"]:
+                    await intelligent_memory_service.store_episode(
+                        user_id=user_id,
+                        role=message.role,
+                        content=message.content,
+                        conversation_id=conversation_id,
+                        source="chat",
+                        memory_type="conversation"
+                    )
+            
+            # Store assistant response as an episode
+            if response_content:
+                await intelligent_memory_service.store_episode(
+                    user_id=user_id,
+                    role="assistant",
+                    content=response_content,
+                    conversation_id=conversation_id,
+                    source="chat",
+                    memory_type="conversation"
+                )
+            
+            # Also maintain legacy conversation storage for compatibility
+            await self._store_legacy_conversation(messages, response_content, user_id, conversation_id)
+            
+            logger.info(f"🧠 Stored conversation {conversation_id} with intelligent episodic memory analysis")
+                
+        except Exception as e:
+            logger.error(f"Error storing conversation in enhanced memory: {e}")
+    
+    async def _store_legacy_conversation(self, messages, response_content, user_id, conversation_id):
+        """Store conversation in legacy format for compatibility"""
+        try:
+            db = SessionLocal()
+            try:
                 conversation = Conversation(
+                    id=conversation_id,
                     user_id=user_id,
                     title="",  # Will be generated later
-                    total_messages=len(messages) + 1  # +1 for assistant response
+                    total_messages=len(messages) + (1 if response_content else 0)
                 )
                 db.add(conversation)
                 db.commit()
-                db.refresh(conversation)
                 
-                # Store all user messages from this chat
+                # Store turns
                 turn_index = 0
                 for message in messages:
-                    if message.role in ["user", "assistant"]:  # Skip system messages
-                        # Generate embedding for the message
+                    if message.role in ["user", "assistant"]:
                         embedding = await embedding_service.generate_embedding(message.content)
                         
-                        # Format embedding based on database type
                         if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                            embedding_data = embedding  # pgvector format
+                            embedding_data = embedding
                         else:
-                            # SQLite: store as JSON string
                             import json
                             embedding_data = json.dumps(embedding) if embedding else None
                         
@@ -1334,15 +1433,12 @@ class SimpleLLMClient:
                         db.add(turn)
                         turn_index += 1
                 
-                # Store assistant response
                 if response_content:
                     response_embedding = await embedding_service.generate_embedding(response_content)
                     
-                    # Format embedding based on database type
                     if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = response_embedding  # pgvector format
+                        embedding_data = response_embedding
                     else:
-                        # SQLite: store as JSON string
                         import json
                         embedding_data = json.dumps(response_embedding) if response_embedding else None
                     
@@ -1357,16 +1453,12 @@ class SimpleLLMClient:
                     db.add(turn)
                 
                 db.commit()
-                
-                # Generate a title for the conversation (async, don't wait)
                 await self.generate_conversation_title(conversation.id, db)
-                
-                logger.info(f"Stored conversation {conversation.id} with {turn_index + 1} turns in episodic memory")
                 
             finally:
                 db.close()
         except Exception as e:
-            logger.error(f"Error storing conversation in memory: {e}")
+            logger.warning(f"Error storing legacy conversation: {e}")
 
     async def generate_conversation_title(self, conversation_id, db):
         """Generate a descriptive title for the conversation"""
@@ -1818,15 +1910,15 @@ Message: [message]"""
                 # Fallback for unknown types
                 return "Notification", f"You have a new {notification_type} notification."
 
-            # Generate the AI response
+            # Generate the AI response using smaller/faster model for notifications
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{OPENAI_BASE_URL}/chat/completions",
                     json={
-                        "model": OPENAI_MODEL,
+                        "model": OPENAI_NOTIFICATION_MODEL,
                         "messages": [{"role": "system", "content": system_prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 200
+                        "max_tokens": 150
                     },
                     headers={"Authorization": "Bearer dummy"}
                 )
@@ -2070,7 +2162,1151 @@ Message: [message]"""
             actions=actions
         )
 
+# Advanced Intelligence System for Sara
+from typing import Union, List, Dict, Any, Optional, Tuple
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from enum import Enum
+
+class WindowType(Enum):
+    TEMPORAL = "temporal"
+    TOPIC = "topic"
+    EMOTIONAL = "emotional"
+    IMPORTANCE = "importance"
+    HYBRID = "hybrid"
+
+@dataclass
+class ContextWindowConfig:
+    """Configuration for a context window"""
+    window_type: WindowType
+    parameters: Dict[str, Any]
+    
+    @classmethod
+    def temporal(cls, duration: Union[timedelta, str]):
+        """Create temporal window (e.g., last 24 hours, last week)"""
+        if isinstance(duration, str):
+            if duration == "today":
+                duration = timedelta(days=1)
+            elif duration == "week":
+                duration = timedelta(weeks=1)
+            elif duration == "month":
+                duration = timedelta(days=30)
+            else:
+                # Parse duration string like "2d", "3h", "1w"
+                duration = cls._parse_duration(duration)
+        
+        return cls(WindowType.TEMPORAL, {"duration": duration})
+    
+    @classmethod
+    def topic(cls, topics: Union[str, List[str]], duration: Optional[timedelta] = None):
+        """Create topic-based window"""
+        if isinstance(topics, str):
+            topics = [topics]
+        params = {"topics": topics}
+        if duration:
+            params["duration"] = duration
+        return cls(WindowType.TOPIC, params)
+    
+    @classmethod
+    def emotional(cls, emotional_states: Union[str, List[str]], duration: Optional[timedelta] = None):
+        """Create emotional context window"""
+        if isinstance(emotional_states, str):
+            emotional_states = [emotional_states]
+        params = {"emotional_states": emotional_states}
+        if duration:
+            params["duration"] = duration
+        return cls(WindowType.EMOTIONAL, params)
+    
+    @classmethod
+    def importance(cls, min_importance: float, duration: Optional[timedelta] = None):
+        """Create importance-based window"""
+        params = {"min_importance": min_importance}
+        if duration:
+            params["duration"] = duration
+        return cls(WindowType.IMPORTANCE, params)
+    
+    @classmethod
+    def hybrid(cls, **kwargs):
+        """Create hybrid window with multiple criteria"""
+        return cls(WindowType.HYBRID, kwargs)
+    
+    @staticmethod
+    def _parse_duration(duration_str: str) -> timedelta:
+        """Parse duration strings like '2d', '3h', '1w'"""
+        import re
+        match = re.match(r'(\d+)([hdwm])', duration_str.lower())
+        if not match:
+            return timedelta(hours=1)  # Default fallback
+        
+        amount, unit = match.groups()
+        amount = int(amount)
+        
+        if unit == 'h':
+            return timedelta(hours=amount)
+        elif unit == 'd':
+            return timedelta(days=amount)
+        elif unit == 'w':
+            return timedelta(weeks=amount)
+        elif unit == 'm':
+            return timedelta(days=amount * 30)
+        else:
+            return timedelta(hours=1)
+
+class EmotionalAnalyzer:
+    """Real-time emotional analysis using fast model"""
+    
+    def __init__(self, fast_model_url: str = None):
+        self.fast_model_url = fast_model_url or os.getenv("FAST_MODEL_URL", OPENAI_BASE_URL)
+        self.fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")  # Your fast model
+        
+    async def analyze_emotional_state(self, content: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Analyze emotional state of content using fast model"""
+        try:
+            context = context or {}
+            
+            prompt = f"""Analyze the emotional state in this message and return ONLY valid JSON:
+
+Message: "{content}"
+
+Context: Time: {context.get('time', 'unknown')}, Previous mood: {context.get('prev_mood', 'unknown')}
+
+Return JSON format:
+{{
+    "primary_emotion": "positive|negative|neutral|excited|frustrated|contemplative|focused|relaxed",
+    "intensity": 0.8,
+    "sub_emotions": ["curious", "determined"],
+    "energy_level": "high|medium|low",
+    "sentiment": "positive|negative|neutral",
+    "confidence": 0.9
+}}"""
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.fast_model_url}/chat/completions",
+                    json={
+                        "model": self.fast_model,
+                        "messages": [{"role": "system", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 200
+                    },
+                    headers={"Authorization": "Bearer dummy"}
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    ai_response = result["choices"][0]["message"]["content"].strip()
+                    
+                    # Try to parse JSON response
+                    try:
+                        # Clean up response to extract JSON
+                        import re
+                        json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+                        if json_match:
+                            return json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+                        
+        except Exception as e:
+            logger.warning(f"Emotional analysis failed: {e}")
+        
+        # Fallback to simple sentiment
+        return {
+            "primary_emotion": "neutral",
+            "intensity": 0.5,
+            "sub_emotions": [],
+            "energy_level": "medium",
+            "sentiment": "neutral",
+            "confidence": 0.1
+        }
+
+class ContextWindowManager:
+    """Manages context windows for intelligent memory retrieval"""
+    
+    def __init__(self):
+        self.emotional_analyzer = EmotionalAnalyzer()
+    
+    async def auto_select_window(self, query: str, user_id: str) -> ContextWindowConfig:
+        """Automatically select appropriate context window based on query"""
+        query_lower = query.lower()
+        
+        # Temporal indicators
+        if any(term in query_lower for term in ["today", "this morning", "earlier", "now"]):
+            return ContextWindowConfig.temporal("today")
+        elif any(term in query_lower for term in ["yesterday", "last night"]):
+            return ContextWindowConfig.temporal("2d")
+        elif any(term in query_lower for term in ["this week", "recently", "lately"]):
+            return ContextWindowConfig.temporal("week")
+        elif any(term in query_lower for term in ["this month", "past month"]):
+            return ContextWindowConfig.temporal("month")
+        
+        # Topic indicators
+        topic_keywords = {
+            "fitness": ["workout", "exercise", "gym", "running", "fitness", "health"],
+            "work": ["project", "meeting", "work", "client", "deadline", "task"],
+            "learning": ["learn", "study", "course", "tutorial", "research", "book"],
+            "personal": ["family", "friend", "relationship", "personal", "feeling"],
+            "creative": ["design", "art", "creative", "writing", "music", "photo"]
+        }
+        
+        for topic, keywords in topic_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                return ContextWindowConfig.topic(topic, timedelta(weeks=2))
+        
+        # Emotional indicators
+        if any(term in query_lower for term in ["feeling", "mood", "stressed", "happy", "sad", "excited"]):
+            return ContextWindowConfig.emotional(["all"], timedelta(days=7))
+        
+        # Importance indicators
+        if any(term in query_lower for term in ["important", "priority", "urgent", "critical"]):
+            return ContextWindowConfig.importance(0.7, timedelta(weeks=4))
+        
+        # Default: recent + moderate importance
+        return ContextWindowConfig.hybrid(
+            duration=timedelta(days=3),
+            min_importance=0.4
+        )
+    
+    async def retrieve_episodes_with_window(
+        self, 
+        user_id: str, 
+        window_config: ContextWindowConfig,
+        query: str = None,
+        limit: int = 10
+    ) -> List[dict]:
+        """Retrieve episodes using context window"""
+        
+        db = SessionLocal()
+        try:
+            # Start with base query
+            query_builder = db.query(Episode).filter(Episode.user_id == user_id)
+            
+            # Apply window filters
+            if window_config.window_type == WindowType.TEMPORAL:
+                duration = window_config.parameters["duration"]
+                cutoff_time = datetime.utcnow() - duration
+                query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
+            
+            elif window_config.window_type == WindowType.TOPIC:
+                topics = window_config.parameters["topics"]
+                # Filter by episodes that contain any of the topics
+                topic_filter = or_(*[Episode.topics.like(f'%"{topic}"%') for topic in topics])
+                query_builder = query_builder.filter(topic_filter)
+                
+                if "duration" in window_config.parameters:
+                    duration = window_config.parameters["duration"]
+                    cutoff_time = datetime.utcnow() - duration
+                    query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
+            
+            elif window_config.window_type == WindowType.EMOTIONAL:
+                emotional_states = window_config.parameters["emotional_states"]
+                if "all" not in emotional_states:
+                    # Filter by emotional tone
+                    emotion_filter = or_(*[
+                        Episode.emotional_tone.like(f'%"primary_emotion": "{emotion}"%') 
+                        for emotion in emotional_states
+                    ])
+                    query_builder = query_builder.filter(emotion_filter)
+                
+                if "duration" in window_config.parameters:
+                    duration = window_config.parameters["duration"]
+                    cutoff_time = datetime.utcnow() - duration
+                    query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
+            
+            elif window_config.window_type == WindowType.IMPORTANCE:
+                min_importance = window_config.parameters["min_importance"]
+                query_builder = query_builder.filter(Episode.importance >= min_importance)
+                
+                if "duration" in window_config.parameters:
+                    duration = window_config.parameters["duration"]
+                    cutoff_time = datetime.utcnow() - duration
+                    query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
+            
+            elif window_config.window_type == WindowType.HYBRID:
+                params = window_config.parameters
+                
+                if "duration" in params:
+                    cutoff_time = datetime.utcnow() - params["duration"]
+                    query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
+                
+                if "min_importance" in params:
+                    query_builder = query_builder.filter(Episode.importance >= params["min_importance"])
+                
+                if "topics" in params:
+                    topics = params["topics"]
+                    topic_filter = or_(*[Episode.topics.like(f'%"{topic}"%') for topic in topics])
+                    query_builder = query_builder.filter(topic_filter)
+            
+            # Order by composite relevance score
+            # For now, order by recency and importance
+            episodes = query_builder.order_by(
+                Episode.importance.desc(),
+                Episode.created_at.desc()
+            ).limit(limit).all()
+            
+            # Update access tracking
+            for episode in episodes:
+                episode.access_count += 1
+                episode.last_accessed = datetime.utcnow()
+            
+            db.commit()
+            
+            # Convert to detached objects to avoid session issues
+            episode_data = []
+            for episode in episodes:
+                episode_dict = {
+                    'id': episode.id,
+                    'conversation_id': episode.conversation_id,
+                    'user_id': episode.user_id,
+                    'role': episode.role,
+                    'content': episode.content,
+                    'importance': episode.importance,
+                    'emotional_tone': episode.emotional_tone,
+                    'topics': episode.topics,
+                    'context_tags': episode.context_tags,
+                    'access_count': episode.access_count,
+                    'last_accessed': episode.last_accessed,
+                    'memory_type': episode.memory_type,
+                    'source': episode.source,
+                    'created_at': episode.created_at,
+                    'embedding': episode.embedding
+                }
+                episode_data.append(episode_dict)
+            
+            return episode_data
+            
+        finally:
+            db.close()
+
+class IntelligentMemoryService:
+    """Enhanced memory service with context windows and emotional intelligence"""
+    
+    def __init__(self):
+        self.window_manager = ContextWindowManager()
+        self.emotional_analyzer = EmotionalAnalyzer()
+    
+    async def store_episode(
+        self, 
+        user_id: str, 
+        role: str, 
+        content: str, 
+        conversation_id: str = None,
+        source: str = "chat",
+        memory_type: str = "conversation"
+    ) -> Episode:
+        """Store an episode with intelligent analysis"""
+        
+        # Analyze emotional content
+        emotional_analysis = await self.emotional_analyzer.analyze_emotional_state(content)
+        
+        # Extract topics (simplified for now)
+        topics = await self._extract_topics(content)
+        
+        # Calculate importance (simplified for now)
+        importance = await self._calculate_importance(content, role, emotional_analysis)
+        
+        # Generate embedding (if available)
+        embedding = await self._generate_embedding(content)
+        
+        # Store episode
+        db = SessionLocal()
+        try:
+            episode = Episode(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                role=role,
+                content=content,
+                importance=importance,
+                emotional_tone=json.dumps(emotional_analysis),
+                topics=json.dumps(topics),
+                context_tags=json.dumps([]),  # Will be enhanced later
+                memory_type=memory_type,
+                source=source,
+                embedding=json.dumps(embedding) if embedding and not PGVECTOR_AVAILABLE else embedding
+            )
+            
+            db.add(episode)
+            db.commit()
+            db.refresh(episode)
+            
+            logger.info(f"🧠 Stored episode {episode.id}: importance={importance:.2f}, emotion={emotional_analysis.get('primary_emotion')}")
+            return episode
+            
+        finally:
+            db.close()
+    
+    async def intelligent_memory_search(
+        self, 
+        user_id: str, 
+        query: str, 
+        auto_window: bool = True,
+        custom_window: ContextWindowConfig = None
+    ) -> List[dict]:
+        """Search memory with intelligent context window selection"""
+        
+        # Select appropriate context window
+        if auto_window and not custom_window:
+            window_config = await self.window_manager.auto_select_window(query, user_id)
+            logger.info(f"🔍 Auto-selected window: {window_config.window_type.value} with params {window_config.parameters}")
+        else:
+            window_config = custom_window or ContextWindowConfig.temporal("week")
+        
+        # Retrieve episodes using window
+        episodes = await self.window_manager.retrieve_episodes_with_window(
+            user_id, window_config, query
+        )
+        
+        logger.info(f"🧠 Retrieved {len(episodes)} episodes using {window_config.window_type.value} window")
+        return episodes
+    
+    async def _extract_topics(self, content: str) -> List[str]:
+        """Extract topics from content (simplified implementation)"""
+        # Simple keyword-based topic extraction for now
+        topic_keywords = {
+            "fitness": ["workout", "exercise", "gym", "running", "fitness", "health", "training"],
+            "work": ["project", "meeting", "work", "client", "deadline", "task", "business"],
+            "learning": ["learn", "study", "course", "tutorial", "research", "book", "education"],
+            "personal": ["family", "friend", "relationship", "personal", "feeling", "life"],
+            "creative": ["design", "art", "creative", "writing", "music", "photo", "draw"],
+            "technology": ["code", "programming", "tech", "computer", "software", "app"],
+            "travel": ["travel", "trip", "vacation", "flight", "hotel", "visit"],
+            "food": ["cook", "recipe", "eat", "restaurant", "food", "meal", "dinner"]
+        }
+        
+        content_lower = content.lower()
+        detected_topics = []
+        
+        for topic, keywords in topic_keywords.items():
+            if any(keyword in content_lower for keyword in keywords):
+                detected_topics.append(topic)
+        
+        return detected_topics[:3]  # Limit to top 3 topics
+    
+    async def _calculate_importance(self, content: str, role: str, emotional_analysis: Dict) -> float:
+        """Calculate importance score for content"""
+        base_importance = 0.5
+        
+        # Role-based adjustment
+        if role == "user":
+            base_importance += 0.1  # User input slightly more important
+        
+        # Length-based adjustment
+        if len(content) > 200:
+            base_importance += 0.1  # Longer content might be more important
+        
+        # Emotional intensity adjustment
+        intensity = emotional_analysis.get("intensity", 0.5)
+        if intensity > 0.7:
+            base_importance += 0.2  # High emotional intensity increases importance
+        
+        # Keyword-based importance
+        important_keywords = [
+            "important", "urgent", "remember", "note", "todo", "deadline",
+            "meeting", "appointment", "call", "email", "follow up"
+        ]
+        content_lower = content.lower()
+        keyword_matches = sum(1 for keyword in important_keywords if keyword in content_lower)
+        base_importance += min(keyword_matches * 0.1, 0.3)
+        
+        return min(base_importance, 1.0)  # Cap at 1.0
+    
+    async def _generate_embedding(self, content: str) -> Optional[List[float]]:
+        """Generate embedding for content (if available)"""
+        # This would integrate with your embedding service
+        # For now, return None
+        return None
+
+# Import necessary modules for the new functionality
+from sqlalchemy import or_
+
+# ========================================
+# DREAMING & CONSOLIDATION SERVICE
+# ========================================
+
+class DreamingService:
+    """Background service for memory consolidation, pattern detection, and insight generation"""
+    
+    def __init__(self):
+        self.fast_model = "gpt-oss:20b"  # Faster model for quick analysis
+        self.smart_model = "gpt-oss:120b"  # Smarter model for deep insights
+        self.is_dreaming = False
+        logger.info("🧠 DreamingService initialized")
+    
+    async def dream_cycle(self, user_id: str, min_episodes: int = 5):
+        """Run a complete dreaming cycle for a user"""
+        if self.is_dreaming:
+            logger.info("🌙 Already dreaming, skipping cycle")
+            return
+            
+        try:
+            self.is_dreaming = True
+            logger.info(f"🌙 Starting dream cycle for user {user_id}")
+            
+            # Step 1: Analyze recent episodes for patterns
+            insights = await self._analyze_recent_patterns(user_id)
+            
+            # Step 2: Cluster related memories
+            clusters = await self._cluster_related_memories(user_id)
+            
+            # Step 3: Detect forgotten gems (old but potentially relevant memories)
+            forgotten_gems = await self._find_forgotten_gems(user_id)
+            
+            # Step 4: Generate connection insights
+            connections = await self._suggest_memory_connections(user_id)
+            
+            # Step 5: Create trend insights
+            trends = await self._analyze_behavioral_trends(user_id)
+            
+            # Store all insights
+            all_insights = insights + clusters + forgotten_gems + connections + trends
+            await self._store_insights(user_id, all_insights)
+            
+            logger.info(f"🌙 Dream cycle complete: generated {len(all_insights)} insights")
+            
+        except Exception as e:
+            logger.error(f"❌ Dream cycle failed: {e}")
+        finally:
+            self.is_dreaming = False
+    
+    async def _analyze_recent_patterns(self, user_id: str) -> List[Dict[str, Any]]:
+        """Analyze recent episodes for emotional and topical patterns"""
+        db = SessionLocal()
+        try:
+            # Get episodes from last 7 days
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+            episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= cutoff_date
+            ).order_by(Episode.created_at.desc()).limit(50).all()
+            
+            if len(episodes) < 3:
+                return []
+            
+            # Analyze emotional patterns
+            emotional_pattern = await self._detect_emotional_patterns(episodes)
+            
+            # Analyze topic patterns  
+            topic_pattern = await self._detect_topic_patterns(episodes)
+            
+            insights = []
+            if emotional_pattern:
+                insights.append({
+                    "type": "pattern",
+                    "subtype": "emotional",
+                    "title": f"Emotional Pattern: {emotional_pattern['dominant_emotion'].title()}",
+                    "content": emotional_pattern["description"],
+                    "confidence": emotional_pattern["confidence"],
+                    "episode_ids": [ep.id for ep in episodes]
+                })
+            
+            if topic_pattern:
+                insights.append({
+                    "type": "pattern", 
+                    "subtype": "topical",
+                    "title": f"Recent Focus: {topic_pattern['dominant_topic'].title()}",
+                    "content": topic_pattern["description"],
+                    "confidence": topic_pattern["confidence"],
+                    "episode_ids": [ep.id for ep in episodes]
+                })
+            
+            return insights
+        finally:
+            db.close()
+    
+    async def _detect_emotional_patterns(self, episodes: List[Episode]) -> Optional[Dict[str, Any]]:
+        """Detect emotional patterns in recent episodes"""
+        try:
+            # Extract emotional data
+            emotions = []
+            content_samples = []
+            
+            for episode in episodes:
+                if episode.emotional_tone:
+                    try:
+                        emotion_data = json.loads(episode.emotional_tone)
+                        emotions.append(emotion_data.get("primary_emotion", "neutral"))
+                        content_samples.append(episode.content[:100])
+                    except:
+                        continue
+            
+            if len(emotions) < 3:
+                return None
+            
+            # Find dominant emotion
+            emotion_counts = {}
+            for emotion in emotions:
+                emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
+            
+            dominant_emotion = max(emotion_counts, key=emotion_counts.get)
+            confidence = emotion_counts[dominant_emotion] / len(emotions)
+            
+            if confidence < 0.3:
+                return None
+            
+            # Generate insight using AI
+            prompt = f"""Analyze this emotional pattern:
+Dominant emotion: {dominant_emotion}
+Frequency: {emotion_counts[dominant_emotion]}/{len(emotions)} conversations
+Sample content: {'; '.join(content_samples[:3])}
+
+Generate a 2-3 sentence insight about this emotional pattern and what it might indicate about the user's current state or needs."""
+            
+            description = await self._call_fast_llm(prompt)
+            
+            return {
+                "dominant_emotion": dominant_emotion,
+                "confidence": confidence,
+                "description": description or f"You've been experiencing {dominant_emotion} emotions in {confidence:.0%} of recent conversations."
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting emotional patterns: {e}")
+            return None
+    
+    async def _detect_topic_patterns(self, episodes: List[Episode]) -> Optional[Dict[str, Any]]:
+        """Detect topical patterns in recent episodes"""
+        try:
+            # Extract topics
+            all_topics = []
+            content_samples = []
+            
+            for episode in episodes:
+                if episode.topics:
+                    try:
+                        topics_data = json.loads(episode.topics)
+                        if isinstance(topics_data, list):
+                            all_topics.extend(topics_data)
+                        content_samples.append(episode.content[:100])
+                    except:
+                        continue
+            
+            if len(all_topics) < 3:
+                return None
+            
+            # Find dominant topic
+            topic_counts = {}
+            for topic in all_topics:
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            
+            dominant_topic = max(topic_counts, key=topic_counts.get)
+            confidence = topic_counts[dominant_topic] / len(all_topics)
+            
+            if confidence < 0.25:
+                return None
+            
+            # Generate insight
+            prompt = f"""Analyze this topic pattern:
+Dominant topic: {dominant_topic}
+Frequency: {topic_counts[dominant_topic]}/{len(all_topics)} topic instances
+Sample content: {'; '.join(content_samples[:3])}
+
+Generate a 2-3 sentence insight about this focus area and potential implications or suggestions."""
+            
+            description = await self._call_fast_llm(prompt)
+            
+            return {
+                "dominant_topic": dominant_topic,
+                "confidence": confidence,
+                "description": description or f"You've been focused on {dominant_topic}-related topics in recent conversations."
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting topic patterns: {e}")
+            return None
+    
+    async def _cluster_related_memories(self, user_id: str) -> List[Dict[str, Any]]:
+        """Cluster semantically similar memories"""
+        db = SessionLocal()
+        try:
+            # Get episodes with embeddings from last 30 days
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+            episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= cutoff_date,
+                Episode.embedding.isnot(None)
+            ).limit(100).all()
+            
+            if len(episodes) < 5:
+                return []
+            
+            # Simple clustering based on topic similarity
+            clusters = await self._simple_topic_clustering(episodes)
+            
+            insights = []
+            for cluster_id, cluster_episodes in clusters.items():
+                if len(cluster_episodes) >= 3:  # Only create insights for clusters with 3+ episodes
+                    insight = await self._generate_cluster_insight(cluster_episodes)
+                    if insight:
+                        insights.append({
+                            "type": "connection",
+                            "subtype": "cluster",
+                            "title": insight["title"],
+                            "content": insight["description"],
+                            "confidence": insight["confidence"],
+                            "episode_ids": [ep.id for ep in cluster_episodes]
+                        })
+            
+            return insights
+        finally:
+            db.close()
+    
+    async def _simple_topic_clustering(self, episodes: List[Episode]) -> Dict[str, List[Episode]]:
+        """Simple clustering based on shared topics"""
+        clusters = {}
+        
+        for episode in episodes:
+            if not episode.topics:
+                continue
+                
+            try:
+                topics = json.loads(episode.topics)
+                if not topics:
+                    continue
+                    
+                # Use primary topic as cluster key
+                primary_topic = topics[0] if isinstance(topics, list) else str(topics)
+                
+                if primary_topic not in clusters:
+                    clusters[primary_topic] = []
+                clusters[primary_topic].append(episode)
+                
+            except:
+                continue
+        
+        return clusters
+    
+    async def _generate_cluster_insight(self, episodes: List[Episode]) -> Optional[Dict[str, Any]]:
+        """Generate insight about a cluster of related episodes"""
+        try:
+            # Extract key information
+            topics = set()
+            sample_content = []
+            date_range = []
+            
+            for episode in episodes:
+                if episode.topics:
+                    try:
+                        ep_topics = json.loads(episode.topics)
+                        if isinstance(ep_topics, list):
+                            topics.update(ep_topics)
+                    except:
+                        pass
+                sample_content.append(episode.content[:80])
+                date_range.append(episode.created_at)
+            
+            if not topics:
+                return None
+            
+            # Calculate date range
+            min_date = min(date_range)
+            max_date = max(date_range)
+            span_days = (max_date - min_date).days
+            
+            prompt = f"""Analyze this cluster of {len(episodes)} related conversations:
+Topics: {', '.join(list(topics)[:5])}
+Time span: {span_days} days
+Sample content: {' | '.join(sample_content[:3])}
+
+Generate a brief title (4-6 words) and 2-3 sentence insight about this recurring theme and its significance."""
+            
+            response = await self._call_fast_llm(prompt)
+            if not response:
+                return None
+            
+            # Parse response (expecting "Title: ... Description: ...")
+            lines = response.strip().split('\n')
+            title = f"Recurring Theme: {list(topics)[0].title()}"
+            description = response
+            
+            if len(lines) >= 2:
+                title = lines[0].replace("Title:", "").strip()
+                description = '\n'.join(lines[1:]).replace("Description:", "").strip()
+            
+            return {
+                "title": title,
+                "description": description,
+                "confidence": min(0.8, len(episodes) / 10)  # Higher confidence for larger clusters
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating cluster insight: {e}")
+            return None
+    
+    async def _find_forgotten_gems(self, user_id: str) -> List[Dict[str, Any]]:
+        """Find old but potentially relevant memories"""
+        db = SessionLocal()
+        try:
+            # Get old episodes (30+ days) with high importance but low recent access
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+            old_episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at <= cutoff_date,
+                Episode.importance >= 0.7,
+                or_(Episode.last_accessed.is_(None), Episode.last_accessed <= cutoff_date)
+            ).order_by(Episode.importance.desc()).limit(20).all()
+            
+            insights = []
+            for episode in old_episodes[:3]:  # Top 3 forgotten gems
+                insight = await self._create_forgotten_gem_insight(episode)
+                if insight:
+                    insights.append(insight)
+            
+            return insights
+        finally:
+            db.close()
+    
+    async def _create_forgotten_gem_insight(self, episode: Episode) -> Optional[Dict[str, Any]]:
+        """Create insight for a forgotten gem episode"""
+        try:
+            days_ago = (datetime.now(timezone.utc) - episode.created_at).days
+            
+            prompt = f"""This is a high-importance conversation from {days_ago} days ago that hasn't been accessed recently:
+Content: {episode.content[:200]}
+Importance: {episode.importance:.2f}
+
+Generate a brief title and 1-2 sentence insight about why this might be worth revisiting now."""
+            
+            response = await self._call_fast_llm(prompt)
+            if not response:
+                return None
+            
+            return {
+                "type": "forgotten_gem",
+                "title": f"Memory from {days_ago} days ago",
+                "content": response,
+                "confidence": episode.importance,
+                "episode_ids": [episode.id]
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating forgotten gem insight: {e}")
+            return None
+    
+    async def _suggest_memory_connections(self, user_id: str) -> List[Dict[str, Any]]:
+        """Suggest new connections between memories"""
+        # For now, return empty list - this would use more advanced similarity analysis
+        return []
+    
+    async def _analyze_behavioral_trends(self, user_id: str) -> List[Dict[str, Any]]:
+        """Analyze behavioral and usage trends"""
+        db = SessionLocal()
+        try:
+            # Get episodes from last 14 days vs previous 14 days
+            now = datetime.now(timezone.utc)
+            recent_start = now - timedelta(days=14)
+            older_start = now - timedelta(days=28)
+            
+            # Recent episodes
+            recent_episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= recent_start
+            ).all()
+            
+            # Older episodes for comparison
+            older_episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= older_start,
+                Episode.created_at < recent_start
+            ).all()
+            
+            if len(recent_episodes) < 3 or len(older_episodes) < 3:
+                return []
+            
+            # Analyze activity trend
+            activity_trend = await self._analyze_activity_trend(recent_episodes, older_episodes)
+            
+            insights = []
+            if activity_trend:
+                insights.append(activity_trend)
+            
+            return insights
+        finally:
+            db.close()
+    
+    async def _analyze_activity_trend(self, recent_episodes: List[Episode], older_episodes: List[Episode]) -> Optional[Dict[str, Any]]:
+        """Analyze activity level trends"""
+        try:
+            recent_count = len(recent_episodes)
+            older_count = len(older_episodes)
+            
+            if older_count == 0:
+                return None
+            
+            change_ratio = recent_count / older_count
+            
+            if abs(change_ratio - 1.0) < 0.3:  # Less than 30% change
+                return None
+            
+            if change_ratio > 1.3:
+                trend = "increased"
+                description = f"Your activity has increased by {(change_ratio - 1) * 100:.0f}% compared to the previous period."
+            else:
+                trend = "decreased" 
+                description = f"Your activity has decreased by {(1 - change_ratio) * 100:.0f}% compared to the previous period."
+            
+            return {
+                "type": "trend",
+                "subtype": "activity",
+                "title": f"Activity Level {trend.title()}",
+                "content": description,
+                "confidence": min(0.9, abs(change_ratio - 1.0)),
+                "episode_ids": [ep.id for ep in recent_episodes]
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing activity trend: {e}")
+            return None
+    
+    async def _store_insights(self, user_id: str, insights: List[Dict[str, Any]]):
+        """Store generated insights in the database"""
+        db = SessionLocal()
+        try:
+            for insight_data in insights:
+                try:
+                    dream_insight = DreamInsight(
+                        user_id=user_id,
+                        dream_date=datetime.now(timezone.utc),
+                        insight_type=insight_data["type"],
+                        confidence=insight_data["confidence"],
+                        title=insight_data["title"],
+                        content=insight_data["content"],
+                        related_episodes=json.dumps(insight_data.get("episode_ids", []))
+                    )
+                    
+                    db.add(dream_insight)
+                    db.commit()
+                    logger.info(f"💭 Stored {insight_data['type']} insight: {insight_data['title']}")
+                    
+                except Exception as e:
+                    logger.error(f"Error storing insight: {e}")
+                    db.rollback()
+        finally:
+            db.close()
+    
+    async def _call_fast_llm(self, prompt: str, max_tokens: int = 150) -> Optional[str]:
+        """Call the fast LLM for quick analysis"""
+        try:
+            response = await call_llm_api(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.fast_model,
+                max_tokens=max_tokens
+            )
+            return response.get("content", "").strip()
+        except Exception as e:
+            logger.error(f"Fast LLM call failed: {e}")
+            return None
+    
+    async def _call_smart_llm(self, prompt: str, max_tokens: int = 300) -> Optional[str]:
+        """Call the smart LLM for deep analysis"""
+        try:
+            response = await call_llm_api(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.smart_model,
+                max_tokens=max_tokens
+            )
+            return response.get("content", "").strip()
+        except Exception as e:
+            logger.error(f"Smart LLM call failed: {e}")
+            return None
+
+# Initialize the intelligent memory service
+intelligent_memory_service = IntelligentMemoryService()
+
+# Initialize the dreaming service  
+dreaming_service = DreamingService()
+
 ntfy_service = NTFYService()
+
+class NotificationScheduler:
+    """Background scheduler for pre-generating NTFY notifications"""
+    
+    def __init__(self):
+        self.scheduled_notifications = {}  # Store pre-generated notifications
+        self.running = False
+        self.task = None
+        
+    async def start(self):
+        """Start the background notification scheduler"""
+        if self.running:
+            return
+            
+        self.running = True
+        self.task = asyncio.create_task(self._notification_loop())
+        logger.info("🔔 Notification scheduler started")
+        
+    async def stop(self):
+        """Stop the background notification scheduler"""
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        logger.info("🔕 Notification scheduler stopped")
+        
+    async def _notification_loop(self):
+        """Main notification loop that checks for due items every 5 seconds"""
+        while self.running:
+            try:
+                await self._check_and_schedule_notifications()
+                await asyncio.sleep(5)  # Check every 5 seconds
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Notification scheduler error: {e}")
+                await asyncio.sleep(10)  # Wait longer on error
+                
+    async def _check_and_schedule_notifications(self):
+        """Check for notifications that need pre-generation or sending"""
+        try:
+            db = SessionLocal()
+            try:
+                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                pre_generate_time = now + timedelta(seconds=20)
+                
+                # Check timers that need pre-generation
+                upcoming_timers = db.query(Timer).filter(
+                    Timer.is_active == True,
+                    Timer.end_time <= pre_generate_time,
+                    Timer.end_time > now
+                ).all()
+                
+                for timer in upcoming_timers:
+                    notification_key = f"timer_{timer.id}"
+                    if notification_key not in self.scheduled_notifications:
+                        # Pre-generate the notification message
+                        duration_str = f"{timer.duration_minutes}min"
+                        user_context = await ntfy_service.get_recent_user_context(timer.user_id)
+                        
+                        title, message = await ntfy_service.generate_ai_notification_message(
+                            notification_type="timer",
+                            context={
+                                "title": timer.title,
+                                "duration": duration_str,
+                                "timer_id": str(timer.id)
+                            },
+                            user_context=user_context
+                        )
+                        
+                        self.scheduled_notifications[notification_key] = {
+                            "title": title,
+                            "message": message,
+                            "send_time": timer.end_time,
+                            "type": "timer",
+                            "timer_id": timer.id,
+                            "user_id": timer.user_id
+                        }
+                        logger.info(f"📝 Pre-generated timer notification for: {timer.title}")
+                
+                # Check reminders that need pre-generation
+                upcoming_reminders = db.query(Reminder).filter(
+                    Reminder.is_completed == False,
+                    Reminder.reminder_time <= pre_generate_time,
+                    Reminder.reminder_time > now
+                ).all()
+                
+                for reminder in upcoming_reminders:
+                    notification_key = f"reminder_{reminder.id}"
+                    if notification_key not in self.scheduled_notifications:
+                        # Pre-generate the notification message
+                        reminder_time_str = reminder.reminder_time.strftime("%I:%M %p")
+                        user_context = await ntfy_service.get_recent_user_context(reminder.user_id)
+                        
+                        title, message = await ntfy_service.generate_ai_notification_message(
+                            notification_type="reminder",
+                            context={
+                                "title": reminder.title,
+                                "description": reminder.description or "",
+                                "reminder_time": reminder_time_str,
+                                "reminder_id": str(reminder.id)
+                            },
+                            user_context=user_context
+                        )
+                        
+                        self.scheduled_notifications[notification_key] = {
+                            "title": title,
+                            "message": message,
+                            "send_time": reminder.reminder_time,
+                            "type": "reminder",
+                            "reminder_id": reminder.id,
+                            "user_id": reminder.user_id
+                        }
+                        logger.info(f"📝 Pre-generated reminder notification for: {reminder.title}")
+                
+                # Send notifications that are due
+                due_notifications = []
+                for key, notification in list(self.scheduled_notifications.items()):
+                    if notification["send_time"] <= now:
+                        due_notifications.append((key, notification))
+                
+                for key, notification in due_notifications:
+                    await self._send_scheduled_notification(notification)
+                    del self.scheduled_notifications[key]
+                    
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"Error in notification scheduling: {e}")
+            
+    async def _send_scheduled_notification(self, notification):
+        """Send a pre-generated notification"""
+        try:
+            if notification["type"] == "timer":
+                actions = [
+                    {
+                        "type": "view",
+                        "label": "Open Sara",
+                        "url": "https://sara.avery.cloud"
+                    },
+                    {
+                        "type": "http", 
+                        "label": "Dismiss",
+                        "url": f"https://sara.avery.cloud/api/timers/{notification['timer_id']}/complete",
+                        "method": "PATCH"
+                    }
+                ]
+                
+                await ntfy_service.send_notification(
+                    topic=ntfy_service.timers_topic,
+                    title=notification["title"],
+                    message=notification["message"],
+                    priority="high",
+                    tags=["timer", "sara", "urgent"],
+                    actions=actions
+                )
+                logger.info(f"⏰ Sent timer notification: {notification['title']}")
+                
+            elif notification["type"] == "reminder":
+                actions = [
+                    {
+                        "type": "view",
+                        "label": "Open Sara", 
+                        "url": "https://sara.avery.cloud"
+                    },
+                    {
+                        "type": "http",
+                        "label": "Mark Complete",
+                        "url": f"https://sara.avery.cloud/api/reminders/{notification['reminder_id']}/complete",
+                        "method": "PATCH"
+                    }
+                ]
+                
+                await ntfy_service.send_notification(
+                    topic=ntfy_service.reminders_topic,
+                    title=notification["title"],
+                    message=notification["message"],
+                    priority="default",
+                    tags=["reminder", "sara", "productivity"],
+                    actions=actions
+                )
+                logger.info(f"📅 Sent reminder notification: {notification['title']}")
+                
+        except Exception as e:
+            logger.error(f"Error sending scheduled notification: {e}")
+
+# Initialize notification scheduler
+notification_scheduler = NotificationScheduler()
 
 # FastAPI app
 app = FastAPI(
@@ -2094,6 +3330,9 @@ async def startup_event():
         await intelligence_pipeline.start_workers()
         logger.info("🧠 Intelligence pipeline workers started")
         
+        # Start notification scheduler for pre-generating NTFY messages
+        await notification_scheduler.start()
+        
     except Exception as e:
         logger.warning(f"⚠️ Services initialization failed (will use fallback): {e}")
 
@@ -2101,6 +3340,9 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on application shutdown"""
     try:
+        # Stop notification scheduler
+        await notification_scheduler.stop()
+        
         from app.services.neo4j_service import neo4j_service
         neo4j_service.close()
         logger.info("🔌 Neo4j connection closed")
@@ -2467,6 +3709,219 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         # Don't fail the request if memory storage fails
     
     return chat_response
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
+    """Streaming chat endpoint with real-time tool usage indicators"""
+    logger.info(f"Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
+    
+    async def generate_events():
+        try:
+            # Create an async queue for events
+            event_queue = asyncio.Queue()
+            
+            # Set up streaming LLM client
+            streaming_client = SimpleLLMClient()
+            streaming_client.set_event_queue(event_queue)
+            
+            # Tool definitions (same as regular chat)
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_note",
+                        "description": "Create a new note with title and content",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "The title of the note"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The content of the note in markdown format"
+                                }
+                            },
+                            "required": ["title", "content"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_notes",
+                        "description": "Search through existing notes",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query to find notes"
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_reminder",
+                        "description": "Create a reminder for a specific time",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "What to be reminded about"
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Additional details about the reminder"
+                                },
+                                "reminder_time": {
+                                    "type": "string",
+                                    "format": "date-time",
+                                    "description": "When to send the reminder (ISO 8601 format)"
+                                }
+                            },
+                            "required": ["title", "reminder_time"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "start_timer",
+                        "description": "Start a timer for a specified duration",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "Name/description of what the timer is for"
+                                },
+                                "duration_minutes": {
+                                    "type": "integer",
+                                    "description": "Duration in minutes"
+                                }
+                            },
+                            "required": ["title", "duration_minutes"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_calendar_events",
+                        "description": "List calendar events for a specific date range",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "start_date": {
+                                    "type": "string",
+                                    "format": "date",
+                                    "description": "Start date (YYYY-MM-DD)"
+                                },
+                                "end_date": {
+                                    "type": "string", 
+                                    "format": "date",
+                                    "description": "End date (YYYY-MM-DD)"
+                                }
+                            },
+                            "required": ["start_date", "end_date"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_memory",
+                        "description": "Search through episodic memory and past conversations",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query to find relevant memories"
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                }
+            ]
+            
+            # Create system message
+            system_message = Message(
+                role="system",
+                content=f"You are {ASSISTANT_NAME}, a helpful AI assistant with access to tools for managing notes, reminders, timers, and calendar events. "
+                        f"You also have access to search through user's memory and past conversations. "
+                        f"When creating timers: convert time durations to minutes. Examples: "
+                        f"2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Always be helpful and concise."
+            )
+            
+            all_messages = [system_message] + request.messages
+            
+            # Start the LLM processing in a background task
+            async def process_chat():
+                response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id)
+                await event_queue.put({
+                    "type": "final_response",
+                    "data": {
+                        "content": response_content,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                })
+                await event_queue.put({"type": "done"})
+            
+            # Start processing
+            task = asyncio.create_task(process_chat())
+            
+            # Stream events as they come in
+            while True:
+                try:
+                    # Wait for next event with timeout
+                    event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+                    
+                    if event.get("type") == "done":
+                        break
+                        
+                    # Format as Server-Sent Event
+                    event_data = json.dumps(event)
+                    yield f"data: {event_data}\n\n"
+                    
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                except Exception as e:
+                    logger.error(f"Error in event stream: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                    break
+            
+            # Ensure task is cleaned up
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"Error in chat stream: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
 
 @app.get("/notes", response_model=list[NoteResponse])
 async def list_notes(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -2993,6 +4448,11 @@ async def complete_reminder(reminder_id: str, current_user: User = Depends(get_c
     reminder.updated_at = datetime.now()
     db.commit()
     
+    # Remove any scheduled notification since reminder was manually completed
+    notification_key = f"reminder_{reminder_id}"
+    if notification_key in notification_scheduler.scheduled_notifications:
+        del notification_scheduler.scheduled_notifications[notification_key]
+    
     return {"message": f"Marked reminder '{reminder.title}' as completed"}
 
 @app.post("/reminders/{reminder_id}/notify")
@@ -3090,9 +4550,18 @@ async def stop_timer(timer_id: str, current_user: User = Depends(get_current_use
     timer.is_completed = "true"
     db.commit()
     
-    # Send AI-generated NTFY notification for timer completion
-    duration_str = f"{timer.duration_minutes}min"
-    await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
+    # Only send notification for manually stopped timers (not automatic completions)
+    # The scheduler handles automatic notifications when timers reach their end time
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    if timer.end_time > now:
+        # Timer was stopped early, send immediate notification
+        duration_str = f"{timer.duration_minutes}min"
+        await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
+    else:
+        # Timer completed naturally, remove any pre-generated notification to avoid duplicates
+        notification_key = f"timer_{timer_id}"
+        if notification_key in notification_scheduler.scheduled_notifications:
+            del notification_scheduler.scheduled_notifications[notification_key]
     
     return {"message": f"Stopped timer '{timer.title}'"}
 
@@ -3495,6 +4964,81 @@ async def search_memory(
         logger.error(f"Memory search error: {e}")
         raise HTTPException(status_code=500, detail=f"Memory search failed: {str(e)}")
 
+@app.get("/memory/insights")
+async def get_dream_insights(
+    limit: int = 10,
+    insight_type: str = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Get AI-generated insights from background dreaming/consolidation"""
+    try:
+        db = SessionLocal()
+        try:
+            query_filter = [DreamInsight.user_id == current_user.id]
+            
+            if insight_type:
+                query_filter.append(DreamInsight.insight_type == insight_type)
+            
+            insights = db.query(DreamInsight).filter(*query_filter).order_by(
+                DreamInsight.dream_date.desc()
+            ).limit(limit).all()
+            
+            insights_data = []
+            for insight in insights:
+                insight_dict = {
+                    "id": insight.id,
+                    "type": insight.insight_type,
+                    "title": insight.title,
+                    "content": insight.content,
+                    "confidence": insight.confidence,
+                    "dream_date": insight.dream_date.isoformat(),
+                    "surfaced_at": insight.surfaced_at.isoformat() if insight.surfaced_at else None,
+                    "user_feedback": insight.user_feedback,
+                    "related_episodes": json.loads(insight.related_episodes) if insight.related_episodes else []
+                }
+                insights_data.append(insight_dict)
+            
+            return {
+                "insights": insights_data,
+                "total": len(insights_data)
+            }
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error fetching dream insights: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch insights")
+
+@app.patch("/memory/insights/{insight_id}/feedback")
+async def update_insight_feedback(
+    insight_id: str,
+    feedback: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Update user feedback on a dream insight"""
+    try:
+        db = SessionLocal()
+        try:
+            insight = db.query(DreamInsight).filter(
+                DreamInsight.id == insight_id,
+                DreamInsight.user_id == current_user.id
+            ).first()
+            
+            if not insight:
+                raise HTTPException(status_code=404, detail="Insight not found")
+            
+            insight.user_feedback = feedback
+            insight.surfaced_at = datetime.now(timezone.utc)
+            db.commit()
+            
+            return {"status": "updated", "feedback": feedback}
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error updating insight feedback: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update feedback")
+
 # Knowledge Graph Endpoints
 @app.get("/knowledge-graph/health")
 async def knowledge_graph_health():
@@ -3740,6 +5284,7 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
     return {
         "openai_base_url": OPENAI_BASE_URL,
         "openai_model": OPENAI_MODEL,
+        "openai_notification_model": OPENAI_NOTIFICATION_MODEL,
         "embedding_base_url": EMBEDDING_BASE_URL,
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dimension": EMBEDDING_DIM
@@ -3748,6 +5293,7 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
 class AISettingsUpdate(BaseModel):
     openai_base_url: Optional[str] = None
     openai_model: Optional[str] = None
+    openai_notification_model: Optional[str] = None
     embedding_base_url: Optional[str] = None
     embedding_model: Optional[str] = None
     embedding_dimension: Optional[int] = None
@@ -3758,7 +5304,7 @@ async def update_ai_settings(
     current_user: User = Depends(get_current_user)
 ):
     """Update AI configuration settings (requires restart to take effect)"""
-    global OPENAI_BASE_URL, OPENAI_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    global OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     
     updated_settings = {}
     
@@ -3769,6 +5315,10 @@ async def update_ai_settings(
     if settings.openai_model is not None:
         OPENAI_MODEL = settings.openai_model
         updated_settings["openai_model"] = settings.openai_model
+        
+    if settings.openai_notification_model is not None:
+        OPENAI_NOTIFICATION_MODEL = settings.openai_notification_model
+        updated_settings["openai_notification_model"] = settings.openai_notification_model
         
     if settings.embedding_base_url is not None:
         EMBEDDING_BASE_URL = settings.embedding_base_url

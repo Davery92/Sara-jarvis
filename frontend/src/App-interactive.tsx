@@ -5,7 +5,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
 import MermaidDiagram from './components/MermaidDiagram'
-import NotesKnowledgeGarden from './components/NotesKnowledgeGarden'
+import MemoryGarden from './components/MemoryGarden'
+import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import Settings from './pages/Settings'
 
@@ -799,11 +800,11 @@ function App() {
                   <span>Notes</span>
                 </button>
                 <button
-                  onClick={() => { setView('graph'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'graph' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  onClick={() => { setView('memory-garden'); loadNotes(); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">🕸️</span>
-                  <span>Knowledge Graph</span>
+                  <span className="text-xl">🧠</span>
+                  <span>Memory Garden</span>
                 </button>
                 <button
                   onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
@@ -864,11 +865,11 @@ function App() {
               <span className="text-xs">Notes</span>
             </button>
             <button
-              onClick={() => { setView('graph'); loadNotes(); }}
-              className={`flex flex-col items-center ${view === 'graph' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => { setView('memory-garden'); loadNotes(); }}
+              className={`flex flex-col items-center ${view === 'memory-garden' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">hub</span>
-              <span className="text-xs">Graph</span>
+              <span className="material-icons">psychology</span>
+              <span className="text-xs">Memory</span>
             </button>
             <button
               onClick={() => { setView('documents'); loadDocuments(); }}
@@ -1387,7 +1388,7 @@ function App() {
           )}
 
           {view === 'notes' && (
-            <NotesKnowledgeGarden
+            <SimplifiedNotes
               notes={notes}
               setNotes={setNotes}
               editingNote={editingNote}
@@ -1396,6 +1397,15 @@ function App() {
               setEditNoteContent={setEditNoteContent}
               editNoteTitle={editNoteTitle}
               setEditNoteTitle={setEditNoteTitle}
+            />
+          )}
+
+          {view === 'memory-garden' && (
+            <MemoryGarden
+              notes={notes}
+              setNotes={setNotes}
+              editingNote={editingNote}
+              setEditingNote={setEditingNote}
             />
           )}
 
@@ -1620,11 +1630,11 @@ function App() {
             <span className="text-xs">Notes</span>
           </button>
           <button
-            onClick={() => { setView('graph'); loadNotes(); }}
-            className={`flex flex-col items-center p-2 ${view === 'graph' ? 'text-teal-400' : 'text-gray-400'}`}
+            onClick={() => { setView('memory-garden'); loadNotes(); }}
+            className={`flex flex-col items-center p-2 ${view === 'memory-garden' ? 'text-teal-400' : 'text-gray-400'}`}
           >
-            <span className="material-icons text-lg">hub</span>
-            <span className="text-xs">Graph</span>
+            <span className="material-icons text-lg">psychology</span>
+            <span className="text-xs">Memory</span>
           </button>
           <button
             onClick={() => { setView('documents'); loadDocuments(); }}

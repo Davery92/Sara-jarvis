@@ -10,6 +10,12 @@ export default function Chat() {
   const { user } = useAuth()
   const [message, setMessage] = useState('')
   const [isTyping, setIsTyping] = useState(false)
+  const [toolActivity, setToolActivity] = useState<{
+    isUsingTools: boolean
+    currentTool?: string
+    round?: number
+    tools?: string[]
+  }>({ isUsingTools: false })
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
@@ -40,20 +46,78 @@ export default function Chat() {
     queryFn: () => apiClient.getChatHistory(),
   })
 
-  // Send message mutation
+  // Send message with streaming
   const sendMessageMutation = useMutation({
-    mutationFn: (content: string) => apiClient.sendMessage(content),
-    onMutate: () => {
+    mutationFn: async (content: string) => {
       setIsTyping(true)
+      setToolActivity({ isUsingTools: false })
+      
+      let finalMessage: ChatMessage | null = null
+      
+      await apiClient.sendMessageStream(content, (event) => {
+        switch (event.type) {
+          case 'tool_calls_start':
+            setToolActivity({
+              isUsingTools: true,
+              tools: event.data.tools,
+              round: event.data.round
+            })
+            break
+            
+          case 'tool_executing':
+            setToolActivity(prev => ({
+              ...prev,
+              currentTool: event.data.tool,
+              round: event.data.round
+            }))
+            break
+            
+          case 'tool_completed':
+            // Keep showing tools activity until all are done
+            break
+            
+          case 'thinking':
+            setToolActivity(prev => ({
+              ...prev,
+              currentTool: 'processing results...'
+            }))
+            break
+            
+          case 'final_response':
+            finalMessage = {
+              id: Date.now().toString(),
+              content: event.data.content,
+              role: 'assistant',
+              timestamp: new Date()
+            }
+            break
+            
+          case 'response_ready':
+            setToolActivity({ isUsingTools: false })
+            setIsTyping(false)
+            break
+            
+          case 'error':
+            console.error('Streaming error:', event.message)
+            setIsTyping(false)
+            setToolActivity({ isUsingTools: false })
+            break
+        }
+      })
+      
+      return finalMessage
     },
     onSuccess: (newMessage) => {
-      queryClient.setQueryData(['chat', 'history'], (old: ChatMessage[] = []) => [...old, newMessage])
+      if (newMessage) {
+        queryClient.setQueryData(['chat', 'history'], (old: ChatMessage[] = []) => [...old, newMessage])
+      }
       setIsTyping(false)
-      // Force scroll after successful message
+      setToolActivity({ isUsingTools: false })
       scrollToBottom(150)
     },
     onError: () => {
       setIsTyping(false)
+      setToolActivity({ isUsingTools: false })
     },
   })
 
@@ -200,25 +264,50 @@ export default function Chat() {
             ))
           )}
 
-          {/* Enhanced typing indicator with tool usage */}
+          {/* Enhanced typing indicator with real-time tool usage */}
           {isTyping && (
             <div className="flex items-start space-x-3">
               <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
                 <span className="text-white font-medium text-sm">{APP_CONFIG.assistantName.charAt(0)}</span>
               </div>
-              <div className="bg-white rounded-lg px-4 py-3 shadow-sm border border-gray-200">
+              <div className="bg-white rounded-lg px-4 py-3 shadow-sm border border-gray-200 min-w-0 flex-1 max-w-md">
                 <div className="flex items-center space-x-3">
-                  <div className="flex space-x-1">
+                  <div className="flex space-x-1 flex-shrink-0">
                     <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
                     <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                   </div>
-                  <div className="flex items-center space-x-2 text-sm text-gray-600">
-                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <div className="flex items-center space-x-2 text-sm text-gray-600 min-w-0">
+                    <svg className="w-4 h-4 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <span>Using tools to find the best answer...</span>
+                    <div className="min-w-0">
+                      {toolActivity.isUsingTools ? (
+                        <div className="space-y-1">
+                          <div className="flex items-center space-x-2">
+                            <span className="text-amber-600 font-medium">🔧 Using Tools</span>
+                            {toolActivity.round && <span className="text-xs text-gray-400">(Round {toolActivity.round})</span>}
+                          </div>
+                          {toolActivity.currentTool && (
+                            <div className="text-xs text-gray-500">
+                              → {toolActivity.currentTool}
+                            </div>
+                          )}
+                          {toolActivity.tools && toolActivity.tools.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {toolActivity.tools.map((tool, index) => (
+                                <span key={index} className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-md">
+                                  {tool}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span>Thinking...</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
