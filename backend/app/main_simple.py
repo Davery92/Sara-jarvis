@@ -891,9 +891,9 @@ class SimpleLLMClient:
                 timer.is_completed = "true"
                 db.commit()
                 
-                # Send NTFY notification for timer completion
+                # Send AI-generated NTFY notification for timer completion
                 duration_str = f"{timer.duration_minutes}min"
-                await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id)
+                await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, user_id)
                 
                 return f"Stopped timer '{timer.title}'"
             finally:
@@ -1735,7 +1735,7 @@ document_processor = DocumentProcessor()
 
 # NTFY Notification Service
 class NTFYService:
-    """Service for sending mobile notifications via NTFY"""
+    """Service for sending mobile notifications via NTFY with AI-generated messages"""
     
     def __init__(self):
         self.server_url = NTFY_SERVER_URL
@@ -1749,6 +1749,145 @@ class NTFYService:
             logger.info(f"✅ NTFY service initialized: {self.server_url}")
         else:
             logger.info("⚠️ NTFY service disabled")
+    
+    async def generate_ai_notification_message(
+        self,
+        notification_type: str,
+        context: dict,
+        user_context: str = None
+    ) -> tuple[str, str]:
+        """Generate AI-powered notification title and message"""
+        try:
+            # Build the prompt based on notification type
+            if notification_type == "timer":
+                system_prompt = f"""You are {ASSISTANT_NAME}, a helpful AI assistant. Generate a friendly, personal notification message for a timer that just finished.
+
+Context:
+- Timer title: {context.get('title', 'Timer')}
+- Duration: {context.get('duration', 'Unknown duration')}
+- User context: {user_context or 'No recent context available'}
+
+Generate:
+1. A short, catchy title (max 30 characters)
+2. A warm, encouraging message (max 100 characters)
+
+Be personal, encouraging, and reflect Sara's personality. Use natural language. No emojis in title, but you can use one emoji in the message if appropriate.
+
+Format your response as:
+Title: [title]
+Message: [message]"""
+
+            elif notification_type == "reminder":
+                system_prompt = f"""You are {ASSISTANT_NAME}, a helpful AI assistant. Generate a friendly, personal reminder notification.
+
+Context:
+- Reminder title: {context.get('title', 'Reminder')}
+- Description: {context.get('description', '')}
+- Due time: {context.get('reminder_time', 'Now')}
+- User context: {user_context or 'No recent context available'}
+
+Generate:
+1. A short, relevant title (max 30 characters)
+2. A helpful, contextual message (max 100 characters)
+
+Be personal, helpful, and reflect Sara's caring personality. Reference the user's context if relevant. No emojis in title, but you can use one emoji in the message if appropriate.
+
+Format your response as:
+Title: [title]
+Message: [message]"""
+
+            elif notification_type == "document":
+                system_prompt = f"""You are {ASSISTANT_NAME}, a helpful AI assistant. Generate a notification for document processing.
+
+Context:
+- Document title: {context.get('title', 'Document')}
+- Action: {context.get('action', 'processed')}
+- User context: {user_context or 'No recent context available'}
+
+Generate:
+1. A clear, informative title (max 30 characters)
+2. A concise status message (max 100 characters)
+
+Be professional but friendly. No emojis in title, but you can use one emoji in the message if appropriate.
+
+Format your response as:
+Title: [title]
+Message: [message]"""
+
+            else:
+                # Fallback for unknown types
+                return "Notification", f"You have a new {notification_type} notification."
+
+            # Generate the AI response
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{OPENAI_BASE_URL}/chat/completions",
+                    json={
+                        "model": OPENAI_MODEL,
+                        "messages": [{"role": "system", "content": system_prompt}],
+                        "temperature": 0.7,
+                        "max_tokens": 200
+                    },
+                    headers={"Authorization": "Bearer dummy"}
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    ai_response = result["choices"][0]["message"]["content"]
+                    
+                    # Parse the response
+                    lines = ai_response.strip().split('\n')
+                    title = "Notification"
+                    message = f"You have a new {notification_type} notification."
+                    
+                    for line in lines:
+                        if line.startswith("Title:"):
+                            title = line.replace("Title:", "").strip()
+                        elif line.startswith("Message:"):
+                            message = line.replace("Message:", "").strip()
+                    
+                    return title, message
+                else:
+                    logger.warning(f"AI message generation failed: {response.status_code}")
+                    
+        except Exception as e:
+            logger.warning(f"AI message generation error: {e}")
+        
+        # Fallback to simple messages if AI generation fails
+        if notification_type == "timer":
+            return "Timer Complete!", f"Your {context.get('duration', '')} timer '{context.get('title', 'Timer')}' finished."
+        elif notification_type == "reminder":
+            return "Reminder", f"Don't forget: {context.get('title', 'Reminder')}"
+        elif notification_type == "document":
+            return f"Document {context.get('action', 'Ready')}", f"'{context.get('title', 'Document')}' is ready."
+        else:
+            return "Notification", f"You have a new {notification_type} notification."
+    
+    async def get_recent_user_context(self, user_id: str, limit: int = 3) -> str:
+        """Get recent user context for personalization"""
+        try:
+            db = SessionLocal()
+            try:
+                # Get recent episodes for context
+                recent_episodes = db.query(Episode).filter(
+                    Episode.user_id == user_id
+                ).order_by(Episode.created_at.desc()).limit(limit).all()
+                
+                if recent_episodes:
+                    context_items = []
+                    for episode in recent_episodes:
+                        if episode.role == "user" and len(episode.content) > 10:
+                            # Truncate long messages
+                            content = episode.content[:100] + "..." if len(episode.content) > 100 else episode.content
+                            context_items.append(f"User said: {content}")
+                    
+                    return " | ".join(context_items) if context_items else None
+                return None
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Error getting user context: {e}")
+            return None
     
     async def send_notification(
         self,
@@ -1810,8 +1949,8 @@ class NTFYService:
             logger.error(f"NTFY notification error: {e}")
             return False
     
-    async def send_timer_notification(self, title: str, duration: str, timer_id: str = None) -> bool:
-        """Send timer completion notification"""
+    async def send_timer_notification(self, title: str, duration: str, timer_id: str = None, user_id: str = None) -> bool:
+        """Send AI-generated timer completion notification"""
         actions = [
             {
                 "type": "view",
@@ -1828,17 +1967,33 @@ class NTFYService:
                 "method": "PATCH"
             })
         
+        # Get user context for personalization
+        user_context = None
+        if user_id:
+            user_context = await self.get_recent_user_context(user_id)
+        
+        # Generate AI-powered notification message
+        ai_title, ai_message = await self.generate_ai_notification_message(
+            notification_type="timer",
+            context={
+                "title": title,
+                "duration": duration,
+                "timer_id": timer_id
+            },
+            user_context=user_context
+        )
+        
         return await self.send_notification(
             topic=self.timers_topic,
-            title="Timer Finished!",
-            message=f"Your {duration} timer '{title}' has completed.",
+            title=ai_title,
+            message=ai_message,
             priority="high",
             tags=["timer", "sara", "urgent"],
             actions=actions
         )
     
-    async def send_reminder_notification(self, title: str, reminder_time: str, reminder_id: str = None) -> bool:
-        """Send reminder notification"""
+    async def send_reminder_notification(self, title: str, reminder_time: str, reminder_id: str = None, description: str = None, user_id: str = None) -> bool:
+        """Send AI-generated reminder notification"""
         actions = [
             {
                 "type": "view",
@@ -1855,17 +2010,34 @@ class NTFYService:
                 "method": "PATCH"
             })
         
+        # Get user context for personalization
+        user_context = None
+        if user_id:
+            user_context = await self.get_recent_user_context(user_id)
+        
+        # Generate AI-powered notification message
+        ai_title, ai_message = await self.generate_ai_notification_message(
+            notification_type="reminder",
+            context={
+                "title": title,
+                "description": description or "",
+                "reminder_time": reminder_time,
+                "reminder_id": reminder_id
+            },
+            user_context=user_context
+        )
+        
         return await self.send_notification(
             topic=self.reminders_topic,
-            title=f"🔔 Reminder",
-            message=f"Don't forget: {title}",
+            title=ai_title,
+            message=ai_message,
             priority="default",
             tags=["reminder", "sara", "productivity"],
             actions=actions
         )
     
-    async def send_document_notification(self, title: str, action: str = "processed") -> bool:
-        """Send document processing notification"""
+    async def send_document_notification(self, title: str, action: str = "processed", user_id: str = None) -> bool:
+        """Send AI-generated document processing notification"""
         actions = [
             {
                 "type": "view",
@@ -1874,10 +2046,25 @@ class NTFYService:
             }
         ]
         
+        # Get user context for personalization
+        user_context = None
+        if user_id:
+            user_context = await self.get_recent_user_context(user_id)
+        
+        # Generate AI-powered notification message
+        ai_title, ai_message = await self.generate_ai_notification_message(
+            notification_type="document",
+            context={
+                "title": title,
+                "action": action
+            },
+            user_context=user_context
+        )
+        
         return await self.send_notification(
             topic=self.documents_topic,
-            title=f"📄 Document {action.title()}",
-            message=f"Document '{title}' has been {action}.",
+            title=ai_title,
+            message=ai_message,
             priority="default",
             tags=["document", "sara"],
             actions=actions
@@ -2819,9 +3006,15 @@ async def send_reminder_notification(reminder_id: str, current_user: User = Depe
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
     
-    # Send NTFY notification
+    # Send AI-generated NTFY notification
     reminder_time = reminder.reminder_time.strftime("%I:%M %p")
-    success = await ntfy_service.send_reminder_notification(reminder.title, reminder_time, reminder_id)
+    success = await ntfy_service.send_reminder_notification(
+        reminder.title, 
+        reminder_time, 
+        reminder_id, 
+        reminder.description, 
+        current_user.id
+    )
     
     if success:
         return {"message": f"Notification sent for reminder '{reminder.title}'"}
@@ -2897,9 +3090,9 @@ async def stop_timer(timer_id: str, current_user: User = Depends(get_current_use
     timer.is_completed = "true"
     db.commit()
     
-    # Send NTFY notification for timer completion
+    # Send AI-generated NTFY notification for timer completion
     duration_str = f"{timer.duration_minutes}min"
-    await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id)
+    await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
     
     return {"message": f"Stopped timer '{timer.title}'"}
 
