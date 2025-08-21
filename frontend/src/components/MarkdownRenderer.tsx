@@ -104,32 +104,32 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className 
         },
         table({ children }) {
           return (
-            <div className="overflow-x-auto mb-2">
-              <table className="min-w-full border border-[#3f3f46] rounded-lg">
+            <div className="overflow-x-auto my-4">
+              <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
                 {children}
               </table>
             </div>
           )
         },
         thead({ children }) {
-          return <thead className="bg-[#18181b]">{children}</thead>
+          return <thead className="bg-gray-700/50">{children}</thead>
         },
         tbody({ children }) {
           return <tbody>{children}</tbody>
         },
         tr({ children }) {
-          return <tr className="border-b border-[#3f3f46]">{children}</tr>
+          return <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>
         },
         th({ children }) {
           return (
-            <th className="px-4 py-2 text-left font-medium text-[#f8fafc] border-r border-[#3f3f46] last:border-r-0">
+            <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
               {children}
             </th>
           )
         },
         td({ children }) {
           return (
-            <td className="px-4 py-2 text-[#f8fafc] border-r border-[#3f3f46] last:border-r-0">
+            <td className="border border-gray-600 px-3 py-2 text-gray-300">
               {children}
             </td>
           )
