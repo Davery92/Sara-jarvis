@@ -16,6 +16,7 @@ export default function Chat() {
     round?: number
     tools?: string[]
   }>({ isUsingTools: false })
+  const [streamingContent, setStreamingContent] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
@@ -51,6 +52,7 @@ export default function Chat() {
     mutationFn: async (content: string) => {
       setIsTyping(true)
       setToolActivity({ isUsingTools: false })
+      setStreamingContent('')
       
       let finalMessage: ChatMessage | null = null
       
@@ -83,6 +85,10 @@ export default function Chat() {
             }))
             break
             
+          case 'text_chunk':
+            setStreamingContent(event.data.full_content)
+            break
+            
           case 'final_response':
             finalMessage = {
               id: Date.now().toString(),
@@ -90,17 +96,20 @@ export default function Chat() {
               role: 'assistant',
               timestamp: new Date()
             }
+            setStreamingContent('')
             break
             
           case 'response_ready':
             setToolActivity({ isUsingTools: false })
             setIsTyping(false)
+            setStreamingContent('')
             break
             
           case 'error':
             console.error('Streaming error:', event.message)
             setIsTyping(false)
             setToolActivity({ isUsingTools: false })
+            setStreamingContent('')
             break
         }
       })
@@ -132,7 +141,7 @@ export default function Chat() {
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     scrollToBottom(100)
-  }, [messages, isTyping])
+  }, [messages, isTyping, streamingContent])
 
   // Auto-resize textarea
   useEffect(() => {
@@ -262,6 +271,26 @@ export default function Chat() {
             messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))
+          )}
+
+          {/* Streaming content bubble */}
+          {streamingContent && (
+            <div className="flex items-start space-x-3">
+              <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
+                <span className="text-white font-medium text-sm">{APP_CONFIG.assistantName.charAt(0)}</span>
+              </div>
+              <div className="max-w-3xl items-start">
+                <div className="rounded-lg px-4 py-3 shadow-sm border bg-white text-gray-900 border-gray-200">
+                  <ErrorBoundary>
+                    <MarkdownRenderer content={streamingContent} />
+                  </ErrorBoundary>
+                  <div className="inline-block w-2 h-4 bg-indigo-500 animate-pulse ml-1"></div>
+                </div>
+                <p className="text-xs text-gray-500 mt-1 text-left">
+                  {formatTime(new Date())}
+                </p>
+              </div>
+            </div>
           )}
 
           {/* Enhanced typing indicator with real-time tool usage */}

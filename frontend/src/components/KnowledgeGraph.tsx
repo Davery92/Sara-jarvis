@@ -32,7 +32,7 @@ interface Document {
 interface GraphNode extends d3.SimulationNodeDatum {
   id: string
   title: string
-  type: 'note' | 'episode' | 'document'
+  type: 'content' | 'entity' | 'topic' | 'tag' | 'note' | 'episode' | 'document'
   importance: number
   content?: string
   group: number
@@ -41,6 +41,13 @@ interface GraphNode extends d3.SimulationNodeDatum {
     source?: string
     mime_type?: string
     created_at?: string
+    content_type?: string
+    entity_type?: string
+    topic_type?: string
+    tag_category?: string
+    confidence?: number
+    urgency_score?: number
+    importance_score?: number
   }
 }
 
@@ -48,7 +55,11 @@ interface GraphLink extends d3.SimulationLinkDatum<GraphNode> {
   source: string | GraphNode
   target: string | GraphNode
   strength: number
-  type: 'reference' | 'semantic' | 'temporal'
+  type: 'reference' | 'semantic' | 'temporal' | 'HAS_CHUNK' | 'HAS_ENTITY' | 'HAS_TOPIC' | 'HAS_TAG' | 'SHARES_ENTITIES' | 'SHARES_TOPICS' | 'SHARES_CONTEXT'
+  properties?: any
+  originalType?: string
+  connection_strength?: number
+  auto_generated?: boolean
 }
 
 interface KnowledgeGraphProps {
@@ -58,13 +69,25 @@ interface KnowledgeGraphProps {
   useApiData?: boolean // If true, fetch graph data from API
 }
 
+interface ConnectionDetails {
+  source: GraphNode
+  target: GraphNode
+  type: string
+  strength: number
+  properties?: any
+}
+
 export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, useApiData = false }: KnowledgeGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [graphData, setGraphData] = React.useState<{nodes: GraphNode[], links: GraphLink[]} | null>(null)
   const [episodes, setEpisodes] = useState<Episode[]>([])
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
-  const [visibleTypes, setVisibleTypes] = useState<Set<string>>(new Set(['note', 'episode', 'document']))
+  const [visibleTypes, setVisibleTypes] = useState<Set<string>>(new Set(['content', 'entity', 'topic', 'tag', 'note', 'episode', 'document']))
+  const [selectedConnection, setSelectedConnection] = useState<ConnectionDetails | null>(null)
+  const [showConnectionModal, setShowConnectionModal] = useState(false)
+  const [connectionDetails, setConnectionDetails] = useState<any>(null)
+  const [loadingConnectionDetails, setLoadingConnectionDetails] = useState(false)
 
   // Fetch graph data from Neo4j
   useEffect(() => {
@@ -171,7 +194,9 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           source: rel.source,
           target: rel.target,
           strength: rel.properties?.strength || rel.properties?.similarity || 0.5,
-          type: mapRelationshipType(rel.type)
+          type: mapRelationshipType(rel.type),
+          properties: rel.properties,
+          originalType: rel.type
         }))
 
       console.log('📊 Using Neo4j graph data:', { nodes: nodes.length, links: links.length })
@@ -265,6 +290,13 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           case 'reference': return "#0d7ff2" // Blue for explicit references
           case 'semantic': return "#4ade80" // Green for semantic connections
           case 'temporal': return "#f59e0b" // Orange for temporal connections
+          case 'HAS_CHUNK': return "#8b5cf6" // Purple for content chunks
+          case 'HAS_ENTITY': return "#06b6d4" // Cyan for entities
+          case 'HAS_TOPIC': return "#10b981" // Emerald for topics
+          case 'HAS_TAG': return "#f59e0b" // Orange for tags
+          case 'SHARES_ENTITIES': return "#06b6d4" // Cyan for shared entities
+          case 'SHARES_TOPICS': return "#10b981" // Emerald for shared topics
+          case 'SHARES_CONTEXT': return "#8b5cf6" // Purple for shared context
           default: return "#3f3f46"
         }
       })
@@ -322,6 +354,54 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
         .style("opacity", 0)
     })
 
+    // Add click handler for connections
+    link.on("click", async function(event, d) {
+      event.stopPropagation()
+      
+      const sourceNode = nodes.find(n => n.id === (typeof d.source === 'string' ? d.source : d.source.id))
+      const targetNode = nodes.find(n => n.id === (typeof d.target === 'string' ? d.target : d.target.id))
+      
+      if (sourceNode && targetNode) {
+        setSelectedConnection({
+          source: sourceNode,
+          target: targetNode,
+          type: d.originalType || d.type,
+          strength: d.strength,
+          properties: d.properties
+        })
+        setShowConnectionModal(true)
+        
+        // Fetch detailed connection information
+        setLoadingConnectionDetails(true)
+        try {
+          const response = await fetch(`${APP_CONFIG.apiUrl}/knowledge-graph/connection-details`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            credentials: 'include',
+            body: JSON.stringify({
+              source_id: sourceNode.id,
+              target_id: targetNode.id
+            })
+          })
+          
+          if (response.ok) {
+            const details = await response.json()
+            setConnectionDetails(details)
+          } else {
+            console.error('Failed to fetch connection details')
+            setConnectionDetails(null)
+          }
+        } catch (error) {
+          console.error('Error fetching connection details:', error)
+          setConnectionDetails(null)
+        } finally {
+          setLoadingConnectionDetails(false)
+        }
+      }
+    })
+
     // Create nodes
     const node = container.append("g")
       .selectAll("g")
@@ -350,9 +430,13 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       .attr("fill", d => {
         if (d.id === `note-${selectedNoteId}`) return "#0d7ff2" // Selected note
         switch (d.type) {
-          case 'note': return "#4ade80" // Green for notes
-          case 'episode': return "#0d7ff2" // Blue for episodes
-          case 'document': return "#f59e0b" // Orange for documents
+          case 'content': return "#8b5cf6" // Purple for content nodes
+          case 'entity': return "#06b6d4" // Cyan for entities
+          case 'topic': return "#10b981" // Emerald for topics
+          case 'tag': return "#f59e0b" // Orange for tags
+          case 'note': return "#4ade80" // Green for notes (legacy)
+          case 'episode': return "#0d7ff2" // Blue for episodes (legacy)
+          case 'document': return "#f59e0b" // Orange for documents (legacy)
           default: return "#6b7280"
         }
       })
@@ -427,6 +511,11 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
 
   // Helper functions for Neo4j data conversion
   const determineNodeTypeFromLabels = (labels: string[]): string => {
+    if (labels.includes('Content')) return 'content'
+    if (labels.includes('Entity')) return 'entity'
+    if (labels.includes('Topic')) return 'topic'
+    if (labels.includes('Tag')) return 'tag'
+    // Legacy types
     if (labels.includes('Note')) return 'note'
     if (labels.includes('Episode')) return 'episode'
     if (labels.includes('Document')) return 'document'
@@ -435,6 +524,15 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
 
   const getNodeTitle = (props: any, nodeType: string): string => {
     if (props.title) return props.title
+    if (props.name) return props.name
+    
+    // Enhanced schema types
+    if (nodeType === 'entity') return props.name || 'Entity'
+    if (nodeType === 'topic') return props.name || 'Topic'
+    if (nodeType === 'tag') return props.name || 'Tag'
+    if (nodeType === 'content') return props.title || props.name || 'Content'
+    
+    // Legacy types
     if (nodeType === 'episode') {
       return `${props.role || 'user'}: ${(props.content || '').substring(0, 30)}...`
     }
@@ -443,7 +541,17 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
   }
 
   const calculateNodeImportance = (props: any, nodeType: string): number => {
+    if (props.importance_score) return props.importance_score
+    if (props.confidence) return props.confidence
     if (props.importance) return props.importance
+    
+    // Enhanced schema importance
+    if (nodeType === 'content') return props.importance_score || Math.min((props.content?.length || 0) / 200, 5)
+    if (nodeType === 'entity') return props.confidence || 0.5
+    if (nodeType === 'topic') return props.confidence || 0.5
+    if (nodeType === 'tag') return props.confidence || 0.3
+    
+    // Legacy types
     if (nodeType === 'note') return Math.min((props.content?.length || 0) / 100, 5)
     if (nodeType === 'episode') return props.importance || 0.5
     if (nodeType === 'document') return Math.min((props.content_text?.length || 0) / 200, 5)
@@ -456,9 +564,13 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
 
   const getNodeGroup = (nodeType: string): number => {
     switch (nodeType) {
-      case 'note': return 1
-      case 'episode': return 2
-      case 'document': return 3
+      case 'content': return 1
+      case 'entity': return 2
+      case 'topic': return 3
+      case 'tag': return 4
+      case 'note': return 5    // Legacy
+      case 'episode': return 6 // Legacy
+      case 'document': return 7 // Legacy
       default: return 0
     }
   }
@@ -548,7 +660,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
 
   const getNodeCounts = () => {
     if (graphData && graphData.nodes && graphData.nodes.length > 0) {
-      const counts = { note: 0, episode: 0, document: 0 }
+      const counts = { content: 0, entity: 0, topic: 0, tag: 0, note: 0, episode: 0, document: 0 }
       graphData.nodes.forEach(node => {
         const nodeType = determineNodeTypeFromLabels(node.labels)
         if (nodeType in counts) {
@@ -558,6 +670,10 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       return counts
     }
     return {
+      content: 0,
+      entity: 0,
+      topic: 0,
+      tag: 0,
       note: notes.length,
       episode: episodes.length,
       document: documents.length
@@ -579,22 +695,119 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
     })
   }
 
+  const formatConnectionDetails = (connection: ConnectionDetails) => {
+    const details = []
+    
+    // Connection type description
+    const typeDescriptions = {
+      'REFERENCES': 'Explicit reference (e.g., [[Note Link]])',
+      'SEMANTIC_SIMILAR': 'Semantically similar content',
+      'TEMPORAL_NEAR': 'Created close in time',
+      'reference': 'Explicit reference',
+      'semantic': 'Semantic similarity', 
+      'temporal': 'Temporal proximity'
+    }
+    
+    details.push({
+      label: 'Connection Type',
+      value: typeDescriptions[connection.type] || connection.type
+    })
+    
+    details.push({
+      label: 'Strength',
+      value: `${(connection.strength * 100).toFixed(1)}%`
+    })
+    
+    // Add property-specific details
+    if (connection.properties) {
+      if (connection.properties.similarity) {
+        details.push({
+          label: 'Similarity Score',
+          value: `${(connection.properties.similarity * 100).toFixed(1)}%`
+        })
+      }
+      if (connection.properties.time_proximity) {
+        details.push({
+          label: 'Time Proximity',
+          value: connection.properties.time_proximity.toFixed(2)
+        })
+      }
+      if (connection.properties.created_at) {
+        try {
+          const date = new Date(connection.properties.created_at)
+          if (!isNaN(date.getTime())) {
+            details.push({
+              label: 'Connection Created',
+              value: date.toLocaleString()
+            })
+          }
+        } catch (e) {
+          // Skip invalid dates
+        }
+      }
+    }
+    
+    return details
+  }
+
   return (
-    <div className="w-full h-full bg-[#27272a] rounded-lg border border-[#3f3f46] overflow-hidden">
-      <div className="p-4 border-b border-[#3f3f46]">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-lg font-medium text-[#f8fafc]">Knowledge Graph</h3>
-          {loading && (
-            <div className="animate-spin rounded-full h-4 w-4 border-2 border-[#0d7ff2] border-t-transparent"></div>
-          )}
-        </div>
+    <>
+      <div className="w-full h-full bg-[#27272a] rounded-lg border border-[#3f3f46] overflow-hidden">
+        <div className="p-4 border-b border-[#3f3f46]">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-lg font-medium text-[#f8fafc]">Knowledge Graph</h3>
+            {loading && (
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-[#0d7ff2] border-t-transparent"></div>
+            )}
+          </div>
         
         <div className="flex items-center justify-between mb-3">
           <p className="text-sm text-[#a1a1aa]">
-            {totalItems} items • Drag to explore • Click to navigate
+            {totalItems} items • Drag to explore • Click nodes to navigate • Click connections for details
           </p>
           
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => toggleContentType('content')}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                visibleTypes.has('content')
+                  ? 'bg-[#8b5cf6] text-white border-[#7c3aed]'
+                  : 'bg-transparent text-[#8b5cf6] border-[#8b5cf6] hover:bg-[#8b5cf6] hover:text-white'
+              }`}
+            >
+              Content ({nodeCounts.content || 0})
+            </button>
+            <button
+              onClick={() => toggleContentType('entity')}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                visibleTypes.has('entity')
+                  ? 'bg-[#06b6d4] text-white border-[#0891b2]'
+                  : 'bg-transparent text-[#06b6d4] border-[#06b6d4] hover:bg-[#06b6d4] hover:text-white'
+              }`}
+            >
+              Entities ({nodeCounts.entity || 0})
+            </button>
+            <button
+              onClick={() => toggleContentType('topic')}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                visibleTypes.has('topic')
+                  ? 'bg-[#10b981] text-white border-[#059669]'
+                  : 'bg-transparent text-[#10b981] border-[#10b981] hover:bg-[#10b981] hover:text-white'
+              }`}
+            >
+              Topics ({nodeCounts.topic || 0})
+            </button>
+            <button
+              onClick={() => toggleContentType('tag')}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                visibleTypes.has('tag')
+                  ? 'bg-[#f59e0b] text-black border-[#d97706]'
+                  : 'bg-transparent text-[#f59e0b] border-[#f59e0b] hover:bg-[#f59e0b] hover:text-black'
+              }`}
+            >
+              Tags ({nodeCounts.tag || 0})
+            </button>
+            {/* Legacy node types */}
             <button
               onClick={() => toggleContentType('note')}
               className={`text-xs px-2 py-1 rounded border transition-colors ${
@@ -605,31 +818,23 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
             >
               Notes ({nodeCounts.note})
             </button>
-            <button
-              onClick={() => toggleContentType('episode')}
-              className={`text-xs px-2 py-1 rounded border transition-colors ${
-                visibleTypes.has('episode')
-                  ? 'bg-[#0d7ff2] text-white border-[#0c6fd1]'
-                  : 'bg-transparent text-[#0d7ff2] border-[#0d7ff2] hover:bg-[#0d7ff2] hover:text-white'
-              }`}
-            >
-              Episodes ({nodeCounts.episode})
-            </button>
-            <button
-              onClick={() => toggleContentType('document')}
-              className={`text-xs px-2 py-1 rounded border transition-colors ${
-                visibleTypes.has('document')
-                  ? 'bg-[#f59e0b] text-black border-[#d97706]'
-                  : 'bg-transparent text-[#f59e0b] border-[#f59e0b] hover:bg-[#f59e0b] hover:text-black'
-              }`}
-            >
-              Docs ({nodeCounts.document})
-            </button>
           </div>
         </div>
         
         {/* Connection Legend */}
-        <div className="flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-3 text-xs flex-wrap">
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#8b5cf6]"></div>
+            <span className="text-[#a1a1aa]">Content</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#06b6d4]"></div>
+            <span className="text-[#a1a1aa]">Entities</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-0 border-t-2 border-[#10b981]"></div>
+            <span className="text-[#a1a1aa]">Topics</span>
+          </div>
           <div className="flex items-center gap-1">
             <div className="w-4 h-0 border-t-2 border-[#0d7ff2]"></div>
             <span className="text-[#a1a1aa]">Reference</span>
@@ -637,10 +842,6 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           <div className="flex items-center gap-1">
             <div className="w-4 h-0 border-t-2 border-[#4ade80] border-dashed"></div>
             <span className="text-[#a1a1aa]">Semantic</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <div className="w-4 h-0 border-t-2 border-[#f59e0b]"></div>
-            <span className="text-[#a1a1aa]">Temporal</span>
           </div>
         </div>
       </div>
@@ -661,5 +862,171 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
         )}
       </div>
     </div>
+
+    {/* Connection Details Modal */}
+    {showConnectionModal && selectedConnection && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-[#1c1c1e] border border-[#3f3f46] rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-[#f8fafc]">Connection Details</h3>
+            <button 
+              onClick={() => {
+                setShowConnectionModal(false)
+                setConnectionDetails(null)
+                setSelectedConnection(null)
+              }}
+              className="text-[#a1a1aa] hover:text-[#f8fafc] transition-colors"
+            >
+              ✕
+            </button>
+          </div>
+          
+          <div className="space-y-4">
+            {/* Connected Nodes */}
+            <div>
+              <h4 className="text-sm font-medium text-[#f8fafc] mb-2">Connected Items</h4>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 p-2 bg-[#27272a] rounded">
+                  <div className={`w-3 h-3 rounded-full ${
+                    selectedConnection.source.type === 'note' ? 'bg-[#4ade80]' :
+                    selectedConnection.source.type === 'episode' ? 'bg-[#0d7ff2]' : 'bg-[#f59e0b]'
+                  }`}></div>
+                  <span className="text-sm text-[#f8fafc] truncate">{selectedConnection.source.title}</span>
+                </div>
+                <div className="flex justify-center">
+                  <div className="text-[#a1a1aa]">↕</div>
+                </div>
+                <div className="flex items-center gap-2 p-2 bg-[#27272a] rounded">
+                  <div className={`w-3 h-3 rounded-full ${
+                    selectedConnection.target.type === 'note' ? 'bg-[#4ade80]' :
+                    selectedConnection.target.type === 'episode' ? 'bg-[#0d7ff2]' : 'bg-[#f59e0b]'
+                  }`}></div>
+                  <span className="text-sm text-[#f8fafc] truncate">{selectedConnection.target.title}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Connection Properties */}
+            <div>
+              <h4 className="text-sm font-medium text-[#f8fafc] mb-2">Connection Properties</h4>
+              <div className="space-y-2">
+                {formatConnectionDetails(selectedConnection).map((detail, index) => (
+                  <div key={index} className="flex justify-between items-center py-1">
+                    <span className="text-sm text-[#a1a1aa]">{detail.label}:</span>
+                    <span className="text-sm text-[#f8fafc] font-medium">{detail.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Detailed Connection Analysis */}
+            <div>
+              <h4 className="text-sm font-medium text-[#f8fafc] mb-2">Why Connected?</h4>
+              {loadingConnectionDetails ? (
+                <div className="flex items-center justify-center p-4">
+                  <div className="animate-spin rounded-full h-6 w-6 border-2 border-[#0d7ff2] border-t-transparent"></div>
+                  <span className="ml-2 text-sm text-[#a1a1aa]">Analyzing connection...</span>
+                </div>
+              ) : connectionDetails ? (
+                <div className="space-y-3">
+                  {/* Semantic Analysis */}
+                  {connectionDetails.shared_content_analysis && (
+                    <div className="bg-[#27272a] p-3 rounded">
+                      <div className="text-sm text-[#f8fafc] font-medium mb-2">Shared Content Analysis</div>
+                      
+                      {connectionDetails.shared_content_analysis.shared_words?.length > 0 && (
+                        <div className="mb-2">
+                          <div className="text-xs text-[#a1a1aa] mb-1">Key shared words:</div>
+                          <div className="flex flex-wrap gap-1">
+                            {connectionDetails.shared_content_analysis.shared_words.slice(0, 5).map((word: any, index: number) => (
+                              <span key={index} className="text-xs bg-[#0d7ff2] text-white px-2 py-1 rounded">
+                                {word.word} ({word.frequency_source + word.frequency_target}x)
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {connectionDetails.shared_content_analysis.shared_phrases?.length > 0 && (
+                        <div className="mb-2">
+                          <div className="text-xs text-[#a1a1aa] mb-1">Common phrases:</div>
+                          {connectionDetails.shared_content_analysis.shared_phrases.slice(0, 3).map((phrase: string, index: number) => (
+                            <div key={index} className="text-xs text-[#4ade80] italic">"{phrase}"</div>
+                          ))}
+                        </div>
+                      )}
+                      
+                      <div className="text-xs text-[#a1a1aa]">
+                        {connectionDetails.shared_content_analysis.total_shared_words} shared words • 
+                        {(connectionDetails.shared_content_analysis.similarity_ratio * 100).toFixed(1)}% content overlap
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Reference Analysis */}
+                  {connectionDetails.reference_analysis && (
+                    <div className="bg-[#27272a] p-3 rounded">
+                      <div className="text-sm text-[#f8fafc] font-medium mb-2">Explicit References Found</div>
+                      {connectionDetails.reference_analysis.references_found?.length > 0 ? (
+                        <div className="space-y-1">
+                          {connectionDetails.reference_analysis.references_found.map((ref: string, index: number) => (
+                            <div key={index} className="text-xs text-[#4ade80] font-mono bg-[#1a1a1a] px-2 py-1 rounded">
+                              {ref}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-xs text-[#a1a1aa]">No explicit references found</div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Temporal Analysis */}
+                  {connectionDetails.temporal_analysis && (
+                    <div className="bg-[#27272a] p-3 rounded">
+                      <div className="text-sm text-[#f8fafc] font-medium mb-2">Temporal Proximity</div>
+                      <div className="text-xs text-[#a1a1aa]">
+                        {connectionDetails.temporal_analysis.created_within}
+                        {connectionDetails.temporal_analysis.temporal_proximity === 'very_close' && 
+                          <span className="text-[#4ade80] ml-2">Very Close</span>
+                        }
+                        {connectionDetails.temporal_proximity === 'close' && 
+                          <span className="text-[#f59e0b] ml-2">Close</span>
+                        }
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-sm text-[#a1a1aa] bg-[#27272a] p-3 rounded">
+                  {selectedConnection.type === 'REFERENCES' || selectedConnection.type === 'reference' ? 
+                    'This connection was created because one item explicitly references the other using [[Link]] syntax or by title mention.' :
+                  selectedConnection.type === 'SEMANTIC_SIMILAR' || selectedConnection.type === 'semantic' ?
+                    'This connection was created because the items have similar content based on semantic analysis and word overlap.' :
+                  selectedConnection.type === 'TEMPORAL_NEAR' || selectedConnection.type === 'temporal' ?
+                    'This connection was created because the items were created close together in time.' :
+                    'This connection represents a relationship detected between the items.'
+                  }
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6 flex justify-end">
+            <button 
+              onClick={() => {
+                setShowConnectionModal(false)
+                setConnectionDetails(null)
+                setSelectedConnection(null)
+              }}
+              className="px-4 py-2 bg-[#0d7ff2] text-white rounded hover:bg-[#0c6fd1] transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }

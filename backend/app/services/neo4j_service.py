@@ -429,35 +429,125 @@ class Neo4jService:
         user_id: str,
         query: str,
         content_types: Optional[List[str]] = None,
-        limit: int = 20
+        limit: int = 20,
+        # Metadata filters
+        entity_types: Optional[List[str]] = None,
+        topic_types: Optional[List[str]] = None,
+        tag_categories: Optional[List[str]] = None,
+        min_importance: Optional[float] = None,
+        max_importance: Optional[float] = None,
+        min_urgency: Optional[float] = None,
+        max_urgency: Optional[float] = None,
+        min_confidence: Optional[float] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Search across all content types in the knowledge graph"""
+        """Search across all content types in the knowledge graph with metadata filtering"""
         with self.driver.session() as session:
-            # Build content type filter
-            type_filter = ""
+            # Build search conditions
+            search_conditions = []
+            params = {"user_id": user_id, "search_query": query, "limit": limit}
+            
+            # Content type filter
             if content_types:
-                labels = "|".join([f":{t}" for t in content_types])
-                type_filter = f"WHERE node{labels}"
+                labels = "|".join([f":{t.title()}" for t in content_types])
+                search_conditions.append(f"node{labels}")
+            
+            # Add text search conditions
+            text_conditions = [
+                "toLower(coalesce(node.title, '')) CONTAINS toLower($search_query)",
+                "toLower(coalesce(node.content, '')) CONTAINS toLower($search_query)",
+                "toLower(coalesce(node.content_text, '')) CONTAINS toLower($search_query)",
+                "toLower(coalesce(node.name, '')) CONTAINS toLower($search_query)"
+            ]
+            
+            # Entity type filter
+            if entity_types:
+                entity_conditions = []
+                for i, entity_type in enumerate(entity_types):
+                    param_name = f"entity_type_{i}"
+                    entity_conditions.append(f"node.entity_type = ${param_name}")
+                    params[param_name] = entity_type
+                search_conditions.append(f"({' OR '.join(entity_conditions)})")
+            
+            # Topic type filter
+            if topic_types:
+                topic_conditions = []
+                for i, topic_type in enumerate(topic_types):
+                    param_name = f"topic_type_{i}"
+                    topic_conditions.append(f"node.topic_type = ${param_name}")
+                    params[param_name] = topic_type
+                search_conditions.append(f"({' OR '.join(topic_conditions)})")
+            
+            # Tag category filter
+            if tag_categories:
+                tag_conditions = []
+                for i, tag_category in enumerate(tag_categories):
+                    param_name = f"tag_category_{i}"
+                    tag_conditions.append(f"node.category = ${param_name}")
+                    params[param_name] = tag_category
+                search_conditions.append(f"({' OR '.join(tag_conditions)})")
+            
+            # Numeric filters
+            if min_importance is not None:
+                search_conditions.append("coalesce(node.importance_score, 0) >= $min_importance")
+                params["min_importance"] = min_importance
+            
+            if max_importance is not None:
+                search_conditions.append("coalesce(node.importance_score, 0) <= $max_importance")
+                params["max_importance"] = max_importance
+            
+            if min_urgency is not None:
+                search_conditions.append("coalesce(node.urgency_score, 0) >= $min_urgency")
+                params["min_urgency"] = min_urgency
+            
+            if max_urgency is not None:
+                search_conditions.append("coalesce(node.urgency_score, 0) <= $max_urgency")
+                params["max_urgency"] = max_urgency
+            
+            if min_confidence is not None:
+                search_conditions.append("coalesce(node.confidence, 0) >= $min_confidence")
+                params["min_confidence"] = min_confidence
+            
+            # Date filters
+            if date_from:
+                search_conditions.append("node.created_at >= datetime($date_from)")
+                params["date_from"] = date_from
+            
+            if date_to:
+                search_conditions.append("node.created_at <= datetime($date_to)")
+                params["date_to"] = date_to
+            
+            # Build WHERE clause
+            where_clause = ""
+            if search_conditions:
+                where_clause = "WHERE " + " AND ".join(search_conditions)
+            
+            # Add text search as OR condition
+            if where_clause:
+                text_search = " OR ".join(text_conditions)
+                where_clause += f" AND ({text_search})"
+            else:
+                text_search = " OR ".join(text_conditions)
+                where_clause = f"WHERE ({text_search})"
             
             query_cypher = f"""
             MATCH (u:User {{id: $user_id}})
-            MATCH (u)-[:CREATED|:UPLOADED|:PARTICIPATED_IN]-(node)
-            {type_filter}
-            WHERE 
-                toLower(coalesce(node.title, '')) CONTAINS toLower($search_query)
-                OR toLower(coalesce(node.content, '')) CONTAINS toLower($search_query)
-                OR toLower(coalesce(node.content_text, '')) CONTAINS toLower($search_query)
+            MATCH (u)-[:CREATED|:UPLOADED|:PARTICIPATED_IN|:HAS_CONTENT]-(node)
+            {where_clause}
             RETURN node, labels(node) as node_types
             ORDER BY 
                 CASE 
                     WHEN toLower(coalesce(node.title, '')) CONTAINS toLower($search_query) THEN 1
-                    ELSE 2
+                    WHEN toLower(coalesce(node.name, '')) CONTAINS toLower($search_query) THEN 2
+                    ELSE 3
                 END,
+                coalesce(node.importance_score, node.confidence, 0) DESC,
                 node.created_at DESC
             LIMIT $limit
             """
             
-            result = session.run(query_cypher, user_id=user_id, search_query=query, limit=limit)
+            result = session.run(query_cypher, **params)
             
             search_results = []
             for record in result:
@@ -466,6 +556,85 @@ class Neo4jService:
                 search_results.append(node)
             
             return search_results
+    
+    async def get_search_filter_options(self, user_id: str) -> Dict[str, Any]:
+        """Get available filter options for the user's content"""
+        with self.driver.session() as session:
+            # Get unique entity types
+            entity_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_CONTENT]-(entity:Entity)
+            RETURN DISTINCT entity.entity_type as type
+            ORDER BY type
+            """
+            entity_result = session.run(entity_query, user_id=user_id)
+            entity_types = [record["type"] for record in entity_result if record["type"]]
+            
+            # Get unique topic types
+            topic_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_CONTENT]-(topic:Topic)
+            RETURN DISTINCT topic.topic_type as type
+            ORDER BY type
+            """
+            topic_result = session.run(topic_query, user_id=user_id)
+            topic_types = [record["type"] for record in topic_result if record["type"]]
+            
+            # Get unique tag categories
+            tag_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_CONTENT]-(tag:Tag)
+            RETURN DISTINCT tag.category as category
+            ORDER BY category
+            """
+            tag_result = session.run(tag_query, user_id=user_id)
+            tag_categories = [record["category"] for record in tag_result if record["category"]]
+            
+            # Get content types
+            content_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_CONTENT]-(content:Content)
+            RETURN DISTINCT content.content_type as type
+            ORDER BY type
+            """
+            content_result = session.run(content_query, user_id=user_id)
+            content_types = [record["type"] for record in content_result if record["type"]]
+            
+            # Get numeric ranges
+            ranges_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_CONTENT]-(node)
+            WHERE node.importance_score IS NOT NULL OR node.urgency_score IS NOT NULL OR node.confidence IS NOT NULL
+            RETURN 
+                min(coalesce(node.importance_score, 0)) as min_importance,
+                max(coalesce(node.importance_score, 0)) as max_importance,
+                min(coalesce(node.urgency_score, 0)) as min_urgency,
+                max(coalesce(node.urgency_score, 0)) as max_urgency,
+                min(coalesce(node.confidence, 0)) as min_confidence,
+                max(coalesce(node.confidence, 0)) as max_confidence,
+                min(node.created_at) as min_date,
+                max(node.created_at) as max_date
+            """
+            ranges_result = session.run(ranges_query, user_id=user_id)
+            ranges = ranges_result.single()
+            
+            return {
+                "entity_types": entity_types,
+                "topic_types": topic_types,
+                "tag_categories": tag_categories,
+                "content_types": content_types,
+                "importance_range": {
+                    "min": float(ranges["min_importance"]) if ranges and ranges["min_importance"] is not None else 0.0,
+                    "max": float(ranges["max_importance"]) if ranges and ranges["max_importance"] is not None else 1.0
+                },
+                "urgency_range": {
+                    "min": float(ranges["min_urgency"]) if ranges and ranges["min_urgency"] is not None else 0.0,
+                    "max": float(ranges["max_urgency"]) if ranges and ranges["max_urgency"] is not None else 1.0
+                },
+                "confidence_range": {
+                    "min": float(ranges["min_confidence"]) if ranges and ranges["min_confidence"] is not None else 0.0,
+                    "max": float(ranges["max_confidence"]) if ranges and ranges["max_confidence"] is not None else 1.0
+                },
+                "date_range": {
+                    "min": ranges["min_date"].isoformat() if ranges and ranges["min_date"] else None,
+                    "max": ranges["max_date"].isoformat() if ranges and ranges["max_date"] else None
+                }
+            }
     
     async def get_knowledge_clusters(self, user_id: str) -> List[Dict[str, Any]]:
         """Find knowledge clusters using community detection"""
@@ -781,6 +950,184 @@ class Neo4jService:
             
             result = session.run(query, rel_id=rel_id, strength=strength)
             return result.single() is not None
+    
+    async def get_connection_details(self, source_id: str, target_id: str, user_id: str) -> Dict[str, Any]:
+        """Get detailed information about a connection including shared content analysis"""
+        with self.driver.session() as session:
+            # Get the relationship and both nodes
+            query = """
+            MATCH (source {id: $source_id})-[r]-(target {id: $target_id})
+            RETURN source, target, r, type(r) as rel_type, properties(r) as rel_props
+            """
+            
+            result = session.run(query, source_id=source_id, target_id=target_id)
+            record = result.single()
+            
+            if not record:
+                return {"error": "Connection not found"}
+            
+            source_node = dict(record["source"])
+            target_node = dict(record["target"])
+            relationship = record["r"]
+            rel_type = record["rel_type"]
+            rel_props = record["rel_props"]
+            
+            # Get content for analysis
+            source_content = source_node.get('content', '') or source_node.get('content_text', '')
+            target_content = target_node.get('content', '') or target_node.get('content_text', '')
+            
+            connection_details = {
+                "source": source_node,
+                "target": target_node,
+                "relationship_type": rel_type,
+                "properties": rel_props,
+                "created_at": rel_props.get('created_at')
+            }
+            
+            # Add specific analysis based on connection type
+            if rel_type == "SEMANTIC_SIMILAR":
+                shared_analysis = self._analyze_semantic_connection(source_content, target_content)
+                connection_details["shared_content_analysis"] = shared_analysis
+            elif rel_type == "REFERENCES":
+                ref_analysis = self._analyze_reference_connection(source_content, target_content, source_node, target_node)
+                connection_details["reference_analysis"] = ref_analysis
+            elif rel_type == "TEMPORAL_NEAR":
+                temporal_analysis = self._analyze_temporal_connection(source_node, target_node)
+                connection_details["temporal_analysis"] = temporal_analysis
+            
+            return connection_details
+    
+    def _analyze_semantic_connection(self, content1: str, content2: str) -> Dict[str, Any]:
+        """Analyze what content is shared between two semantically connected items"""
+        import re
+        from collections import Counter
+        
+        # Extract meaningful words (longer than 3 chars, not common words)
+        stop_words = {
+            'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 
+            'this', 'that', 'these', 'those', 'have', 'has', 'had', 'will', 'would', 
+            'could', 'should', 'can', 'may', 'might', 'must', 'shall', 'are', 'is', 'was', 
+            'were', 'been', 'being', 'do', 'does', 'did', 'done', 'get', 'got', 'getting',
+            'make', 'made', 'making', 'take', 'took', 'taken', 'taking', 'come', 'came',
+            'coming', 'go', 'went', 'going', 'see', 'saw', 'seen', 'seeing', 'know', 
+            'knew', 'known', 'knowing', 'think', 'thought', 'thinking', 'say', 'said', 
+            'saying', 'tell', 'told', 'telling', 'work', 'worked', 'working', 'use', 
+            'used', 'using', 'find', 'found', 'finding', 'give', 'gave', 'given', 'giving'
+        }
+        
+        # Extract words from both contents
+        words1 = re.findall(r'\b[a-zA-Z]{4,}\b', content1.lower())
+        words2 = re.findall(r'\b[a-zA-Z]{4,}\b', content2.lower())
+        
+        # Filter out stop words
+        meaningful_words1 = [w for w in words1 if w not in stop_words]
+        meaningful_words2 = [w for w in words2 if w not in stop_words]
+        
+        # Find common words
+        common_words = list(set(meaningful_words1) & set(meaningful_words2))
+        
+        # Get word frequencies
+        freq1 = Counter(meaningful_words1)
+        freq2 = Counter(meaningful_words2)
+        
+        # Calculate importance of shared words
+        shared_word_analysis = []
+        for word in common_words:
+            importance = min(freq1[word], freq2[word]) * len(word)  # Basic importance scoring
+            shared_word_analysis.append({
+                "word": word,
+                "frequency_source": freq1[word],
+                "frequency_target": freq2[word],
+                "importance": importance
+            })
+        
+        # Sort by importance
+        shared_word_analysis.sort(key=lambda x: x["importance"], reverse=True)
+        
+        # Look for shared phrases (2-3 words)
+        shared_phrases = []
+        for i in range(len(words1) - 1):
+            phrase = " ".join(words1[i:i+2])
+            if phrase in " ".join(words2) and len(phrase) > 8:
+                shared_phrases.append(phrase)
+        
+        return {
+            "shared_words": shared_word_analysis[:10],  # Top 10 most important
+            "shared_phrases": list(set(shared_phrases))[:5],  # Top 5 unique phrases
+            "total_shared_words": len(common_words),
+            "similarity_ratio": len(common_words) / max(len(set(meaningful_words1 + meaningful_words2)), 1)
+        }
+    
+    def _analyze_reference_connection(self, content1: str, content2: str, node1: Dict, node2: Dict) -> Dict[str, Any]:
+        """Analyze reference connections to show what exactly is referenced"""
+        import re
+        
+        # Look for [[Title]] style references
+        wiki_links = re.findall(r'\[\[([^\]]+)\]\]', content1)
+        title_matches = []
+        
+        target_title = node2.get('title', '')
+        source_title = node1.get('title', '')
+        
+        # Check if target title is referenced in source
+        for link in wiki_links:
+            if link.lower() == target_title.lower():
+                title_matches.append(f"[[{link}]]")
+        
+        # Check for direct title mentions (case insensitive)
+        if target_title and target_title.lower() in content1.lower():
+            title_matches.append(f"Title mention: '{target_title}'")
+        
+        # Check reverse direction
+        reverse_wiki_links = re.findall(r'\[\[([^\]]+)\]\]', content2)
+        for link in reverse_wiki_links:
+            if link.lower() == source_title.lower():
+                title_matches.append(f"[[{link}]] (reverse)")
+                
+        if source_title and source_title.lower() in content2.lower():
+            title_matches.append(f"Title mention: '{source_title}' (reverse)")
+        
+        return {
+            "reference_type": "explicit_link",
+            "references_found": title_matches,
+            "bidirectional": len([m for m in title_matches if "(reverse)" in m]) > 0
+        }
+    
+    def _analyze_temporal_connection(self, node1: Dict, node2: Dict) -> Dict[str, Any]:
+        """Analyze temporal connections"""
+        from datetime import datetime
+        
+        created1 = node1.get('created_at')
+        created2 = node2.get('created_at')
+        
+        if created1 and created2:
+            # Convert to datetime if needed
+            if isinstance(created1, str):
+                try:
+                    created1 = datetime.fromisoformat(created1.replace('Z', '+00:00'))
+                except:
+                    created1 = None
+            if isinstance(created2, str):
+                try:
+                    created2 = datetime.fromisoformat(created2.replace('Z', '+00:00'))
+                except:
+                    created2 = None
+            
+            if created1 and created2:
+                time_diff = abs((created1 - created2).total_seconds())
+                hours_apart = time_diff / 3600
+                
+                return {
+                    "time_difference_hours": round(hours_apart, 2),
+                    "created_within": f"{round(hours_apart, 1)} hours of each other",
+                    "temporal_proximity": "very_close" if hours_apart < 1 else "close" if hours_apart < 6 else "same_day"
+                }
+        
+        return {
+            "time_difference_hours": None,
+            "created_within": "Unknown timing",
+            "temporal_proximity": "unknown"
+        }
 
 # Global Neo4j service instance
 neo4j_service = Neo4jService()

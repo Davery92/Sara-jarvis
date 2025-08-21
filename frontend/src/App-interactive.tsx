@@ -8,6 +8,7 @@ import MermaidDiagram from './components/MermaidDiagram'
 import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
+import VulnerabilityWatch from './components/VulnerabilityWatch'
 import Settings from './pages/Settings'
 
 // LiveTimer component that updates every second without causing parent re-renders
@@ -53,7 +54,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, documents, calendar, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, documents, calendar, vulnerability-watch, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -316,8 +317,13 @@ function App() {
       setQuickChatResponse('Sara is typing...')
     }
 
+    // State for streaming
+    let streamingContent = ''
+    let isUsingTools = false
+    let toolActivity = ''
+
     try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/chat`, {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -326,43 +332,125 @@ function App() {
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        console.log('🔍 Frontend received response:', data)
-        console.log('🔍 Message content:', data.message?.content)
-        console.log('🔍 Message content length:', data.message?.content?.length)
-        
-        // DEBUGGING: Alert to see what we got
-        if (data.message?.content) {
-          console.log('✅ RESPONSE RECEIVED:', data.message.content)
-        } else {
-          console.log('❌ NO CONTENT IN RESPONSE:', data)
-          alert('NO CONTENT: ' + JSON.stringify(data))
-        }
-        
-        if (isQuickChat) {
-          setQuickChatResponse(data.message.content)
-        } else {
-          setChatMessages(prev => [...prev, {
-            role: 'assistant',
-            content: data.message.content,
-            timestamp: new Date()
-          }])
-        }
-        // Refresh timers/reminders after chat in case something was created
-        await loadTimersAndReminders()
-      } else {
-        const errorMsg = 'Sorry, I encountered an error. Please try again.'
-        if (isQuickChat) {
-          setQuickChatResponse(errorMsg)
-        } else {
-          setChatMessages(prev => [...prev, {
-            role: 'assistant',
-            content: errorMsg,
-            timestamp: new Date()
-          }])
-        }
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('No response body reader available')
+      }
+
+      const decoder = new TextDecoder()
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          
+          if (done) break
+          
+          const chunk = decoder.decode(value)
+          const lines = chunk.split('\n')
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const eventData = JSON.parse(line.slice(6))
+                console.log('Received SSE event:', eventData)
+                
+                // Debug tool events specifically
+                if (eventData.type?.includes('tool')) {
+                  console.log('🔧 TOOL EVENT RECEIVED:', eventData)
+                }
+                
+                switch (eventData.type) {
+                  case 'tool_calls_start':
+                    isUsingTools = true
+                    toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
+                    if (isQuickChat) {
+                      setQuickChatResponse(toolActivity)
+                    }
+                    break
+                    
+                  case 'tool_executing':
+                    toolActivity = `🔧 Using ${eventData.data.tool}...`
+                    if (isQuickChat) {
+                      setQuickChatResponse(toolActivity)
+                    }
+                    break
+                    
+                  case 'thinking':
+                    toolActivity = '💭 Processing results...'
+                    if (isQuickChat) {
+                      setQuickChatResponse(toolActivity)
+                    }
+                    break
+                    
+                  case 'text_chunk':
+                    streamingContent = eventData.data.full_content
+                    if (isQuickChat) {
+                      setQuickChatResponse(streamingContent)
+                    } else {
+                      // Update the last message with streaming content
+                      setChatMessages(prev => {
+                        const newMessages = [...prev]
+                        if (newMessages[newMessages.length - 1]?.role === 'assistant') {
+                          newMessages[newMessages.length - 1].content = streamingContent
+                        } else {
+                          newMessages.push({
+                            role: 'assistant',
+                            content: streamingContent,
+                            timestamp: new Date()
+                          })
+                        }
+                        return newMessages
+                      })
+                    }
+                    break
+                    
+                  case 'final_response':
+                    const finalContent = eventData.data.content
+                    if (isQuickChat) {
+                      setQuickChatResponse(finalContent)
+                    } else {
+                      setChatMessages(prev => {
+                        const newMessages = [...prev]
+                        if (newMessages[newMessages.length - 1]?.role === 'assistant') {
+                          newMessages[newMessages.length - 1].content = finalContent
+                        } else {
+                          newMessages.push({
+                            role: 'assistant',
+                            content: finalContent,
+                            timestamp: new Date()
+                          })
+                        }
+                        return newMessages
+                      })
+                    }
+                    break
+                    
+                  case 'response_ready':
+                    setLoading(false)
+                    isUsingTools = false
+                    break
+                    
+                  case 'error':
+                    console.error('Streaming error:', eventData.message)
+                    setLoading(false)
+                    break
+                }
+              } catch (e) {
+                console.warn('Failed to parse SSE data:', line)
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      
+      // Refresh timers/reminders after chat in case something was created
+      await loadTimersAndReminders()
     } catch (error) {
       const errorMsg = 'Connection error. Please check your network and try again.'
       if (isQuickChat) {
@@ -374,8 +462,9 @@ function App() {
           timestamp: new Date()
         }])
       }
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const createNote = async (e) => {
@@ -821,6 +910,13 @@ function App() {
                   <span>Calendar</span>
                 </button>
                 <button
+                  onClick={() => { setView('vulnerability-watch'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'vulnerability-watch' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🛡️</span>
+                  <span>Vulnerability Watch</span>
+                </button>
+                <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -884,6 +980,13 @@ function App() {
             >
               <span className="material-icons">calendar_today</span>
               <span className="text-xs">Calendar</span>
+            </button>
+            <button
+              onClick={() => setView('vulnerability-watch')}
+              className={`flex flex-col items-center ${view === 'vulnerability-watch' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">security</span>
+              <span className="text-xs">Vulns</span>
             </button>
             <button
               onClick={() => setView('settings')}
@@ -1599,6 +1702,10 @@ function App() {
             </div>
           )}
 
+          {view === 'vulnerability-watch' && (
+            <VulnerabilityWatch onToast={showToast} />
+          )}
+
           {view === 'settings' && (
             <Settings />
           )}
@@ -1649,6 +1756,13 @@ function App() {
           >
             <span className="material-icons text-lg">calendar_today</span>
             <span className="text-xs">Calendar</span>
+          </button>
+          <button
+            onClick={() => setView('vulnerability-watch')}
+            className={`flex flex-col items-center p-2 ${view === 'vulnerability-watch' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">security</span>
+            <span className="text-xs">Vulns</span>
           </button>
         </div>
       </nav>

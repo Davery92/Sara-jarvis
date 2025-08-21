@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.services.memory_service import MemoryService
+from app.services.contextual_awareness_service import contextual_awareness_service
 from app.tools.registry import tool_registry
 import logging
 import uuid
@@ -136,9 +137,18 @@ async def chat(
         # Determine retrieval needs
         retrieval_needs = chat_router.should_retrieve_memory(user_message)
         
+        # Get Sara's current contextual awareness (living context)
+        living_context = await contextual_awareness_service.get_current_living_context(str(current_user.id))
+        
         # Prepare context
         context_parts = []
         citations = []
+        
+        # Always include living context for Sara's awareness
+        if living_context:
+            context_parts.append("## Sara's Current Contextual Awareness")
+            context_parts.append(living_context)
+            context_parts.append("")  # Add spacing
         
         if retrieval_needs["needs_context"]:
             # Determine which scopes to search
@@ -175,12 +185,31 @@ async def chat(
                             context_parts.append(f"- Document '{result['doc_title']}': {result['text'][:200]}...")
                             citations.append(f"doc:{result['doc_id']}#{result['chunk_idx']}")
         
+        # Generate proactive suggestions based on context and user message
+        proactive_suggestions = await _generate_proactive_suggestions(
+            str(current_user.id), user_message, living_context
+        )
+        
         # Prepare messages for LLM
-        system_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant. You have access to tools to manage notes, reminders, timers, calendar events, and search through personal memory.
+        base_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant with contextual awareness. You have access to tools to manage notes, reminders, timers, calendar events, and search through personal memory.
 
-When you use information from memory or documents, cite them using the format provided in the context. Keep responses conversational and helpful.
+You have been provided with your current contextual awareness which includes active timers, upcoming reminders, mood analysis, and priority items. Use this information to provide proactive and contextually appropriate responses.
+
+When you use information from memory or documents, cite them using the format provided in the context. Keep responses conversational and helpful, and consider your current contextual awareness when providing assistance.
 
 Available tools: notes management, reminders, timers, calendar events, and memory search."""
+        
+        # Add proactive suggestions if any were generated
+        if proactive_suggestions:
+            suggestions_text = "\n".join([f"- {suggestion}" for suggestion in proactive_suggestions])
+            system_prompt = base_prompt + f"""
+
+PROACTIVE SUGGESTIONS: Based on the user's message and current context, consider offering these helpful suggestions naturally in your response:
+{suggestions_text}
+
+Only mention suggestions that feel genuinely helpful and relevant to the conversation flow. Don't force all suggestions - use your judgment."""
+        else:
+            system_prompt = base_prompt
         
         llm_messages = [{"role": "system", "content": system_prompt}]
         
@@ -334,3 +363,67 @@ async def list_chat_sessions(
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve sessions")
+
+
+async def _generate_proactive_suggestions(user_id: str, user_message: str, living_context: str = None) -> List[str]:
+    """Generate proactive suggestions based on user message and context"""
+    
+    suggestions = []
+    message_lower = user_message.lower()
+    
+    try:
+        # Time-based suggestions
+        time_keywords = ["later", "tomorrow", "next week", "in an hour", "tonight", "this afternoon"]
+        if any(keyword in message_lower for keyword in time_keywords):
+            if "remind" not in message_lower and "timer" not in message_lower:
+                suggestions.append("Would you like me to create a reminder for this?")
+        
+        # Task/activity suggestions
+        task_keywords = ["need to", "have to", "should", "must", "going to", "planning to"]
+        if any(keyword in message_lower for keyword in task_keywords):
+            if "remind" not in message_lower and "note" not in message_lower:
+                suggestions.append("I can help you create a reminder or note to track this task.")
+        
+        # Meeting/appointment suggestions
+        meeting_keywords = ["meeting", "appointment", "call", "zoom", "conference"]
+        if any(keyword in message_lower for keyword in meeting_keywords):
+            suggestions.append("Would you like me to add this to your calendar or set a reminder?")
+        
+        # Learning/reference suggestions
+        learning_keywords = ["learned", "interesting", "important", "remember this", "good to know"]
+        if any(keyword in message_lower for keyword in learning_keywords):
+            if "note" not in message_lower:
+                suggestions.append("This sounds like something worth saving as a note for future reference.")
+        
+        # Recipe/cooking suggestions
+        cooking_keywords = ["cook", "recipe", "ingredients", "grocery", "shopping"]
+        if any(keyword in message_lower for keyword in cooking_keywords):
+            suggestions.append("I can help you save this recipe or create a shopping list.")
+        
+        # Workout/fitness suggestions  
+        fitness_keywords = ["workout", "exercise", "gym", "run", "training"]
+        if any(keyword in message_lower for keyword in fitness_keywords):
+            if "timer" not in message_lower:
+                suggestions.append("Would you like me to set a workout timer or log this session?")
+        
+        # Context-based suggestions from living context
+        if living_context:
+            # Check for active timers
+            if "Active Timers: 0" not in living_context and "timer" in message_lower:
+                suggestions.append("I notice you have active timers running. Let me know if you need to check or modify them.")
+            
+            # Check for upcoming reminders
+            if "Upcoming Reminders: 0" not in living_context and any(word in message_lower for word in ["busy", "schedule", "time"]):
+                suggestions.append("You have upcoming reminders - would you like me to review what's coming up?")
+        
+        # Question/uncertainty suggestions
+        question_keywords = ["how do i", "what should", "not sure", "confused", "help"]
+        if any(keyword in message_lower for keyword in question_keywords):
+            suggestions.append("I can search through your notes and memories to see if we've discussed this before.")
+        
+        # Limit suggestions to avoid overwhelming
+        return suggestions[:2]  # Maximum 2 suggestions
+        
+    except Exception as e:
+        logger.error(f"Error generating proactive suggestions: {e}")
+        return []

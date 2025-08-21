@@ -96,6 +96,44 @@ export interface AISettingsUpdate {
   embedding_dimension?: number
 }
 
+export interface VulnerabilityReport {
+  id: string
+  report_date: string
+  title: string
+  summary?: string
+  content?: string
+  vulnerabilities_count: number
+  critical_count: number
+  kev_count: number
+  created_at: string
+}
+
+export interface VulnerabilityReportList {
+  id: string
+  report_date: string
+  title: string
+  summary?: string
+  vulnerabilities_count: number
+  critical_count: number
+  kev_count: number
+  created_at: string
+}
+
+export interface NotificationRequest {
+  type: string
+  title: string
+  message: string
+  reference_id?: string
+}
+
+export interface NotificationResponse {
+  id: string
+  notification_type: string
+  title: string
+  message: string
+  sent_at: string
+}
+
 class ApiClient {
   private client: AxiosInstance
 
@@ -178,7 +216,6 @@ class ApiClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
       credentials: 'include',
       body: JSON.stringify({
@@ -356,6 +393,37 @@ class ApiClient {
 
   async testAISettings(): Promise<any> {
     const response = await this.client.post('/settings/ai/test')
+    return response.data
+  }
+
+  // Vulnerability Watch endpoints
+  async getVulnerabilityReports(): Promise<VulnerabilityReportList[]> {
+    const response = await this.client.get('/api/vulnerability-reports')
+    return response.data
+  }
+
+  async getVulnerabilityReport(reportId: string): Promise<VulnerabilityReport> {
+    const response = await this.client.get(`/api/vulnerability-reports/${reportId}`)
+    return response.data
+  }
+
+  async getLatestVulnerabilityReport(): Promise<VulnerabilityReport> {
+    const response = await this.client.get('/api/vulnerability-reports/latest')
+    return response.data
+  }
+
+  async generateVulnerabilityReport(): Promise<any> {
+    const response = await this.client.post('/api/vulnerability-reports/generate')
+    return response.data
+  }
+
+  async sendNtfyNotification(notification: NotificationRequest): Promise<NotificationResponse> {
+    const response = await this.client.post('/api/notifications/ntfy', notification)
+    return response.data
+  }
+
+  async getNotificationHistory(): Promise<NotificationResponse[]> {
+    const response = await this.client.get('/api/notifications/history')
     return response.data
   }
 }

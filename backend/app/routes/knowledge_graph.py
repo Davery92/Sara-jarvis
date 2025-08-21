@@ -35,6 +35,17 @@ class SearchRequest(BaseModel):
     query: str
     content_types: Optional[List[str]] = None
     limit: int = 20
+    # Metadata filters
+    entity_types: Optional[List[str]] = None
+    topic_types: Optional[List[str]] = None
+    tag_categories: Optional[List[str]] = None
+    min_importance: Optional[float] = None
+    max_importance: Optional[float] = None
+    min_urgency: Optional[float] = None
+    max_urgency: Optional[float] = None
+    min_confidence: Optional[float] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
 
 class ConnectedContentRequest(BaseModel):
     node_id: str
@@ -100,7 +111,18 @@ async def search_knowledge_graph(
             user_id=current_user.id,
             query=request.query,
             content_types=request.content_types,
-            limit=request.limit
+            limit=request.limit,
+            # Metadata filters
+            entity_types=request.entity_types,
+            topic_types=request.topic_types,
+            tag_categories=request.tag_categories,
+            min_importance=request.min_importance,
+            max_importance=request.max_importance,
+            min_urgency=request.min_urgency,
+            max_urgency=request.max_urgency,
+            min_confidence=request.min_confidence,
+            date_from=request.date_from,
+            date_to=request.date_to
         )
         
         # Format results for frontend consumption
@@ -130,6 +152,27 @@ async def search_knowledge_graph(
     except Exception as e:
         logger.error(f"Knowledge graph search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@router.get("/filter-options")
+async def get_filter_options(
+    current_user: User = Depends(get_current_user)
+):
+    """Get available filter options for search"""
+    try:
+        filter_options = await neo4j_service.get_search_filter_options(str(current_user.id))
+        return {
+            "entity_types": filter_options.get("entity_types", []),
+            "topic_types": filter_options.get("topic_types", []),
+            "tag_categories": filter_options.get("tag_categories", []),
+            "content_types": filter_options.get("content_types", []),
+            "date_range": filter_options.get("date_range", {}),
+            "importance_range": filter_options.get("importance_range", {}),
+            "urgency_range": filter_options.get("urgency_range", {}),
+            "confidence_range": filter_options.get("confidence_range", {})
+        }
+    except Exception as e:
+        logger.error(f"Failed to get filter options: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get filter options: {str(e)}")
 
 @router.post("/connected-content")
 async def get_connected_content(

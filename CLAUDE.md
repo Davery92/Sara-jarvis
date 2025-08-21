@@ -180,6 +180,37 @@ Tools are registered in `app/tools/registry.py`:
 - `docker-compose.yml`: Complete service orchestration
 - `frontend/src/config.ts`: Dynamic API URL configuration
 
+### Vulnerability Watch System
+New defensive security monitoring feature for vulnerability intelligence:
+
+#### Features
+- **Daily Reports**: Automated 5am generation of vulnerability intelligence reports
+- **Multi-Source Intelligence**: MSRC, CISA KEV, NVD, Project Zero, Exploit-DB
+- **Priority Scoring**: Known exploited (KEV) and critical vulnerabilities highlighted
+- **NTFY Notifications**: Report ready alerts and critical vulnerability notifications
+- **Knowledge Integration**: Reports processed into Sara's Neo4j knowledge graph
+- **Mobile Responsive**: Clean UI with sidebar navigation and markdown rendering
+
+#### Database Tables
+- `vulnerability_report`: Daily reports with metadata and markdown content
+- `notification_log`: NTFY notification tracking for debugging
+
+#### API Endpoints
+- `GET /api/vulnerability-reports`: List all reports
+- `GET /api/vulnerability-reports/{id}`: Get specific report content
+- `POST /api/vulnerability-reports/generate`: Manual report generation
+- `POST /api/notifications/ntfy`: Send test notifications
+
+#### Daily Automation
+- **Cron Job**: `/home/david/jarvis/scripts/generate_daily_vulnerability_report.py`
+- **Schedule**: Daily at 5:00 AM via crontab
+- **Logs**: `/home/david/jarvis/logs/vulnerability_reports.log`
+
+#### Frontend Components
+- `frontend/src/components/VulnerabilityWatch.tsx`: Main vulnerability watch interface
+- **Navigation**: "Vulns" button in sidebar with security icon
+- **Layout**: Left sidebar (reports list) + right panel (markdown viewer)
+
 ### Environment Variables
 Key variables for development:
 - `DATABASE_URL`: PostgreSQL connection string
@@ -188,3 +219,4 @@ Key variables for development:
 - `EMBEDDING_MODEL`: Embedding model (bge-m3)
 - `ASSISTANT_NAME`: Branding (Sara)
 - `DOMAIN`: Target domain (sara.avery.cloud)
+- `NTFY_VULNERABILITY_TOPIC`: NTFY topic for vulnerability notifications

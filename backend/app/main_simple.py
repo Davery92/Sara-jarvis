@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -25,6 +25,15 @@ import aiofiles
 import asyncio
 import json
 from fastapi import UploadFile
+
+# Import vulnerability services
+try:
+    from app.services.vulnerability_service import fetch_all_vulnerability_data, VulnerabilityProcessor
+    from app.services.vulnerability_notifications import VulnerabilityNotificationService, notify_report_ready
+    VULNERABILITY_SERVICES_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Vulnerability services not available: {e}")
+    VULNERABILITY_SERVICES_AVAILABLE = False
 
 # Configure logging first
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +68,7 @@ NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
 NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
 NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
 NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
+NTFY_VULNERABILITY_TOPIC = os.getenv("NTFY_VULNERABILITY_TOPIC", "sara")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
 # Smaller, faster model for notifications (uses same endpoint but different model)
@@ -262,6 +272,44 @@ class DreamInsight(Base):
     
     created_at = Column(DateTime, server_default=func.now())
 
+class VulnerabilityReport(Base):
+    """Daily vulnerability reports generated from multiple sources"""
+    __tablename__ = "vulnerability_report"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    
+    # Report metadata
+    report_date = Column(DateTime, nullable=False, unique=True)
+    title = Column(String, nullable=False)
+    summary = Column(Text, nullable=True)  # Brief summary for notifications
+    
+    # Report content
+    content = Column(Text, nullable=False)  # Markdown content
+    vulnerabilities_count = Column(Integer, default=0)
+    critical_count = Column(Integer, default=0)
+    kev_count = Column(Integer, default=0)  # Known Exploited Vulnerabilities
+    
+    # Processing status
+    processed_to_neo4j = Column(Integer, default=0)  # Boolean flag for Neo4j integration
+    
+    created_at = Column(DateTime, server_default=func.now())
+
+class NotificationLog(Base):
+    """Track NTFY notifications to prevent spam and for debugging"""
+    __tablename__ = "notification_log"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    
+    # Notification details
+    notification_type = Column(String, nullable=False)  # 'report_ready', 'critical_vuln'
+    reference_id = Column(String, nullable=True)  # report_id or cve_id
+    title = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+    
+    # Delivery tracking
+    ntfy_response = Column(Text, nullable=True)
+    sent_at = Column(DateTime, server_default=func.now())
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -278,6 +326,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     created_at: str
+    access_token: Optional[str] = None
 
 class NoteCreate(BaseModel):
     title: str = ""
@@ -407,6 +456,40 @@ class ConversationTurnResponse(BaseModel):
     message_index: int
     created_at: str
 
+class VulnerabilityReportResponse(BaseModel):
+    id: str
+    report_date: str
+    title: str
+    summary: Optional[str]
+    content: str
+    vulnerabilities_count: int
+    critical_count: int
+    kev_count: int
+    created_at: str
+
+class VulnerabilityReportListResponse(BaseModel):
+    id: str
+    report_date: str
+    title: str
+    summary: Optional[str]
+    vulnerabilities_count: int
+    critical_count: int
+    kev_count: int
+    created_at: str
+
+class NotificationRequest(BaseModel):
+    type: str  # 'report_ready' or 'critical_vuln'
+    title: str
+    message: str
+    reference_id: Optional[str] = None
+
+class NotificationResponse(BaseModel):
+    id: str
+    notification_type: str
+    title: str
+    message: str
+    sent_at: str
+
 # Auth utilities
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -441,7 +524,15 @@ def get_db():
         db.close()
 
 def get_current_user(request: Request, db: Session = Depends(get_db)):
+    # Try to get token from cookie first (for web UI)
     access_token = request.cookies.get("access_token")
+    
+    # If no cookie, try Authorization header (for programmatic access)
+    if not access_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            access_token = auth_header[7:]  # Remove "Bearer " prefix
+    
     if not access_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
@@ -475,6 +566,73 @@ class SimpleLLMClient:
                 "timestamp": datetime.utcnow().isoformat()
             })
     
+    async def _stream_response(self, payload):
+        """Stream response from LLM and emit text chunks"""
+        full_content = ""
+        tool_calls = []
+        
+        try:
+            async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions", 
+                                        json=payload, 
+                                        headers={"Authorization": "Bearer dummy"}) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        line_data = line[6:]
+                        if line_data == "[DONE]":
+                            break
+                        
+                        try:
+                            chunk = json.loads(line_data)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            
+                            # Handle content streaming
+                            if "content" in delta and delta["content"]:
+                                content_chunk = delta["content"]
+                                full_content += content_chunk
+                                await self.emit_event("text_chunk", {
+                                    "content": content_chunk,
+                                    "full_content": full_content
+                                })
+                            
+                            # Handle tool calls
+                            if "tool_calls" in delta:
+                                if not tool_calls:
+                                    tool_calls = delta["tool_calls"]
+                                else:
+                                    # Merge tool calls
+                                    for i, tc in enumerate(delta["tool_calls"]):
+                                        if i < len(tool_calls):
+                                            if "function" in tc and "arguments" in tc["function"]:
+                                                tool_calls[i]["function"]["arguments"] += tc["function"]["arguments"]
+                                        else:
+                                            tool_calls.append(tc)
+                                            
+                        except json.JSONDecodeError:
+                            continue
+            
+            # Return message object compatible with existing code
+            return {
+                "content": full_content,
+                "tool_calls": tool_calls if tool_calls else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            # Fallback to non-streaming
+            payload_fallback = payload.copy()
+            payload_fallback.pop("stream", None)
+            
+            response = await self.client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                json=payload_fallback,
+                headers={"Authorization": "Bearer dummy"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]
+    
     async def chat(self, messages: list):
         try:
             response = await self.client.post(
@@ -503,18 +661,11 @@ class SimpleLLMClient:
                 "tools": tools,
                 "tool_choice": "auto",
                 "temperature": 0.7,
-                "max_tokens": 2000
+                "max_tokens": 2000,
+                "stream": True
             }
             
-            response = await self.client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                json=payload,
-                headers={"Authorization": "Bearer dummy"}
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            message = result["choices"][0]["message"]
+            message = await self._stream_response(payload)
             
             # Handle tool calls with recursive support (max 10 rounds for complex queries)
             max_tool_rounds = 10
@@ -567,24 +718,17 @@ class SimpleLLMClient:
                         "status": "processing_tools"
                     })
                     
-                    # Make follow-up request
+                    # Make follow-up request with streaming
                     follow_up_payload = {
                         "model": OPENAI_MODEL,
                         "messages": current_messages,
                         "temperature": 0.7,
                         "max_tokens": 2000,
-                        "tools": tools
+                        "tools": tools,
+                        "stream": True
                     }
                     
-                    follow_up_response = await self.client.post(
-                        f"{OPENAI_BASE_URL}/chat/completions",
-                        json=follow_up_payload,
-                        headers={"Authorization": "Bearer dummy"}
-                    )
-                    follow_up_response.raise_for_status()
-                    
-                    final_result = follow_up_response.json()
-                    message = final_result["choices"][0]["message"]
+                    message = await self._stream_response(follow_up_payload)
                     
                     # Enhanced debugging
                     logger.info(f"🔍 Round {round_num + 1} - Message keys: {list(message.keys())}")
@@ -682,8 +826,10 @@ class SimpleLLMClient:
 
     async def search_notes_tool(self, query, user_id):
         """Search notes using Neo4j knowledge graph (with PostgreSQL fallback)"""
+        neo4j_failed = False
+        
+        # Try Neo4j search first
         try:
-            # Try Neo4j search first
             from app.services.neo4j_service import neo4j_service
             if neo4j_service.driver:
                 search_results = await neo4j_service.search_knowledge_graph(
@@ -700,8 +846,14 @@ class SimpleLLMClient:
                         content = node.get('content', '')[:200]
                         results.append(f"Note: {title}\nContent: {content}...")
                     return "\n\n".join(results)
-            
-            # Fallback to PostgreSQL
+                elif search_results is not None:  # Empty list means no results found
+                    return "No notes found matching your query in Neo4j."
+        except Exception as e:
+            logger.warning(f"Neo4j search failed, falling back to PostgreSQL: {e}")
+            neo4j_failed = True
+        
+        # Fallback to PostgreSQL
+        try:
             db = SessionLocal()
             try:
                 notes = db.query(Note).filter(
@@ -716,12 +868,13 @@ class SimpleLLMClient:
                 for note in notes:
                     results.append(f"Note: {note.title or 'Untitled'}\nContent: {note.content[:200]}...")
                 
-                return "\n\n".join(results)
+                fallback_notice = " (via PostgreSQL fallback)" if neo4j_failed else ""
+                return "\n\n".join(results) + fallback_notice
             finally:
                 db.close()
         except Exception as e:
-            logger.error(f"Error searching notes: {e}")
-            return f"Error searching notes: {str(e)}"
+            logger.error(f"Error searching notes in PostgreSQL: {e}")
+            return "Unable to search notes at this time. Please try again later."
 
     async def create_note_tool(self, title, content, user_id):
         """Create a new note using Neo4j-first architecture with intelligent processing"""
@@ -3085,12 +3238,11 @@ Generate a brief title and 1-2 sentence insight about why this might be worth re
     async def _call_fast_llm(self, prompt: str, max_tokens: int = 150) -> Optional[str]:
         """Call the fast LLM for quick analysis"""
         try:
-            response = await call_llm_api(
-                messages=[{"role": "user", "content": prompt}],
-                model=self.fast_model,
-                max_tokens=max_tokens
-            )
-            return response.get("content", "").strip()
+            # Use the global llm_client instance
+            response = await llm_client.chat([{"role": "user", "content": prompt}])
+            if response and "choices" in response and response["choices"]:
+                return response["choices"][0]["message"]["content"].strip()
+            return None
         except Exception as e:
             logger.error(f"Fast LLM call failed: {e}")
             return None
@@ -3098,12 +3250,11 @@ Generate a brief title and 1-2 sentence insight about why this might be worth re
     async def _call_smart_llm(self, prompt: str, max_tokens: int = 300) -> Optional[str]:
         """Call the smart LLM for deep analysis"""
         try:
-            response = await call_llm_api(
-                messages=[{"role": "user", "content": prompt}],
-                model=self.smart_model,
-                max_tokens=max_tokens
-            )
-            return response.get("content", "").strip()
+            # Use the global llm_client instance
+            response = await llm_client.chat([{"role": "user", "content": prompt}])
+            if response and "choices" in response and response["choices"]:
+                return response["choices"][0]["message"]["content"].strip()
+            return None
         except Exception as e:
             logger.error(f"Smart LLM call failed: {e}")
             return None
@@ -3422,7 +3573,8 @@ async def login(user_data: UserLogin, request: Request, response: Response, db: 
     return UserResponse(
         id=user.id,
         email=user.email,
-        created_at=user.created_at.isoformat()
+        created_at=user.created_at.isoformat(),
+        access_token=access_token
     )
 
 @app.post("/auth/logout")
@@ -3710,6 +3862,18 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     
     return chat_response
 
+@app.options("/chat/stream")
+async def chat_stream_options():
+    """Handle CORS preflight for streaming chat"""
+    return JSONResponse(
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+    )
+
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
     """Streaming chat endpoint with real-time tool usage indicators"""
@@ -3854,7 +4018,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             ]
             
             # Create system message
-            system_message = Message(
+            system_message = ChatMessage(
                 role="system",
                 content=f"You are {ASSISTANT_NAME}, a helpful AI assistant with access to tools for managing notes, reminders, timers, and calendar events. "
                         f"You also have access to search through user's memory and past conversations. "
@@ -5133,6 +5297,33 @@ async def search_knowledge_graph(
         logger.error(f"Knowledge graph search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
+@app.post("/knowledge-graph/connection-details")
+async def get_connection_details(
+    request: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Get detailed information about a specific connection"""
+    try:
+        from app.services.neo4j_service import neo4j_service
+        source_id = request.get("source_id")
+        target_id = request.get("target_id")
+        
+        if not source_id or not target_id:
+            raise HTTPException(status_code=400, detail="Both source_id and target_id are required")
+        
+        # Get detailed connection info including shared content analysis
+        connection_details = await neo4j_service.get_connection_details(
+            source_id=source_id,
+            target_id=target_id,
+            user_id=current_user.id
+        )
+        
+        return connection_details
+        
+    except Exception as e:
+        logger.error(f"Failed to get connection details: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get connection details: {str(e)}")
+
 @app.post("/knowledge-graph/connected-content")
 async def get_connected_content(
     request: dict,
@@ -5388,6 +5579,274 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
         test_results["embedding"] = {"status": "error", "message": f"Embedding service failed: {str(e)}"}
     
     return test_results
+
+# =============================================================================
+# VULNERABILITY WATCH ENDPOINTS
+# =============================================================================
+
+@app.get("/api/vulnerability-reports", response_model=list[VulnerabilityReportListResponse])
+async def get_vulnerability_reports(current_user: User = Depends(get_current_user)):
+    """Get all vulnerability reports"""
+    db = SessionLocal()
+    try:
+        reports = db.query(VulnerabilityReport).filter(
+            VulnerabilityReport.user_id == current_user.id
+        ).order_by(VulnerabilityReport.report_date.desc()).all()
+        
+        return [
+            VulnerabilityReportListResponse(
+                id=report.id,
+                report_date=report.report_date.isoformat(),
+                title=report.title,
+                summary=report.summary,
+                vulnerabilities_count=report.vulnerabilities_count,
+                critical_count=report.critical_count,
+                kev_count=report.kev_count,
+                created_at=report.created_at.isoformat()
+            ) for report in reports
+        ]
+    finally:
+        db.close()
+
+@app.get("/api/vulnerability-reports/{report_id}", response_model=VulnerabilityReportResponse)
+async def get_vulnerability_report(report_id: str, current_user: User = Depends(get_current_user)):
+    """Get a specific vulnerability report"""
+    db = SessionLocal()
+    try:
+        report = db.query(VulnerabilityReport).filter(
+            VulnerabilityReport.id == report_id,
+            VulnerabilityReport.user_id == current_user.id
+        ).first()
+        
+        if not report:
+            raise HTTPException(status_code=404, detail="Vulnerability report not found")
+        
+        return VulnerabilityReportResponse(
+            id=report.id,
+            report_date=report.report_date.isoformat(),
+            title=report.title,
+            summary=report.summary,
+            content=report.content,
+            vulnerabilities_count=report.vulnerabilities_count,
+            critical_count=report.critical_count,
+            kev_count=report.kev_count,
+            created_at=report.created_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.get("/api/vulnerability-reports/latest", response_model=VulnerabilityReportResponse)
+async def get_latest_vulnerability_report(current_user: User = Depends(get_current_user)):
+    """Get the most recent vulnerability report"""
+    db = SessionLocal()
+    try:
+        report = db.query(VulnerabilityReport).filter(
+            VulnerabilityReport.user_id == current_user.id
+        ).order_by(VulnerabilityReport.report_date.desc()).first()
+        
+        if not report:
+            raise HTTPException(status_code=404, detail="No vulnerability reports found")
+        
+        return VulnerabilityReportResponse(
+            id=report.id,
+            report_date=report.report_date.isoformat(),
+            title=report.title,
+            summary=report.summary,
+            content=report.content,
+            vulnerabilities_count=report.vulnerabilities_count,
+            critical_count=report.critical_count,
+            kev_count=report.kev_count,
+            created_at=report.created_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.post("/api/vulnerability-reports/generate")
+async def generate_vulnerability_report(
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """Generate a new daily vulnerability report"""
+    if not VULNERABILITY_SERVICES_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Vulnerability services not available")
+    
+    from datetime import date
+    
+    db = SessionLocal()
+    try:
+        logger.info("🚀 Starting vulnerability report generation...")
+        
+        # Check if report already exists for today
+        today = date.today()
+        existing_report = db.query(VulnerabilityReport).filter(
+            VulnerabilityReport.user_id == current_user.id,
+            VulnerabilityReport.report_date == today
+        ).first()
+        
+        # Check if regeneration is requested via query parameter
+        regenerate = request.query_params.get("regenerate", "false").lower() == "true" if request else False
+        logger.info(f"Regenerate parameter: {regenerate}, query_params: {request.query_params if request else 'No request'}")
+        
+        if existing_report and not regenerate:
+            logger.warning(f"Report already exists for {today}")
+            return {
+                "message": "Report already exists for today", 
+                "report_id": existing_report.id,
+                "vulnerabilities_count": existing_report.vulnerabilities_count,
+                "critical_count": existing_report.critical_count,
+                "kev_count": existing_report.kev_count,
+                "notification_sent": False
+            }
+        elif existing_report and regenerate:
+            logger.info(f"Regenerating existing report for {today}")
+            # Delete existing report to create a new one
+            db.delete(existing_report)
+            db.commit()
+        
+        # Fetch vulnerability data
+        vulnerabilities = await fetch_all_vulnerability_data()
+        
+        # Generate markdown report with Sara's AI analysis
+        content, summary = await VulnerabilityProcessor.generate_markdown_report(vulnerabilities, today)
+        
+        # Count statistics
+        kev_count = len([v for v in vulnerabilities if v.known_exploited])
+        critical_count = len([v for v in vulnerabilities if v.severity == 'Critical' or (v.cvss_score and v.cvss_score >= 9.0)])
+        
+        # Create report record
+        report = VulnerabilityReport(
+            user_id=current_user.id,
+            report_date=today,
+            title=f"Daily Vulnerability Report - {today.strftime('%B %d, %Y')}",
+            summary=summary,
+            content=content,
+            vulnerabilities_count=len(vulnerabilities),
+            critical_count=critical_count,
+            kev_count=kev_count
+        )
+        
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+        
+        # Send NTFY notification
+        ntfy_service = VulnerabilityNotificationService(
+            NTFY_SERVER_URL, 
+            NTFY_VULNERABILITY_TOPIC, 
+            NTFY_ENABLED
+        )
+        
+        notification_result = await notify_report_ready(
+            ntfy_service, 
+            report.title, 
+            summary, 
+            report.id
+        )
+        
+        # Log notification
+        notification_log = NotificationLog(
+            user_id=current_user.id,
+            notification_type=notification_result["notification_type"],
+            reference_id=notification_result["reference_id"],
+            title=notification_result["title"],
+            message=notification_result["message"],
+            ntfy_response=json.dumps(notification_result)
+        )
+        db.add(notification_log)
+        db.commit()
+        
+        logger.info(f"✅ Vulnerability report generated successfully: {report.id}")
+        
+        return {
+            "message": "Vulnerability report generated successfully",
+            "report_id": report.id,
+            "vulnerabilities_count": len(vulnerabilities),
+            "critical_count": critical_count,
+            "kev_count": kev_count,
+            "notification_sent": notification_result["success"]
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error generating vulnerability report: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating vulnerability report: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/api/notifications/ntfy", response_model=NotificationResponse)
+async def send_ntfy_notification(
+    notification: NotificationRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Send NTFY notification manually (for testing)"""
+    if not VULNERABILITY_SERVICES_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Vulnerability services not available")
+    
+    db = SessionLocal()
+    try:
+        ntfy_service = VulnerabilityNotificationService(
+            NTFY_SERVER_URL, 
+            NTFY_VULNERABILITY_TOPIC, 
+            NTFY_ENABLED
+        )
+        
+        # Send notification
+        success = await ntfy_service._send_notification(
+            title=notification.title,
+            message=notification.message,
+            priority=3,
+            tags=["shield", "test"]
+        )
+        
+        # Log notification
+        notification_log = NotificationLog(
+            user_id=current_user.id,
+            notification_type=notification.type,
+            reference_id=notification.reference_id,
+            title=notification.title,
+            message=notification.message,
+            ntfy_response=json.dumps({"success": success})
+        )
+        
+        db.add(notification_log)
+        db.commit()
+        db.refresh(notification_log)
+        
+        return NotificationResponse(
+            id=notification_log.id,
+            notification_type=notification_log.notification_type,
+            title=notification_log.title,
+            message=notification_log.message,
+            sent_at=notification_log.sent_at.isoformat()
+        )
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error sending notification: {e}")
+        raise HTTPException(status_code=500, detail=f"Error sending notification: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/notifications/history", response_model=list[NotificationResponse])
+async def get_notification_history(current_user: User = Depends(get_current_user)):
+    """Get notification history for debugging"""
+    db = SessionLocal()
+    try:
+        notifications = db.query(NotificationLog).filter(
+            NotificationLog.user_id == current_user.id
+        ).order_by(NotificationLog.sent_at.desc()).limit(50).all()
+        
+        return [
+            NotificationResponse(
+                id=notif.id,
+                notification_type=notif.notification_type,
+                title=notif.title,
+                message=notif.message,
+                sent_at=notif.sent_at.isoformat()
+            ) for notif in notifications
+        ]
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     import uvicorn
