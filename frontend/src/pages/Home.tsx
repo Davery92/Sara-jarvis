@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '../hooks/useAuth'
-import { apiClient, Reminder, CalendarEvent, Note } from '../api/client'
+import { apiClient } from '../api/client'
 import { APP_CONFIG } from '../config'
 
 export default function Home() {
@@ -277,4 +277,3 @@ export default function Home() {
     </div>
   )
 }
-export default Home

@@ -55,7 +55,9 @@
       "Bash(alembic init:*)",
       "Bash(alembic revision:*)",
       "Bash(alembic upgrade:*)",
-      "Bash(crontab:*)"
+      "Bash(crontab:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)"
     ],
     "deny": [],
     "ask": [],

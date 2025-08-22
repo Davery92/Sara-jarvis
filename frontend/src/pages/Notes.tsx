@@ -22,15 +22,15 @@ interface Note {
   updated_at: string
 }
 
-interface Folder {
-  id: string
-  name: string
-  parent_id?: string
-  notes_count: number
-  subfolders_count: number
-  created_at: string
-  updated_at: string
-}
+// interface Folder {
+//   id: string
+//   name: string
+//   parent_id?: string
+//   notes_count: number
+//   subfolders_count: number
+//   created_at: string
+//   updated_at: string
+// }
 
 export default function Notes() {
   const [tree, setTree] = useState<TreeNode[]>([])

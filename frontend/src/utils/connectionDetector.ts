@@ -10,12 +10,12 @@ interface Note {
   folder_id?: number
 }
 
-interface Connection {
-  sourceId: number
-  targetId: number
-  type: 'reference' | 'semantic' | 'temporal'
-  strength: number
-}
+// interface Connection {
+//   sourceId: number
+//   targetId: number
+//   type: 'reference' | 'semantic' | 'temporal'
+//   strength: number
+// }
 
 interface ApiConnection {
   target_note_id: string
@@ -95,7 +95,6 @@ export async function detectAndCreateConnections(noteId: number, allNotes: Note[
 export async function updateAllConnections(allNotes: Note[]): Promise<void> {
   console.log('🔄 Updating connections for all notes...')
   
-  let totalCreated = 0
   for (const note of allNotes) {
     const success = await detectAndCreateConnections(note.id, allNotes)
     if (success) {

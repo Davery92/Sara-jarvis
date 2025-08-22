@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient, Document } from '../api/client'
+import { apiClient } from '../api/client'
 
 export default function Documents() {
   const [dragActive, setDragActive] = useState(false)
@@ -36,14 +36,14 @@ export default function Documents() {
       const document = documents.find(doc => doc.id === id)
       if (document) {
         const url = window.URL.createObjectURL(blob)
-        const a = document.createElement('a')
+        const a = window.document.createElement('a')
         a.style.display = 'none'
         a.href = url
         a.download = document.filename
-        document.body.appendChild(a)
+        window.document.body.appendChild(a)
         a.click()
         window.URL.revokeObjectURL(url)
-        document.body.removeChild(a)
+        window.document.body.removeChild(a)
       }
     },
   })
@@ -282,4 +282,3 @@ export default function Documents() {
     </div>
   )
 }
-export default Documents

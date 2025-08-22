@@ -358,4 +358,3 @@ export default function Reminders() {
     </div>
   )
 }
-export default Reminders

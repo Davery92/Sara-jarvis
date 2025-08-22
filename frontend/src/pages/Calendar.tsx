@@ -4,8 +4,8 @@ import { apiClient, CalendarEvent } from '../api/client'
 
 export default function Calendar() {
   const [currentDate, setCurrentDate] = useState(new Date())
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null)
-  const [view, setView] = useState<'month' | 'week' | 'day'>('month')
+  const [setSelectedDate] = useState<Date | null>(null)
+  const [setView] = useState<'month' | 'week' | 'day'>('month')
   const [isCreating, setIsCreating] = useState(false)
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null)
   const [formData, setFormData] = useState({

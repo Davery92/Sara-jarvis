@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient, AISettings, AISettingsUpdate } from '../api/client'
+import { apiClient, AISettingsUpdate } from '../api/client'
 
 export default function Settings() {
   const [formData, setFormData] = useState<AISettingsUpdate>({})

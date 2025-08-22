@@ -1,13 +1,13 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../hooks/useAuth'
-import { apiClient, ChatMessage, Citation, ToolEffect } from '../api/client'
+import { apiClient, ChatMessage } from '../api/client'
 import { APP_CONFIG } from '../config'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import ErrorBoundary from '../components/ErrorBoundary'
 
 export default function Chat() {
-  const { user } = useAuth()
+  const {} = useAuth()
   const [message, setMessage] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [toolActivity, setToolActivity] = useState<{
@@ -468,4 +468,3 @@ function MessageBubble({ message }: MessageBubbleProps) {
     </div>
   )
 }
-export default Chat
