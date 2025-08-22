@@ -1,0 +1,5 @@
+#!/bin/bash
+export PYTHONPATH="/home/david/jarvis/backend"
+export SARA_USER_EMAIL="david@avery.cloud"
+export SARA_USER_PASSWORD="Nutman17!"
+export API_BASE_URL="http://10.185.1.180:8000"

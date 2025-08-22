@@ -12,9 +12,9 @@ except ImportError:
     PGVECTOR_AVAILABLE = False
     Vector = None
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, Dict, Any
 from passlib.context import CryptContext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 import jwt
 import uuid
 import httpx
@@ -288,6 +288,7 @@ class VulnerabilityReport(Base):
     vulnerabilities_count = Column(Integer, default=0)
     critical_count = Column(Integer, default=0)
     kev_count = Column(Integer, default=0)  # Known Exploited Vulnerabilities
+    vulnerability_ids = Column(Text, nullable=True)  # JSON list of CVE IDs in this report
     
     # Processing status
     processed_to_neo4j = Column(Integer, default=0)  # Boolean flag for Neo4j integration
@@ -309,6 +310,103 @@ class NotificationLog(Base):
     # Delivery tracking
     ntfy_response = Column(Text, nullable=True)
     sent_at = Column(DateTime, server_default=func.now())
+
+# Habit Tracking Models
+class Habit(Base):
+    """Core habit definition with scheduling and configuration"""
+    __tablename__ = "habits"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    title = Column(Text, nullable=False)
+    type = Column(String, nullable=False)  # binary, quantitative, checklist, time
+    target_numeric = Column(Float, nullable=True)  # for quantitative/time
+    unit = Column(Text, nullable=True)  # oz, min, reps, pages
+    rrule = Column(Text, nullable=False)  # RRULE string for expected days
+    weekly_minimum = Column(Integer, nullable=True)  # e.g., 3 times/week
+    monthly_minimum = Column(Integer, nullable=True)  # optional
+    windows = Column(Text, nullable=True)  # JSON: [{"name":"Morning","start":"05:00","end":"11:30"}]
+    checklist_mode = Column(String, nullable=True)  # all, percent
+    checklist_threshold = Column(Float, nullable=True)  # e.g., 0.7 for 70%
+    grace_days = Column(Integer, default=0)
+    retro_hours = Column(Integer, default=24)
+    paused = Column(Integer, default=0)  # boolean
+    pause_from = Column(DateTime, nullable=True)
+    pause_to = Column(DateTime, nullable=True)
+    vacation_from = Column(DateTime, nullable=True)  # vacation periods
+    vacation_to = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)  # optional description
+    current_streak = Column(Integer, default=0)
+    best_streak = Column(Integer, default=0)
+    last_completed = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
+
+class HabitItem(Base):
+    """Checklist items for checklist-type habits"""
+    __tablename__ = "habit_items"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    habit_id = Column(String, nullable=False)  # foreign key to habits.id
+    label = Column(Text, nullable=False)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+
+class HabitInstance(Base):
+    """Materialized daily instances for fast UI queries"""
+    __tablename__ = "habit_instances"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    habit_id = Column(String, nullable=False)  # foreign key to habits.id
+    user_id = Column(String, nullable=False)
+    date = Column(DateTime, nullable=False)  # date for this instance
+    window = Column(Text, nullable=True)  # optional window name
+    expected = Column(Integer, default=1)  # boolean: expected on this day
+    status = Column(String, nullable=False, default='pending')  # pending, complete, skipped
+    progress = Column(Float, default=0.0)  # 0..1 for binary/checklist; scaled for quantitative
+    total_amount = Column(Float, nullable=True)  # raw sum for quantitative
+    target = Column(Float, nullable=True)  # snapshot of target for the day
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
+
+class HabitLog(Base):
+    """Individual completion logs with source tracking"""
+    __tablename__ = "habit_logs"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    habit_id = Column(String, nullable=False)  # foreign key to habits.id
+    instance_id = Column(String, nullable=True)  # foreign key to habit_instances.id
+    user_id = Column(String, nullable=False)
+    ts = Column(DateTime, nullable=False, server_default=func.now())
+    source = Column(String, nullable=False)  # manual, voice, timer, calendar, ntfy, health
+    payload = Column(Text, nullable=True)  # JSON: {amount:12, unit:'oz'} or {timer_id:...}
+    created_at = Column(DateTime, server_default=func.now())
+
+class HabitStreak(Base):
+    """Streak tracking per habit"""
+    __tablename__ = "habit_streaks"
+    habit_id = Column(String, primary_key=True)  # foreign key to habits.id
+    current_streak = Column(Integer, default=0)
+    best_streak = Column(Integer, default=0)
+    last_completed = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now())
+
+class HabitLink(Base):
+    """Links to notes/concepts/documents for graph integration"""
+    __tablename__ = "habit_links"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    habit_id = Column(String, nullable=False)  # foreign key to habits.id
+    target_type = Column(String, nullable=False)  # note, concept, document
+    target_id = Column(String, nullable=False)
+    meta = Column(Text, nullable=True)  # JSON metadata
+    created_at = Column(DateTime, server_default=func.now())
+
+class EventOutbox(Base):
+    """Outbox pattern for Neo4j sync"""
+    __tablename__ = "event_outbox"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    aggregate_type = Column(String, nullable=False)  # Habit, Instance, Log, Link
+    aggregate_id = Column(String, nullable=False)
+    op = Column(String, nullable=False)  # UPSERT, DELETE
+    payload = Column(Text, nullable=False)  # JSON
+    created_at = Column(DateTime, server_default=func.now())
+    processed_at = Column(DateTime, nullable=True)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -489,6 +587,151 @@ class NotificationResponse(BaseModel):
     title: str
     message: str
     sent_at: str
+
+# Habit Tracking Pydantic Models
+class HabitCreate(BaseModel):
+    title: str
+    type: str  # binary, quantitative, checklist, time
+    target_numeric: Optional[float] = None
+    unit: Optional[str] = None
+    rrule: str = "FREQ=DAILY"  # Default to daily
+    weekly_minimum: Optional[int] = None
+    monthly_minimum: Optional[int] = None
+    windows: Optional[str] = None  # JSON string
+    checklist_mode: Optional[str] = "all"  # all, percent
+    checklist_threshold: Optional[float] = 1.0
+    grace_days: int = 0
+    retro_hours: int = 24
+    notes: Optional[str] = None
+
+class HabitResponse(BaseModel):
+    id: str
+    title: str
+    type: str
+    target_numeric: Optional[float] = None
+    unit: Optional[str] = None
+    rrule: str
+    weekly_minimum: Optional[int] = None
+    monthly_minimum: Optional[int] = None
+    windows: Optional[str] = None
+    checklist_mode: Optional[str] = None
+    checklist_threshold: Optional[float] = None
+    grace_days: int
+    retro_hours: int
+    paused: bool
+    pause_from: Optional[str] = None
+    pause_to: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class HabitItemCreate(BaseModel):
+    label: str
+    sort_order: int = 0
+
+class HabitItemResponse(BaseModel):
+    id: str
+    habit_id: str
+    label: str
+    sort_order: int
+    created_at: str
+
+class HabitInstanceResponse(BaseModel):
+    id: str
+    habit_id: str
+    date: str
+    window: Optional[str] = None
+    expected: bool
+    status: str  # pending, complete, skipped
+    progress: float
+    total_amount: Optional[float] = None
+    target: Optional[float] = None
+    # Include habit details for Today view
+    title: str
+    type: str
+    unit: Optional[str] = None
+
+class HabitTodayStats(BaseModel):
+    total: int
+    completed: int
+    in_progress: int
+    completion_rate: float
+
+class HabitTodayResponse(BaseModel):
+    date: str
+    habits: list[HabitInstanceResponse]
+    stats: HabitTodayStats
+
+class HabitInsightsOverview(BaseModel):
+    total_habits: int
+    active_habits: int
+    total_completions: int
+    average_completion_rate: float
+    current_streaks: int
+    longest_streak: int
+
+class HabitInsightsWeeklyStats(BaseModel):
+    this_week: dict
+    last_week: dict
+    trend: str
+
+class HabitInsightsPerformance(BaseModel):
+    habit_id: str
+    title: str
+    type: str
+    completion_rate: float
+    current_streak: int
+    best_streak: int
+    total_completions: int
+
+class HabitInsightsPatterns(BaseModel):
+    best_day_of_week: str
+    best_time_of_day: str
+    most_consistent_habit: str
+    improvement_suggestions: list[str]
+
+class HabitInsightsResponse(BaseModel):
+    overview: HabitInsightsOverview
+    weekly_stats: HabitInsightsWeeklyStats
+    habit_performance: list[HabitInsightsPerformance]
+    patterns: HabitInsightsPatterns
+
+class HabitLogCreate(BaseModel):
+    amount: Optional[float] = None
+    source: str = "manual"
+    payload: Optional[str] = None  # JSON string
+
+class HabitLogResponse(BaseModel):
+    id: str
+    habit_id: str
+    instance_id: Optional[str] = None
+    ts: str
+    source: str
+    payload: Optional[str] = None
+    created_at: str
+
+class HabitStreakResponse(BaseModel):
+    habit_id: str
+    current_streak: int
+    best_streak: int
+    last_completed: Optional[str] = None
+
+class HabitLinkCreate(BaseModel):
+    target_type: str  # note, concept, document
+    target_id: str
+    meta: Optional[str] = None  # JSON string
+
+class HabitLinkResponse(BaseModel):
+    id: str
+    habit_id: str
+    target_type: str
+    target_id: str
+    meta: Optional[str] = None
+    created_at: str
+
+class HabitPauseRequest(BaseModel):
+    pause_from: str  # ISO datetime
+    pause_to: str    # ISO datetime
 
 # Auth utilities
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -5706,23 +5949,47 @@ async def generate_vulnerability_report(
         # Fetch vulnerability data
         vulnerabilities = await fetch_all_vulnerability_data()
         
-        # Generate markdown report with Sara's AI analysis
-        content, summary = await VulnerabilityProcessor.generate_markdown_report(vulnerabilities, today)
+        # Get previous day's vulnerability IDs to identify NEW vulnerabilities only
+        from datetime import timedelta
+        yesterday = today - timedelta(days=1)
+        previous_report = db.query(VulnerabilityReport).filter(
+            VulnerabilityReport.user_id == current_user.id,
+            VulnerabilityReport.report_date == yesterday
+        ).first()
         
-        # Count statistics
-        kev_count = len([v for v in vulnerabilities if v.known_exploited])
-        critical_count = len([v for v in vulnerabilities if v.severity == 'Critical' or (v.cvss_score and v.cvss_score >= 9.0)])
+        previous_vuln_ids = set()
+        if previous_report and previous_report.vulnerability_ids:
+            import json
+            try:
+                previous_vuln_ids = set(json.loads(previous_report.vulnerability_ids))
+            except (json.JSONDecodeError, TypeError):
+                previous_vuln_ids = set()
         
-        # Create report record
+        # Filter to only NEW vulnerabilities (not in previous report)
+        current_vuln_ids = {v.cve_id for v in vulnerabilities}
+        new_vulnerabilities = [v for v in vulnerabilities if v.cve_id not in previous_vuln_ids]
+        
+        logger.info(f"📊 Total fetched: {len(vulnerabilities)}, Previous: {len(previous_vuln_ids)}, NEW: {len(new_vulnerabilities)}")
+        
+        # Generate markdown report with Sara's AI analysis (using NEW vulnerabilities only)
+        content, summary = await VulnerabilityProcessor.generate_markdown_report(new_vulnerabilities, today, is_new_only=True)
+        
+        # Count statistics (for ALL vulnerabilities, but report on NEW ones)
+        kev_count = len([v for v in new_vulnerabilities if v.known_exploited])
+        critical_count = len([v for v in new_vulnerabilities if v.severity == 'Critical' or (v.cvss_score and v.cvss_score >= 9.0)])
+        
+        # Create report record (store ALL vulnerability IDs for next day's comparison)
+        import json
         report = VulnerabilityReport(
             user_id=current_user.id,
             report_date=today,
             title=f"Daily Vulnerability Report - {today.strftime('%B %d, %Y')}",
             summary=summary,
             content=content,
-            vulnerabilities_count=len(vulnerabilities),
+            vulnerabilities_count=len(new_vulnerabilities),  # Count of NEW vulnerabilities only
             critical_count=critical_count,
-            kev_count=kev_count
+            kev_count=kev_count,
+            vulnerability_ids=json.dumps(list(current_vuln_ids))  # Store ALL for comparison
         )
         
         db.add(report)
@@ -5760,9 +6027,10 @@ async def generate_vulnerability_report(
         return {
             "message": "Vulnerability report generated successfully",
             "report_id": report.id,
-            "vulnerabilities_count": len(vulnerabilities),
+            "vulnerabilities_count": len(new_vulnerabilities),  # NEW vulnerabilities only
             "critical_count": critical_count,
             "kev_count": kev_count,
+            "total_vulnerabilities": len(vulnerabilities),  # Total fetched for reference
             "notification_sent": notification_result["success"]
         }
         
@@ -5847,6 +6115,1039 @@ async def get_notification_history(current_user: User = Depends(get_current_user
         ]
     finally:
         db.close()
+
+# ==========================================
+# HABIT TRACKING ENDPOINTS
+# ==========================================
+
+@app.post("/habits", response_model=HabitResponse)
+def create_habit(habit_data: HabitCreate, current_user=Depends(get_current_user)):
+    """Create a new habit"""
+    db = SessionLocal()
+    try:
+        habit = Habit(
+            user_id=current_user.id,
+            title=habit_data.title,
+            type=habit_data.type,
+            target_numeric=habit_data.target_numeric,
+            unit=habit_data.unit,
+            rrule=habit_data.rrule,
+            weekly_minimum=habit_data.weekly_minimum,
+            monthly_minimum=habit_data.monthly_minimum,
+            windows=habit_data.windows,
+            checklist_mode=habit_data.checklist_mode,
+            checklist_threshold=habit_data.checklist_threshold,
+            grace_days=habit_data.grace_days,
+            retro_hours=habit_data.retro_hours,
+            notes=habit_data.notes,
+            current_streak=0,
+            best_streak=0
+        )
+        db.add(habit)
+        db.commit()
+        db.refresh(habit)
+        
+        # Initialize streak record
+        streak = HabitStreak(habit_id=habit.id)
+        db.add(streak)
+        db.commit()
+        
+        return HabitResponse(
+            id=habit.id,
+            title=habit.title,
+            type=habit.type,
+            target_numeric=habit.target_numeric,
+            unit=habit.unit,
+            rrule=habit.rrule,
+            weekly_minimum=habit.weekly_minimum,
+            monthly_minimum=habit.monthly_minimum,
+            windows=habit.windows,
+            checklist_mode=habit.checklist_mode,
+            checklist_threshold=habit.checklist_threshold,
+            grace_days=habit.grace_days,
+            retro_hours=habit.retro_hours,
+            paused=bool(habit.paused),
+            pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
+            pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
+            notes=habit.notes,
+            created_at=habit.created_at.isoformat(),
+            updated_at=habit.updated_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.get("/habits", response_model=list[HabitResponse])
+def list_habits(current_user=Depends(get_current_user)):
+    """List all habits for the current user"""
+    db = SessionLocal()
+    try:
+        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
+        return [
+            HabitResponse(
+                id=habit.id,
+                title=habit.title,
+                type=habit.type,
+                target_numeric=habit.target_numeric,
+                unit=habit.unit,
+                rrule=habit.rrule,
+                weekly_minimum=habit.weekly_minimum,
+                monthly_minimum=habit.monthly_minimum,
+                windows=habit.windows,
+                checklist_mode=habit.checklist_mode,
+                checklist_threshold=habit.checklist_threshold,
+                grace_days=habit.grace_days,
+                retro_hours=habit.retro_hours,
+                paused=bool(habit.paused),
+                pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
+                pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
+                notes=habit.notes,
+                created_at=habit.created_at.isoformat(),
+                updated_at=habit.updated_at.isoformat()
+            ) for habit in habits
+        ]
+    finally:
+        db.close()
+
+@app.get("/habits/today", response_model=HabitTodayResponse)
+def get_today_habits(current_user=Depends(get_current_user)):
+    """Get today's habit instances with stats"""
+    db = SessionLocal()
+    try:
+        from app.services.habit_instances import HabitInstanceGenerator
+        
+        # First, generate any missing instances for today
+        today = datetime.now().date()
+        HabitInstanceGenerator.generate_instances_for_all_habits(
+            db, current_user.id, today, today
+        )
+        
+        # Get today's instances
+        instances = HabitInstanceGenerator.get_today_instances(db, current_user.id, today)
+        
+        # Convert to response format
+        habits = [
+            HabitInstanceResponse(
+                id=instance["instance_id"],
+                habit_id=instance["habit_id"],
+                date=instance["date"],
+                window=instance.get("window"),
+                expected=instance["expected"],
+                status=instance["status"],
+                progress=instance["progress"],
+                total_amount=instance.get("total_amount"),
+                target=instance.get("target"),
+                title=instance["title"],
+                type=instance["type"],
+                unit=instance.get("unit")
+            ) for instance in instances
+        ]
+        
+        # Calculate stats
+        total = len(habits)
+        completed = len([h for h in habits if h.status == "complete"])
+        in_progress = len([h for h in habits if h.status == "in_progress" or (h.progress > 0 and h.status != "complete")])
+        completion_rate = (completed / total * 100) if total > 0 else 0
+        
+        stats = HabitTodayStats(
+            total=total,
+            completed=completed,
+            in_progress=in_progress,
+            completion_rate=completion_rate
+        )
+        
+        return HabitTodayResponse(
+            date=today.isoformat(),
+            habits=habits,
+            stats=stats
+        )
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/log")
+def log_habit_completion(
+    habit_id: str, 
+    log_data: HabitLogCreate,
+    current_user=Depends(get_current_user)
+):
+    """Log a habit completion"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Create log entry
+        log = HabitLog(
+            habit_id=habit_id,
+            user_id=current_user.id,
+            source=log_data.source,
+            payload=json.dumps({"amount": log_data.amount}) if log_data.amount else log_data.payload
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        
+        # Update habit instance progress and streak
+        from app.services.habit_instances import HabitInstanceGenerator
+        from app.services.habit_streaks import HabitStreakCalculator
+        from datetime import date
+        
+        # Get or create today's instance
+        today = date.today()
+        instance_data = HabitInstanceGenerator.get_instance_by_habit_and_date(
+            db, habit_id, today
+        )
+        
+        if instance_data:
+            # Get all logs for this habit today
+            today_logs = db.query(HabitLog).filter(
+                HabitLog.habit_id == habit_id,
+                HabitLog.ts >= datetime.combine(today, datetime.min.time()),
+                HabitLog.ts < datetime.combine(today + timedelta(days=1), datetime.min.time())
+            ).all()
+            
+            log_dicts = []
+            for l in today_logs:
+                log_dicts.append({
+                    "payload": l.payload,
+                    "ts": l.ts,
+                    "source": l.source
+                })
+            
+            # Get checklist items if needed
+            checklist_items = []
+            if habit.type == "checklist":
+                items = db.query(HabitItem).filter(HabitItem.habit_id == habit_id).all()
+                checklist_items = [{"id": item.id, "label": item.label} for item in items]
+            
+            # Update instance progress
+            HabitInstanceGenerator.update_instance_progress(
+                db, instance_data["instance_id"], log_dicts, habit, checklist_items
+            )
+            
+            # Update streak if habit is now complete
+            from app.services.habit_progress import HabitProgressCalculator
+            is_complete = HabitProgressCalculator.is_habit_complete(
+                habit.type, log_dicts, habit.target_numeric, checklist_items,
+                habit.checklist_mode or "all", habit.checklist_threshold or 1.0
+            )
+            
+            if is_complete:
+                # Update streak
+                streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).first()
+                if streak:
+                    vacation_periods = []
+                    if habit.pause_from and habit.pause_to:
+                        vacation_periods = [(habit.pause_from.date(), habit.pause_to.date())]
+                    
+                    new_current, new_best, last_completed = HabitStreakCalculator.update_streak_after_completion(
+                        streak.current_streak,
+                        streak.best_streak,
+                        streak.last_completed,
+                        today,
+                        habit.grace_days,
+                        vacation_periods
+                    )
+                    
+                    streak.current_streak = new_current
+                    streak.best_streak = new_best
+                    streak.last_completed = last_completed
+                    streak.updated_at = datetime.now()
+                    db.commit()
+        
+        return {"message": "Habit logged successfully", "log_id": log.id}
+    finally:
+        db.close()
+
+@app.get("/habits/{habit_id}/streak", response_model=HabitStreakResponse)
+def get_habit_streak(habit_id: str, current_user=Depends(get_current_user)):
+    """Get streak information for a habit"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).first()
+        
+        if not streak:
+            # Create initial streak record
+            streak = HabitStreak(habit_id=habit_id)
+            db.add(streak)
+            db.commit()
+        
+        return HabitStreakResponse(
+            habit_id=streak.habit_id,
+            current_streak=streak.current_streak,
+            best_streak=streak.best_streak,
+            last_completed=streak.last_completed.isoformat() if streak.last_completed else None
+        )
+    finally:
+        db.close()
+
+# ==========================================
+# ADVANCED HABIT ENDPOINTS
+# ==========================================
+
+@app.patch("/habits/{habit_id}", response_model=HabitResponse)
+def update_habit(habit_id: str, habit_data: dict, current_user=Depends(get_current_user)):
+    """Update an existing habit"""
+    db = SessionLocal()
+    try:
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Update fields that are provided
+        update_fields = ["title", "target_numeric", "unit", "rrule", "weekly_minimum", 
+                        "monthly_minimum", "windows", "checklist_mode", "checklist_threshold", 
+                        "grace_days", "retro_hours", "notes"]
+        
+        for field in update_fields:
+            if field in habit_data:
+                setattr(habit, field, habit_data[field])
+        
+        habit.updated_at = datetime.now()
+        db.commit()
+        db.refresh(habit)
+        
+        return HabitResponse(
+            id=habit.id,
+            title=habit.title,
+            type=habit.type,
+            target_numeric=habit.target_numeric,
+            unit=habit.unit,
+            rrule=habit.rrule,
+            weekly_minimum=habit.weekly_minimum,
+            monthly_minimum=habit.monthly_minimum,
+            windows=habit.windows,
+            checklist_mode=habit.checklist_mode,
+            checklist_threshold=habit.checklist_threshold,
+            grace_days=habit.grace_days,
+            retro_hours=habit.retro_hours,
+            paused=bool(habit.paused),
+            pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
+            pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
+            notes=habit.notes,
+            created_at=habit.created_at.isoformat(),
+            updated_at=habit.updated_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.delete("/habits/{habit_id}")
+def delete_habit(habit_id: str, current_user=Depends(get_current_user)):
+    """Delete a habit and all associated data"""
+    db = SessionLocal()
+    try:
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Delete associated data (cascade should handle this, but let's be explicit)
+        db.query(HabitInstance).filter(HabitInstance.habit_id == habit_id).delete()
+        db.query(HabitLog).filter(HabitLog.habit_id == habit_id).delete()
+        db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).delete()
+        db.query(HabitItem).filter(HabitItem.habit_id == habit_id).delete()
+        db.query(HabitLink).filter(HabitLink.habit_id == habit_id).delete()
+        
+        # Delete the habit itself
+        db.delete(habit)
+        db.commit()
+        
+        return {"message": "Habit deleted successfully"}
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/pause")
+def pause_habit(habit_id: str, pause_data: HabitPauseRequest, current_user=Depends(get_current_user)):
+    """Pause a habit for a specific period"""
+    db = SessionLocal()
+    try:
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Parse dates
+        try:
+            pause_from = datetime.fromisoformat(pause_data.pause_from)
+            pause_to = datetime.fromisoformat(pause_data.pause_to)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+        
+        if pause_from >= pause_to:
+            raise HTTPException(status_code=400, detail="Pause start must be before pause end")
+        
+        habit.paused = 1
+        habit.pause_from = pause_from
+        habit.pause_to = pause_to
+        habit.updated_at = datetime.now()
+        
+        db.commit()
+        
+        return {"message": f"Habit paused from {pause_from.date()} to {pause_to.date()}"}
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/resume")
+def resume_habit(habit_id: str, current_user=Depends(get_current_user)):
+    """Resume a paused habit"""
+    db = SessionLocal()
+    try:
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        habit.paused = 0
+        habit.pause_from = None
+        habit.pause_to = None
+        habit.updated_at = datetime.now()
+        
+        db.commit()
+        
+        return {"message": "Habit resumed successfully"}
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/items", response_model=HabitItemResponse)
+def add_habit_item(
+    habit_id: str,
+    item_data: HabitItemCreate,
+    current_user=Depends(get_current_user)
+):
+    """Add a checklist item to a habit"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user and is checklist type
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id,
+            Habit.type == "checklist"
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found or not a checklist")
+        
+        item = HabitItem(
+            habit_id=habit_id,
+            label=item_data.label,
+            sort_order=item_data.sort_order
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        
+        return HabitItemResponse(
+            id=item.id,
+            habit_id=item.habit_id,
+            label=item.label,
+            sort_order=item.sort_order,
+            created_at=item.created_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.get("/habits/{habit_id}/items", response_model=list[HabitItemResponse])
+def get_habit_items(habit_id: str, current_user=Depends(get_current_user)):
+    """Get all checklist items for a habit"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        items = db.query(HabitItem).filter(
+            HabitItem.habit_id == habit_id
+        ).order_by(HabitItem.sort_order).all()
+        
+        return [
+            HabitItemResponse(
+                id=item.id,
+                habit_id=item.habit_id,
+                label=item.label,
+                sort_order=item.sort_order,
+                created_at=item.created_at.isoformat()
+            ) for item in items
+        ]
+    finally:
+        db.close()
+
+@app.patch("/habit_items/{item_id}", response_model=HabitItemResponse)
+def update_habit_item(item_id: str, item_data: dict, current_user=Depends(get_current_user)):
+    """Update a checklist item"""
+    db = SessionLocal()
+    try:
+        # Get item and verify ownership through habit
+        item = db.query(HabitItem).join(Habit).filter(
+            HabitItem.id == item_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        # Update fields
+        if "label" in item_data:
+            item.label = item_data["label"]
+        if "sort_order" in item_data:
+            item.sort_order = item_data["sort_order"]
+        
+        db.commit()
+        db.refresh(item)
+        
+        return HabitItemResponse(
+            id=item.id,
+            habit_id=item.habit_id,
+            label=item.label,
+            sort_order=item.sort_order,
+            created_at=item.created_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.delete("/habit_items/{item_id}")
+def delete_habit_item(item_id: str, current_user=Depends(get_current_user)):
+    """Delete a checklist item"""
+    db = SessionLocal()
+    try:
+        # Get item and verify ownership through habit
+        item = db.query(HabitItem).join(Habit).filter(
+            HabitItem.id == item_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        db.delete(item)
+        db.commit()
+        
+        return {"message": "Item deleted successfully"}
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/link", response_model=HabitLinkResponse)
+def link_habit_to_resource(
+    habit_id: str,
+    link_data: HabitLinkCreate,
+    current_user=Depends(get_current_user)
+):
+    """Link a habit to a note, document, or concept"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Check if link already exists
+        existing_link = db.query(HabitLink).filter(
+            HabitLink.habit_id == habit_id,
+            HabitLink.target_type == link_data.target_type,
+            HabitLink.target_id == link_data.target_id
+        ).first()
+        
+        if existing_link:
+            raise HTTPException(status_code=400, detail="Link already exists")
+        
+        link = HabitLink(
+            habit_id=habit_id,
+            target_type=link_data.target_type,
+            target_id=link_data.target_id,
+            meta=link_data.meta
+        )
+        db.add(link)
+        db.commit()
+        db.refresh(link)
+        
+        return HabitLinkResponse(
+            id=link.id,
+            habit_id=link.habit_id,
+            target_type=link.target_type,
+            target_id=link.target_id,
+            meta=link.meta,
+            created_at=link.created_at.isoformat()
+        )
+    finally:
+        db.close()
+
+@app.get("/habits/{habit_id}/links", response_model=list[HabitLinkResponse])
+def get_habit_links(habit_id: str, current_user=Depends(get_current_user)):
+    """Get all links for a habit"""
+    db = SessionLocal()
+    try:
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        links = db.query(HabitLink).filter(HabitLink.habit_id == habit_id).all()
+        
+        return [
+            HabitLinkResponse(
+                id=link.id,
+                habit_id=link.habit_id,
+                target_type=link.target_type,
+                target_id=link.target_id,
+                meta=link.meta,
+                created_at=link.created_at.isoformat()
+            ) for link in links
+        ]
+    finally:
+        db.close()
+
+@app.delete("/habit_links/{link_id}")
+def delete_habit_link(link_id: str, current_user=Depends(get_current_user)):
+    """Delete a habit link"""
+    db = SessionLocal()
+    try:
+        # Get link and verify ownership through habit
+        link = db.query(HabitLink).join(Habit).filter(
+            HabitLink.id == link_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not link:
+            raise HTTPException(status_code=404, detail="Link not found")
+        
+        db.delete(link)
+        db.commit()
+        
+        return {"message": "Link deleted successfully"}
+    finally:
+        db.close()
+
+# ==========================================
+# HABIT INSIGHTS & ANALYTICS ENDPOINTS
+# ==========================================
+
+@app.get("/insights/habits", response_model=HabitInsightsResponse)
+def get_habit_insights(
+    current_user=Depends(get_current_user),
+    period: str = "month"
+):
+    """Get habit analytics and insights in frontend-expected format"""
+    db = SessionLocal()
+    try:
+        from datetime import date, timedelta
+        
+        # Parse period
+        days_map = {"week": 7, "month": 30, "year": 365}
+        days = days_map.get(period, 30)
+        
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+        
+        # Get all user habits
+        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
+        
+        # Calculate overview stats
+        total_completions = 0
+        total_expected = 0
+        current_streaks = 0
+        longest_streak = 0
+        habit_performance = []
+        
+        for habit in habits:
+            # Get instances in period
+            instances = db.query(HabitInstance).filter(
+                HabitInstance.habit_id == habit.id,
+                HabitInstance.date >= start_date,
+                HabitInstance.date <= end_date,
+                HabitInstance.expected == 1
+            ).all()
+            
+            expected_count = len(instances)
+            completed_count = len([i for i in instances if i.status == "complete"])
+            completion_rate = (completed_count / expected_count * 100) if expected_count > 0 else 0
+            
+            total_expected += expected_count
+            total_completions += completed_count
+            
+            # Get current streak
+            streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit.id).first()
+            current_streak = streak.current_streak if streak else 0
+            best_streak = streak.best_streak if streak else 0
+            
+            if current_streak > 0:
+                current_streaks += 1
+            if best_streak > longest_streak:
+                longest_streak = best_streak
+            
+            habit_performance.append(HabitInsightsPerformance(
+                habit_id=habit.id,
+                title=habit.title,
+                type=habit.type,
+                completion_rate=completion_rate,
+                current_streak=current_streak,
+                best_streak=best_streak,
+                total_completions=completed_count
+            ))
+        
+        # Calculate average completion rate
+        average_completion_rate = (total_completions / total_expected * 100) if total_expected > 0 else 0
+        
+        # Create overview
+        overview = HabitInsightsOverview(
+            total_habits=len(habits),
+            active_habits=len([h for h in habits if not h.paused]),
+            total_completions=total_completions,
+            average_completion_rate=average_completion_rate,
+            current_streaks=current_streaks,
+            longest_streak=longest_streak
+        )
+        
+        # Calculate weekly stats (simplified for now)
+        week_start = end_date - timedelta(days=7)
+        last_week_start = week_start - timedelta(days=7)
+        
+        # This week stats - collect from user's habits
+        this_week_total = 0
+        this_week_completed = 0
+        for habit in habits:
+            week_instances = db.query(HabitInstance).filter(
+                HabitInstance.habit_id == habit.id,
+                HabitInstance.date >= week_start,
+                HabitInstance.date <= end_date,
+                HabitInstance.expected == 1
+            ).all()
+            this_week_total += len(week_instances)
+            this_week_completed += len([i for i in week_instances if i.status == "complete"])
+        
+        this_week_rate = (this_week_completed / this_week_total * 100) if this_week_total > 0 else 0
+        
+        # Last week stats
+        last_week_total = 0
+        last_week_completed = 0
+        for habit in habits:
+            week_instances = db.query(HabitInstance).filter(
+                HabitInstance.habit_id == habit.id,
+                HabitInstance.date >= last_week_start,
+                HabitInstance.date < week_start,
+                HabitInstance.expected == 1
+            ).all()
+            last_week_total += len(week_instances)
+            last_week_completed += len([i for i in week_instances if i.status == "complete"])
+        
+        last_week_rate = (last_week_completed / last_week_total * 100) if last_week_total > 0 else 0
+        
+        # Determine trend
+        if this_week_rate > last_week_rate + 5:
+            trend = "up"
+        elif this_week_rate < last_week_rate - 5:
+            trend = "down"
+        else:
+            trend = "stable"
+        
+        weekly_stats = HabitInsightsWeeklyStats(
+            this_week={"completed": this_week_completed, "total": this_week_total, "completion_rate": this_week_rate},
+            last_week={"completed": last_week_completed, "total": last_week_total, "completion_rate": last_week_rate},
+            trend=trend
+        )
+        
+        # Create patterns (simplified for now)
+        most_consistent = habit_performance[0].title if habit_performance else "None"
+        
+        patterns = HabitInsightsPatterns(
+            best_day_of_week="Monday",  # Placeholder
+            best_time_of_day="Morning",  # Placeholder
+            most_consistent_habit=most_consistent,
+            improvement_suggestions=[
+                "Try setting reminders for your habits",
+                "Start with smaller, easier habits to build momentum",
+                "Track your habits at the same time each day"
+            ]
+        )
+        
+        return HabitInsightsResponse(
+            overview=overview,
+            weekly_stats=weekly_stats,
+            habit_performance=habit_performance,
+            patterns=patterns
+        )
+        
+    finally:
+        db.close()
+
+@app.get("/habits/{habit_id}/history")
+def get_habit_history(
+    habit_id: str,
+    current_user=Depends(get_current_user),
+    days: int = 90
+):
+    """Get detailed history for a specific habit"""
+    db = SessionLocal()
+    try:
+        from datetime import date, timedelta
+        
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+        
+        # Get instances
+        instances = db.query(HabitInstance).filter(
+            HabitInstance.habit_id == habit_id,
+            HabitInstance.date >= start_date,
+            HabitInstance.date <= end_date
+        ).order_by(HabitInstance.date.desc()).all()
+        
+        # Get logs
+        logs = db.query(HabitLog).filter(
+            HabitLog.habit_id == habit_id,
+            HabitLog.ts >= datetime.combine(start_date, datetime.min.time()),
+            HabitLog.ts <= datetime.combine(end_date, datetime.max.time())
+        ).order_by(HabitLog.ts.desc()).all()
+        
+        history = {
+            "habit": {
+                "id": habit.id,
+                "title": habit.title,
+                "type": habit.type,
+                "target": habit.target_numeric,
+                "unit": habit.unit
+            },
+            "period": {
+                "days": days,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat()
+            },
+            "instances": [
+                {
+                    "date": instance.date.isoformat(),
+                    "expected": bool(instance.expected),
+                    "status": instance.status,
+                    "progress": instance.progress,
+                    "total_amount": instance.total_amount,
+                    "target": instance.target,
+                    "window": instance.window
+                } for instance in instances
+            ],
+            "logs": [
+                {
+                    "id": log.id,
+                    "timestamp": log.ts.isoformat(),
+                    "source": log.source,
+                    "payload": log.payload
+                } for log in logs
+            ]
+        }
+        
+        return history
+        
+    finally:
+        db.close()
+
+@app.post("/habits/{habit_id}/log-retro")
+def log_habit_retro(
+    habit_id: str,
+    log_data: dict,
+    current_user=Depends(get_current_user)
+):
+    """Log a habit completion for a past date (retro logging)"""
+    db = SessionLocal()
+    try:
+        from datetime import datetime, date, timedelta
+        
+        # Verify habit belongs to user
+        habit = db.query(Habit).filter(
+            Habit.id == habit_id,
+            Habit.user_id == current_user.id
+        ).first()
+        
+        if not habit:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        
+        # Parse the target date
+        try:
+            if "date" in log_data:
+                target_date = datetime.fromisoformat(log_data["date"]).date()
+            else:
+                raise HTTPException(status_code=400, detail="Date is required for retro logging")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+        
+        # Check if retro logging is allowed
+        days_ago = (date.today() - target_date).days
+        if days_ago > habit.retro_hours / 24:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Retro logging only allowed within {habit.retro_hours} hours"
+            )
+        
+        if target_date > date.today():
+            raise HTTPException(status_code=400, detail="Cannot log for future dates")
+        
+        # Create log entry with specified date
+        log = HabitLog(
+            habit_id=habit_id,
+            user_id=current_user.id,
+            ts=datetime.combine(target_date, datetime.now().time()),
+            source=log_data.get("source", "retro"),
+            payload=json.dumps({
+                "amount": log_data.get("amount"),
+                "retro": True
+            }) if log_data.get("amount") else json.dumps({"retro": True})
+        )
+        db.add(log)
+        db.commit()
+        
+        # Update instance for that date if it exists
+        from app.services.habit_instances import HabitInstanceGenerator
+        
+        instance_data = HabitInstanceGenerator.get_instance_by_habit_and_date(
+            db, habit_id, target_date
+        )
+        
+        if instance_data:
+            # Update the instance with new progress
+            target_logs = db.query(HabitLog).filter(
+                HabitLog.habit_id == habit_id,
+                HabitLog.ts >= datetime.combine(target_date, datetime.min.time()),
+                HabitLog.ts < datetime.combine(target_date + timedelta(days=1), datetime.min.time())
+            ).all()
+            
+            log_dicts = []
+            for l in target_logs:
+                log_dicts.append({
+                    "payload": l.payload,
+                    "ts": l.ts,
+                    "source": l.source
+                })
+            
+            checklist_items = []
+            if habit.type == "checklist":
+                items = db.query(HabitItem).filter(HabitItem.habit_id == habit_id).all()
+                checklist_items = [{"id": item.id, "label": item.label} for item in items]
+            
+            HabitInstanceGenerator.update_instance_progress(
+                db, instance_data["instance_id"], log_dicts, habit, checklist_items
+            )
+        
+        return {"message": f"Retro log created for {target_date}", "log_id": log.id}
+        
+    finally:
+        db.close()
+
+
+# ==========================================
+# Worker Management Endpoints
+# ==========================================
+
+# Initialize worker coordinator
+try:
+    from app.workers.habit_worker_coordinator import HabitWorkerCoordinator
+    worker_coordinator = HabitWorkerCoordinator()
+    worker_coordinator.start_background_tasks()
+    logger.info("✅ Habit worker coordinator initialized")
+except Exception as e:
+    logger.warning(f"⚠️ Habit worker coordinator not available: {e}")
+    worker_coordinator = None
+
+@app.get("/workers/status")
+async def get_worker_status(current_user: User = Depends(get_current_user)):
+    """Get status of all habit workers"""
+    if not worker_coordinator:
+        raise HTTPException(status_code=503, detail="Worker coordinator not available")
+    return worker_coordinator.get_status()
+
+@app.post("/workers/run/{task_name}")
+async def run_worker_task(
+    task_name: str,
+    request: Dict[str, Any] = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Manually run a specific worker task"""
+    if not worker_coordinator:
+        raise HTTPException(status_code=503, detail="Worker coordinator not available")
+    
+    kwargs = request or {}
+    result = await worker_coordinator.run_manual_task(task_name, **kwargs)
+    return result
+
+@app.post("/workers/generate-instances/{user_id}")
+async def generate_past_instances(
+    user_id: str,
+    days_back: int = 7,
+    current_user: User = Depends(get_current_user)
+):
+    """Generate habit instances for past days (retro logging support)"""
+    if not worker_coordinator:
+        raise HTTPException(status_code=503, detail="Worker coordinator not available")
+    
+    # Only allow users to generate for themselves or admin
+    if current_user.id != user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    result = await worker_coordinator.run_manual_task(
+        "generate_past_instances", 
+        user_id=user_id, 
+        days_back=days_back
+    )
+    return result
+
+@app.post("/workers/streak-alerts/{user_id}")
+async def send_streak_alerts(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Send streak alerts for a specific user"""
+    if not worker_coordinator:
+        raise HTTPException(status_code=503, detail="Worker coordinator not available")
+    
+    # Only allow users to send for themselves or admin
+    if current_user.id != user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    result = await worker_coordinator.run_manual_task("streak_alerts", user_id=user_id)
+    return result
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,0 +1,4 @@
+2025-08-22 05:00:01,894 - INFO - 🌅 Starting daily vulnerability report generation at 2025-08-22 05:00:01.894369
+2025-08-22 05:00:01,895 - INFO - 🔐 Authenticating with Sara Hub...
+2025-08-22 05:00:02,779 - ERROR - Authentication failed: 401 - {"detail":"Incorrect email or password"}
+2025-08-22 05:00:02,782 - ERROR - ❌ Daily vulnerability report generation failed after 0.89 seconds

@@ -51,7 +51,11 @@
       "Bash(PYTHONPATH=/home/david/jarvis/backend NEO4J_URI=bolt://10.185.1.180:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=sara-graph-secret python3 -c \"\nimport asyncio\nimport sys\nsys.path.insert(0, ''/home/david/jarvis/backend'')\n\nfrom app.services.content_intelligence import content_intelligence\nfrom app.services.metadata_extractor import metadata_extractor\nfrom app.services.tagging_system import smart_tagger\nfrom app.services.enhanced_neo4j_schema import enhanced_neo4j\n\nasync def test_schema_only():\n    print(''🔧 Testing Enhanced Neo4j Schema Setup...'')\n    \n    # Initialize enhanced schema\n    try:\n        await enhanced_neo4j.initialize_enhanced_schema()\n        print(''✅ Enhanced Neo4j schema initialized successfully!'')\n        \n        # Test content processing pipeline\n        test_content = ''''''## Beef Stew Recipe\n        \n- 2 lb chuck roast\n- 4 potatoes\n- 2 carrots\n- 1 onion\n\n## Instructions\n1. Brown the meat\n2. Add vegetables\n3. Pressure cook for 30 minutes\n\nTODO: Buy groceries this weekend''''''\n        \n        title = ''Test Beef Stew Recipe''\n        \n        # Run intelligence pipeline\n        print(''🧠 Running content intelligence...'')\n        content_type, chunks = content_intelligence.process_content(test_content, title)\n        print(f''   ✅ Type: {content_type.value}, Chunks: {len(chunks)}'')\n        \n        metadata = metadata_extractor.extract_metadata(test_content, content_type, title)\n        print(f''   ✅ Entities: {len(metadata.entities)}, Topics: {len(metadata.topics)}'')\n        \n        tags = smart_tagger.generate_tags(test_content, metadata, content_type, title)\n        print(f''   ✅ Tags: {len(tags)} generated'')\n        \n        print(''🎉 Content intelligence pipeline working perfectly!'')\n        print(''✅ Enhanced schema ready for Phase 2!'')\n        \n    except Exception as e:\n        print(f''❌ Schema test failed: {e}'')\n        import traceback\n        traceback.print_exc()\n\nasyncio.run(test_schema_only())\n\")",
       "Bash(timedatectl:*)",
       "Bash(PYTHONPATH=/home/david/jarvis/backend SARA_USER_EMAIL=\"david@avery.cloud\" SARA_USER_PASSWORD=\"Nutman17!\" API_BASE_URL=\"http://10.185.1.180:8000\" timeout 180 /usr/bin/python3 /home/david/jarvis/scripts/generate_daily_vulnerability_report.py)",
-      "Bash(PYTHONPATH:*)"
+      "Bash(PYTHONPATH:*)",
+      "Bash(alembic init:*)",
+      "Bash(alembic revision:*)",
+      "Bash(alembic upgrade:*)",
+      "Bash(crontab:*)"
     ],
     "deny": [],
     "ask": [],

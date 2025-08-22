@@ -10,6 +10,9 @@ import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
 import Settings from './pages/Settings'
+import HabitToday from './components/HabitToday'
+import HabitCreate from './components/HabitCreate'
+import HabitInsights from './components/HabitInsights'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -54,7 +57,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, documents, calendar, vulnerability-watch, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -78,6 +81,10 @@ function App() {
   const [notifiedReminders, setNotifiedReminders] = useState(new Set())
   const [timerTick, setTimerTick] = useState(0) // Force re-render for timer displays
   const [documents, setDocuments] = useState([])
+  
+  // Habit-related state
+  const [habitView, setHabitView] = useState('today') // today, insights, create
+  const [showHabitCreate, setShowHabitCreate] = useState(false)
   const [selectedFile, setSelectedFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [analytics, setAnalytics] = useState(null)
@@ -896,6 +903,13 @@ function App() {
                   <span>Memory Garden</span>
                 </button>
                 <button
+                  onClick={() => { setView('habits'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🎯</span>
+                  <span>Habits</span>
+                </button>
+                <button
                   onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -966,6 +980,13 @@ function App() {
             >
               <span className="material-icons">psychology</span>
               <span className="text-xs">Memory</span>
+            </button>
+            <button
+              onClick={() => setView('habits')}
+              className={`flex flex-col items-center ${view === 'habits' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">track_changes</span>
+              <span className="text-xs">Habits</span>
             </button>
             <button
               onClick={() => { setView('documents'); loadDocuments(); }}
@@ -1702,6 +1723,71 @@ function App() {
             </div>
           )}
 
+          {view === 'habits' && (
+            <div className="space-y-6">
+              {/* Habit Sub-Navigation */}
+              <div className="bg-card border border-card rounded-xl p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex space-x-4">
+                    <button
+                      onClick={() => setHabitView('today')}
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                        habitView === 'today'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                      }`}
+                    >
+                      Today
+                    </button>
+                    <button
+                      onClick={() => setHabitView('insights')}
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                        habitView === 'insights'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                      }`}
+                    >
+                      Insights
+                    </button>
+                  </div>
+                  
+                  <button
+                    onClick={() => setShowHabitCreate(true)}
+                    className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Create Habit
+                  </button>
+                </div>
+              </div>
+
+              {/* Habit Content */}
+              {habitView === 'today' && (
+                <HabitToday />
+              )}
+              
+              {habitView === 'insights' && (
+                <HabitInsights />
+              )}
+
+              {/* Create Habit Modal */}
+              <HabitCreate
+                isOpen={showHabitCreate}
+                onClose={() => setShowHabitCreate(false)}
+                onCreated={() => {
+                  setShowHabitCreate(false);
+                  showToast('Habit created successfully!', 'success');
+                  // Refresh today view if that's active
+                  if (habitView === 'today') {
+                    // HabitToday component will automatically refresh
+                  }
+                }}
+              />
+            </div>
+          )}
+
           {view === 'vulnerability-watch' && (
             <VulnerabilityWatch onToast={showToast} />
           )}
@@ -1742,6 +1828,13 @@ function App() {
           >
             <span className="material-icons text-lg">psychology</span>
             <span className="text-xs">Memory</span>
+          </button>
+          <button
+            onClick={() => setView('habits')}
+            className={`flex flex-col items-center p-2 ${view === 'habits' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">track_changes</span>
+            <span className="text-xs">Habits</span>
           </button>
           <button
             onClick={() => { setView('documents'); loadDocuments(); }}
