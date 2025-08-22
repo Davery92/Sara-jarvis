@@ -5,7 +5,6 @@ import { apiClient, ChatMessage } from '../api/client'
 import { APP_CONFIG } from '../config'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import ErrorBoundary from '../components/ErrorBoundary'
-import SourcesChip from '../components/SourcesChip'
 
 export default function Chat() {
   const {} = useAuth()
@@ -428,9 +427,25 @@ function MessageBubble({ message }: MessageBubbleProps) {
           )}
         </div>
 
-        {/* Sources chip (supports URLs or rich objects) */}
+        {/* Sources list (compact, clickable) */}
         {Array.isArray((message as any).citations) && (message as any).citations.length > 0 && (
-          <SourcesChip sources={(message as any).citations as any[]} />
+          <div className="mt-2 space-y-1">
+            <p className="text-xs text-gray-500 font-medium">Sources:</p>
+            <ul className="space-y-1">
+              {(message as any).citations.slice(0,5).map((c: any, i: number) => (
+                <li key={i} className="text-xs text-gray-600 truncate">
+                  <a
+                    href={typeof c === 'string' ? c : c.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="hover:underline"
+                  >
+                    {typeof c === 'string' ? c : (c.title || c.url)}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         {/* Tool Effects */}

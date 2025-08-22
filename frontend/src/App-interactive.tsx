@@ -9,7 +9,6 @@ import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
-import SourcesChip from './components/SourcesChip'
 import Settings from './pages/Settings'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
@@ -1529,11 +1528,6 @@ function App() {
                             </ReactMarkdown>
                           ) : (
                             <p>{msg.content}</p>
-                          )}
-                          {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
-                            <div className="mt-2">
-                              <SourcesChip sources={(msg as any).citations as any[]} />
-                            </div>
                           )}
                           {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
                             <div className="mt-2 space-y-1">
