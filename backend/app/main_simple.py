@@ -25,6 +25,7 @@ import aiofiles
 import asyncio
 import json
 from fastapi import UploadFile
+from app.tools.registry import tool_registry
 
 # Import vulnerability services
 try:
@@ -795,10 +796,13 @@ class SimpleLLMClient:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=60.0)
         self.event_queue = None
+        self._citations = set()
     
     def set_event_queue(self, queue):
         """Set event queue for streaming updates"""
         self.event_queue = queue
+        # Reset collected citations at the start of a new stream
+        self._citations = set()
     
     async def emit_event(self, event_type, data):
         """Emit an event to the streaming queue"""
@@ -1056,7 +1060,24 @@ class SimpleLLMClient:
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
         else:
-            result = f"Unknown tool: {function_name}"
+            # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
+            try:
+                reg_result = await tool_registry.execute_tool(name=function_name, user_id=str(user_id), parameters=arguments)
+                # Collect citations if available
+                try:
+                    if reg_result.citations:
+                        for c in reg_result.citations:
+                            if isinstance(c, str):
+                                self._citations.add(c)
+                except Exception:
+                    pass
+                result = json.dumps({
+                    "success": reg_result.success,
+                    "message": reg_result.message,
+                    "data": reg_result.data
+                })
+            except Exception as e:
+                result = f"Unknown tool: {function_name} ({e})"
         
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
         if function_name == "search_documents":
@@ -1066,6 +1087,9 @@ class SimpleLLMClient:
             "tool_call_id": tool_call["id"],
             "content": str(result)
         }
+
+    def get_citations(self):
+        return list(self._citations)
 
     async def search_notes_tool(self, query, user_id):
         """Search notes using Neo4j knowledge graph (with PostgreSQL fallback)"""
@@ -4052,26 +4076,31 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         }
     ]
     
-    # Add enhanced system message
+    # Add enhanced system message (explicit web_search/open_page guidance)
     system_message = ChatMessage(
         role="system",
-        content=f"You are {ASSISTANT_NAME}, a helpful personal assistant for {current_user.email}. "
-                f"You have access to tools to search and create notes, manage reminders, run timers, search documents, and access your memory. "
-                f"Use search_notes when the user asks about saved information, create_note to save information, "
-                f"create_reminder to set time-based reminders, list_reminders to show active reminders, "
-                f"complete_reminder to mark reminders as done, start_timer to start productivity timers, "
-                f"list_timers to check timer status, stop_timer to cancel timers, "
-                f"search_documents to find information in uploaded files, and search_memory to recall past conversations. "
-                f"IMPORTANT: Use search_memory when the user asks about previous conversations, mentions something you should remember, "
-                f"or when context from past interactions would be helpful. You remember everything we discuss! "
-                f"When referencing information from documents, use search_documents and include citations when available. "
-                f"You can create beautiful Mermaid diagrams using ```mermaid code blocks for flowcharts, mind maps, timelines, tables, and data visualization. "
-                f"Use Mermaid diagrams when presenting complex data, relationships, or processes to make them more visually appealing. "
-                f"CRITICAL: After using tools, ALWAYS provide a helpful, conversational response based on the results. "
-                f"Never end with just tool calls - always follow up with a natural response that addresses the user's question. "
-                f"If tools return information, summarize it helpfully. If no relevant information is found, say so politely. "
-                f"For timers, always convert durations to minutes correctly: "
-                f"2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Always be helpful and concise."
+        content=(
+            f"You are {ASSISTANT_NAME}, a helpful personal assistant for {current_user.email}. "
+            f"You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar, document search, and memory search. "
+            f"Use web_search for questions that require external, up-to-date information. "
+            f"web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. "
+            f"Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. "
+            f"When you use web_search, synthesize a concise answer first; the system will attach sources automatically. "
+            f"Use search_notes when the user asks about saved information, create_note to save information, "
+            f"create_reminder to set time-based reminders, list_reminders to show active reminders, "
+            f"complete_reminder to mark reminders as done, start_timer to start productivity timers, "
+            f"list_timers to check timer status, stop_timer to cancel timers, "
+            f"search_documents to find information in uploaded files, and search_memory to recall past conversations. "
+            f"IMPORTANT: Use search_memory when the user asks about previous conversations, mentions something you should remember, "
+            f"or when context from past interactions would be helpful. You remember everything we discuss! "
+            f"When referencing information from documents, use search_documents and include citations when available. "
+            f"You can create beautiful Mermaid diagrams using ```mermaid code blocks for flowcharts, mind maps, timelines, tables, and data visualization. "
+            f"Use Mermaid diagrams when presenting complex data, relationships, or processes to make them more visually appealing. "
+            f"CRITICAL: After using tools, ALWAYS provide a helpful, conversational response based on the results. "
+            f"Never end with just tool calls - always follow up with a natural response that addresses the user's question. "
+            f"If tools return information, summarize it helpfully. If no relevant information is found, say so politely. "
+            f"For timers, always convert durations to minutes correctly: 2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Be helpful and concise."
+        )
     )
     
     all_messages = [system_message] + request.messages
@@ -4131,142 +4160,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             streaming_client = SimpleLLMClient()
             streaming_client.set_event_queue(event_queue)
             
-            # Tool definitions (same as regular chat)
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "create_note",
-                        "description": "Create a new note with title and content",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "title": {
-                                    "type": "string",
-                                    "description": "The title of the note"
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "The content of the note in markdown format"
-                                }
-                            },
-                            "required": ["title", "content"]
-                        }
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "search_notes",
-                        "description": "Search through existing notes",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "Search query to find notes"
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "create_reminder",
-                        "description": "Create a reminder for a specific time",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "title": {
-                                    "type": "string",
-                                    "description": "What to be reminded about"
-                                },
-                                "description": {
-                                    "type": "string",
-                                    "description": "Additional details about the reminder"
-                                },
-                                "reminder_time": {
-                                    "type": "string",
-                                    "format": "date-time",
-                                    "description": "When to send the reminder (ISO 8601 format)"
-                                }
-                            },
-                            "required": ["title", "reminder_time"]
-                        }
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "start_timer",
-                        "description": "Start a timer for a specified duration",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "title": {
-                                    "type": "string",
-                                    "description": "Name/description of what the timer is for"
-                                },
-                                "duration_minutes": {
-                                    "type": "integer",
-                                    "description": "Duration in minutes"
-                                }
-                            },
-                            "required": ["title", "duration_minutes"]
-                        }
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "list_calendar_events",
-                        "description": "List calendar events for a specific date range",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "start_date": {
-                                    "type": "string",
-                                    "format": "date",
-                                    "description": "Start date (YYYY-MM-DD)"
-                                },
-                                "end_date": {
-                                    "type": "string", 
-                                    "format": "date",
-                                    "description": "End date (YYYY-MM-DD)"
-                                }
-                            },
-                            "required": ["start_date", "end_date"]
-                        }
-                    }
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "search_memory",
-                        "description": "Search through episodic memory and past conversations",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "Search query to find relevant memories"
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    }
-                }
-            ]
+            # Use global tool registry to expose all tools (includes web_search and open_page)
+            tools = tool_registry.get_openai_schemas()
             
             # Create system message
             system_message = ChatMessage(
                 role="system",
-                content=f"You are {ASSISTANT_NAME}, a helpful AI assistant with access to tools for managing notes, reminders, timers, and calendar events. "
-                        f"You also have access to search through user's memory and past conversations. "
-                        f"When creating timers: convert time durations to minutes. Examples: "
-                        f"2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Always be helpful and concise."
+                content=(
+                    f"You are {ASSISTANT_NAME}, a helpful AI assistant with access to tools including web_search and open_page, as well as notes, reminders, timers, calendar, and memory search. "
+                    f"Use web_search for questions that require external, up-to-date information. "
+                    f"web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. "
+                    f"Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. "
+                    f"When you use web_search, synthesize a concise answer first; the system will attach sources automatically. "
+                    f"When creating timers: convert time durations to minutes. Examples: 2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Be helpful and concise."
+                )
             )
             
             all_messages = [system_message] + request.messages
@@ -4278,6 +4185,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     "type": "final_response",
                     "data": {
                         "content": response_content,
+                        "citations": streaming_client.get_citations(),
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 })

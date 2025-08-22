@@ -191,13 +191,15 @@ async def chat(
         )
         
         # Prepare messages for LLM
-        base_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant with contextual awareness. You have access to tools to manage notes, reminders, timers, calendar events, and search through personal memory.
+        base_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant with contextual awareness. You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar events, document search, and memory search.
+
+Use web_search for questions that require external, up-to-date information. web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. When you use web_search, synthesize a concise answer first; the system will attach sources automatically.
 
 You have been provided with your current contextual awareness which includes active timers, upcoming reminders, mood analysis, and priority items. Use this information to provide proactive and contextually appropriate responses.
 
 When you use information from memory or documents, cite them using the format provided in the context. Keep responses conversational and helpful, and consider your current contextual awareness when providing assistance.
 
-Available tools: notes management, reminders, timers, calendar events, and memory search."""
+Available tools: web_search, open_page, notes management, reminders, timers, calendar events, document search, and memory search."""
         
         # Add proactive suggestions if any were generated
         if proactive_suggestions:

@@ -9,6 +9,7 @@ import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
+import SourcesChip from './components/SourcesChip'
 import Settings from './pages/Settings'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
@@ -439,6 +440,7 @@ function App() {
                     
                   case 'final_response':
                     const finalContent = eventData.data.content
+                    const finalCitations = eventData.data.citations || []
                     if (isQuickChat) {
                       setQuickChatResponse(finalContent)
                     } else {
@@ -446,10 +448,12 @@ function App() {
                         const newMessages = [...prev]
                         if (newMessages[newMessages.length - 1]?.role === 'assistant') {
                           newMessages[newMessages.length - 1].content = finalContent
+                          newMessages[newMessages.length - 1].citations = finalCitations
                         } else {
                           newMessages.push({
                             role: 'assistant',
                             content: finalContent,
+                            citations: finalCitations,
                             timestamp: new Date()
                           })
                         }
@@ -1525,6 +1529,25 @@ function App() {
                             </ReactMarkdown>
                           ) : (
                             <p>{msg.content}</p>
+                          )}
+                          {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
+                            <div className="mt-2">
+                              <SourcesChip sources={(msg as any).citations as any[]} />
+                            </div>
+                          )}
+                          {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                              <div className="text-[11px] text-gray-300">Sources</div>
+                              <ul className="space-y-1">
+                                {(msg as any).citations.slice(0,5).map((c: any, i: number) => (
+                                  <li key={i} className="text-[11px] text-gray-400 truncate">
+                                    <a href={typeof c === 'string' ? c : c.url} target="_blank" rel="noreferrer" className="hover:text-gray-200">
+                                      {typeof c === 'string' ? c : (c.title || c.url)}
+                                    </a>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
                           )}
                         </div>
                         

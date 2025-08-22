@@ -11,6 +11,8 @@ from app.tools.knowledge_graph import (
     KnowledgeClusterTool,
     KnowledgeGapAnalysisTool
 )
+from app.tools.web_search import WebSearchTool
+from app.tools.open_page import OpenPageTool
 import logging
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,10 @@ class ToolRegistry:
             ConnectionFinderTool(),
             KnowledgeClusterTool(),
             KnowledgeGapAnalysisTool(),
+
+            # Web Search
+            WebSearchTool(),
+            OpenPageTool(),
         ]
         
         for tool in tools:

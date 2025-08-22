@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional, Dict
 import os
 
 
@@ -17,6 +17,21 @@ class Settings(BaseSettings):
     embedding_base_url: str = "http://100.104.68.115:11434"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
+    
+    # Search / Reranker / Caching
+    searxng_base_url: str = "http://10.185.1.9:4000"
+    searxng_timeout_s: float = 3.0
+    searxng_language: str = "en"
+    search_cache_ttl_s: int = 1800  # 30 minutes
+    page_cache_ttl_s: int = 172800  # 48 hours
+    redis_url: str = "redis://localhost:6379/0"
+    # If not provided, fallback to embedding_base_url in service
+    reranker_base_url: Optional[str] = None
+    reranker_model: str = "bge-reranker-v2-m3:latest"
+
+    # Domain policy
+    domain_boosts: Dict[str, float] = {}
+    domain_denylist: List[str] = []
     
     # Security
     jwt_secret: str = "sara-hub-jwt-secret-change-in-production"

@@ -52,6 +52,16 @@ class SearchService:
         self.reranker_base = (settings.reranker_base_url or settings.embedding_base_url).rstrip('/')
         self.reranker_model = settings.reranker_model
 
+        # Domain policy
+        try:
+            self.domain_boosts = {str(k).lower(): float(v) for k, v in (settings.domain_boosts or {}).items()}
+        except Exception:
+            self.domain_boosts = {}
+        try:
+            self.domain_deny = {d.lower() for d in (settings.domain_denylist or [])}
+        except Exception:
+            self.domain_deny = set()
+
     async def close(self):
         try:
             await self.http.aclose()
@@ -217,9 +227,25 @@ class SearchService:
             for i in range(len(items)):
                 # Blend: 0.6 cross, 0.4 bi; add tiny boost for earlier rank
                 blended = 0.6 * cross_scores[i] + 0.4 * bi_scores[i] + (0.01 * (len(items) - i) / len(items))
+                # Domain boost (authoritative domains)
+                try:
+                    host = urlparse(items[i].get("url", "")).netloc.lower()
+                    if host in getattr(self, 'domain_boosts', {}):
+                        blended += float(self.domain_boosts[host])
+                except Exception:
+                    pass
                 final_scores.append(blended)
         else:
-            final_scores = bi_scores
+            # Start from bi-encoder scores and apply boosts
+            base = list(bi_scores)
+            for i in range(len(items)):
+                try:
+                    host = urlparse(items[i].get("url", "")).netloc.lower()
+                    if host in getattr(self, 'domain_boosts', {}):
+                        base[i] += float(self.domain_boosts[host])
+                except Exception:
+                    pass
+            final_scores = base
 
         ranked = list(zip(items, final_scores))
         ranked.sort(key=lambda x: x[1], reverse=True)
@@ -259,6 +285,19 @@ class SearchService:
                 continue
             seen.add(cu)
             deduped.append(it)
+
+        # Apply denylist filtering by host
+        if self.domain_deny:
+            filtered: List[Dict[str, Any]] = []
+            for it in deduped:
+                try:
+                    host = urlparse(it.get("url", "")).netloc.lower()
+                except Exception:
+                    host = ""
+                if host and host in self.domain_deny:
+                    continue
+                filtered.append(it)
+            deduped = filtered
 
         # Lightweight extraction for top-N to improve snippets
         topN = deduped[:extract_top_n]
@@ -303,4 +342,3 @@ class SearchService:
 
 # Global instance
 search_service = SearchService()
-

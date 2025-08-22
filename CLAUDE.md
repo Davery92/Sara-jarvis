@@ -4,20 +4,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
+### Docker Container Management
+```bash
+# Start all data services (recommended for development)
+docker compose up -d db neo4j minio redis
+
+# Start complete application stack
+docker compose up -d
+
+# View logs for specific services
+docker compose logs -f db          # Database logs
+docker compose logs -f backend     # Backend API logs
+docker compose logs -f frontend    # Frontend dev server logs
+
+# Stop all services
+docker compose down
+
+# Rebuild containers after code changes
+docker compose build --no-cache backend
+docker compose build --no-cache frontend
+```
+
 ### Frontend (React + Vite + TypeScript)
 ```bash
+# Running in Docker (recommended for development)
+# Frontend automatically starts in Docker container on port 3000
+# Access at: http://10.185.1.180:3000
+
+# Local development (alternative)
 cd frontend
 npm run dev        # Start development server on port 3000
-npm run build      # Build for production
+npm run build      # Build for production (requires TypeScript fixes)
 npm run lint       # Run ESLint
 npm run preview    # Preview production build
 ```
 
 ### Backend (FastAPI + Python)
 ```bash
+# Running locally (current setup)
 cd backend
-
-# Development (local)
 export DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
 export OPENAI_BASE_URL=http://100.104.68.115:11434/v1
 export OPENAI_MODEL=gpt-oss:120b
@@ -28,10 +53,8 @@ export EMBEDDING_DIM=1024
 export ASSISTANT_NAME=Sara
 python3 app/main_simple.py
 
-# Production
-docker-compose up -d        # Start all services
-docker-compose logs -f      # View logs
-docker-compose down         # Stop services
+# Running in Docker (production)
+docker compose up -d backend       # Requires fixing large dependencies
 ```
 
 ### Database Operations
@@ -55,6 +78,65 @@ Sara is a personal AI hub with human-like memory built as a full-stack applicati
 - **Database**: PostgreSQL 16 with pgvector extension for semantic search
 - **Storage**: MinIO for document uploads
 - **LLM**: OpenAI-compatible endpoint (gpt-oss:120b via http://100.104.68.115:11434)
+
+### Docker Container Architecture
+
+The application uses a hybrid containerized architecture optimized for development:
+
+#### Current Running Containers
+```bash
+docker compose ps
+# Shows:
+# jarvis-db-1              - PostgreSQL 16 with pgvector (port 5432)
+# jarvis-neo4j-1           - Neo4j graph database (ports 7474/7687)
+# jarvis-redis-1           - Redis cache (port 6379)
+# jarvis-frontend-dev-1    - Vite dev server (port 3000)
+```
+
+#### Container Details
+
+**Data Layer (Containerized)**
+- **PostgreSQL (`jarvis-db-1`)**: Primary database with pgvector extension
+  - Image: `pgvector/pgvector:pg16`
+  - Port: `10.185.1.180:5432`
+  - Persistent volume: `postgres_data`
+  
+- **Neo4j (`jarvis-neo4j-1`)**: Knowledge graph database
+  - Image: `neo4j:5.15-community`
+  - Ports: `10.185.1.180:7474` (HTTP), `10.185.1.180:7687` (Bolt)
+  - Persistent volumes: `neo4j_data`, `neo4j_logs`, `neo4j_import`, `neo4j_plugins`
+  
+- **Redis (`jarvis-redis-1`)**: Caching layer
+  - Image: `redis:7-alpine`
+  - Port: `0.0.0.0:6379`
+  
+- **MinIO (`jarvis-minio-1`)**: Object storage for documents
+  - Image: `quay.io/minio/minio`
+  - Ports: `10.185.1.180:9000` (API), `10.185.1.180:9001` (Console)
+  - Persistent volume: `minio_data`
+
+**Application Layer**
+- **Frontend (`jarvis-frontend-dev-1`)**: React development server
+  - Image: `node:20-alpine`
+  - Port: `0.0.0.0:3000`
+  - Volume mounted: Live code reloading
+  - Command: Vite dev server with hot module replacement
+  
+- **Backend**: Currently runs locally for development
+  - Connects to containerized databases
+  - Access: `http://10.185.1.180:8000`
+  - Environment: Full Python dependencies available locally
+
+#### Container Networking
+- All containers use the `jarvis_default` Docker network
+- Services can communicate using container names (e.g., `db`, `neo4j`, `redis`)
+- Host networking for external access (frontend, API, databases)
+
+#### Development Workflow
+1. **Data services** run in Docker containers for consistency
+2. **Frontend** runs in Docker with live reloading for rapid development  
+3. **Backend** runs locally for easier debugging and dependency management
+4. **Hot reloading** enabled for both frontend and backend development
 
 ### Key Components
 

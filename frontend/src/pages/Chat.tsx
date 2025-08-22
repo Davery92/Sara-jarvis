@@ -5,6 +5,7 @@ import { apiClient, ChatMessage } from '../api/client'
 import { APP_CONFIG } from '../config'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import ErrorBoundary from '../components/ErrorBoundary'
+import SourcesChip from '../components/SourcesChip'
 
 export default function Chat() {
   const {} = useAuth()
@@ -427,21 +428,9 @@ function MessageBubble({ message }: MessageBubbleProps) {
           )}
         </div>
 
-        {/* Citations */}
-        {message.citations && message.citations.length > 0 && (
-          <div className="mt-2 space-y-2">
-            <p className="text-xs text-gray-500 font-medium">Sources:</p>
-            {message.citations.map((citation, index) => (
-              <div key={index} className="bg-gray-50 border border-gray-200 rounded-lg p-3">
-                <div className="flex items-center space-x-2 mb-1">
-                  <span className="text-xs font-medium text-gray-700">
-                    {citation.type === 'memory' ? '🧠' : citation.type === 'document' ? '📄' : '📝'} {citation.source}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-600">{citation.content}</p>
-              </div>
-            ))}
-          </div>
+        {/* Sources chip (supports URLs or rich objects) */}
+        {Array.isArray((message as any).citations) && (message as any).citations.length > 0 && (
+          <SourcesChip sources={(message as any).citations as any[]} />
         )}
 
         {/* Tool Effects */}

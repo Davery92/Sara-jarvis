@@ -6,6 +6,7 @@ import logging
 from app.core.config import settings
 from app.db.session import engine, create_tables
 from app.routes import auth, chat, notes, reminders, calendar, docs, memory
+from app.routes import search as search_routes
 from app.services.scheduler import scheduler_service
 
 
@@ -50,6 +51,7 @@ app.include_router(reminders.router, prefix="/reminders", tags=["reminders"])
 app.include_router(calendar.router, prefix="/events", tags=["calendar"])
 app.include_router(docs.router, prefix="/docs", tags=["documents"])
 app.include_router(memory.router, prefix="/memory", tags=["memory"])
+app.include_router(search_routes.router)
 
 
 @app.get("/")
