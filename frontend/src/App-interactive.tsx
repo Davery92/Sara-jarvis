@@ -93,6 +93,9 @@ function App() {
   
   // Ref for auto-scrolling chat messages
   const chatMessagesEndRef = useRef(null)
+  
+  // Ref to track and cancel ongoing chat requests
+  const abortControllerRef = useRef(null)
 
   // Check authentication on load
   useEffect(() => {
@@ -137,11 +140,12 @@ function App() {
     }
   }, [isAuthenticated])
 
-  // Load analytics when view changes to dashboard
+  // Load analytics and notes when view changes to dashboard
   useEffect(() => {
     if (isAuthenticated && view === 'dashboard') {
-      console.log('Dashboard view activated, loading analytics...')
+      console.log('Dashboard view activated, loading analytics and notes...')
       loadAnalytics()
+      loadNotes()
     }
   }, [isAuthenticated, view])
 
@@ -157,6 +161,15 @@ function App() {
       }, 100)
     }
   }, [chatMessages, view, loading])
+
+  // Cleanup: cancel any ongoing chat requests when component unmounts
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   const loadTimersAndReminders = async () => {
     try {
@@ -310,7 +323,15 @@ function App() {
 
   const sendMessage = async (e, isQuickChat = false) => {
     e.preventDefault()
-    if (!message.trim()) return
+    if (!message.trim() || loading) return // Prevent multiple concurrent requests
+
+    // Cancel any existing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    
+    // Create new abort controller for this request
+    abortControllerRef.current = new AbortController()
 
     const userMessage = { role: 'user', content: message, timestamp: new Date() }
     if (!isQuickChat) {
@@ -334,6 +355,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        signal: abortControllerRef.current.signal,
         body: JSON.stringify({
           messages: [...chatMessages, userMessage].map(m => ({ role: m.role, content: m.content }))
         })
@@ -459,6 +481,12 @@ function App() {
       // Refresh timers/reminders after chat in case something was created
       await loadTimersAndReminders()
     } catch (error) {
+      // Don't show error if request was aborted (user sent another message)
+      if (error.name === 'AbortError') {
+        console.log('Chat request was cancelled')
+        return
+      }
+      
       const errorMsg = 'Connection error. Please check your network and try again.'
       if (isQuickChat) {
         setQuickChatResponse(errorMsg)
@@ -471,6 +499,10 @@ function App() {
       }
     } finally {
       setLoading(false)
+      // Clear the abort controller when done
+      if (abortControllerRef.current) {
+        abortControllerRef.current = null
+      }
     }
   }
 
@@ -1231,6 +1263,7 @@ function App() {
                       </div>
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
+                        skipHtml={false}
                         components={{
                           code({node, inline, className, children, ...props}) {
                             const match = /language-(\w+)/.exec(className || '')
@@ -1256,6 +1289,26 @@ function App() {
                           p: ({children}) => <p className="text-gray-100 text-sm">{children}</p>,
                           ul: ({children}) => <ul className="list-disc list-inside text-gray-100 text-sm">{children}</ul>,
                           ol: ({children}) => <ol className="list-decimal list-inside text-gray-100 text-sm">{children}</ol>,
+                          table: ({children}) => (
+                            <div className="overflow-x-auto my-4">
+                              <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
+                                {children}
+                              </table>
+                            </div>
+                          ),
+                          thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
+                          tbody: ({children}) => <tbody>{children}</tbody>,
+                          tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
+                          th: ({children}) => (
+                            <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
+                              {children}
+                            </th>
+                          ),
+                          td: ({children}) => (
+                            <td className="border border-gray-600 px-3 py-2 text-gray-300">
+                              {children}
+                            </td>
+                          ),
                         }}
                       >
                         {quickChatResponse}
@@ -1381,6 +1434,7 @@ function App() {
                           {msg.role === 'assistant' ? (
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
+                              skipHtml={false}
                               components={{
                                 code({node, inline, className, children, ...props}) {
                                   const match = /language-(\w+)/.exec(className || '')
@@ -1445,6 +1499,26 @@ function App() {
                                     </a>
                                   )
                                 },
+                                table: ({children}) => (
+                                  <div className="overflow-x-auto my-4">
+                                    <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
+                                      {children}
+                                    </table>
+                                  </div>
+                                ),
+                                thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
+                                tbody: ({children}) => <tbody>{children}</tbody>,
+                                tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
+                                th: ({children}) => (
+                                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
+                                    {children}
+                                  </th>
+                                ),
+                                td: ({children}) => (
+                                  <td className="border border-gray-600 px-3 py-2 text-gray-300">
+                                    {children}
+                                  </td>
+                                ),
                               }}
                             >
                               {msg.content}
