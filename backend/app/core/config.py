@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
     
     # Search / Reranker / Caching
-    searxng_base_url: str = "http://10.185.1.9:4000"
+    searxng_base_url: str = "http://10.185.1.8:4000"
     searxng_timeout_s: float = 3.0
     searxng_language: str = "en"
     search_cache_ttl_s: int = 1800  # 30 minutes

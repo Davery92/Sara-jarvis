@@ -14,6 +14,7 @@ import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
+import Sprite, { SpriteHandle } from './components/Sprite'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -97,6 +98,9 @@ function App() {
   
   // Ref to track and cancel ongoing chat requests
   const abortControllerRef = useRef(null)
+  
+  // Sprite ref for controlling the assistant avatar
+  const spriteRef = useRef<SpriteHandle>(null)
 
   // Check authentication on load
   useEffect(() => {
@@ -123,7 +127,7 @@ function App() {
         const endTime = new Date(timer.end_time)
         if (endTime <= now && timer.is_active && !finishedTimers.has(timer.id)) {
           setFinishedTimers(prev => new Set([...prev, timer.id]))
-          showToast(`🔔 Timer finished: ${timer.title}`, 'success', true)
+          showToast(`🔔 Timer finished: ${timer.title}`, 'success', true, true)
           // Automatically stop the timer on the backend
           stopTimer(timer.id)
         }
@@ -144,9 +148,10 @@ function App() {
   // Load analytics and notes when view changes to dashboard
   useEffect(() => {
     if (isAuthenticated && view === 'dashboard') {
-      console.log('Dashboard view activated, loading analytics and notes...')
+      console.log('Dashboard view activated, loading analytics, notes, timers, and reminders...')
       loadAnalytics()
       loadNotes()
+      loadTimersAndReminders()
     }
   }, [isAuthenticated, view])
 
@@ -199,7 +204,7 @@ function App() {
           // If reminder is due (within 30 seconds) and we haven't notified yet
           if (timeDiff < 30000 && !notifiedReminders.has(reminder.id)) {
             setNotifiedReminders(prev => new Set([...prev, reminder.id]))
-            showToast(`🔔 Reminder: ${reminder.title}`, 'info', true)
+            showToast(`🔔 Reminder: ${reminder.title}`, 'info', true, true)
           }
         })
         
@@ -312,6 +317,17 @@ function App() {
           content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
           timestamp: new Date()
         }])
+        
+        // Welcome notification via sprite
+        setTimeout(() => {
+          spriteRef.current?.notify(`Welcome back! I'm here to assist you.`, {
+            showToast: true,
+            keepBadge: false,
+            autoHide: 4000,
+            onReply: () => setView('chat'),
+            onOpen: () => setView('dashboard')
+          })
+        }, 2000)
       } else {
         const error = await response.json()
         setMessage(error.detail || 'Authentication failed')
@@ -397,6 +413,7 @@ function App() {
                   case 'tool_calls_start':
                     isUsingTools = true
                     toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
+                    spriteRef.current?.setState('listening')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -404,6 +421,7 @@ function App() {
                     
                   case 'tool_executing':
                     toolActivity = `🔧 Using ${eventData.data.tool}...`
+                    spriteRef.current?.setState('thinking')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -411,6 +429,7 @@ function App() {
                     
                   case 'thinking':
                     toolActivity = '💭 Processing results...'
+                    spriteRef.current?.setState('thinking')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -418,6 +437,7 @@ function App() {
                     
                   case 'text_chunk':
                     streamingContent = eventData.data.full_content
+                    spriteRef.current?.setState('speaking')
                     if (isQuickChat) {
                       setQuickChatResponse(streamingContent)
                     } else {
@@ -465,11 +485,13 @@ function App() {
                   case 'response_ready':
                     setLoading(false)
                     isUsingTools = false
+                    spriteRef.current?.setState('idle')
                     break
                     
                   case 'error':
                     console.error('Streaming error:', eventData.message)
                     setLoading(false)
+                    spriteRef.current?.setState('idle')
                     break
                 }
               } catch (e) {
@@ -503,6 +525,7 @@ function App() {
       }
     } finally {
       setLoading(false)
+      spriteRef.current?.setState('idle')
       // Clear the abort controller when done
       if (abortControllerRef.current) {
         abortControllerRef.current = null
@@ -788,10 +811,36 @@ function App() {
     }])
   }
   
-  const showToast = (message, type = 'info', persistent = false) => {
+  const showToast = (message, type = 'info', persistent = false, showSprite = false) => {
     const id = Date.now()
     const toast = { id, message, type, persistent }
     setToasts(prev => [...prev, toast])
+    
+    // Show sprite notification for important messages
+    if (showSprite) {
+      spriteRef.current?.notify(message, {
+        showToast: true,
+        keepBadge: true,
+        autoHide: persistent ? 0 : 6500,
+        onReply: () => {
+          // Open chat and pre-fill with a relevant response
+          setView('chat')
+          setMessage(`About the notification: "${message}"`)
+        },
+        onOpen: () => {
+          // Navigate to most relevant view based on notification type
+          if (message.toLowerCase().includes('vuln')) {
+            setView('vulnerability-watch')
+          } else if (message.toLowerCase().includes('timer')) {
+            setView('dashboard')
+          } else if (message.toLowerCase().includes('reminder')) {
+            setView('dashboard') 
+          } else {
+            setView('chat')
+          }
+        }
+      })
+    }
     
     // Auto-remove toast after 5 seconds (unless persistent)
     if (!persistent) {
@@ -911,7 +960,7 @@ function App() {
               </div>
               <nav className="flex flex-col space-y-4">
                 <button
-                  onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); setIsMobileMenuOpen(false); }}
+                  onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="text-xl">🏠</span>
@@ -990,7 +1039,7 @@ function App() {
           <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl">S</div>
           <nav className="flex flex-col items-center space-y-6">
             <button
-              onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); }}
+              onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
               className={`flex flex-col items-center ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
               <span className="material-icons">home</span>
@@ -1703,7 +1752,7 @@ function App() {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40">
         <div className="flex justify-around py-2">
           <button
-            onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); }}
+            onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
             className={`flex flex-col items-center p-2 ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">home</span>
@@ -1805,6 +1854,11 @@ function App() {
           </div>
         ))}
       </div>
+      
+      {/* Sara Sprite Assistant */}
+      <Sprite 
+        ref={spriteRef}
+      />
     </div>
   )
 }

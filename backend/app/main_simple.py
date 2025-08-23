@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, text
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -143,7 +143,7 @@ class Reminder(Base):
     title = Column(String, nullable=False)
     description = Column(Text, default="")
     reminder_time = Column(DateTime, nullable=False)
-    is_completed = Column(String, default="false")  # SQLite compatibility
+    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
@@ -155,8 +155,8 @@ class Timer(Base):
     duration_minutes = Column(Integer, nullable=False)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
-    is_active = Column(String, default="true")  # SQLite compatibility
-    is_completed = Column(String, default="false")  # SQLite compatibility
+    is_active = Column(Boolean, default=True)  # PostgreSQL boolean
+    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
     created_at = Column(DateTime, server_default=func.now())
 
 class Document(Base):
@@ -516,6 +516,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    conversation_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     message: ChatMessage
@@ -898,7 +899,7 @@ class SimpleLLMClient:
             logger.error(f"LLM error: {e}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
-    async def chat_with_tools(self, messages, tools, user_id):
+    async def chat_with_tools(self, messages, tools, user_id, conversation_id=None):
         """Enhanced chat with tool calling support"""
         try:
             logger.info(f"LLM chat_with_tools called with {len(messages)} messages, {len(tools)} tools for user {user_id}")
@@ -994,7 +995,7 @@ class SimpleLLMClient:
                             "rounds": round_num + 1,
                             "content_length": len(response_content) if response_content else 0
                         })
-                        await self.store_conversation(messages, response_content, user_id)
+                        await self.store_conversation(messages, response_content, user_id, conversation_id)
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
                 else:
@@ -1004,7 +1005,7 @@ class SimpleLLMClient:
                         "rounds": 1,
                         "content_length": len(response_content) if response_content else 0
                     })
-                    await self.store_conversation(messages, response_content, user_id)
+                    await self.store_conversation(messages, response_content, user_id, conversation_id)
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
             
@@ -1020,7 +1021,7 @@ class SimpleLLMClient:
             if not response_content:
                 response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
             
-            await self.store_conversation(messages, response_content, user_id)
+            await self.store_conversation(messages, response_content, user_id, conversation_id)
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
                 
@@ -1298,7 +1299,7 @@ class SimpleLLMClient:
             try:
                 reminders = db.query(Reminder).filter(
                     Reminder.user_id == user_id,
-                    Reminder.is_completed == "false"
+                    Reminder.is_completed == False
                 ).order_by(Reminder.reminder_time).limit(10).all()
                 
                 if not reminders:
@@ -1383,7 +1384,7 @@ class SimpleLLMClient:
                 now = datetime.now(timezone.utc)
                 timers = db.query(Timer).filter(
                     Timer.user_id == user_id,
-                    Timer.is_active == "true"
+                    Timer.is_active == True
                 ).order_by(Timer.created_at.desc()).limit(10).all()
                 
                 if not timers:
@@ -1420,7 +1421,7 @@ class SimpleLLMClient:
                 timer = db.query(Timer).filter(
                     Timer.id == timer_id,
                     Timer.user_id == user_id,
-                    Timer.is_active == "true"
+                    Timer.is_active == True
                 ).first()
                 
                 if not timer:
@@ -1779,11 +1780,15 @@ class SimpleLLMClient:
             logger.error(f"Error searching dream insights: {e}")
             return []
 
-    async def store_conversation(self, messages, response_content, user_id):
+    async def store_conversation(self, messages, response_content, user_id, conversation_id=None):
         """Store the conversation in enhanced episodic memory with emotional and topical analysis"""
         try:
-            # Create a conversation ID for grouping related episodes
-            conversation_id = str(uuid.uuid4())
+            # Use provided conversation ID or create a new one for grouping related episodes
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+            
+            # Store the conversation ID for later retrieval
+            self.current_conversation_id = conversation_id
             
             # Store each message as an episode using the intelligent memory service
             for message in messages:
@@ -1821,37 +1826,52 @@ class SimpleLLMClient:
         try:
             db = SessionLocal()
             try:
-                conversation = Conversation(
-                    id=conversation_id,
-                    user_id=user_id,
-                    title="",  # Will be generated later
-                    total_messages=len(messages) + (1 if response_content else 0)
-                )
-                db.add(conversation)
-                db.commit()
+                # Check if conversation already exists
+                existing_conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
                 
-                # Store turns
-                turn_index = 0
-                for message in messages:
-                    if message.role in ["user", "assistant"]:
-                        embedding = await embedding_service.generate_embedding(message.content)
-                        
-                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                            embedding_data = embedding
-                        else:
-                            import json
-                            embedding_data = json.dumps(embedding) if embedding else None
-                        
-                        turn = ConversationTurn(
-                            conversation_id=conversation.id,
-                            user_id=user_id,
-                            role=message.role,
-                            content=message.content,
-                            message_index=turn_index,
-                            embedding=embedding_data
-                        )
-                        db.add(turn)
-                        turn_index += 1
+                if not existing_conversation:
+                    # Create new conversation
+                    conversation = Conversation(
+                        id=conversation_id,
+                        user_id=user_id,
+                        title="",  # Will be generated later
+                        total_messages=len(messages) + (1 if response_content else 0)
+                    )
+                    db.add(conversation)
+                    db.commit()
+                else:
+                    # Update existing conversation
+                    conversation = existing_conversation
+                    conversation.total_messages = conversation.total_messages + (1 if response_content else 0)
+                    conversation.updated_at = func.now()
+                    db.commit()
+                
+                # Get current turn count for indexing
+                current_turn_count = db.query(ConversationTurn).filter(
+                    ConversationTurn.conversation_id == conversation_id
+                ).count()
+                
+                # Only store the new user message (last message in the list)
+                if messages and messages[-1].role == "user":
+                    last_message = messages[-1]
+                    embedding = await embedding_service.generate_embedding(last_message.content)
+                    
+                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                        embedding_data = embedding
+                    else:
+                        import json
+                        embedding_data = json.dumps(embedding) if embedding else None
+                    
+                    turn = ConversationTurn(
+                        conversation_id=conversation.id,
+                        user_id=user_id,
+                        role=last_message.role,
+                        content=last_message.content,
+                        message_index=current_turn_count,
+                        embedding=embedding_data
+                    )
+                    db.add(turn)
+                    current_turn_count += 1
                 
                 if response_content:
                     response_embedding = await embedding_service.generate_embedding(response_content)
@@ -1867,7 +1887,7 @@ class SimpleLLMClient:
                         user_id=user_id,
                         role="assistant",
                         content=response_content,
-                        message_index=turn_index,
+                        message_index=current_turn_count,
                         embedding=embedding_data
                     )
                     db.add(turn)
@@ -3579,15 +3599,27 @@ class NotificationScheduler:
         try:
             db = SessionLocal()
             try:
-                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
                 pre_generate_time = now + timedelta(seconds=20)
                 
                 # Check timers that need pre-generation
                 upcoming_timers = db.query(Timer).filter(
-                    Timer.is_active == True,
-                    Timer.end_time <= pre_generate_time,
-                    Timer.end_time > now
+                    Timer.is_active == True
                 ).all()
+                
+                # Filter timers with proper timezone handling
+                filtered_timers = []
+                for timer in upcoming_timers:
+                    # Ensure timer end_time is timezone-aware
+                    timer_end_time = timer.end_time
+                    if timer_end_time.tzinfo is None:
+                        timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
+                    
+                    # Check if timer needs pre-generation or sending
+                    if timer_end_time <= pre_generate_time and timer_end_time > now:
+                        filtered_timers.append(timer)
+                
+                upcoming_timers = filtered_timers
                 
                 for timer in upcoming_timers:
                     notification_key = f"timer_{timer.id}"
@@ -3617,11 +3649,23 @@ class NotificationScheduler:
                         logger.info(f"📝 Pre-generated timer notification for: {timer.title}")
                 
                 # Check reminders that need pre-generation
-                upcoming_reminders = db.query(Reminder).filter(
-                    Reminder.is_completed == False,
-                    Reminder.reminder_time <= pre_generate_time,
-                    Reminder.reminder_time > now
+                all_reminders = db.query(Reminder).filter(
+                    Reminder.is_completed == False
                 ).all()
+                
+                # Filter reminders with proper timezone handling
+                filtered_reminders = []
+                for reminder in all_reminders:
+                    # Ensure reminder time is timezone-aware
+                    reminder_time = reminder.reminder_time
+                    if reminder_time.tzinfo is None:
+                        reminder_time = reminder_time.replace(tzinfo=timezone.utc)
+                    
+                    # Check if reminder needs pre-generation or sending
+                    if reminder_time <= pre_generate_time and reminder_time > now:
+                        filtered_reminders.append(reminder)
+                
+                upcoming_reminders = filtered_reminders
                 
                 for reminder in upcoming_reminders:
                     notification_key = f"reminder_{reminder.id}"
@@ -3654,7 +3698,12 @@ class NotificationScheduler:
                 # Send notifications that are due
                 due_notifications = []
                 for key, notification in list(self.scheduled_notifications.items()):
-                    if notification["send_time"] <= now:
+                    send_time = notification["send_time"]
+                    # Ensure send_time is timezone-aware for comparison
+                    if send_time.tzinfo is None:
+                        send_time = send_time.replace(tzinfo=timezone.utc)
+                    
+                    if send_time <= now:
                         due_notifications.append((key, notification))
                 
                 for key, notification in due_notifications:
@@ -4126,7 +4175,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     # Store conversation in episodic memory
     try:
         logger.info(f"🧠 Storing conversation in Sara's memory...")
-        await llm_client.store_conversation(request.messages, response_content, current_user.id)
+        await llm_client.store_conversation(request.messages, response_content, current_user.id, request.conversation_id)
         logger.info(f"✅ Conversation stored in memory successfully")
     except Exception as e:
         logger.error(f"❌ Failed to store conversation in memory: {e}")
@@ -4180,13 +4229,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             
             # Start the LLM processing in a background task
             async def process_chat():
-                response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id)
+                response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id, request.conversation_id)
                 await event_queue.put({
                     "type": "final_response",
                     "data": {
                         "content": response_content,
                         "citations": streaming_client.get_citations(),
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "conversation_id": streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
                     }
                 })
                 await event_queue.put({"type": "done"})
@@ -4544,14 +4594,50 @@ async def get_episodes(
     db: Session = Depends(get_db)
 ):
     """Get episodes with pagination and filtering"""
-    # Note: This requires memory service integration
-    # For now, return empty response
-    return {
-        "episodes": [],
-        "total": 0,
-        "page": page,
-        "per_page": per_page
-    }
+    try:
+        # Build base query
+        query = db.query(Episode).filter(Episode.user_id == current_user.id)
+        
+        # Apply importance filters
+        if min_importance is not None:
+            query = query.filter(Episode.importance >= min_importance)
+        if max_importance is not None:
+            query = query.filter(Episode.importance <= max_importance)
+        
+        # Get total count
+        total = query.count()
+        
+        # Apply pagination and ordering
+        episodes = query.order_by(Episode.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+        
+        # Format episodes for frontend
+        episode_data = []
+        for episode in episodes:
+            episode_data.append({
+                "id": episode.id,
+                "source": episode.source or "chat",
+                "role": episode.role,
+                "content": episode.content,
+                "importance": episode.importance,
+                "meta": {
+                    "memory_type": episode.memory_type,
+                    "topics": episode.topics,
+                    "emotional_tone": episode.emotional_tone,
+                    "context_tags": episode.context_tags,
+                    "access_count": episode.access_count
+                },
+                "created_at": episode.created_at.isoformat()
+            })
+        
+        return {
+            "episodes": episode_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving episodes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve episodes")
 
 @app.delete("/memory/episodes/{episode_id}")
 async def delete_episode(
@@ -4560,9 +4646,29 @@ async def delete_episode(
     db: Session = Depends(get_db)
 ):
     """Delete a specific episode"""
-    # Note: This requires memory service integration
-    # For now, return success
-    return {"message": "Episode deletion not yet implemented"}
+    try:
+        # Find the episode
+        episode = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.user_id == current_user.id
+        ).first()
+        
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        
+        # Delete the episode
+        db.delete(episode)
+        db.commit()
+        
+        logger.info(f"Deleted episode {episode_id} for user {current_user.id}")
+        return {"message": "Episode deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting episode {episode_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete episode")
 
 @app.patch("/memory/episodes/{episode_id}")
 async def update_episode(
@@ -4572,9 +4678,80 @@ async def update_episode(
     db: Session = Depends(get_db)
 ):
     """Update episode importance"""
-    # Note: This requires memory service integration
-    # For now, return success
-    return {"message": "Episode update not yet implemented"}
+    try:
+        # Validate importance value
+        if not (0.0 <= importance <= 1.0):
+            raise HTTPException(status_code=400, detail="Importance must be between 0.0 and 1.0")
+        
+        # Find the episode
+        episode = db.query(Episode).filter(
+            Episode.id == episode_id,
+            Episode.user_id == current_user.id
+        ).first()
+        
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        
+        # Update the importance
+        episode.importance = importance
+        episode.updated_at = func.now()
+        db.commit()
+        
+        logger.info(f"Updated episode {episode_id} importance to {importance} for user {current_user.id}")
+        return {"message": "Episode importance updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating episode {episode_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update episode importance")
+
+@app.post("/memory/search")
+async def search_episodes(
+    search_request: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Search episodes with POST request body"""
+    try:
+        query = search_request.get("query", "")
+        scopes = search_request.get("scopes", ["episodes"])
+        limit = search_request.get("limit", 50)
+        
+        if not query.strip():
+            return {"results": []}
+        
+        # Search episodes by content using LIKE for now (could be enhanced with vector search)
+        episodes = db.query(Episode).filter(
+            Episode.user_id == current_user.id,
+            Episode.content.ilike(f"%{query}%")
+        ).order_by(Episode.created_at.desc()).limit(limit).all()
+        
+        # Format results for frontend
+        results = []
+        for episode in episodes:
+            results.append({
+                "text": episode.content,
+                "metadata": {
+                    "episode_id": episode.id,
+                    "id": episode.id,
+                    "importance": episode.importance,
+                    "role": episode.role,
+                    "source": episode.source or "chat",
+                    "timestamp": episode.created_at.isoformat(),
+                    "memory_type": episode.memory_type,
+                    "topics": episode.topics,
+                    "emotional_tone": episode.emotional_tone,
+                    "context_tags": episode.context_tags
+                }
+            })
+        
+        return {"results": results}
+        
+    except Exception as e:
+        logger.error(f"Error searching episodes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search episodes")
 
 # Folder endpoints
 @app.post("/folders", response_model=FolderResponse)
@@ -4709,7 +4886,7 @@ async def delete_folder(folder_id: str, current_user: User = Depends(get_current
 async def list_reminders(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     reminders = db.query(Reminder).filter(
         Reminder.user_id == current_user.id,
-        Reminder.is_completed == "false"
+        Reminder.is_completed == False
     ).order_by(Reminder.reminder_time).limit(20).all()
     
     return [
@@ -4800,7 +4977,7 @@ async def send_reminder_notification(reminder_id: str, current_user: User = Depe
 async def list_timers(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     timers = db.query(Timer).filter(
         Timer.user_id == current_user.id,
-        Timer.is_active == "true"
+        Timer.is_active == True
     ).order_by(Timer.created_at.desc()).limit(20).all()
     
     results = [
@@ -4810,7 +4987,7 @@ async def list_timers(current_user: User = Depends(get_current_user), db: Sessio
             duration_minutes=timer.duration_minutes,
             start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
             end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
-            is_active=timer.is_active == "true",
+            is_active=timer.is_active,
             is_completed=timer.is_completed == "true",
             created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
         )
@@ -4845,7 +5022,7 @@ async def start_timer(timer_data: TimerCreate, current_user: User = Depends(get_
         duration_minutes=timer.duration_minutes,
         start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
         end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
-        is_active=timer.is_active == "true",
+        is_active=timer.is_active,
         is_completed=timer.is_completed == "true",
         created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
     )
@@ -4855,20 +5032,24 @@ async def stop_timer(timer_id: str, current_user: User = Depends(get_current_use
     timer = db.query(Timer).filter(
         Timer.id == timer_id,
         Timer.user_id == current_user.id,
-        Timer.is_active == "true"
+        Timer.is_active == True
     ).first()
     
     if not timer:
         raise HTTPException(status_code=404, detail="Active timer not found")
     
-    timer.is_active = "false"
-    timer.is_completed = "true"
+    timer.is_active = False
+    timer.is_completed = True
     db.commit()
     
     # Only send notification for manually stopped timers (not automatic completions)
     # The scheduler handles automatic notifications when timers reach their end time
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
-    if timer.end_time > now:
+    now = datetime.now(timezone.utc)
+    timer_end_time = timer.end_time
+    if timer_end_time.tzinfo is None:
+        timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
+    
+    if timer_end_time > now:
         # Timer was stopped early, send immediate notification
         duration_str = f"{timer.duration_minutes}min"
         await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
@@ -5256,6 +5437,45 @@ async def get_conversation_turns(
         for turn in turns
     ]
 
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a conversation and all its turns"""
+    try:
+        logger.info(f"Delete request for conversation {conversation_id} by user {current_user.id}")
+        
+        # Verify the conversation belongs to the user
+        conversation = db.query(Conversation).filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id
+        ).first()
+        
+        if not conversation:
+            logger.warning(f"Conversation {conversation_id} not found for user {current_user.id}")
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Delete all conversation turns first (due to foreign key constraints)
+        db.query(ConversationTurn).filter(
+            ConversationTurn.conversation_id == conversation_id
+        ).delete()
+        
+        # Delete the conversation
+        db.delete(conversation)
+        db.commit()
+        
+        logger.info(f"Deleted conversation {conversation_id} and its turns for user {current_user.id}")
+        return {"message": "Conversation deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting conversation {conversation_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete conversation")
+
 @app.get("/memory/search")
 async def search_memory(
     query: str,
@@ -5568,12 +5788,12 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
         notes_count = db.query(Note).filter(Note.user_id == current_user.id).count()
         reminders_count = db.query(Reminder).filter(
             Reminder.user_id == current_user.id,
-            Reminder.is_completed == "false"
+            Reminder.is_completed == False
         ).count()
         documents_count = db.query(Document).filter(Document.user_id == current_user.id).count()
         active_timers = db.query(Timer).filter(
             Timer.user_id == current_user.id,
-            Timer.is_active == "true"
+            Timer.is_active == True
         ).count()
         
         # Recent activity

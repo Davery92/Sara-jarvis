@@ -47,6 +47,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [loadingConversations, setLoadingConversations] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
+  const [toolActivity, setToolActivity] = useState('')
+  const [isUsingTools, setIsUsingTools] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
 
   // Check if mobile on mount and window resize
@@ -82,9 +85,179 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   }, [messages, loading])
 
-  // Wrapper for send message that refreshes conversations afterwards
+  // Enhanced send message with tool activity tracking
   const handleSendMessage = async (e: React.FormEvent, isQuickChat = false) => {
-    await onSendMessage(e, isQuickChat)
+    e.preventDefault()
+    if (!message.trim() || loading) return
+    
+    // Cancel any existing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    
+    // Create new abort controller for this request
+    abortControllerRef.current = new AbortController()
+
+    const userMessage = { role: 'user' as const, content: message, timestamp: new Date() }
+    setMessages(prev => [...prev, userMessage])
+    setMessage('')
+    setIsLoading(true)
+    setIsUsingTools(false)
+    setToolActivity('')
+    
+    // State for streaming
+    let streamingContent = ''
+    
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        signal: abortControllerRef.current.signal,
+        body: JSON.stringify({
+          messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
+          conversation_id: currentConversationId
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('No response body reader available')
+      }
+
+      const decoder = new TextDecoder()
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          
+          if (done) break
+          
+          const chunk = decoder.decode(value)
+          const lines = chunk.split('\n')
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const eventData = JSON.parse(line.slice(6))
+                
+                switch (eventData.type) {
+                  case 'tool_calls_start':
+                    console.log('🔧 TOOL_CALLS_START event received:', eventData)
+                    setIsUsingTools(true)
+                    setToolActivity(`🔧 Using Tools (Round ${eventData.data.round})`)
+                    break
+                    
+                  case 'tool_executing':
+                    console.log('🔧 TOOL_EXECUTING event received:', eventData)
+                    setToolActivity(`🔧 Using ${eventData.data.tool}...`)
+                    break
+                    
+                  case 'thinking':
+                    console.log('💭 THINKING event received:', eventData)
+                    setIsUsingTools(true)
+                    setToolActivity('💭 Processing results...')
+                    break
+                    
+                  case 'text_chunk':
+                    streamingContent = eventData.data.full_content
+                    setIsUsingTools(false)
+                    setToolActivity('')
+                    // Update the last message with streaming content
+                    setMessages(prev => {
+                      const newMessages = [...prev]
+                      if (newMessages[newMessages.length - 1]?.role === 'assistant') {
+                        newMessages[newMessages.length - 1].content = streamingContent
+                      } else {
+                        newMessages.push({
+                          role: 'assistant',
+                          content: streamingContent,
+                          timestamp: new Date()
+                        })
+                      }
+                      return newMessages
+                    })
+                    break
+                    
+                  case 'final_response':
+                    const finalContent = eventData.data.content
+                    const finalCitations = eventData.data.citations || []
+                    const responseConversationId = eventData.data.conversation_id
+                    
+                    // Update conversation ID if we got one back
+                    if (responseConversationId && responseConversationId !== currentConversationId) {
+                      setCurrentConversationId(responseConversationId)
+                    }
+                    
+                    setIsUsingTools(false)
+                    setToolActivity('')
+                    setMessages(prev => {
+                      const newMessages = [...prev]
+                      if (newMessages[newMessages.length - 1]?.role === 'assistant') {
+                        newMessages[newMessages.length - 1].content = finalContent
+                        newMessages[newMessages.length - 1].citations = finalCitations
+                      } else {
+                        newMessages.push({
+                          role: 'assistant',
+                          content: finalContent,
+                          citations: finalCitations,
+                          timestamp: new Date()
+                        })
+                      }
+                      return newMessages
+                    })
+                    break
+                    
+                  case 'response_ready':
+                    setIsUsingTools(false)
+                    setToolActivity('')
+                    setIsLoading(false)
+                    break
+                    
+                  case 'error':
+                    console.error('Streaming error:', eventData.message)
+                    setIsUsingTools(false)
+                    setToolActivity('')
+                    setIsLoading(false)
+                    break
+                }
+              } catch (e) {
+                console.warn('Failed to parse SSE data:', line)
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      
+    } catch (error) {
+      // Don't show error if request was aborted (user sent another message)
+      if (error.name === 'AbortError') {
+        console.log('Chat request was cancelled')
+        return
+      }
+      
+      const errorMsg = 'Connection error. Please check your network and try again.'
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: errorMsg,
+        timestamp: new Date()
+      }])
+    } finally {
+      setIsUsingTools(false)
+      setToolActivity('')
+      setIsLoading(false)
+      // Clear the abort controller when done
+      if (abortControllerRef.current) {
+        abortControllerRef.current = null
+      }
+    }
+    
     // Refresh conversations after sending a message (in case a new conversation was created)
     setTimeout(() => {
       loadConversations()
@@ -143,6 +316,39 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     // Auto-collapse sidebar on mobile after starting new conversation
     if (isMobile) {
       setSidebarCollapsed(true)
+    }
+  }
+
+  const deleteConversation = async (conversationId: string, event: React.MouseEvent) => {
+    event.stopPropagation() // Prevent triggering the conversation click
+    
+    if (!confirm('Are you sure you want to delete this conversation? This action cannot be undone.')) {
+      return
+    }
+
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/conversations/${conversationId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      })
+
+      if (response.ok) {
+        // If we're deleting the current conversation, clear the chat
+        if (currentConversationId === conversationId) {
+          setCurrentConversationId(null)
+          messages.splice(0, messages.length) // Clear current messages
+        }
+        
+        // Reload conversations list
+        loadConversations()
+        console.log('✅ Conversation deleted successfully')
+      } else {
+        console.error('Failed to delete conversation')
+        alert('Failed to delete conversation. Please try again.')
+      }
+    } catch (error) {
+      console.error('Error deleting conversation:', error)
+      alert('Error deleting conversation. Please try again.')
     }
   }
 
@@ -229,9 +435,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                               {formatConversationTime(conv.updated_at)}
                             </p>
                           </div>
-                          <span className="material-icons text-xs text-gray-500 ml-2">
-                            chat_bubble_outline
-                          </span>
+                          <div className="flex items-center gap-1 ml-2">
+                            <span className="material-icons text-xs text-gray-500">
+                              chat_bubble_outline
+                            </span>
+                            <button
+                              onClick={(e) => deleteConversation(conv.id, e)}
+                              className="p-1 rounded hover:bg-gray-600 text-gray-400 hover:text-red-400 transition-colors"
+                              title="Delete conversation"
+                            >
+                              <span className="material-icons text-sm">delete</span>
+                            </button>
+                          </div>
                         </div>
                       </button>
                     ))}
@@ -415,7 +630,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             </div>
           ))}
           
-          {loading && (
+          {(isLoading || isUsingTools) && (
             <div className="flex justify-start">
               <div className="max-w-[80%]">
                 <div className="flex items-center mb-2">
@@ -425,11 +640,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   <span className="text-sm text-gray-400">Sara</span>
                 </div>
                 <div className="bg-gray-700 rounded-lg px-4 py-3">
-                  <div className="flex space-x-1">
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                  </div>
+                  {isUsingTools && toolActivity ? (
+                    <div className="text-gray-100 text-sm">
+                      {toolActivity}
+                    </div>
+                  ) : (
+                    <div className="flex space-x-1">
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -448,11 +669,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 onChange={(e) => setMessage(e.target.value)}
                 placeholder={APP_CONFIG.ui.chatPlaceholder}
                 className="flex-1 bg-gray-700 border border-gray-600 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder-gray-400"
-                disabled={loading}
+                disabled={isLoading}
               />
               <button 
                 type="submit" 
-                disabled={loading || !message.trim()}
+                disabled={isLoading || !message.trim()}
                 className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-6 rounded-lg transition-colors flex items-center"
               >
                 <span className="material-icons">send</span>

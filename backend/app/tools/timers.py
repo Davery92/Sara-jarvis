@@ -1,10 +1,25 @@
 from typing import Dict, Any
 from app.tools.base import BaseTool, ToolResult
-from app.models.reminder import Timer
 from app.db.session import get_db
-from sqlalchemy.orm import Session
+from sqlalchemy import Column, String, DateTime, Integer, Boolean, func
+from sqlalchemy.orm import declarative_base, Session
 from datetime import datetime, timezone, timedelta
 import uuid
+
+# Define Timer model locally to avoid circular imports
+Base = declarative_base()
+
+class Timer(Base):
+    __tablename__ = "timer"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
 
 
 class TimersStartTool(BaseTool):
@@ -37,54 +52,49 @@ class TimersStartTool(BaseTool):
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Start a new timer"""
         
-        label = kwargs.get("label", "")
-        duration = kwargs.get("duration")
+        title = kwargs.get("label", "Timer")
+        duration = kwargs.get("duration", 25)  # Default 25 minutes if not specified
         
         db_gen = get_db()
         db: Session = next(db_gen)
         
         try:
-            # Calculate end time
-            now = datetime.now(timezone.utc)
-            if duration:
-                if duration <= 0:
-                    return ToolResult(
-                        success=False,
-                        message="Duration must be a positive number of minutes"
-                    )
-                ends_at = now + timedelta(minutes=duration)
-            else:
-                # For open-ended timers, set a far future date
-                ends_at = now + timedelta(days=365)  # 1 year from now
+            # Validate duration
+            if duration <= 0:
+                return ToolResult(
+                    success=False,
+                    message="Duration must be a positive number of minutes"
+                )
             
-            # Create timer
+            # Calculate times
+            now = datetime.now(timezone.utc)
+            end_time = now + timedelta(minutes=duration)
+            
+            # Create timer using correct field names
             timer = Timer(
                 user_id=user_id,
-                label=label,
-                ends_at=ends_at,
-                status="running"
+                title=title,
+                duration_minutes=duration,
+                start_time=now,
+                end_time=end_time,
+                is_active=True,
+                is_completed=False
             )
             
             db.add(timer)
             db.commit()
             db.refresh(timer)
             
-            message = f"Started timer"
-            if label:
-                message += f": {label}"
-            if duration:
-                message += f" ({duration} minutes)"
-            else:
-                message += " (open-ended)"
+            message = f"Started timer '{title}' for {duration} minutes"
             
             return ToolResult(
                 success=True,
                 data={
                     "timer_id": str(timer.id),
-                    "label": timer.label,
-                    "ends_at": timer.ends_at.isoformat(),
-                    "duration_minutes": duration,
-                    "status": timer.status,
+                    "title": timer.title,
+                    "end_time": timer.end_time.isoformat(),
+                    "duration_minutes": timer.duration_minutes,
+                    "is_active": timer.is_active,
                     "created_at": timer.created_at.isoformat()
                 },
                 message=message
@@ -174,7 +184,7 @@ class TimersStatusTool(BaseTool):
                     "timer_id": str(timer.id),
                     "label": timer.label,
                     "ends_at": timer.ends_at.isoformat(),
-                    "status": timer.status,
+                    "is_active": timer.is_active,
                     "created_at": timer.created_at.isoformat(),
                     "time_remaining": time_remaining,
                     "is_expired": is_expired
