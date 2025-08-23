@@ -13,6 +13,7 @@ import Settings from './pages/Settings'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
+import ChatInterface from './components/ChatInterface'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -1399,207 +1400,16 @@ function App() {
           )}
 
           {view === 'chat' && (
-            <div className="flex flex-col h-[calc(100vh-8rem)] md:h-[calc(100vh-12rem)]">
-              <div className="bg-card border border-card rounded-t-xl p-4 md:p-6 border-b-0">
-                <div className="flex justify-between items-center">
-                  <h2 className="text-lg font-semibold">CHAT WITH SARA</h2>
-                  <button
-                    onClick={clearChat}
-                    className="text-gray-400 hover:text-white flex items-center space-x-2"
-                  >
-                    <span className="material-icons text-sm">refresh</span>
-                    <span className="text-sm">Clear Chat</span>
-                  </button>
-                </div>
-              </div>
-              
-              <div className="flex-1 bg-card border border-card border-t-0 border-b-0 overflow-hidden">
-                <div className="h-full p-4 md:p-6 overflow-y-auto space-y-4">
-                  {chatMessages.map((msg, index) => {
-                    console.log(`🔍 Rendering message ${index}:`, msg.role, msg.content?.length || 0, 'chars')
-                    return (
-                      <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
-                        {msg.role === 'assistant' && (
-                          <div className="flex items-center mb-2">
-                            <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-sm font-medium mr-2">
-                              S
-                            </div>
-                            <span className="text-sm text-gray-400">Sara</span>
-                          </div>
-                        )}
-                        
-                        <div className={`rounded-lg px-4 py-3 ${
-                          msg.role === 'user' 
-                            ? 'bg-teal-600 text-white ml-auto' 
-                            : 'bg-gray-700 text-gray-100'
-                        }`}>
-                          {msg.role === 'assistant' ? (
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              skipHtml={false}
-                              components={{
-                                code({node, inline, className, children, ...props}) {
-                                  const match = /language-(\w+)/.exec(className || '')
-                                  const language = match ? match[1] : ''
-                                  const codeContent = String(children).replace(/\n$/, '')
-                                  
-                                  console.log('🔍 CODE BLOCK DETECTED:', { inline, className, language, contentPreview: codeContent.substring(0, 50) + '...' })
-                                  
-                                  // Handle Mermaid diagrams
-                                  if (!inline && language === 'mermaid') {
-                                    console.log('🎯 MERMAID DETECTED! Language:', language, 'Content:', codeContent.substring(0, 100) + '...')
-                                    return (
-                                      <MermaidDiagram 
-                                        chart={codeContent} 
-                                        id={`mermaid-${Date.now()}-${Math.random()}`} 
-                                      />
-                                    )
-                                  }
-                                  
-                                  // Handle regular code blocks
-                                  return !inline && match ? (
-                                    <SyntaxHighlighter
-                                      style={oneDark}
-                                      language={language}
-                                      PreTag="div"
-                                      className="rounded-md mt-2"
-                                      {...props}
-                                    >
-                                      {codeContent}
-                                    </SyntaxHighlighter>
-                                  ) : (
-                                    <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...props}>
-                                      {children}
-                                    </code>
-                                  )
-                                },
-                                p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                                ul: ({children}) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
-                                ol: ({children}) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
-                                blockquote: ({children}) => (
-                                  <blockquote className="border-l-4 border-gray-500 pl-4 italic my-2">
-                                    {children}
-                                  </blockquote>
-                                ),
-                                h1: ({children}) => <h1 className="text-xl font-bold mb-2">{children}</h1>,
-                                h2: ({children}) => <h2 className="text-lg font-bold mb-2">{children}</h2>,
-                                h3: ({children}) => <h3 className="text-md font-bold mb-2">{children}</h3>,
-                                // Style citations and references
-                                hr: () => <hr className="border-gray-600 my-4" />,
-                                a: ({href, children}) => {
-                                  // Style citation links differently
-                                  if (href && href.startsWith('#')) {
-                                    return (
-                                      <span className="inline-block px-1.5 py-0.5 text-xs bg-teal-600/20 border border-teal-500/30 rounded text-teal-400 hover:bg-teal-600/30 cursor-pointer transition-colors">
-                                        {children}
-                                      </span>
-                                    )
-                                  }
-                                  return (
-                                    <a href={href} className="text-teal-400 hover:text-teal-300 underline" target="_blank" rel="noopener noreferrer">
-                                      {children}
-                                    </a>
-                                  )
-                                },
-                                table: ({children}) => (
-                                  <div className="overflow-x-auto my-4">
-                                    <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
-                                      {children}
-                                    </table>
-                                  </div>
-                                ),
-                                thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
-                                tbody: ({children}) => <tbody>{children}</tbody>,
-                                tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
-                                th: ({children}) => (
-                                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
-                                    {children}
-                                  </th>
-                                ),
-                                td: ({children}) => (
-                                  <td className="border border-gray-600 px-3 py-2 text-gray-300">
-                                    {children}
-                                  </td>
-                                ),
-                              }}
-                            >
-                              {msg.content}
-                            </ReactMarkdown>
-                          ) : (
-                            <p>{msg.content}</p>
-                          )}
-                          {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
-                            <div className="mt-2 space-y-1">
-                              <div className="text-[11px] text-gray-300">Sources</div>
-                              <ul className="space-y-1">
-                                {(msg as any).citations.slice(0,5).map((c: any, i: number) => (
-                                  <li key={i} className="text-[11px] text-gray-400 truncate">
-                                    <a href={typeof c === 'string' ? c : c.url} target="_blank" rel="noreferrer" className="hover:text-gray-200">
-                                      {typeof c === 'string' ? c : (c.title || c.url)}
-                                    </a>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                        
-                        <div className={`text-xs text-gray-500 mt-1 ${
-                          msg.role === 'user' ? 'text-right' : 'text-left'
-                        }`}>
-                          {msg.timestamp.toLocaleTimeString()}
-                        </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                  {loading && (
-                    <div className="flex justify-start">
-                      <div className="max-w-[80%]">
-                        <div className="flex items-center mb-2">
-                          <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-sm font-medium mr-2">
-                            S
-                          </div>
-                          <span className="text-sm text-gray-400">Sara</span>
-                        </div>
-                        <div className="bg-gray-700 rounded-lg px-4 py-3">
-                          <div className="flex space-x-1">
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {/* Auto-scroll target */}
-                  <div ref={chatMessagesEndRef} />
-                </div>
-              </div>
-              
-              <div className="bg-card border border-card rounded-b-xl border-t-0">
-                <form onSubmit={sendMessage} className="p-4 md:p-6">
-                  <div className="flex space-x-2 md:space-x-4">
-                    <input
-                      type="text"
-                      value={message}
-                      onChange={(e) => setMessage(e.target.value)}
-                      placeholder={APP_CONFIG.ui.chatPlaceholder}
-                      className="flex-1 bg-gray-800 border border-gray-600 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white"
-                      disabled={loading}
-                    />
-                    <button 
-                      type="submit" 
-                      disabled={loading || !message.trim()}
-                      className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-6 rounded-lg transition-colors"
-                    >
-                      <span className="material-icons">send</span>
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
+            <ChatInterface
+              messages={chatMessages}
+              setMessages={setChatMessages}
+              loading={loading}
+              onSendMessage={sendMessage}
+              onClearChat={clearChat}
+              message={message}
+              setMessage={setMessage}
+              abortControllerRef={abortControllerRef}
+            />
           )}
 
           {view === 'notes' && (
