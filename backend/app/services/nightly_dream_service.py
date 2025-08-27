@@ -121,6 +121,12 @@ class NightlyDreamService:
             # Generate daily summary and insights
             await self._generate_daily_summary(user_id, daily_episodes)
             
+            # Also run the dreaming service to generate PostgreSQL insights
+            from app.main_simple import dreaming_service
+            if len(daily_episodes) >= 3:  # Only run if there are enough episodes
+                logger.info(f"   💭 Running dream cycle to generate insights...")
+                await dreaming_service.dream_cycle(user_id, min_episodes=3)
+            
             logger.info(f"✅ Processed {len(conversation_sessions)} conversation sessions for user {user_id}")
             
         except Exception as e:
@@ -130,6 +136,9 @@ class NightlyDreamService:
         """Get all episodes from a specific day"""
         db = SessionLocal()
         try:
+            # Ensure user_id is a string to avoid UUID casting issues
+            user_id_str = str(user_id)
+            
             start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
             end_of_day = start_of_day + timedelta(days=1)
             
@@ -143,7 +152,7 @@ class NightlyDreamService:
                 Episode.importance,
                 Episode.created_at
             ).filter(
-                Episode.user_id == user_id,
+                Episode.user_id == user_id_str,
                 Episode.created_at >= start_of_day,
                 Episode.created_at < end_of_day
             ).order_by(Episode.created_at).all()

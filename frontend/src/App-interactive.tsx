@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
 import MermaidDiagram from './components/MermaidDiagram'
@@ -15,6 +15,14 @@ import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
 import Sprite, { SpriteHandle } from './components/Sprite'
+import InsightInbox from './components/InsightInbox'
+import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
+import { GTKYInterview } from './components/onboarding/GTKYInterview'
+import { GTKYInterviewTest } from './components/onboarding/GTKYInterviewTest'
+import { ReflectionTrigger } from './components/reflection/ReflectionTrigger'
+import { NightlyReflection } from './components/reflection/NightlyReflection'
+import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
+import { useActivityMonitor } from './hooks/useActivityMonitor'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -59,7 +67,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings, onboarding, reflection
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -92,6 +100,7 @@ function App() {
   const [analytics, setAnalytics] = useState(null)
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
+  const [currentSpriteMode, setCurrentSpriteMode] = useState('companion')
   
   // Ref for auto-scrolling chat messages
   const chatMessagesEndRef = useRef(null)
@@ -101,6 +110,53 @@ function App() {
   
   // Sprite ref for controlling the assistant avatar
   const spriteRef = useRef<SpriteHandle>(null)
+
+  // Activity monitoring for autonomous behaviors
+  const { activityState, getIdleMinutes } = useActivityMonitor({
+    thresholds: {
+      quickSweep: 25 * 60 * 1000,      // 25 minutes - short idle
+      standardSweep: 2.5 * 60 * 60 * 1000, // 2.5 hours - medium idle
+      digestSweep: 24 * 60 * 60 * 1000     // 24 hours - long idle
+    },
+    onThresholdReached: async (threshold, duration) => {
+      console.log(`🤖 Sara: ${threshold} triggered after ${Math.round(duration / 60000)} minutes idle`)
+      
+      // Get current mode and trigger autonomous sweep
+      const mode = spriteRef.current?.getMode() || 'companion'
+      
+      try {
+        // Call backend autonomous sweep
+        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/${threshold}?personality_mode=${mode}`, {
+          method: 'POST',
+          credentials: 'include'
+        })
+        
+        if (response.ok) {
+          const result = await response.json()
+          console.log(`🤖 Autonomous sweep result:`, result)
+          
+          // Only notify if meaningful insights were generated
+          if (result.insights_stored > 0 && result.new_insights > 0) {
+            await fetchAndDisplayLatestInsight(threshold, mode)
+          } else {
+            console.log(`🤖 Sara: No new insights to share (${result.insights_stored} stored, ${result.new_insights || 0} new)`)
+            // Don't show notifications or fallback behaviors when there's nothing new
+          }
+        } else {
+          console.log(`🤖 Sara: Sweep completed but no actionable insights found`)
+          // Don't notify on failed sweeps - just log quietly
+        }
+      } catch (error) {
+        console.log(`🤖 Sara: Unable to generate insights at this time`)
+        // Don't notify on errors - just log quietly  
+      }
+    },
+    onActivityResume: () => {
+      console.log('🤖 Sara: Activity resumed, returning to idle')
+      spriteRef.current?.setState('idle')
+    },
+    enableLogging: true
+  })
 
   // Check authentication on load
   useEffect(() => {
@@ -854,6 +910,164 @@ function App() {
     setToasts(prev => prev.filter(t => t.id !== id))
   }
 
+  // Autonomous behavior handlers for different idle thresholds
+  const handleQuickSweep = useCallback((mode) => {
+    console.log(`🔍 Quick Sweep triggered in ${mode} mode`)
+    
+    const messages = {
+      coach: "Ready to tackle something new? 💪",
+      analyst: "I've been analyzing your recent patterns...",
+      companion: "I'm here if you need to chat about anything",
+      guardian: "System status: All secure and running smoothly",
+      concierge: "Shall I help organize your day?", 
+      librarian: "I noticed some documents that might interest you"
+    }
+
+    spriteRef.current?.setState('thinking')
+    spriteRef.current?.pulse('subtle')
+    
+    setTimeout(() => {
+      spriteRef.current?.notify(messages[mode] || messages.companion, {
+        showToast: true,
+        keepBadge: true,
+        autoHide: 6000,
+        onReply: () => setView('chat'),
+        onOpen: () => setView('dashboard')
+      })
+    }, 2000)
+  }, [])
+
+  const handleStandardSweep = useCallback((mode) => {
+    console.log(`📊 Standard Sweep triggered in ${mode} mode`)
+    
+    const messages = {
+      coach: "I've spotted some patterns in your habits - want insights?",
+      analyst: "Ready for your productivity summary?",
+      companion: "How are you feeling about your progress today?",
+      guardian: "Time for a security and wellness check-in",
+      concierge: "I can help reschedule or prep for upcoming tasks",
+      librarian: "I've organized your knowledge graph - take a look?"
+    }
+
+    spriteRef.current?.setState('listening')
+    spriteRef.current?.pulse('normal')
+    
+    setTimeout(() => {
+      spriteRef.current?.notify(messages[mode] || messages.companion, {
+        showToast: true, 
+        keepBadge: true,
+        autoHide: 8000,
+        onReply: () => setView('chat'),
+        onOpen: () => {
+          // Navigate to relevant view based on mode
+          const views = {
+            coach: 'habits',
+            analyst: 'memory-garden',
+            companion: 'chat',
+            guardian: 'vulnerability-watch',
+            concierge: 'calendar',
+            librarian: 'notes'
+          }
+          setView(views[mode] || 'dashboard')
+        }
+      })
+    }, 1500)
+  }, [])
+
+  const handleDigestSweep = useCallback((mode) => {
+    console.log(`📝 Digest Sweep triggered in ${mode} mode`)
+    
+    const messages = {
+      coach: "Let's review your wins and plan tomorrow! 🎯",
+      analyst: "Your weekly intelligence digest is ready",
+      companion: "Shall we reflect on today and set intentions?",
+      guardian: "Daily security briefing and system health report",
+      concierge: "Tomorrow's schedule optimized with buffer time",
+      librarian: "Weekly knowledge summary and reading recommendations"
+    }
+
+    spriteRef.current?.setState('notifying')
+    spriteRef.current?.pulse('strong')
+    
+    setTimeout(() => {
+      spriteRef.current?.notify(messages[mode] || messages.companion, {
+        showToast: true,
+        keepBadge: true,
+        autoHide: 10000,
+        onReply: () => setView('chat'),
+        onOpen: () => setView('dashboard')
+      })
+    }, 1000)
+  }, [])
+
+  // Helper function to fetch and display the latest autonomous insight
+  const fetchAndDisplayLatestInsight = useCallback(async (threshold: string, mode: string) => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/insights?limit=1&sweep_type=${threshold}`, {
+        credentials: 'include'
+      })
+      
+      if (response.ok) {
+        const insights = await response.json()
+        if (insights.length > 0) {
+          const insight = insights[0]
+          
+          // Set appropriate sprite state based on sweep type
+          const spriteState = threshold === 'quickSweep' ? 'thinking' : 
+                             threshold === 'standardSweep' ? 'listening' : 'notifying'
+          
+          spriteRef.current?.setState(spriteState)
+          spriteRef.current?.pulse(threshold === 'digestSweep' ? 'strong' : 'normal')
+          
+          // Display insight via sprite notification
+          setTimeout(() => {
+            spriteRef.current?.notify(insight.message, {
+              showToast: true,
+              keepBadge: true,
+              autoHide: threshold === 'digestSweep' ? 10000 : threshold === 'standardSweep' ? 8000 : 6000,
+              onReply: () => setView('chat'),
+              onOpen: () => {
+                // Navigate to relevant view based on insight type
+                const viewMap: Record<string, string> = {
+                  'habit_salvage': 'habits',
+                  'content_pattern': 'notes',
+                  'knowledge_connection': 'notes',
+                  'security_alert': 'vulnerability-watch',
+                  'calendar_prep': 'calendar',
+                  'weekly_summary': 'dashboard',
+                  'gtky_prompt': 'gtky-interview',
+                  'reflection_prompt': 'nightly-reflection',
+                  'reflection_streak': 'nightly-reflection',
+                  'mood_improvement': 'nightly-reflection',
+                  'goal_check': 'gtky-interview',
+                  'style_adjustment': 'privacy-dashboard'
+                }
+                setView(viewMap[insight.insight_type] || 'dashboard')
+              }
+            })
+          }, 1500)
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to fetch latest insight:', error)
+    }
+  }, [])
+
+  // Fallback sweep handlers (original client-side behavior)
+  const handleFallbackSweep = useCallback((threshold: string, mode: string) => {
+    switch (threshold) {
+      case 'quickSweep':
+        handleQuickSweep(mode)
+        break
+      case 'standardSweep':
+        handleStandardSweep(mode)
+        break
+      case 'digestSweep':
+        handleDigestSweep(mode)
+        break
+    }
+  }, [])
+
   const logout = async () => {
     try {
       await fetch(`${APP_CONFIG.apiUrl}/auth/logout`, {
@@ -1016,6 +1230,27 @@ function App() {
                   <span>Vulnerability Watch</span>
                 </button>
                 <button
+                  onClick={() => { setView('insights'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🧠</span>
+                  <span>Sara's Insights</span>
+                </button>
+                <button
+                  onClick={() => { setView('onboarding'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'onboarding' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">💫</span>
+                  <span>Get to Know You</span>
+                </button>
+                <button
+                  onClick={() => { setView('reflection'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'reflection' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🌙</span>
+                  <span>Nightly Reflection</span>
+                </button>
+                <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1093,6 +1328,20 @@ function App() {
             >
               <span className="material-icons">security</span>
               <span className="text-xs">Vulns</span>
+            </button>
+            <button
+              onClick={() => setView('onboarding')}
+              className={`flex flex-col items-center ${view === 'onboarding' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="text-xl">💫</span>
+              <span className="text-xs">GTKY</span>
+            </button>
+            <button
+              onClick={() => setView('reflection')}
+              className={`flex flex-col items-center ${view === 'reflection' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="text-xl">🌙</span>
+              <span className="text-xs">Reflect</span>
             </button>
             <button
               onClick={() => setView('settings')}
@@ -1453,7 +1702,7 @@ function App() {
               messages={chatMessages}
               setMessages={setChatMessages}
               loading={loading}
-              onSendMessage={sendMessage}
+              onSendMessage={null} // Let ChatInterface handle its own message sending
               onClearChat={clearChat}
               message={message}
               setMessage={setMessage}
@@ -1742,8 +1991,333 @@ function App() {
             <VulnerabilityWatch onToast={showToast} />
           )}
 
+          {view === 'insights' && (
+            <InsightInbox onToast={showToast} onNavigate={setView} />
+          )}
+
+          {view === 'onboarding' && (
+            <div className="max-w-4xl mx-auto">
+              <GTKYTrigger
+                onComplete={() => {
+                  showToast('Welcome! Your profile has been created successfully.', 'success')
+                  setView('dashboard')
+                }}
+                onSpriteStateChange={(state) => {
+                  if (spriteRef.current) {
+                    spriteRef.current.setState(state)
+                  }
+                }}
+                personalityMode={spriteRef.current?.getMode() || 'companion'}
+              />
+            </div>
+          )}
+
+          {view === 'reflection' && (
+            <div className="max-w-4xl mx-auto">
+              <ReflectionTrigger
+                onComplete={() => {
+                  showToast('Thank you for reflecting! Your insights have been saved.', 'success')
+                  setView('dashboard')
+                }}
+                onSpriteStateChange={(state) => {
+                  if (spriteRef.current) {
+                    spriteRef.current.setState(state)
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {view === 'gtky-interview' && (
+            <div className="max-w-4xl mx-auto bg-gray-900 text-white p-8 rounded-lg">
+              <div className="text-center mb-4">
+                <h2 className="text-2xl font-bold text-white">GTKY Interview Debug</h2>
+                <p className="text-gray-400">Testing if this renders...</p>
+              </div>
+              <GTKYInterviewTest
+                onComplete={() => {
+                  showToast('Welcome! Your profile has been created successfully.', 'success')
+                  setView('dashboard')
+                }}
+                onSpriteStateChange={(state) => {
+                  if (spriteRef.current) {
+                    spriteRef.current.setState(state)
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {view === 'nightly-reflection' && (
+            <div className="max-w-4xl mx-auto">
+              <NightlyReflection
+                onComplete={(insights) => {
+                  showToast('Thank you for reflecting! Your insights have been saved.', 'success')
+                  setView('dashboard')
+                }}
+                onSpriteStateChange={(state) => {
+                  if (spriteRef.current) {
+                    spriteRef.current.setState(state)
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {view === 'privacy-dashboard' && (
+            <div className="max-w-4xl mx-auto">
+              <PrivacyDashboard
+                onToast={(message, type) => {
+                  showToast(message, type || 'info')
+                }}
+              />
+            </div>
+          )}
+
           {view === 'settings' && (
-            <Settings />
+            <div className="space-y-6">
+              <Settings />
+              
+              {/* Sprite Mode Testing */}
+              <div className="bg-card border border-card rounded-xl p-6">
+                <h2 className="text-lg font-semibold mb-4">SPRITE PERSONALITY MODES</h2>
+                <p className="text-gray-400 text-sm mb-4">Test different personality modes for Sara's sprite. Each mode has unique colors, breathing rhythms, and energy levels.</p>
+                
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  {[
+                    { mode: 'coach', label: 'Coach', desc: 'Bright & Energetic' },
+                    { mode: 'analyst', label: 'Analyst', desc: 'Focused & Sharp' },
+                    { mode: 'companion', label: 'Companion', desc: 'Warm & Gentle' },
+                    { mode: 'guardian', label: 'Guardian', desc: 'Calm & Steady' },
+                    { mode: 'concierge', label: 'Concierge', desc: 'Practical & Efficient' },
+                    { mode: 'librarian', label: 'Librarian', desc: 'Quiet & Thoughtful' }
+                  ].map(({ mode, label, desc }) => (
+                    <button
+                      key={mode}
+                      onClick={async () => {
+                        try {
+                          // Update backend
+                          const response = await fetch(`${APP_CONFIG.apiUrl}/user/personality-mode`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({ mode })
+                          })
+                          
+                          if (response.ok) {
+                            // Update frontend
+                            spriteRef.current?.setMode(mode as any)
+                            setCurrentSpriteMode(mode)
+                            showToast(`Switched to ${label} mode`, 'success', false, true)
+                            
+                            // Also notify the sprite for tooltip support
+                            setTimeout(() => {
+                              spriteRef.current?.notify(`Now in ${label} mode: ${desc}`, {
+                                showToast: false,
+                                keepBadge: true,
+                                importance: 'medium'
+                              })
+                            }, 500)
+                          } else {
+                            showToast('Failed to update personality mode', 'error')
+                          }
+                        } catch (error) {
+                          console.error('Error updating personality mode:', error)
+                          showToast('Failed to update personality mode', 'error')
+                        }
+                      }}
+                      className={`p-3 rounded-lg border transition-colors text-left ${
+                        currentSpriteMode === mode
+                          ? 'border-teal-500 bg-teal-500/10 text-teal-300'
+                          : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600 hover:bg-gray-700'
+                      }`}
+                    >
+                      <div className="font-medium">{label}</div>
+                      <div className="text-xs text-gray-400 mt-1">{desc}</div>
+                    </button>
+                  ))}
+                </div>
+                
+                <div className="mt-4 flex gap-2">
+                  <button
+                    onClick={() => spriteRef.current?.pulse('subtle')}
+                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
+                  >
+                    Subtle Pulse
+                  </button>
+                  <button
+                    onClick={() => spriteRef.current?.pulse('normal')}
+                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
+                  >
+                    Normal Pulse
+                  </button>
+                  <button
+                    onClick={() => spriteRef.current?.pulse('strong')}
+                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
+                  >
+                    Strong Pulse
+                  </button>
+                </div>
+              </div>
+
+              {/* Activity Monitor Status */}
+              <div className="bg-card border border-card rounded-xl p-6">
+                <h2 className="text-lg font-semibold mb-4">ACTIVITY MONITORING</h2>
+                <p className="text-gray-400 text-sm mb-4">Sara monitors your activity to provide timely autonomous assistance.</p>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-gray-800 p-4 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-gray-300 font-medium">Status</span>
+                      <span className={`px-2 py-1 rounded text-xs font-medium ${
+                        activityState.isIdle 
+                          ? 'bg-yellow-900 text-yellow-300' 
+                          : 'bg-green-900 text-green-300'
+                      }`}>
+                        {activityState.isIdle ? 'Idle' : 'Active'}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      {activityState.isIdle 
+                        ? `Idle for ${getIdleMinutes()} minutes`
+                        : 'Currently active'
+                      }
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 p-4 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-gray-300 font-medium">Threshold</span>
+                      <span className="text-xs text-gray-500 capitalize">
+                        {activityState.currentThreshold.replace('Sweep', ' Sweep')}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      Next: {
+                        activityState.currentThreshold === 'active' ? 'Quick Sweep (30s)' :
+                        activityState.currentThreshold === 'quickSweep' ? 'Standard Sweep (2min)' :
+                        activityState.currentThreshold === 'standardSweep' ? 'Digest Sweep (5min)' :
+                        'All triggered'
+                      }
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 p-4 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-gray-300 font-medium">Last Activity</span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      {activityState.lastActivity.toLocaleTimeString()}
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800 p-4 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-gray-300 font-medium">Mode</span>
+                      <span className="text-xs text-teal-400 capitalize">
+                        {currentSpriteMode}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      Autonomous behavior style
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 text-xs text-gray-500">
+                  <strong>Testing Thresholds:</strong> Quick (30s), Standard (2min), Digest (5min)
+                  <br />
+                  <strong>Tip:</strong> Stop interacting to see autonomous notifications appear!
+                </div>
+              </div>
+
+              {/* Manual Sweep Testing */}
+              <div className="bg-card border border-card rounded-xl p-6">
+                <h2 className="text-lg font-semibold mb-4">AUTONOMOUS SWEEP TESTING</h2>
+                <p className="text-gray-400 text-sm mb-4">Manually trigger Sara's background analysis to test autonomous insights generation.</p>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <button
+                    onClick={async () => {
+                      const mode = spriteRef.current?.getMode() || 'companion'
+                      try {
+                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/quick_sweep?personality_mode=${mode}`, {
+                          method: 'POST',
+                          credentials: 'include'
+                        })
+                        if (response.ok) {
+                          const result = await response.json()
+                          showToast(`Quick sweep completed: ${result.insights_stored} insights generated`, 'success')
+                          if (result.insights_stored > 0) {
+                            fetchAndDisplayLatestInsight('quick_sweep', mode)
+                          }
+                        }
+                      } catch (error) {
+                        showToast('Sweep failed', 'error')
+                      }
+                    }}
+                    className="p-3 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 transition-colors"
+                  >
+                    <div className="font-medium">Quick Sweep</div>
+                    <div className="text-xs text-gray-400 mt-1">Fast checks & alerts</div>
+                  </button>
+
+                  <button
+                    onClick={async () => {
+                      const mode = spriteRef.current?.getMode() || 'companion'
+                      try {
+                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/standard_sweep?personality_mode=${mode}`, {
+                          method: 'POST',
+                          credentials: 'include'
+                        })
+                        if (response.ok) {
+                          const result = await response.json()
+                          showToast(`Standard sweep completed: ${result.insights_stored} insights generated`, 'success')
+                          if (result.insights_stored > 0) {
+                            fetchAndDisplayLatestInsight('standard_sweep', mode)
+                          }
+                        }
+                      } catch (error) {
+                        showToast('Sweep failed', 'error')
+                      }
+                    }}
+                    className="p-3 bg-purple-600/20 text-purple-400 rounded-lg hover:bg-purple-600/30 transition-colors"
+                  >
+                    <div className="font-medium">Standard Sweep</div>
+                    <div className="text-xs text-gray-400 mt-1">Pattern analysis</div>
+                  </button>
+
+                  <button
+                    onClick={async () => {
+                      const mode = spriteRef.current?.getMode() || 'companion'
+                      try {
+                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/digest_sweep?personality_mode=${mode}`, {
+                          method: 'POST',
+                          credentials: 'include'
+                        })
+                        if (response.ok) {
+                          const result = await response.json()
+                          showToast(`Digest sweep completed: ${result.insights_stored} insights generated`, 'success')
+                          if (result.insights_stored > 0) {
+                            fetchAndDisplayLatestInsight('digest_sweep', mode)
+                          }
+                        }
+                      } catch (error) {
+                        showToast('Sweep failed', 'error')
+                      }
+                    }}
+                    className="p-3 bg-green-600/20 text-green-400 rounded-lg hover:bg-green-600/30 transition-colors"
+                  >
+                    <div className="font-medium">Digest Sweep</div>
+                    <div className="text-xs text-gray-400 mt-1">Deep insights</div>
+                  </button>
+                </div>
+
+                <div className="mt-4 text-xs text-gray-500">
+                  <strong>Note:</strong> Sweeps analyze your notes, conversations, habits, and patterns to generate contextual insights. Results depend on available data.
+                </div>
+              </div>
+            </div>
           )}
         </main>
       </div>
@@ -1858,6 +2432,7 @@ function App() {
       {/* Sara Sprite Assistant */}
       <Sprite 
         ref={spriteRef}
+        onNavigate={setView}
       />
     </div>
   )

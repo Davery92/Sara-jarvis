@@ -302,3 +302,16 @@ Key variables for development:
 - `ASSISTANT_NAME`: Branding (Sara)
 - `DOMAIN`: Target domain (sara.avery.cloud)
 - `NTFY_VULNERABILITY_TOPIC`: NTFY topic for vulnerability notifications
+
+### Sara's Autonomous Personality System
+Sara features a complete autonomous personality system with living sprite animations, contextual intelligence, and memory-enhanced insights. See detailed documentation:
+
+- **[Sara Autonomous System Documentation](docs/SARA_AUTONOMOUS_SYSTEM.md)**: Complete technical documentation
+- **[Sara User Guide](docs/SARA_USER_GUIDE.md)**: Quick reference for users
+
+**Key Features:**
+- **Living Sprite**: Breathing animations with 6 distinct personality modes
+- **Contextual Intelligence**: Memory-enhanced insights from conversation patterns  
+- **Smart Notifications**: Respectful, duplicate-free notifications
+- **Activity Monitoring**: Idle detection triggers contextual assistance
+- **User Controls**: Comprehensive settings and feedback mechanisms

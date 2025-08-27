@@ -213,23 +213,23 @@ export default function Documents() {
                 <div className="flex items-start justify-between">
                   <div className="flex items-start space-x-4 flex-1">
                     <div className="text-3xl flex-shrink-0">
-                      {getFileIcon(document.type)}
+                      {getFileIcon(document.mime_type)}
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="text-lg font-medium text-gray-900 truncate">
                         {document.filename}
                       </h3>
                       <div className="mt-1 flex items-center space-x-4 text-sm text-gray-500">
-                        <span>{formatFileSize(document.size)}</span>
+                        <span>{formatFileSize(document.file_size)}</span>
                         <span>•</span>
-                        <span>{new Date(document.uploaded_at).toLocaleDateString()}</span>
+                        <span>{new Date(document.created_at).toLocaleDateString()}</span>
                         <span>•</span>
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(document.processed)}`}>
-                          {getStatusText(document.processed)}
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(document.is_processed)}`}>
+                          {getStatusText(document.is_processed)}
                         </span>
                       </div>
                       <p className="mt-1 text-xs text-gray-400">
-                        {document.type}
+                        {document.mime_type}
                       </p>
                     </div>
                   </div>

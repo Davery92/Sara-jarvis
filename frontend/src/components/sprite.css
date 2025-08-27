@@ -10,6 +10,14 @@
   --toast-bg: #0b1220;
   --toast-fg: #e9f3ff;
   --toast-ac: #2f86ff;
+  
+  /* Personality mode colors */
+  --mode-coach: #4cc3ff;      /* Bright blue - energetic */
+  --mode-analyst: #6b73ff;    /* Purple-blue - focused */
+  --mode-companion: #b574ff;  /* Purple - warm */
+  --mode-guardian: #2d5aa0;   /* Deep blue - calm */
+  --mode-concierge: #00d4aa;  /* Teal - practical */
+  --mode-librarian: #7c9885;  /* Sage green - quiet */
 }
 
 /* --- placement --- */
@@ -23,11 +31,11 @@
   isolation: isolate;
   cursor: pointer;
   z-index: 1000;
-  /* subtle idle "breathing" */
-  animation: breathe 3.6s ease-in-out infinite;
+  /* subtle idle "breathing" + occasional shimmer */
+  animation: breathe 3.6s ease-in-out infinite, shimmer 11s ease-in-out infinite;
   /* soft drop shadow */
   filter: drop-shadow(0 2px 12px var(--shadow));
-  transition: transform 0.2s ease;
+  transition: transform 0.28s ease, filter 0.28s ease;
 }
 
 .sprite:hover {
@@ -107,6 +115,51 @@
   z-index: 10;
 }
 
+/* --- tooltip: hover message for notifications --- */
+.sprite .tooltip {
+  position: absolute;
+  right: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 
+    0 4px 16px rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.1);
+  z-index: 15;
+  pointer-events: none;
+  animation: tooltip-in 0.15s ease-out;
+}
+
+.sprite .tooltip::after {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 6px solid transparent;
+  border-left-color: var(--toast-bg);
+}
+
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
+}
+
 /* --- toast: compact message anchored to the sprite --- */
 .sprite .toast {
   position: absolute;
@@ -131,6 +184,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   z-index: 5;
+  /* Ensure hidden by default to prevent flash during page refresh */
+  visibility: hidden;
 }
 
 .sprite .toast .toast-text {
@@ -195,9 +250,10 @@
 
 .sprite.show-toast .toast {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
   transform: translateY(0) scale(1);
-  transition: transform 0.18s ease-out, opacity 0.18s ease-out;
+  transition: transform 0.18s ease-out, opacity 0.18s ease-out, visibility 0s;
 }
 
 /* --- keyframes ---------------------------------------------- */
@@ -311,6 +367,12 @@
     font-size: 11px;
     padding: 3px 8px;
   }
+  
+  .sprite .tooltip {
+    right: calc(100% + 8px);
+    max-width: 200px;
+    font-size: 12px;
+  }
 }
 
 /* Dark theme integration */
@@ -319,4 +381,285 @@
     --toast-bg: #0b1220;
     --toast-fg: #e9f3ff;
   }
+}
+
+/* --- personality modes ----------------------------------------- */
+.sprite.mode-coach {
+  --blue-1: var(--mode-coach);
+  --blue-2: var(--mode-coach);
+  --halo: rgba(76, 195, 255, 0.45); /* brighter for energy */
+  animation: coach-breathe 3.2s ease-in-out infinite, coach-shimmer 10s ease-in-out infinite; /* slightly faster */
+}
+
+.sprite.mode-coach .core::before {
+  animation: coach-swirl 8s linear infinite; /* faster swirl for energy */
+}
+
+.sprite.mode-analyst {
+  --blue-1: var(--mode-analyst);
+  --blue-2: var(--mode-analyst);
+  --halo: rgba(107, 115, 255, 0.35);
+  animation: analyst-breathe 3.8s ease-in-out infinite, analyst-pulse 6s ease-in-out infinite; /* focused rhythm */
+}
+
+.sprite.mode-analyst .core::before {
+  animation: analyst-swirl 11s linear infinite; /* methodical rotation */
+}
+
+.sprite.mode-companion {
+  --blue-1: var(--mode-companion);
+  --blue-2: var(--mode-companion);
+  --halo: rgba(181, 116, 255, 0.4); /* warm purple */
+  animation: companion-breathe 4.2s ease-in-out infinite, companion-glow 13s ease-in-out infinite; /* gentle rhythm */
+}
+
+.sprite.mode-companion .core::before {
+  animation: companion-swirl 12s ease-in-out infinite; /* gentle, warm swirl */
+}
+
+.sprite.mode-guardian {
+  --blue-1: var(--mode-guardian);
+  --blue-2: var(--mode-guardian);
+  --halo: rgba(45, 90, 160, 0.3); /* calm, steady */
+  animation: guardian-breathe 4.8s ease-in-out infinite, guardian-watch 20s ease-in-out infinite; /* slower, steadier */
+}
+
+.sprite.mode-guardian .core::before {
+  animation: guardian-swirl 15s linear infinite; /* steady, protective rotation */
+}
+
+.sprite.mode-concierge {
+  --blue-1: var(--mode-concierge);
+  --blue-2: var(--mode-concierge);
+  --halo: rgba(0, 212, 170, 0.35); /* practical teal */
+  animation: concierge-breathe 3.4s ease-in-out infinite, concierge-ready 8s ease-in-out infinite; /* efficient rhythm */
+}
+
+.sprite.mode-concierge .core::before {
+  animation: concierge-swirl 9s linear infinite; /* efficient, purposeful */
+}
+
+.sprite.mode-librarian {
+  --blue-1: var(--mode-librarian);
+  --blue-2: var(--mode-librarian);
+  --halo: rgba(124, 152, 133, 0.25); /* quiet sage */
+  animation: librarian-breathe 5.2s ease-in-out infinite, librarian-wisdom 18s ease-in-out infinite; /* slowest, most subtle */
+}
+
+.sprite.mode-librarian .core::before {
+  animation: librarian-swirl 16s ease-in-out infinite; /* contemplative, wise */
+}
+
+/* shimmer animation for occasional life */
+@keyframes shimmer {
+  0% {
+    filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%);
+  }
+  12% {
+    filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%);
+  }
+  16% {
+    filter: drop-shadow(0 2px 16px var(--glow)) saturate(120%) brightness(110%);
+  }
+  20% {
+    filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%);
+  }
+  100% {
+    filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%);
+  }
+}
+
+/* pulse animations for programmatic expressiveness */
+.sprite.pulse-subtle {
+  animation: breathe 3.6s ease-in-out infinite, shimmer 11s ease-in-out infinite, pulse-subtle 0.6s ease-out 1;
+}
+
+.sprite.pulse-normal {
+  animation: breathe 3.6s ease-in-out infinite, shimmer 11s ease-in-out infinite, pulse-normal 0.6s ease-out 1;
+}
+
+.sprite.pulse-strong {
+  animation: breathe 3.6s ease-in-out infinite, shimmer 11s ease-in-out infinite, pulse-strong 0.6s ease-out 1;
+}
+
+@keyframes pulse-subtle {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+@keyframes pulse-normal {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+@keyframes pulse-strong {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+/* --- importance-based notification animations --- */
+.sprite.notification-high {
+  animation: 
+    breathe 3.6s ease-in-out infinite, 
+    shimmer 11s ease-in-out infinite,
+    high-importance 2s ease-out 1;
+}
+
+.sprite.notification-medium {
+  animation: 
+    breathe 3.6s ease-in-out infinite, 
+    shimmer 11s ease-in-out infinite,
+    medium-importance 1.5s ease-out 1;
+}
+
+@keyframes high-importance {
+  0% { transform: scale(1) rotate(0deg); }
+  10% { transform: scale(1.05) rotate(-3deg); }
+  20% { transform: scale(1.02) rotate(3deg); }
+  30% { transform: scale(1.08) rotate(-2deg); }
+  40% { transform: scale(1.01) rotate(2deg); }
+  50% { transform: scale(1.06) rotate(-1deg); }
+  60% { transform: scale(1.02) rotate(1deg); }
+  70% { transform: scale(1.04) rotate(0deg); }
+  80% { transform: scale(1.01); }
+  90% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+@keyframes medium-importance {
+  0% { transform: scale(1); }
+  15% { transform: scale(1.03) rotate(-1deg); }
+  30% { transform: scale(1.01) rotate(1deg); }
+  45% { transform: scale(1.04) rotate(0deg); }
+  60% { transform: scale(1.01); }
+  75% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+/* --- personality-specific animations --- */
+/* Coach mode: energetic and motivating */
+@keyframes coach-breathe {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.98); }
+  60% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+@keyframes coach-shimmer {
+  0% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  10% { filter: drop-shadow(0 2px 16px var(--glow)) saturate(110%) brightness(105%); }
+  15% { filter: drop-shadow(0 2px 20px var(--glow)) saturate(120%) brightness(110%); }
+  25% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  100% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+}
+
+@keyframes coach-swirl {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Analyst mode: focused and methodical */
+@keyframes analyst-breathe {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.99); }
+  100% { transform: scale(1); }
+}
+
+@keyframes analyst-pulse {
+  0% { box-shadow: inset 0 0 18px rgba(107, 115, 255, 0.2), inset 0 0 42px rgba(107, 115, 255, 0.15); }
+  25% { box-shadow: inset 0 0 22px rgba(107, 115, 255, 0.25), inset 0 0 50px rgba(107, 115, 255, 0.2); }
+  50% { box-shadow: inset 0 0 18px rgba(107, 115, 255, 0.2), inset 0 0 42px rgba(107, 115, 255, 0.15); }
+  75% { box-shadow: inset 0 0 22px rgba(107, 115, 255, 0.25), inset 0 0 50px rgba(107, 115, 255, 0.2); }
+  100% { box-shadow: inset 0 0 18px rgba(107, 115, 255, 0.2), inset 0 0 42px rgba(107, 115, 255, 0.15); }
+}
+
+@keyframes analyst-swirl {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Companion mode: warm and gentle */
+@keyframes companion-breathe {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.985); }
+  100% { transform: scale(1); }
+}
+
+@keyframes companion-glow {
+  0% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  20% { filter: drop-shadow(0 3px 16px rgba(181, 116, 255, 0.4)) saturate(105%) brightness(102%); }
+  40% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  100% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+}
+
+@keyframes companion-swirl {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(180deg) scale(1.02); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+/* Guardian mode: steady and protective */
+@keyframes guardian-breathe {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.99); }
+  100% { transform: scale(1); }
+}
+
+@keyframes guardian-watch {
+  0% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  30% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  35% { filter: drop-shadow(0 3px 18px rgba(45, 90, 160, 0.4)) saturate(110%) brightness(105%); }
+  40% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  100% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+}
+
+@keyframes guardian-swirl {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Concierge mode: efficient and ready */
+@keyframes concierge-breathe {
+  0% { transform: scale(1); }
+  45% { transform: scale(0.98); }
+  55% { transform: scale(1.01); }
+  100% { transform: scale(1); }
+}
+
+@keyframes concierge-ready {
+  0% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  12% { filter: drop-shadow(0 3px 16px rgba(0, 212, 170, 0.4)) saturate(108%) brightness(104%); }
+  20% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  100% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+}
+
+@keyframes concierge-swirl {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Librarian mode: contemplative and wise */
+@keyframes librarian-breathe {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.995); }
+  100% { transform: scale(1); }
+}
+
+@keyframes librarian-wisdom {
+  0% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  40% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  45% { filter: drop-shadow(0 3px 15px rgba(124, 152, 133, 0.3)) saturate(105%) brightness(102%); }
+  50% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+  100% { filter: drop-shadow(0 2px 12px var(--shadow)) saturate(100%) brightness(100%); }
+}
+
+@keyframes librarian-swirl {
+  0% { transform: rotate(0deg) scale(1); }
+  25% { transform: rotate(90deg) scale(0.99); }
+  50% { transform: rotate(180deg) scale(1.01); }
+  75% { transform: rotate(270deg) scale(0.99); }
+  100% { transform: rotate(360deg) scale(1); }
 }

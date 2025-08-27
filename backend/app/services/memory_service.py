@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text, and_, desc, func
-from app.models.episode_sqlite import Episode, MemoryVector, MemoryHot
+from app.models.episode import Episode, MemoryVector, MemoryHot
 from app.models.memory import SemanticSummary
 from app.models.note import Note
 from app.models.doc import DocChunk

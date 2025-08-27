@@ -51,10 +51,14 @@ export interface Note {
 export interface Document {
   id: string
   filename: string
-  size: number
-  type: string
-  uploaded_at: Date
-  processed: boolean
+  original_filename: string
+  title: string
+  file_size: number
+  mime_type: string
+  content_text?: string
+  is_processed: string
+  created_at: string
+  updated_at: string
 }
 
 export interface Reminder {
@@ -301,11 +305,13 @@ class ApiClient {
     return response.data
   }
 
-  async uploadDocument(file: File): Promise<Document> {
+  async uploadDocument(file: File, chatContext: boolean = false): Promise<Document> {
     const formData = new FormData()
     formData.append('file', file)
     
-    const response = await this.client.post('/documents/upload', formData, {
+    const url = chatContext ? `/documents?chat_context=true` : '/documents'
+    
+    const response = await this.client.post(url, formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },

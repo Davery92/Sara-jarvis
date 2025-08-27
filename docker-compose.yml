@@ -6,7 +6,7 @@ services:
     ports:
       - "10.185.1.180:3000:3000"
     environment:
-      - VITE_API_URL=https://sara.avery.cloud/api
+      - VITE_API_URL=http://10.185.1.180:8000
       - VITE_ASSISTANT_NAME=Sara
       - VITE_DOMAIN=sara.avery.cloud
     depends_on:

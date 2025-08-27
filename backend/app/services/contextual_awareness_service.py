@@ -14,7 +14,11 @@ import pytz
 from app.db.session import SessionLocal
 from app.models.user import User
 from app.models.episode import Episode
-from app.models.reminder import Reminder, Timer
+from app.models.reminder import Reminder
+# Import Timer from main_simple where the actual database schema is defined
+import sys
+sys.path.insert(0, '/home/david/jarvis/backend')
+from app.main_simple import Timer
 from app.services.content_intelligence import content_intelligence, ContentType
 from app.services.metadata_extractor import metadata_extractor
 from app.services.tagging_system import smart_tagger
@@ -105,7 +109,8 @@ class ContextualAwarenessService:
             active_timers = db.query(Timer).filter(
                 and_(
                     Timer.user_id == user_id,
-                    Timer.status == 'running',
+                    Timer.is_active == True,
+                    Timer.is_completed == False,
                     Timer.end_time <= current_time.replace(tzinfo=None) + timedelta(minutes=5)  # Due within 5 minutes
                 )
             ).all()
@@ -117,7 +122,7 @@ class ContextualAwarenessService:
                 alert = {
                     'type': 'timer',
                     'timer_id': timer.id,
-                    'label': timer.label or 'Timer',
+                    'label': timer.title or 'Timer',
                     'time_remaining': time_remaining.total_seconds(),
                     'status': 'due_soon' if time_remaining.total_seconds() > 0 else 'overdue',
                     'urgency': 'high' if time_remaining.total_seconds() <= 300 else 'medium'  # High if < 5 min

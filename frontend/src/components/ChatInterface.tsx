@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from '../config'
+import { apiClient } from '../api/client'
+import type { Document } from '../api/client'
 import MermaidDiagram from './MermaidDiagram'
 
 interface Conversation {
@@ -19,13 +21,14 @@ interface ChatMessage {
   content: string
   timestamp: Date
   citations?: any[]
+  attachedDocuments?: Document[]
 }
 
 interface ChatInterfaceProps {
   messages: ChatMessage[]
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>
   loading: boolean
-  onSendMessage: (e: React.FormEvent, isQuickChat?: boolean) => Promise<void>
+  onSendMessage: ((e: React.FormEvent, isQuickChat?: boolean) => Promise<void>) | null
   onClearChat: () => void
   message: string
   setMessage: React.Dispatch<React.SetStateAction<string>>
@@ -50,6 +53,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [toolActivity, setToolActivity] = useState('')
   const [isUsingTools, setIsUsingTools] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [uploadedDocuments, setUploadedDocuments] = useState<Document[]>([])
+  const [isUploading, setIsUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
 
   // Check if mobile on mount and window resize
@@ -85,11 +91,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   }, [messages, loading])
 
+  // Handle document upload for chat context
+  const handleDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    setIsUploading(true)
+
+    try {
+      // Upload document with chat_context=true
+      const uploadedDoc = await apiClient.uploadDocument(file, true)
+      
+      // Add to uploaded documents list
+      setUploadedDocuments(prev => [...prev, uploadedDoc])
+      
+      console.log('Document uploaded for chat:', uploadedDoc)
+    } catch (error) {
+      console.error('Error uploading document:', error)
+      // Could add toast notification here
+    } finally {
+      setIsUploading(false)
+      // Reset the input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  // Remove uploaded document
+  const removeUploadedDocument = (docId: string) => {
+    setUploadedDocuments(prev => prev.filter(doc => doc.id !== docId))
+  }
+
   // Enhanced send message with tool activity tracking
   const handleSendMessage = async (e: React.FormEvent, isQuickChat = false) => {
     e.preventDefault()
-    if (!message.trim() || loading) return
+    if ((!message.trim() && uploadedDocuments.length === 0) || loading) return
     
+    // If parent provided onSendMessage, use it
+    if (onSendMessage) {
+      return await onSendMessage(e, isQuickChat)
+    }
+    
+    // Otherwise, handle message sending internally with proper conversation management
     // Cancel any existing request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
@@ -98,9 +143,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     // Create new abort controller for this request
     abortControllerRef.current = new AbortController()
 
-    const userMessage = { role: 'user' as const, content: message, timestamp: new Date() }
+    // Create user message with attached documents
+    const userMessage = { 
+      role: 'user' as const, 
+      content: message, 
+      timestamp: new Date(),
+      attachedDocuments: uploadedDocuments.length > 0 ? [...uploadedDocuments] : undefined
+    }
     setMessages(prev => [...prev, userMessage])
     setMessage('')
+    
+    // Clear uploaded documents after sending
+    setUploadedDocuments([])
     setIsLoading(true)
     setIsUsingTools(false)
     setToolActivity('')
@@ -115,7 +169,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         credentials: 'include',
         signal: abortControllerRef.current.signal,
         body: JSON.stringify({
-          messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
+          messages: [...messages, userMessage].map(m => {
+            let messageContent = m.content
+            
+            // If this message has attached documents, prepend their content
+            if (m.attachedDocuments && m.attachedDocuments.length > 0) {
+              const documentContext = m.attachedDocuments
+                .map(doc => `[Document: ${doc.title || doc.original_filename}]\n${doc.content_text || 'Content could not be extracted'}\n[End of ${doc.title || doc.original_filename}]`)
+                .join('\n\n')
+              messageContent = `${documentContext}\n\n${m.content}`
+            }
+            
+            return { role: m.role, content: messageContent }
+          }),
           conversation_id: currentConversationId
         })
       })
@@ -605,6 +671,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   ) : (
                     <p>{msg.content}</p>
                   )}
+                  
+                  {/* Display attached documents for user messages */}
+                  {msg.role === 'user' && msg.attachedDocuments && msg.attachedDocuments.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      {msg.attachedDocuments.map((doc) => (
+                        <div key={doc.id} className="flex items-center bg-teal-900/20 border border-teal-700/30 rounded-lg px-3 py-2 text-sm">
+                          <span className="material-icons text-teal-400 mr-2 text-sm">description</span>
+                          <span className="text-teal-200">
+                            {doc.title || doc.original_filename}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
                   {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
                     <div className="mt-2 space-y-1">
                       <div className="text-[11px] text-gray-300">Sources</div>
@@ -661,6 +742,30 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
         {/* Input Area */}
         <div className="border-t border-gray-700 bg-gray-800">
+          {/* Uploaded Documents Preview */}
+          {uploadedDocuments.length > 0 && (
+            <div className="p-4 border-b border-gray-700">
+              <div className="text-xs text-gray-400 mb-2">Attached Documents:</div>
+              <div className="flex flex-wrap gap-2">
+                {uploadedDocuments.map((doc) => (
+                  <div key={doc.id} className="flex items-center bg-gray-600 rounded-lg px-3 py-1.5 text-sm">
+                    <span className="material-icons text-teal-400 mr-2 text-sm">description</span>
+                    <span className="text-gray-200 truncate max-w-48">
+                      {doc.title || doc.original_filename}
+                    </span>
+                    <button
+                      onClick={() => removeUploadedDocument(doc.id)}
+                      className="ml-2 text-gray-400 hover:text-red-400 transition-colors"
+                      type="button"
+                    >
+                      <span className="material-icons text-xs">close</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
           <form onSubmit={handleSendMessage} className="p-4">
             <div className="flex space-x-4">
               <input
@@ -671,9 +776,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 className="flex-1 bg-gray-700 border border-gray-600 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder-gray-400"
                 disabled={isLoading}
               />
+              
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleDocumentUpload}
+                accept=".pdf,.doc,.docx,.txt,.md"
+                className="hidden"
+              />
+              
+              {/* File upload button */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-4 rounded-lg transition-colors flex items-center"
+                title="Upload document"
+              >
+                {isUploading ? (
+                  <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                  <span className="material-icons">attach_file</span>
+                )}
+              </button>
+              
               <button 
                 type="submit" 
-                disabled={isLoading || !message.trim()}
+                disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0)}
                 className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-6 rounded-lg transition-colors flex items-center"
               >
                 <span className="material-icons">send</span>

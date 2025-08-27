@@ -2,3 +2,32 @@
 2025-08-22 05:00:01,895 - INFO - 🔐 Authenticating with Sara Hub...
 2025-08-22 05:00:02,779 - ERROR - Authentication failed: 401 - {"detail":"Incorrect email or password"}
 2025-08-22 05:00:02,782 - ERROR - ❌ Daily vulnerability report generation failed after 0.89 seconds
+2025-08-25 05:00:02,618 - INFO - 🌅 Starting daily vulnerability report generation at 2025-08-25 05:00:02.617949
+2025-08-25 05:00:02,849 - INFO - 📡 Fetching vulnerability intelligence from sources...
+2025-08-25 05:00:02,850 - INFO - 🎯 Fetching CISA KEV catalog...
+2025-08-25 05:00:02,941 - INFO - ✅ Retrieved 50 CISA KEV entries
+2025-08-25 05:00:02,941 - INFO - 🪟 Fetching MSRC advisories...
+2025-08-25 05:00:03,387 - INFO - ✅ Retrieved 20 MSRC advisories
+2025-08-25 05:00:03,485 - INFO - ✅ Report saved to database for 2025-08-25
+2025-08-25 05:00:03,538 - INFO - 📱 Sent NTFY notification: 🛡️ Daily Vulnerability Report Ready
+2025-08-25 05:00:03,539 - INFO - ✅ Daily vulnerability report generation completed successfully in 0.92 seconds
+2025-08-26 05:00:02,628 - INFO - 🌅 Starting daily vulnerability report generation at 2025-08-26 05:00:02.628601
+2025-08-26 05:00:02,890 - INFO - 📡 Fetching vulnerability intelligence from sources...
+2025-08-26 05:00:02,890 - INFO - 🎯 Fetching CISA KEV catalog...
+2025-08-26 05:00:03,034 - INFO - ✅ Retrieved 50 CISA KEV entries
+2025-08-26 05:00:03,035 - INFO - 🪟 Fetching MSRC advisories...
+2025-08-26 05:00:03,449 - INFO - ✅ Retrieved 20 MSRC advisories
+2025-08-26 05:00:03,569 - INFO - ✅ Report saved to database for 2025-08-26
+2025-08-26 05:00:03,626 - INFO - 📱 Sent NTFY notification: 🛡️ Daily Vulnerability Report Ready
+2025-08-26 05:00:03,628 - INFO - ✅ Daily vulnerability report generation completed successfully in 1.00 seconds
+2025-08-27 05:00:02,803 - INFO - 🌅 Starting daily vulnerability report generation at 2025-08-27 05:00:02.803258
+2025-08-27 05:00:02,858 - INFO - 🔐 Authenticating with Sara Hub...
+2025-08-27 05:00:03,721 - INFO - ✅ Authenticated as david@avery.cloud
+2025-08-27 05:00:03,722 - INFO - 🔑 Access token received
+2025-08-27 05:00:03,722 - INFO - 🚀 Generating vulnerability report...
+2025-08-27 05:01:01,196 - INFO - ✅ Report generated successfully!
+2025-08-27 05:01:01,196 - INFO -    📊 Total vulnerabilities: 1
+2025-08-27 05:01:01,196 - INFO -    🚨 Critical: 0
+2025-08-27 05:01:01,197 - INFO -    ⚠️  KEV: 1
+2025-08-27 05:01:01,197 - INFO -    📱 Notification sent: True
+2025-08-27 05:01:01,198 - INFO - 🎉 Daily vulnerability report generation completed successfully in 58.40 seconds
