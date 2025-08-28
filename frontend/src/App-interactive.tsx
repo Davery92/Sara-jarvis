@@ -511,6 +511,7 @@ function App() {
 
     // State for streaming
     let streamingContent = ''
+    let isFirstStreamChunk = true
     let isUsingTools = false
     let toolActivity = ''
 
@@ -561,7 +562,10 @@ function App() {
                     isUsingTools = true
                     toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
                     spriteRef.current?.setState('listening')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('listening', 'chat:tools_start')
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setBase('listening', 'chat:tools_start')
+                      spriteBus.setTone('focused', 'chat:tools_start')
+                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -570,7 +574,11 @@ function App() {
                   case 'tool_executing':
                     toolActivity = `🔧 Using ${eventData.data.tool}...`
                     spriteRef.current?.setState('thinking')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('thinking', 'chat:tool_executing')
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setBase('thinking', 'chat:tool_executing')
+                      spriteBus.setTone('focused', 'chat:tool_executing')
+                      spriteBus.setVisuals({ energyScale: 1.02 }, 'chat:tool_executing')
+                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -579,7 +587,11 @@ function App() {
                   case 'thinking':
                     toolActivity = '💭 Processing results...'
                     spriteRef.current?.setState('thinking')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('thinking', 'chat:thinking')
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setBase('thinking', 'chat:thinking')
+                      spriteBus.setTone('focused', 'chat:thinking')
+                      spriteBus.setVisuals({ energyScale: 1.015 }, 'chat:thinking')
+                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -588,7 +600,16 @@ function App() {
                   case 'text_chunk':
                     streamingContent = eventData.data.full_content
                     spriteRef.current?.setState('speaking')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setOverlay('speaking', { source: 'chat:text_chunk', autoClearMs: 900 })
+                    if (isFirstStreamChunk) {
+                      // Brief "breath to talk" surge on first streamed token
+                      spriteRef.current?.pulse('strong')
+                      isFirstStreamChunk = false
+                    }
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setOverlay('speaking', { source: 'chat:text_chunk', autoClearMs: 900 })
+                      spriteBus.setTone('playful', 'chat:text_chunk')
+                      spriteBus.setVisuals({ energyScale: 1.03, tempoBreatheSec: 3.2 }, 'chat:text_chunk')
+                    }
                     if (isQuickChat) {
                       setQuickChatResponse(streamingContent)
                     } else {
@@ -637,14 +658,22 @@ function App() {
                     setLoading(false)
                     isUsingTools = false
                     spriteRef.current?.setState('idle')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:response_ready')
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setBase('idle', 'chat:response_ready')
+                      spriteBus.setTone(undefined, 'chat:response_ready')
+                      spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chat:response_ready')
+                    }
                     break
                     
                   case 'error':
                     console.error('Streaming error:', eventData.message)
                     setLoading(false)
                     spriteRef.current?.setState('idle')
-                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:error')
+                    if (APP_CONFIG.flags?.spriteBus) {
+                      spriteBus.setBase('idle', 'chat:error')
+                      spriteBus.setTone(undefined, 'chat:error')
+                      spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chat:error')
+                    }
                     break
                 }
               } catch (e) {

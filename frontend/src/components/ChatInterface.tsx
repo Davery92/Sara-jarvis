@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from '../config'
+import { spriteBus } from '../state/spriteBus'
 import { apiClient } from '../api/client'
 import type { Document } from '../api/client'
 import MermaidDiagram from './MermaidDiagram'
@@ -156,11 +157,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     // Clear uploaded documents after sending
     setUploadedDocuments([])
     setIsLoading(true)
+    // Sprite: indicate listening state when sending
+    spriteBus.setBase('listening', 'chatInterface:send')
+    spriteBus.setTone('focused', 'chatInterface:send')
     setIsUsingTools(false)
     setToolActivity('')
     
     // State for streaming
     let streamingContent = ''
+    let firstStreamChunk = true
     
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
@@ -216,23 +221,37 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     console.log('🔧 TOOL_CALLS_START event received:', eventData)
                     setIsUsingTools(true)
                     setToolActivity(`🔧 Using Tools (Round ${eventData.data.round})`)
+                    spriteBus.setBase('listening', 'chatInterface:tools_start')
+                    spriteBus.setTone('focused', 'chatInterface:tools_start')
                     break
                     
                   case 'tool_executing':
                     console.log('🔧 TOOL_EXECUTING event received:', eventData)
                     setToolActivity(`🔧 Using ${eventData.data.tool}...`)
+                    spriteBus.setBase('thinking', 'chatInterface:tool_executing')
+                    spriteBus.setTone('focused', 'chatInterface:tool_executing')
+                    spriteBus.setVisuals({ energyScale: 1.02 }, 'chatInterface:tool_executing')
                     break
                     
                   case 'thinking':
                     console.log('💭 THINKING event received:', eventData)
                     setIsUsingTools(true)
                     setToolActivity('💭 Processing results...')
+                    spriteBus.setBase('thinking', 'chatInterface:thinking')
+                    spriteBus.setTone('focused', 'chatInterface:thinking')
+                    spriteBus.setVisuals({ energyScale: 1.015 }, 'chatInterface:thinking')
                     break
                     
                   case 'text_chunk':
                     streamingContent = eventData.data.full_content
                     setIsUsingTools(false)
                     setToolActivity('')
+                    if (firstStreamChunk) {
+                      spriteBus.setVisuals({ energyScale: 1.04, tempoBreatheSec: 3.2 }, 'chatInterface:first_chunk')
+                      firstStreamChunk = false
+                    }
+                    spriteBus.setOverlay('speaking', { source: 'chatInterface:text_chunk', autoClearMs: 900 })
+                    spriteBus.setTone('playful', 'chatInterface:text_chunk')
                     // Update the last message with streaming content
                     setMessages(prev => {
                       const newMessages = [...prev]
@@ -282,6 +301,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsUsingTools(false)
                     setToolActivity('')
                     setIsLoading(false)
+                    spriteBus.setBase('idle', 'chatInterface:response_ready')
+                    spriteBus.setTone(undefined, 'chatInterface:response_ready')
+                    spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chatInterface:response_ready')
                     break
                     
                   case 'error':
@@ -289,6 +311,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsUsingTools(false)
                     setToolActivity('')
                     setIsLoading(false)
+                    spriteBus.setBase('idle', 'chatInterface:error')
+                    spriteBus.setTone(undefined, 'chatInterface:error')
+                    spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chatInterface:error')
                     break
                 }
               } catch (e) {

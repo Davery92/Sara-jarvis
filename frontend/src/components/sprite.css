@@ -285,7 +285,7 @@
   inset: -2px;
   border-radius: 50%;
   border: 2px solid rgba(130, 190, 255, 0.33);
-  animation: ripple 0.9s ease-out 1;
+  animation: ripple 0.9s ease-out infinite;
   pointer-events: none;
 }
 
@@ -296,6 +296,16 @@
 /* While speaking (streaming), add rapid pulse + faster hue cycle */
 .sprite.speaking .core {
   animation: pulse-talking 0.45s ease-in-out infinite, hue-cycle-fast 3s linear infinite;
+}
+
+/* thinking ring subtle, speaking ring animated */
+.sprite.thinking .ring {
+  opacity: 0.85;
+  animation: ring-rotate 3.2s linear infinite;
+}
+.sprite.speaking .ring {
+  opacity: 1;
+  animation: ripple 0.9s ease-out infinite;
 }
 
 /* notifying: quick entrance bounce + show toast */
