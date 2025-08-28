@@ -14,10 +14,25 @@ const getApiUrl = () => {
   return 'http://10.185.1.180:8000'
 }
 
+// Local preferences can override or complement env flags
+const calmFromLocal = (() => {
+  try { return localStorage.getItem('sprite.calmMode') === 'true' } catch { return false }
+})()
+const enhancedFromLocal = (() => {
+  try { return localStorage.getItem('sprite.enhancedVisuals') === 'true' } catch { return false }
+})()
+
 export const APP_CONFIG = {
   assistantName: import.meta.env.VITE_ASSISTANT_NAME || 'Sara',
   domain: import.meta.env.VITE_DOMAIN || 'sara.avery.cloud',
   apiUrl: getApiUrl(),
+  flags: {
+    // Enable emitting spriteBus events alongside existing spriteRef controls
+    spriteBus: (import.meta.env.VITE_SPRITE_BUS === 'true') || false,
+    // Visual mode prefs
+    enhancedVisuals: enhancedFromLocal || (import.meta.env.VITE_SPRITE_ENHANCED === 'true') || false,
+    calmMode: calmFromLocal || false,
+  },
   theme: {
     primary: '#6366f1',
     secondary: '#8b5cf6',

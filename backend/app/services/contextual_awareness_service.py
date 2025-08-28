@@ -14,11 +14,10 @@ import pytz
 from app.db.session import SessionLocal
 from app.models.user import User
 from app.models.episode import Episode
-from app.models.reminder import Reminder
-# Import Timer from main_simple where the actual database schema is defined
+# Import Timer and Reminder from main_simple where the actual database schema is defined
 import sys
 sys.path.insert(0, '/home/david/jarvis/backend')
-from app.main_simple import Timer
+from app.main_simple import Timer, Reminder
 from app.services.content_intelligence import content_intelligence, ContentType
 from app.services.metadata_extractor import metadata_extractor
 from app.services.tagging_system import smart_tagger
@@ -147,7 +146,7 @@ class ContextualAwarenessService:
             upcoming_reminders = db.query(Reminder).filter(
                 and_(
                     Reminder.user_id == user_id,
-                    Reminder.status == 'active',
+                    Reminder.is_completed == False,
                     Reminder.reminder_time >= current_time.replace(tzinfo=None),
                     Reminder.reminder_time <= next_hour.replace(tzinfo=None)
                 )
@@ -672,11 +671,11 @@ class ContextualAwarenessService:
                     upcoming_reminders = db.query(Reminder).filter(
                         and_(
                             Reminder.user_id == user_id,
-                            Reminder.status == "scheduled",
-                            Reminder.due_at <= eastern_now + timedelta(hours=2),
-                            Reminder.due_at > eastern_now
+                            Reminder.is_completed == False,
+                            Reminder.reminder_time <= eastern_now + timedelta(hours=2),
+                            Reminder.reminder_time > eastern_now
                         )
-                    ).order_by(Reminder.due_at).all()
+                    ).order_by(Reminder.reminder_time).all()
                 except Exception as e:
                     logger.debug(f"Reminder query failed: {e}")
                     upcoming_reminders = []

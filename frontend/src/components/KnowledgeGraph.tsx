@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react'
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import * as d3 from 'd3'
 import { generateNoteConnections } from '../utils/linkParser'
 import { APP_CONFIG } from '../config'
@@ -77,32 +77,56 @@ interface ConnectionDetails {
   properties?: any
 }
 
-export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, useApiData = false }: KnowledgeGraphProps) {
+const KnowledgeGraph = React.memo(function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, useApiData = false }: KnowledgeGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [graphData, setGraphData] = React.useState<{nodes: GraphNode[], links: GraphLink[]} | null>(null)
   const [episodes, setEpisodes] = useState<Episode[]>([])
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(false)
+  
+  // Track the last data hash to prevent unnecessary re-renders
+  const lastDataHashRef = useRef<string>('')
   const [visibleTypes, setVisibleTypes] = useState<Set<string>>(new Set(['content', 'entity', 'topic', 'tag', 'note', 'episode', 'document']))
   const [selectedConnection, setSelectedConnection] = useState<ConnectionDetails | null>(null)
   const [showConnectionModal, setShowConnectionModal] = useState(false)
   const [connectionDetails, setConnectionDetails] = useState<any>(null)
   const [loadingConnectionDetails, setLoadingConnectionDetails] = useState(false)
 
-  // Fetch graph data from Neo4j
+  // Fetch graph data from Neo4j (only once on mount)
   useEffect(() => {
+    let isMounted = true
+    
     const fetchGraphData = async () => {
+      if (!isMounted) return
       setLoading(true)
+      
       try {
         // Try to fetch from Neo4j knowledge graph first
         const graphResponse = await fetch(`${APP_CONFIG.apiUrl}/knowledge-graph/?depth=2`, {
           credentials: 'include'
         })
         
+        if (!isMounted) return
+        
         if (graphResponse.ok) {
-          const graphData = await graphResponse.json()
-          setGraphData(graphData)
-          console.log('✅ Loaded graph data from Neo4j:', graphData)
+          const data = await graphResponse.json()
+          if (isMounted) {
+            // Only update if the data has actually changed
+            const dataHash = JSON.stringify({
+              nodeCount: data.nodes?.length || 0,
+              relCount: data.relationships?.length || 0,
+              firstNodeId: data.nodes?.[0]?.properties?.id || data.nodes?.[0]?.id,
+              lastNodeId: data.nodes?.[data.nodes?.length - 1]?.properties?.id || data.nodes?.[data.nodes?.length - 1]?.id
+            })
+            
+            if (dataHash !== lastDataHashRef.current) {
+              lastDataHashRef.current = dataHash
+              setGraphData(data)
+              console.log('✅ Loaded graph data from Neo4j:', data)
+            } else {
+              console.log('🔄 Graph data unchanged, skipping update')
+            }
+          }
         } else {
           // Fallback to old method if Neo4j is not available
           console.warn('Neo4j not available, falling back to PostgreSQL data')
@@ -111,19 +135,25 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       } catch (error) {
         console.error('Failed to fetch Neo4j graph data:', error)
         // Fallback to old method
-        await fetchFallbackData()
+        if (isMounted) {
+          await fetchFallbackData()
+        }
       } finally {
-        setLoading(false)
+        if (isMounted) {
+          setLoading(false)
+        }
       }
     }
 
     const fetchFallbackData = async () => {
+      if (!isMounted) return
+      
       try {
         // Fetch episodes
         const episodesResponse = await fetch(`${APP_CONFIG.apiUrl}/memory/episodes?page=1&per_page=100`, {
           credentials: 'include'
         })
-        if (episodesResponse.ok) {
+        if (episodesResponse.ok && isMounted) {
           const episodesData = await episodesResponse.json()
           setEpisodes(episodesData.episodes || [])
         }
@@ -132,7 +162,7 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
         const documentsResponse = await fetch(`${APP_CONFIG.apiUrl}/documents`, {
           credentials: 'include'
         })
-        if (documentsResponse.ok) {
+        if (documentsResponse.ok && isMounted) {
           const documentsData = await documentsResponse.json()
           setDocuments(documentsData || [])
         }
@@ -142,10 +172,26 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
     }
 
     fetchGraphData()
+    
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   useEffect(() => {
-    if (!svgRef.current) return
+    if (!svgRef.current || loading) return
+    
+    // If we have no meaningful data, show empty state instead of bouncing
+    const hasMeaningfulData = (graphData && graphData.nodes && graphData.nodes.length > 0) || 
+                             notes.length > 0 || 
+                             (episodes.length > 0 && episodes.some(e => e.content && e.content.trim().length > 50)) ||
+                             documents.length > 0
+    
+    if (!hasMeaningfulData) {
+      // Clear the SVG and show empty state - don't render D3 graph
+      d3.select(svgRef.current).selectAll("*").remove()
+      return
+    }
 
     // Clear previous graph
     d3.select(svgRef.current).selectAll("*").remove()
@@ -507,7 +553,10 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
       simulation.stop()
     }
 
-  }, [notes, episodes, documents, selectedNoteId, onNodeClick, visibleTypes, graphData])
+  }, [notes, episodes, documents, selectedNoteId, onNodeClick, visibleTypes, graphData, loading])
+
+  // Memoize the visibleTypes array to prevent unnecessary re-renders
+  const visibleTypesArray = useMemo(() => Array.from(visibleTypes), [visibleTypes])
 
   // Helper functions for Neo4j data conversion
   const determineNodeTypeFromLabels = (labels: string[]): string => {
@@ -851,15 +900,32 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
           className="w-full h-full"
           style={{ background: 'transparent' }}
         />
-        {totalItems === 0 && !loading && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <span className="material-symbols-outlined text-6xl text-[#a1a1aa] mb-4 block">hub</span>
-              <h3 className="text-lg font-medium mb-2 text-[#f8fafc]">No content to visualize</h3>
-              <p className="text-[#a1a1aa]">Create notes, have conversations, or upload documents to see the knowledge graph</p>
+{(() => {
+          const hasMeaningfulData = (graphData && graphData.nodes && graphData.nodes.length > 0) || 
+                                   notes.length > 0 || 
+                                   (episodes.length > 0 && episodes.some(e => e.content && e.content.trim().length > 50)) ||
+                                   documents.length > 0
+          
+          return !hasMeaningfulData && !loading && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center">
+                <div className="text-6xl text-[#a1a1aa] mb-4">🧠</div>
+                <h3 className="text-lg font-medium mb-2 text-[#f8fafc]">Knowledge Graph Empty</h3>
+                <p className="text-[#a1a1aa] mb-4 max-w-md">
+                  {notes.length === 0 && episodes.length === 0 && documents.length === 0
+                    ? "No content available. Create notes, have conversations, or upload documents to build your knowledge graph."
+                    : "Neo4j is not available. Content intelligence features (entities, topics, tags) require Neo4j to be running."
+                  }
+                </p>
+                {episodes.length > 0 && (
+                  <div className="text-xs text-[#6b7280] bg-[#374151] px-3 py-2 rounded">
+                    📊 {episodes.length} conversation episodes found but no processed content available
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
       </div>
     </div>
 
@@ -1029,4 +1095,17 @@ export default function KnowledgeGraph({ notes, onNodeClick, selectedNoteId, use
     )}
     </>
   )
-}
+}, (prevProps, nextProps) => {
+  // Only re-render if props that actually affect the visualization have changed
+  return (
+    prevProps.selectedNoteId === nextProps.selectedNoteId &&
+    prevProps.useApiData === nextProps.useApiData &&
+    prevProps.notes.length === nextProps.notes.length &&
+    prevProps.notes.every((note, index) => 
+      nextProps.notes[index]?.id === note.id &&
+      nextProps.notes[index]?.updated_at === note.updated_at
+    )
+  )
+})
+
+export default KnowledgeGraph

@@ -59,7 +59,9 @@
       "Bash(pkill:*)",
       "Bash(lsof:*)",
       "Bash(/usr/bin/python3:*)",
-      "Bash(VITE_API_URL=http://10.185.1.180:8000 npm run dev -- --port 3001 --host 10.185.1.180 --force)"
+      "Bash(VITE_API_URL=http://10.185.1.180:8000 npm run dev -- --port 3001 --host 10.185.1.180 --force)",
+      "Bash(VITE_API_URL=http://10.185.1.180:8000 npm run dev -- --port 3000 --host 10.185.1.180)",
+      "Bash(npx serve:*)"
     ],
     "deny": [],
     "ask": [],

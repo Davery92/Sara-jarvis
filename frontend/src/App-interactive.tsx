@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
+import { spriteBus } from './state/spriteBus'
 import MermaidDiagram from './components/MermaidDiagram'
 import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
@@ -15,6 +16,7 @@ import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
 import Sprite, { SpriteHandle } from './components/Sprite'
+import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
 import { GTKYInterview } from './components/onboarding/GTKYInterview'
@@ -23,6 +25,7 @@ import { ReflectionTrigger } from './components/reflection/ReflectionTrigger'
 import { NightlyReflection } from './components/reflection/NightlyReflection'
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
+import { getCalmMode } from './utils/prefs'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -154,9 +157,68 @@ function App() {
     onActivityResume: () => {
       console.log('🤖 Sara: Activity resumed, returning to idle')
       spriteRef.current?.setState('idle')
+      if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'activity:resume')
     },
     enableLogging: true
   })
+
+  // Adjust sprite visuals based on activity state (feature-flagged)
+  useEffect(() => {
+    if (!APP_CONFIG.flags?.spriteBus) return
+    // Compute visuals based on current idle threshold and Calm Mode
+    // Defaults: normal energy and tempo
+    let energyScale = 1.0
+    let tempoBreatheSec = 3.6
+    let tempoShimmerSec = 11
+    let brightnessScale = 1.0
+    let saturationScale = 1.0
+    if (activityState.isIdle) {
+      switch (activityState.currentThreshold) {
+        case 'quickSweep':
+          energyScale = 0.99
+          tempoBreatheSec = 4.2
+          tempoShimmerSec = 12
+          brightnessScale = 0.99
+          saturationScale = 0.98
+          break
+        case 'standardSweep':
+          energyScale = 0.985
+          tempoBreatheSec = 4.8
+          tempoShimmerSec = 13
+          brightnessScale = 0.985
+          saturationScale = 0.96
+          break
+        case 'digestSweep':
+          energyScale = 0.98
+          tempoBreatheSec = 5.6
+          tempoShimmerSec = 14
+          brightnessScale = 0.98
+          saturationScale = 0.94
+          break
+        default:
+          break
+      }
+    }
+    // Calm Mode enforces calmer visuals regardless of activity
+    const calm = APP_CONFIG.flags?.calmMode || getCalmMode()
+    if (calm) {
+      energyScale = Math.min(energyScale, 0.985)
+      tempoBreatheSec = Math.max(tempoBreatheSec, 5.2)
+      tempoShimmerSec = Math.max(tempoShimmerSec, 13)
+      brightnessScale = Math.min(brightnessScale, 0.975)
+      saturationScale = Math.min(saturationScale, 0.94)
+    }
+    spriteBus.setVisuals({ energyScale, tempoBreatheSec, tempoShimmerSec, brightnessScale, saturationScale }, calm ? 'calm:visuals' : 'activity:visuals')
+  }, [activityState.isIdle, activityState.currentThreshold])
+
+  // On mount, apply Calm Mode once if enabled (ensures visuals are calm before first idle tick)
+  useEffect(() => {
+    if (!APP_CONFIG.flags?.spriteBus) return
+    const calm = APP_CONFIG.flags?.calmMode || getCalmMode()
+    if (calm) {
+      spriteBus.setVisuals({ energyScale: 0.985, tempoBreatheSec: 5.2, tempoShimmerSec: 13 }, 'calm:init')
+    }
+  }, [])
 
   // Check authentication on load
   useEffect(() => {
@@ -199,6 +261,35 @@ function App() {
       const interval = setInterval(loadTimersAndReminders, 60000) // Reduced from 30s to 60s
       return () => clearInterval(interval)
     }
+  }, [isAuthenticated])
+
+  // Optional: bias sprite tone based on latest vulnerability report (feature-flagged by spriteBus usage)
+  useEffect(() => {
+    if (!isAuthenticated) return
+    if (!APP_CONFIG.flags?.spriteBus) return
+
+    let cancelled = false
+    const fetchVulnTone = async () => {
+      try {
+        const resp = await fetch(`${APP_CONFIG.apiUrl}/api/vulnerability-reports/latest`, { credentials: 'include' })
+        if (!resp.ok) return
+        const data = await resp.json()
+        if (cancelled) return
+        const critical = (data?.critical_count || 0) > 0
+        const kev = (data?.kev_count || 0) > 0
+        if (critical || kev) {
+          spriteBus.setTone('serious', 'vuln:latest')
+        } else {
+          spriteBus.setTone(undefined, 'vuln:latest')
+        }
+      } catch (e) {
+        // ignore network errors silently
+      }
+    }
+    // fetch immediately and then every 10 minutes
+    fetchVulnTone()
+    const interval = setInterval(fetchVulnTone, 10 * 60 * 1000)
+    return () => { cancelled = true; clearInterval(interval) }
   }, [isAuthenticated])
 
   // Load analytics and notes when view changes to dashboard
@@ -470,6 +561,7 @@ function App() {
                     isUsingTools = true
                     toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
                     spriteRef.current?.setState('listening')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('listening', 'chat:tools_start')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -478,6 +570,7 @@ function App() {
                   case 'tool_executing':
                     toolActivity = `🔧 Using ${eventData.data.tool}...`
                     spriteRef.current?.setState('thinking')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('thinking', 'chat:tool_executing')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -486,6 +579,7 @@ function App() {
                   case 'thinking':
                     toolActivity = '💭 Processing results...'
                     spriteRef.current?.setState('thinking')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('thinking', 'chat:thinking')
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -494,6 +588,7 @@ function App() {
                   case 'text_chunk':
                     streamingContent = eventData.data.full_content
                     spriteRef.current?.setState('speaking')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setOverlay('speaking', { source: 'chat:text_chunk', autoClearMs: 900 })
                     if (isQuickChat) {
                       setQuickChatResponse(streamingContent)
                     } else {
@@ -542,12 +637,14 @@ function App() {
                     setLoading(false)
                     isUsingTools = false
                     spriteRef.current?.setState('idle')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:response_ready')
                     break
                     
                   case 'error':
                     console.error('Streaming error:', eventData.message)
                     setLoading(false)
                     spriteRef.current?.setState('idle')
+                    if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:error')
                     break
                 }
               } catch (e) {
@@ -582,6 +679,7 @@ function App() {
     } finally {
       setLoading(false)
       spriteRef.current?.setState('idle')
+      if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:finally')
       // Clear the abort controller when done
       if (abortControllerRef.current) {
         abortControllerRef.current = null
@@ -866,6 +964,11 @@ function App() {
       timestamp: new Date()
     }])
   }
+
+  // Close Sprite HUD when route/view changes
+  useEffect(() => {
+    try { spriteRef.current?.closeHUD?.() } catch {}
+  }, [view])
   
   const showToast = (message, type = 'info', persistent = false, showSprite = false) => {
     const id = Date.now()
@@ -896,6 +999,10 @@ function App() {
           }
         }
       })
+      if (APP_CONFIG.flags?.spriteBus) {
+        // Emit a medium-importance alert overlay through the bus
+        spriteBus.alert({ source: 'toast', importance: 'medium', autoClearMs: 1000 })
+      }
     }
     
     // Auto-remove toast after 5 seconds (unless persistent)
@@ -2434,6 +2541,7 @@ function App() {
         ref={spriteRef}
         onNavigate={setView}
       />
+      <SpriteDevPanel />
     </div>
   )
 }

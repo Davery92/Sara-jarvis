@@ -1,6 +1,12 @@
 /* Sara Sprite CSS */
 :root {
   --sprite-size: 68px;
+  /* Tunable visual parameters */
+  --tempo-breathe: 3.6s; /* default breathing duration */
+  --tempo-shimmer: 11s;  /* default shimmer duration */
+  --energy-scale: 1;     /* scale transformations subtly */
+  --brightness-scale: 1; /* visual calmness multiplier */
+  --saturation-scale: 1; /* visual calmness multiplier */
   --blue-1: #4cc3ff;
   --blue-2: #1e90ff;
   --blue-3: #0a66ff;
@@ -18,6 +24,16 @@
   --mode-guardian: #2d5aa0;   /* Deep blue - calm */
   --mode-concierge: #00d4aa;  /* Teal - practical */
   --mode-librarian: #7c9885;  /* Sage green - quiet */
+
+  /* Tone colors */
+  --tone-neutral-1: #4cc3ff;
+  --tone-neutral-2: #1e90ff;
+  --tone-focused-1: #7c4dff;   /* indigo/violet */
+  --tone-focused-2: #5b3fd1;
+  --tone-playful-1: #00d8c6;   /* aqua/teal */
+  --tone-playful-2: #00bfa5;
+  --tone-serious-1: #ffb020;   /* amber/red accent */
+  --tone-serious-2: #ff7043;
 }
 
 /* --- placement --- */
@@ -32,7 +48,7 @@
   cursor: pointer;
   z-index: 1000;
   /* subtle idle "breathing" + occasional shimmer */
-  animation: breathe 3.6s ease-in-out infinite, shimmer 11s ease-in-out infinite;
+  animation: breathe var(--tempo-breathe) ease-in-out infinite, shimmer var(--tempo-shimmer) ease-in-out infinite;
   /* soft drop shadow */
   filter: drop-shadow(0 2px 12px var(--shadow));
   transition: transform 0.28s ease, filter 0.28s ease;
@@ -68,7 +84,8 @@
     inset 0 0 18px rgba(255, 255, 255, 0.18),
     inset 0 0 42px rgba(90, 180, 255, 0.22);
   /* slight blur to make it feel like light, not paint */
-  filter: saturate(115%) blur(0.15px);
+  filter: saturate(calc(1.15 * var(--saturation-scale))) brightness(var(--brightness-scale)) blur(0.15px);
+  transition: box-shadow 0.18s ease, filter 0.18s ease;
 }
 
 /* animated "swirl" overlay for plasma motion */
@@ -100,7 +117,39 @@
   opacity: 0;
   transform: scale(0.96);
   pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
+
+/* Overlay: ALERT (brief halo flash + ring pulse) */
+.sprite.overlay-alert::after,
+.sprite.overlay-alert::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 180, 120, 0.45);
+  animation: ripple 0.75s ease-out 1;
+  pointer-events: none;
+}
+.sprite.overlay-alert::after { animation-delay: 0.08s; }
+
+/* Overlay: CELEBRATE (warmer core bloom + spark ripples) */
+.sprite.overlay-celebrate .core {
+  box-shadow:
+    inset 0 0 22px rgba(255, 255, 255, 0.24),
+    inset 0 0 66px rgba(255, 210, 120, 0.28);
+}
+.sprite.overlay-celebrate::after,
+.sprite.overlay-celebrate::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 210, 120, 0.35);
+  animation: ripple 0.9s ease-out 1;
+  pointer-events: none;
+}
+.sprite.overlay-celebrate::after { animation-delay: 0.12s; }
 
 /* --- badge: tiny unread dot --- */
 .sprite .badge {
@@ -224,7 +273,8 @@
 
 /* thinking: inner glow pulses a couple of times */
 .sprite.thinking .core {
-  animation: think 1.2s ease-out infinite;
+  /* Intensify inner glow and cycle hue slowly while thinking */
+  animation: think 1.2s ease-out infinite, hue-cycle-slow 8s linear infinite;
 }
 
 /* speaking: emit two soft ripples */
@@ -243,6 +293,11 @@
   animation-delay: 0.12s;
 }
 
+/* While speaking (streaming), add rapid pulse + faster hue cycle */
+.sprite.speaking .core {
+  animation: pulse-talking 0.45s ease-in-out infinite, hue-cycle-fast 3s linear infinite;
+}
+
 /* notifying: quick entrance bounce + show toast */
 .sprite.notifying {
   animation: bounce-in 0.22s ease-out 1;
@@ -259,13 +314,13 @@
 /* --- keyframes ---------------------------------------------- */
 @keyframes breathe {
   0% {
-    transform: scale(1);
+    transform: scale(calc(1 * var(--energy-scale)));
   }
   50% {
-    transform: scale(0.985);
+    transform: scale(calc(0.985 * var(--energy-scale)));
   }
   100% {
-    transform: scale(1);
+    transform: scale(calc(1 * var(--energy-scale)));
   }
 }
 
@@ -383,6 +438,23 @@
   }
 }
 
+/* Reduced motion: minimize animations while keeping presence */
+@media (prefers-reduced-motion: reduce) {
+  .sprite {
+    animation: none;
+  }
+  .sprite .halo { animation: none; }
+  .sprite .core::before { animation: none; }
+  .sprite.speaking::after,
+  .sprite.speaking::before,
+  .sprite.overlay-alert::after,
+  .sprite.overlay-alert::before,
+  .sprite.overlay-celebrate::after,
+  .sprite.overlay-celebrate::before {
+    display: none;
+  }
+}
+
 /* --- personality modes ----------------------------------------- */
 .sprite.mode-coach {
   --blue-1: var(--mode-coach);
@@ -493,6 +565,36 @@
   50% { transform: scale(1.05); }
   100% { transform: scale(1); }
 }
+
+@keyframes pulse-talking {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+
+/* Hue cycles (redeclare filter to include current saturation/brightness vars) */
+@keyframes hue-cycle-slow {
+  0% {
+    filter: saturate(calc(1.15 * var(--saturation-scale))) brightness(var(--brightness-scale)) blur(0.15px) hue-rotate(0deg);
+  }
+  100% {
+    filter: saturate(calc(1.15 * var(--saturation-scale))) brightness(var(--brightness-scale)) blur(0.15px) hue-rotate(360deg);
+  }
+}
+
+@keyframes hue-cycle-fast {
+  0% {
+    filter: saturate(calc(1.15 * var(--saturation-scale))) brightness(var(--brightness-scale)) blur(0.15px) hue-rotate(0deg);
+  }
+  100% {
+    filter: saturate(calc(1.15 * var(--saturation-scale))) brightness(var(--brightness-scale)) blur(0.15px) hue-rotate(720deg);
+  }
+}
+/* Tone classes (bias hues without changing mode personality) */
+.sprite.tone-neutral { --blue-1: var(--tone-neutral-1); --blue-2: var(--tone-neutral-2); }
+.sprite.tone-focused { --blue-1: var(--tone-focused-1); --blue-2: var(--tone-focused-2); }
+.sprite.tone-playful { --blue-1: var(--tone-playful-1); --blue-2: var(--tone-playful-2); }
+.sprite.tone-serious { --blue-1: var(--tone-serious-1); --blue-2: var(--tone-serious-2); }
 
 @keyframes pulse-strong {
   0% { transform: scale(1); }

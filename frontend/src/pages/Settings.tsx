@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals } from '../utils/prefs'
+import { spriteBus } from '../state/spriteBus'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, AISettingsUpdate } from '../api/client'
 
@@ -234,6 +236,58 @@ export default function Settings() {
                   <p className="mt-1 text-xs text-gray-400">Vector dimension for embeddings</p>
                 </div>
               </div>
+            </div>
+
+            {/* Appearance & Sprite */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Appearance & Sprite</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Calm Mode</div>
+                    <div className="text-xs text-gray-400">Keep the sprite’s visuals gentle even when active.</div>
+                  </div>
+                  <label className="inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      defaultChecked={getCalmMode()}
+                      onChange={(e) => {
+                        const v = e.target.checked
+                        setCalmMode(v)
+                        // Apply immediately
+                        if (v) {
+                          spriteBus.setVisuals({ energyScale: 0.985, tempoBreatheSec: 5.2, tempoShimmerSec: 13, brightnessScale: 0.975, saturationScale: 0.94 }, 'calm:toggle')
+                        } else {
+                          spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6, tempoShimmerSec: 11, brightnessScale: 1.0, saturationScale: 1.0 }, 'calm:toggle')
+                        }
+                      }}
+                    />
+                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                      <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 translate-x-0 peer-checked:translate-x-4"></span>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Enhanced Visuals</div>
+                    <div className="text-xs text-gray-400">Enable richer particle effects on capable devices.</div>
+                  </div>
+                  <label className="inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      defaultChecked={getEnhancedVisuals()}
+                      onChange={(e) => setEnhancedVisuals(e.target.checked)}
+                    />
+                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                      <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 translate-x-0 peer-checked:translate-x-4"></span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+              <p className="mt-2 text-xs text-gray-400">Visual preference changes take effect immediately. Calm Mode reduces animation intensity and tempo.</p>
             </div>
 
             {/* Actions */}

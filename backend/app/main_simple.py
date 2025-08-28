@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -15,7 +15,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone, date
-import jwt
+from jose import jwt, JWTError
 import uuid
 import httpx
 import json
@@ -76,7 +76,16 @@ ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sara_hub.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "sara-hub-jwt-secret-development")
 JWT_ALGORITHM = "HS256"
-CORS_ORIGINS = ["https://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000", "http://sara.avery.cloud"]
+# CORS configuration for frontend origins (explicit) + regex for IP host any port
+CORS_ORIGINS = [
+    "https://sara.avery.cloud",
+    "http://sara.avery.cloud",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://10.185.1.180:3000",
+    "http://10.185.1.180:3005",
+]
+ALLOWED_ORIGIN_REGEX = r"^http://10\.185\.1\.180(?::\d+)?$"
 
 # NTFY Configuration
 NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
@@ -976,7 +985,7 @@ def verify_token(token: str):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
-    except jwt.PyJWTError:
+    except JWTError:
         return None
 
 # Dependencies
@@ -4057,7 +4066,8 @@ async def shutdown_event():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,  # Use specific origins for credentials
+    allow_origins=CORS_ORIGINS,  # Specific origins
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,  # Match IP + any port
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4615,6 +4625,18 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             "Access-Control-Allow-Headers": "Cache-Control"
         }
     )
+
+# ==================== SPRITE TELEMETRY (optional) ====================
+@app.post("/sprite/telemetry")
+async def sprite_telemetry(payload: Dict[str, Any], request: Request):
+    """Best-effort telemetry ingest for sprite UX metrics.
+    Stores nothing by default; logs to server for debugging/analysis.
+    """
+    try:
+        logger.info(f"[SPRITE_TELEMETRY] {payload}")
+    except Exception as e:
+        logger.error(f"Failed to log sprite telemetry: {e}")
+    return {"status": "ok"}
 
 @app.get("/notes", response_model=list[NoteResponse])
 async def list_notes(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -5936,11 +5958,54 @@ async def get_user_knowledge_graph(
             depth=depth
         )
         
+        # If Neo4j returns empty results, fall back to PostgreSQL data
+        nodes = graph_data.get("nodes", [])
+        relationships = graph_data.get("relationships", [])
+        
+        if not nodes:
+            logger.info("Neo4j graph is empty, falling back to PostgreSQL episode data")
+            # Fetch episodes from PostgreSQL as fallback
+            from sqlalchemy import select, and_, func
+            
+            db = SessionLocal()
+            try:
+                # Get meaningful episodes (content longer than 50 chars) using synchronous query
+                episodes = db.query(Episode).filter(
+                    and_(
+                        Episode.user_id == current_user.id,
+                        func.length(Episode.content) > 50
+                    )
+                ).order_by(Episode.created_at.desc()).limit(20).all()
+                
+                # Convert episodes to graph nodes
+                fallback_nodes = []
+                for episode in episodes:
+                    fallback_nodes.append({
+                        "id": f"episode_{episode.id}",
+                        "labels": ["Episode"],
+                        "properties": {
+                            "id": episode.id,
+                            "title": f"{episode.role}: {episode.content[:50]}..." if len(episode.content) > 50 else episode.content,
+                            "content": episode.content,
+                            "type": "episode",
+                            "role": episode.role,
+                            "source": episode.source,
+                            "importance": episode.importance or 0.5,
+                            "created_at": episode.created_at.isoformat(),
+                            "group": 1 if episode.role == "user" else 2
+                        }
+                    })
+                
+                nodes = fallback_nodes
+                logger.info(f"Generated {len(nodes)} fallback nodes from episodes")
+            finally:
+                db.close()
+        
         return {
-            "nodes": graph_data.get("nodes", []),
-            "relationships": graph_data.get("relationships", []),
-            "total_nodes": len(graph_data.get("nodes", [])),
-            "total_relationships": len(graph_data.get("relationships", []))
+            "nodes": nodes,
+            "relationships": relationships,
+            "total_nodes": len(nodes),
+            "total_relationships": len(relationships)
         }
         
     except Exception as e:
