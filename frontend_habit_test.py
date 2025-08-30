@@ -6,10 +6,11 @@ Test script to verify the habit tracking frontend integration with backend APIs
 import requests
 import json
 import time
+import os
 
 # Configuration
-BASE_URL = "http://10.185.1.180:8000"
-FRONTEND_URL = "http://10.185.1.180:3000"
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 def test_frontend_backend_integration():
     print("🧪 Testing Habit Frontend-Backend Integration...")

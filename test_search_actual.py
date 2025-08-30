@@ -5,6 +5,7 @@ Test search functionality with actual notes
 import asyncio
 import httpx
 import json
+import os
 
 async def test_search_with_actual_notes():
     print("🔍 Testing Search with Your Actual Notes")
@@ -23,8 +24,9 @@ async def test_search_with_actual_notes():
             print("-" * 40)
             
             try:
+                base_url = os.getenv("BASE_URL", "http://localhost:8000")
                 response = await client.post(
-                    "http://10.185.1.180:8000/chat/stream",
+                    f"{base_url}/chat/stream",
                     json={
                         "messages": [
                             {"role": "user", "content": f"Search for notes about '{query}' and tell me what you find"}

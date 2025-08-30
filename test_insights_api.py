@@ -3,8 +3,9 @@
 
 import requests
 import json
+import os
 
-BASE_URL = "http://10.185.1.180:8000"
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 # Login
 login_data = {

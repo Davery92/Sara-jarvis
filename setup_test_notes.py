@@ -18,8 +18,9 @@ async def create_test_notes_and_search():
         try:
             # First, login to get session
             print("1. Logging in...")
+            base_url = os.getenv("BASE_URL", "http://localhost:8000")
             login_response = await client.post(
-                "http://10.185.1.180:8000/auth/login",
+                f"{base_url}/auth/login",
                 json={"email": "david@avery.cloud", "password": "your_password"}  # Use actual password
             )
             
@@ -27,7 +28,7 @@ async def create_test_notes_and_search():
                 print(f"❌ Login failed: {login_response.status_code}")
                 print("Trying without password...")
                 # Try to get current user instead
-                me_response = await client.get("http://10.185.1.180:8000/auth/me")
+                me_response = await client.get(f"{base_url}/auth/me")
                 if me_response.status_code != 200:
                     print("❌ Authentication failed completely")
                     return False
@@ -57,7 +58,7 @@ async def create_test_notes_and_search():
                 print(f"   Creating note {i}: '{note_data['title']}'")
                 
                 response = await client.post(
-                    "http://10.185.1.180:8000/notes",
+                    f"{base_url}/notes",
                     json=note_data
                 )
                 
@@ -88,7 +89,7 @@ async def create_test_notes_and_search():
                 chat_query = f"Search for notes about '{query}' and summarize what you find"
                 
                 response = await client.post(
-                    "http://10.185.1.180:8000/chat/stream",
+                    f"{base_url}/chat/stream",
                     json={
                         "messages": [
                             {"role": "user", "content": chat_query}

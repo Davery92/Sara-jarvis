@@ -76,16 +76,28 @@ ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sara_hub.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "sara-hub-jwt-secret-development")
 JWT_ALGORITHM = "HS256"
-# CORS configuration for frontend origins (explicit) + regex for IP host any port
-CORS_ORIGINS = [
+# CORS configuration for frontend origins
+# Prefer CORS_ORIGINS from environment as a JSON array or comma-separated list
+_cors_env = os.getenv("CORS_ORIGINS", "")
+_parsed_env_origins = []
+if _cors_env:
+    try:
+        _parsed = json.loads(_cors_env)
+        if isinstance(_parsed, list):
+            _parsed_env_origins = [str(x) for x in _parsed]
+    except Exception:
+        # Fallback: comma-separated
+        _parsed_env_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+
+CORS_ORIGINS = _parsed_env_origins or [
     "https://sara.avery.cloud",
     "http://sara.avery.cloud",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://10.185.1.180:3000",
-    "http://10.185.1.180:3005",
 ]
-ALLOWED_ORIGIN_REGEX = r"^http://10\.185\.1\.180(?::\d+)?$"
+
+# Optional regex for dynamic IPs; leave unset by default
+ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOW_REGEX") or None
 
 # NTFY Configuration
 NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
@@ -553,6 +565,19 @@ class BackgroundSweep(Base):
     patterns_found = Column(Text, nullable=True)  # JSON summary of patterns discovered
     
     executed_at = Column(DateTime, server_default=func.now())
+
+# Ensure pgvector extension exists on Postgres before creating tables
+try:
+    if DATABASE_URL.startswith("postgresql"):
+        with engine.connect() as conn:
+            try:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+                logger.info("✅ Ensured pgvector extension is available")
+            except Exception as e:
+                logger.warning(f"Could not create pgvector extension: {e}")
+except Exception as e:
+    logger.warning(f"Postgres extension check failed: {e}")
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -4067,7 +4092,7 @@ async def shutdown_event():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,  # Specific origins
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX,  # Match IP + any port
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,  # Optional regex when provided
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4114,6 +4139,11 @@ async def signup(user_data: UserCreate, request: Request, response: Response, db
         email=user.email,
         created_at=user.created_at.isoformat()
     )
+
+# Alias to support frontend client expecting /auth/register
+@app.post("/auth/register", response_model=UserResponse)
+async def register(user_data: UserCreate, request: Request, response: Response, db: Session = Depends(get_db)):
+    return await signup(user_data, request, response, db)
 
 @app.post("/auth/login", response_model=UserResponse)
 async def login(user_data: UserLogin, request: Request, response: Response, db: Session = Depends(get_db)):
@@ -4523,17 +4553,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     
     return chat_response
 
-@app.options("/chat/stream")
-async def chat_stream_options():
-    """Handle CORS preflight for streaming chat"""
-    return JSONResponse(
-        content={"message": "OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
+# Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -4620,9 +4640,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         media_type="text/plain",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Cache-Control"
+            "Connection": "keep-alive"
         }
     )
 
@@ -8279,4 +8297,7 @@ async def update_reflection_settings(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="10.185.1.180", port=8000)
+    # Allow host/port override via env for flexible deployment
+    uvicorn_host = os.getenv("HOST", "0.0.0.0")
+    uvicorn_port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=uvicorn_host, port=uvicorn_port)

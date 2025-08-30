@@ -50,8 +50,9 @@ async def test_notes_search():
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             # First, login to get session
+            base_url = os.getenv("BASE_URL", "http://localhost:8000")
             login_response = await client.post(
-                "http://10.185.1.180:8000/auth/login",
+                f"{base_url}/auth/login",
                 json={"email": "david@avery.cloud", "password": "your_password_here"}
             )
             
@@ -67,7 +68,7 @@ async def test_notes_search():
             print(f"\n3. Sending chat request: '{search_query}'")
             
             response = await client.post(
-                "http://10.185.1.180:8000/chat/stream",
+                f"{base_url}/chat/stream",
                 json={
                     "messages": [
                         {"role": "user", "content": search_query}
@@ -163,7 +164,7 @@ if __name__ == "__main__":
     print("🚀 Starting Notes Search Test")
     
     # Set up environment
-    os.environ["DATABASE_URL"] = "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
+    os.environ["DATABASE_URL"] = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@localhost:5432/sara_hub")
     
     # Run the test
     success = asyncio.run(test_notes_search())

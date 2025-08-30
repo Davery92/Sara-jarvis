@@ -6,12 +6,18 @@ const getApiUrl = () => {
   }
   
   // If we're on the production domain with HTTPS, use the API endpoint
-  if (typeof window !== 'undefined' && window.location.host.includes('sara.avery.cloud')) {
-    return 'https://sara.avery.cloud/api'
+  const prodDomain = import.meta.env.VITE_DOMAIN
+  if (typeof window !== 'undefined' && prodDomain && window.location.host.includes(prodDomain)) {
+    return `https://${prodDomain}/api`
   }
-  
-  // Otherwise use local development backend
-  return 'http://10.185.1.180:8000'
+
+  // Otherwise use local/LAN development backend using current hostname
+  if (typeof window !== 'undefined') {
+    return `http://${window.location.hostname}:8000`
+  }
+
+  // Fallback for non-browser contexts
+  return 'http://localhost:8000'
 }
 
 // Local preferences can override or complement env flags

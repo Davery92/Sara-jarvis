@@ -14,7 +14,7 @@ export EMBEDDING_DIM="1024"
 export ASSISTANT_NAME="Sara"
 export DOMAIN="sara.avery.cloud"
 export COOKIE_DOMAIN=".sara.avery.cloud"
-export CORS_ORIGINS='["https://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000"]'
+export CORS_ORIGINS='["https://sara.avery.cloud", "http://localhost:3000"]'
 export JWT_SECRET="sara-hub-jwt-secret-development"
 export TIMEZONE="America/New_York"
 
@@ -65,7 +65,9 @@ except Exception as e:
 echo "🖥️ Starting backend server..."
 # Start backend
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-python3 -m uvicorn app.main:app --host 10.185.1.180 --port 8000 --reload &
+HOST=${HOST:-0.0.0.0}
+DEV_HOST=${DEV_HOST:-localhost}
+python3 -m uvicorn app.main:app --host "$HOST" --port 8000 --reload &
 BACKEND_PID=$!
 
 cd ../frontend
@@ -74,16 +76,16 @@ echo "📦 Installing frontend dependencies..."
 npm install
 
 echo "🌐 Starting frontend server..."
-npm run dev -- --host 10.185.1.180 --port 3000 &
+npm run dev -- --host "$HOST" --port 3000 &
 FRONTEND_PID=$!
 
 echo ""
 echo "🎉 Sara Hub is starting up!"
 echo ""
-echo "📍 Frontend: http://10.185.1.180:3000"
-echo "📍 Backend API: http://10.185.1.180:8000"
+echo "📍 Frontend: http://$DEV_HOST:3000"
+echo "📍 Backend API: http://$DEV_HOST:8000"
 echo ""
-echo "Point your nginx proxy manager to: 10.185.1.180:3000"
+echo "Point your nginx proxy manager to: ${DEV_HOST}:3000"
 echo ""
 echo "Press Ctrl+C to stop all services"
 
