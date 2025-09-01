@@ -3,9 +3,11 @@ import { getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals } from
 import { spriteBus } from '../state/spriteBus'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, AISettingsUpdate } from '../api/client'
+import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
 
 export default function Settings() {
   const [formData, setFormData] = useState<AISettingsUpdate>({})
+  const [showGTKY, setShowGTKY] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const queryClient = useQueryClient()
 
@@ -102,7 +104,7 @@ export default function Settings() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-white mb-2">Settings</h1>
-          <p className="text-gray-400">Configure AI models and embedding services</p>
+          <p className="text-gray-400">Configure AI models, embeddings, and personalization</p>
         </div>
 
         {/* Test Result Alert */}
@@ -349,6 +351,65 @@ export default function Settings() {
               <div className="mt-1 text-sm text-blue-300">
                 <p>Changes to these settings will affect how Sara processes your requests, generates responses, and creates push notifications. The notification model should be smaller/faster for quick message generation. Make sure your AI and embedding services are accessible before saving.</p>
               </div>
+            </div>
+
+            {/* Get To Know You (GTKY) */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Get To Know You (GTKY)</h3>
+              <p className="text-gray-400 text-sm mb-4">
+                Help Sara personalize your experience. You can start or revisit the GTKY interview any time.
+              </p>
+              {!showGTKY ? (
+                <button
+                  onClick={() => setShowGTKY(true)}
+                  className="px-4 py-2 bg-teal-600/20 text-teal-300 rounded-lg hover:bg-teal-600/30 text-sm"
+                >
+                  Start GTKY Interview
+                </button>
+              ) : (
+                <div className="mt-4">
+                  <GTKYTrigger
+                    onComplete={() => {
+                      setShowGTKY(false)
+                    }}
+                    onSpriteStateChange={() => {}}
+                    personalityMode={'companion'}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Memory Maintenance */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Memory Maintenance</h3>
+              <p className="text-gray-400 text-sm mb-4">Run nightly consolidation on demand for yesterday’s traces.</p>
+              <button
+                onClick={async () => {
+                  try {
+                    const yesterday = new Date(Date.now() - 24*60*60*1000)
+                    const day = yesterday.toISOString().slice(0,10)
+                    const resp = await fetch(`${APP_CONFIG.apiUrl}/memory/consolidate`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      credentials: 'include',
+                      body: JSON.stringify({ day })
+                    })
+                    if (resp.ok) {
+                      setTestResult({ success: true, message: 'Consolidation started/succeeded for yesterday.' })
+                    } else {
+                      const txt = await resp.text()
+                      setTestResult({ success: false, message: `Consolidation failed: ${resp.status} ${txt}` })
+                    }
+                    setTimeout(() => setTestResult(null), 4000)
+                  } catch (err: any) {
+                    setTestResult({ success: false, message: err?.message || 'Consolidation failed' })
+                    setTimeout(() => setTestResult(null), 5000)
+                  }
+                }}
+                className="px-4 py-2 bg-indigo-600/20 text-indigo-300 rounded-lg hover:bg-indigo-600/30 text-sm"
+              >
+                Run Consolidation (Yesterday)
+              </button>
             </div>
           </div>
         </div>

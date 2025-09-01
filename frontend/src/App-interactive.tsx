@@ -19,10 +19,7 @@ import Sprite, { SpriteHandle } from './components/Sprite'
 import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
-import { GTKYInterview } from './components/onboarding/GTKYInterview'
-import { GTKYInterviewTest } from './components/onboarding/GTKYInterviewTest'
-import { ReflectionTrigger } from './components/reflection/ReflectionTrigger'
-import { NightlyReflection } from './components/reflection/NightlyReflection'
+// Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
 import { getCalmMode } from './utils/prefs'
@@ -70,7 +67,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings, onboarding, reflection
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -1171,11 +1168,11 @@ function App() {
                   'security_alert': 'vulnerability-watch',
                   'calendar_prep': 'calendar',
                   'weekly_summary': 'dashboard',
-                  'gtky_prompt': 'gtky-interview',
-                  'reflection_prompt': 'nightly-reflection',
-                  'reflection_streak': 'nightly-reflection',
-                  'mood_improvement': 'nightly-reflection',
-                  'goal_check': 'gtky-interview',
+                  'gtky_prompt': 'settings',
+                  'reflection_prompt': 'dashboard',
+                  'reflection_streak': 'dashboard',
+                  'mood_improvement': 'dashboard',
+                  'goal_check': 'settings',
                   'style_adjustment': 'privacy-dashboard'
                 }
                 setView(viewMap[insight.insight_type] || 'dashboard')
@@ -1372,20 +1369,7 @@ function App() {
                   <span className="text-xl">🧠</span>
                   <span>Sara's Insights</span>
                 </button>
-                <button
-                  onClick={() => { setView('onboarding'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'onboarding' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">💫</span>
-                  <span>Get to Know You</span>
-                </button>
-                <button
-                  onClick={() => { setView('reflection'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'reflection' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">🌙</span>
-                  <span>Nightly Reflection</span>
-                </button>
+                {/* GTKY now accessible within Settings; Reflection removed */}
                 <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
@@ -1465,20 +1449,7 @@ function App() {
               <span className="material-icons">security</span>
               <span className="text-xs">Vulns</span>
             </button>
-            <button
-              onClick={() => setView('onboarding')}
-              className={`flex flex-col items-center ${view === 'onboarding' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">💫</span>
-              <span className="text-xs">GTKY</span>
-            </button>
-            <button
-              onClick={() => setView('reflection')}
-              className={`flex flex-col items-center ${view === 'reflection' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">🌙</span>
-              <span className="text-xs">Reflect</span>
-            </button>
+            {/* GTKY moved to Settings; Reflect removed */}
             <button
               onClick={() => setView('settings')}
               className={`flex flex-col items-center ${view === 'settings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
@@ -2131,74 +2102,7 @@ function App() {
             <InsightInbox onToast={showToast} onNavigate={setView} />
           )}
 
-          {view === 'onboarding' && (
-            <div className="max-w-4xl mx-auto">
-              <GTKYTrigger
-                onComplete={() => {
-                  showToast('Welcome! Your profile has been created successfully.', 'success')
-                  setView('dashboard')
-                }}
-                onSpriteStateChange={(state) => {
-                  if (spriteRef.current) {
-                    spriteRef.current.setState(state)
-                  }
-                }}
-                personalityMode={spriteRef.current?.getMode() || 'companion'}
-              />
-            </div>
-          )}
-
-          {view === 'reflection' && (
-            <div className="max-w-4xl mx-auto">
-              <ReflectionTrigger
-                onComplete={() => {
-                  showToast('Thank you for reflecting! Your insights have been saved.', 'success')
-                  setView('dashboard')
-                }}
-                onSpriteStateChange={(state) => {
-                  if (spriteRef.current) {
-                    spriteRef.current.setState(state)
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {view === 'gtky-interview' && (
-            <div className="max-w-4xl mx-auto bg-gray-900 text-white p-8 rounded-lg">
-              <div className="text-center mb-4">
-                <h2 className="text-2xl font-bold text-white">GTKY Interview Debug</h2>
-                <p className="text-gray-400">Testing if this renders...</p>
-              </div>
-              <GTKYInterviewTest
-                onComplete={() => {
-                  showToast('Welcome! Your profile has been created successfully.', 'success')
-                  setView('dashboard')
-                }}
-                onSpriteStateChange={(state) => {
-                  if (spriteRef.current) {
-                    spriteRef.current.setState(state)
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {view === 'nightly-reflection' && (
-            <div className="max-w-4xl mx-auto">
-              <NightlyReflection
-                onComplete={(insights) => {
-                  showToast('Thank you for reflecting! Your insights have been saved.', 'success')
-                  setView('dashboard')
-                }}
-                onSpriteStateChange={(state) => {
-                  if (spriteRef.current) {
-                    spriteRef.current.setState(state)
-                  }
-                }}
-              />
-            </div>
-          )}
+          {/* GTKY now managed within Settings; reflection views removed */}
 
           {view === 'privacy-dashboard' && (
             <div className="max-w-4xl mx-auto">

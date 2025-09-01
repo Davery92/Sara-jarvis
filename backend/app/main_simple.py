@@ -26,6 +26,8 @@ import asyncio
 import json
 from fastapi import UploadFile
 from app.tools.registry import tool_registry
+from fastapi import APIRouter
+import pytz
 
 # Import vulnerability services
 try:
@@ -114,6 +116,10 @@ OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b"
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://100.104.68.115:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "postgres").lower()
+MEMORY_HOT_DAYS = int(os.getenv("MEMORY_HOT_DAYS", "30"))
+MEMORY_K_DEFAULT = int(os.getenv("MEMORY_K", "10"))
+MEMORY_SALIENCE_WRITE_THRESHOLD = float(os.getenv("MEMORY_SALIENCE_WRITE_THRESHOLD", "0.35"))
 UPLOAD_DIR = "./uploads"
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 ALLOWED_MIME_TYPES = [
@@ -243,6 +249,34 @@ class ConversationTurn(Base):
     # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL  
     embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+# ===================== HUMAN-LIKE MEMORY TABLES =====================
+class MemoryTrace(Base):
+    __tablename__ = "memory_trace"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    role = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    salience = Column(Float, nullable=True)
+    # Store JSON as text for portability; services can json.loads when needed
+    source = Column(Text, nullable=True)
+    meta = Column(Text, nullable=True)
+
+class MemoryEmbedding(Base):
+    __tablename__ = "memory_embedding"
+    trace_id = Column(String, primary_key=True)
+    head = Column(String, primary_key=True)
+    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class MemoryEdge(Base):
+    __tablename__ = "memory_edge"
+    src = Column(String, primary_key=True)
+    dst = Column(String, primary_key=True)
+    type = Column(String, primary_key=True)
+    weight = Column(Float, nullable=True)
+    ts = Column(DateTime(timezone=True), server_default=func.now())
 
 # Episodic Memory Models for Advanced Intelligence
 class Episode(Base):
@@ -581,6 +615,26 @@ except Exception as e:
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+# Optional: create ANN index for pgvector on hot tier
+try:
+    if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
+        with engine.connect() as conn:
+            try:
+                # Prefer HNSW with explicit operator class
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_hnsw ON memory_embedding USING hnsw (embedding vector_l2_ops)"))
+                conn.commit()
+                logger.info("✅ HNSW index ensured on memory_embedding(embedding vector_l2_ops)")
+            except Exception as e:
+                logger.warning(f"Could not create HNSW index, falling back to IVFFLAT: {e}")
+                try:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_ivfflat ON memory_embedding USING ivfflat (embedding vector_l2_ops) WITH (lists = 100)"))
+                    conn.commit()
+                    logger.info("✅ IVFFLAT index ensured on memory_embedding(embedding vector_l2_ops)")
+                except Exception as e2:
+                    logger.warning(f"Could not create IVFFLAT index: {e2}")
+except Exception as e:
+    logger.warning(f"HNSW index ensure failed: {e}")
 
 # Pydantic models
 class UserCreate(BaseModel):
@@ -2199,7 +2253,7 @@ class SimpleLLMClient:
 
 class EmbeddingService:
     def __init__(self):
-        self.client = httpx.AsyncClient()
+        # Create client lazily per-call to avoid event loop/session lifecycle issues
         self.base_url = EMBEDDING_BASE_URL
         self.model = EMBEDDING_MODEL
         self.dimension = EMBEDDING_DIM
@@ -2208,16 +2262,17 @@ class EmbeddingService:
         """Generate embedding for text using BGE-M3 model"""
         try:
             # Use the embeddings endpoint
-            response = await self.client.post(
-                f"{self.base_url}/v1/embeddings",
-                json={
-                    "model": self.model,
-                    "input": text,
-                    "encoding_format": "float"
-                },
-                headers={"Authorization": "Bearer dummy"},
-                timeout=30.0
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/embeddings",
+                    json={
+                        "model": self.model,
+                        "input": text,
+                        "encoding_format": "float"
+                    },
+                    headers={"Authorization": "Bearer dummy"},
+                    timeout=30.0
+                )
             response.raise_for_status()
             
             result = response.json()
@@ -2242,15 +2297,7 @@ class EmbeddingService:
         """Generate embeddings for multiple texts"""
         try:
             # For now, process individually to avoid API limits
-            embeddings = []
-            for text in texts:
-                embedding = await self.generate_embedding(text)
-                if embedding:
-                    embeddings.append(embedding)
-                else:
-                    # Return zero vector for failed embeddings
-                    embeddings.append([0.0] * self.dimension)
-            return embeddings
+            return [await self.generate_embedding(text) or ([0.0] * self.dimension) for text in texts]
             
         except Exception as e:
             logger.error(f"Error generating batch embeddings: {e}")
@@ -4047,15 +4094,148 @@ app = FastAPI(
     version="1.0.0-simple"
 )
 
+# Include modular routes
+try:
+    from app.routes.memory import router as memory_router
+    app.include_router(memory_router)
+except Exception as e:
+    logger.warning(f"Memory routes not available: {e}")
+
+# ===================== NIGHTLY MEMORY CONSOLIDATION =====================
+class MemoryConsolidationScheduler:
+    def __init__(self):
+        self._task = None
+        self._stop = False
+        self.eastern_tz = pytz.timezone('America/New_York')
+        self.hh = 2
+        self.mm = 15
+
+    async def start(self):
+        if self._task is None:
+            self._stop = False
+            import asyncio as _asyncio
+            self._task = _asyncio.create_task(self._runner())
+            logger.info("🗂️ Memory consolidation scheduler started (2:15 AM ET)")
+
+    async def stop(self):
+        if self._task is not None:
+            self._stop = True
+            self._task.cancel()
+            self._task = None
+
+    async def _runner(self):
+        import asyncio as _asyncio
+        from datetime import datetime as _dt
+        while not self._stop:
+            try:
+                utc_now = _dt.now(pytz.UTC)
+                eastern = utc_now.astimezone(self.eastern_tz)
+                target = eastern.replace(hour=self.hh, minute=self.mm, second=0, microsecond=0)
+                if eastern > target:
+                    # schedule for next day
+                    from datetime import timedelta as _td
+                    target = target + _td(days=1)
+                wait_sec = (target - eastern).total_seconds()
+                await _asyncio.sleep(min(max(wait_sec, 60), 24*3600))
+                if self._stop:
+                    break
+                await self.run_for_all_users()
+            except _asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Memory consolidation scheduler error: {e}")
+                await _asyncio.sleep(3600)
+
+    async def run_for_all_users(self):
+        from sqlalchemy.orm import Session as _Session
+        db: _Session = SessionLocal()
+        try:
+            users = db.query(User).all()
+            from datetime import datetime as _dt, timedelta as _td
+            yesterday = _dt.now(pytz.UTC) - _td(days=1)
+            for u in users:
+                try:
+                    await self._consolidate_day_for_user(db, u.id, yesterday)
+                except Exception as e:
+                    logger.warning(f"Consolidation failed for user {u.id}: {e}")
+            logger.info(f"✅ Memory consolidation completed for {len(users)} users")
+        finally:
+            db.close()
+
+    async def _consolidate_day_for_user(self, db, user_id: str, day):
+        from datetime import datetime as _dt, timedelta as _td
+        start = _dt(day.year, day.month, day.day, tzinfo=day.tzinfo)
+        end = start + _td(days=1)
+        traces = db.query(MemoryTrace).filter(
+            MemoryTrace.user_id == user_id,
+            MemoryTrace.created_at >= start,
+            MemoryTrace.created_at < end,
+        ).order_by(MemoryTrace.created_at.asc()).all()
+        if not traces:
+            return
+        # Basic heuristic summary; can be replaced by LLM later
+        key_phrases = []
+        try:
+            for t in traces:
+                content_low = (t.content or "").lower()
+                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
+                    if kw in content_low:
+                        key_phrases.append(kw)
+            key_phrases = list(dict.fromkeys(key_phrases))[:8]
+        except Exception:
+            key_phrases = []
+        summary_content = (
+            f"Daily summary for {start.date()}: {len(traces)} events captured."
+            + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
+        )
+        sid = str(uuid.uuid4())
+        s = MemoryTrace(
+            id=sid,
+            user_id=user_id,
+            content=summary_content,
+            role="summary",
+            salience=0.5,
+            source=json.dumps({"type": "consolidation"}),
+            meta=json.dumps({"day": str(start.date())}),
+        )
+        db.add(s)
+        # Embed summary (semantic head)
+        try:
+            emb = await embedding_service.generate_embedding(summary_content)
+            if emb:
+                me = MemoryEmbedding(
+                    trace_id=sid,
+                    head="semantic",
+                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
+                )
+                db.add(me)
+        except Exception as e:
+            logger.warning(f"Summary embedding failed: {e}")
+        # Edges
+        try:
+            from app.main_simple import MemoryEdge as _ME
+        except Exception:
+            _ME = None
+        if _ME:
+            for a, b in zip(traces, traces[1:]):
+                db.merge(_ME(src=a.id, dst=b.id, type="temporal", weight=0.1))
+            # Connect summary to all traces lightly
+            for t in traces:
+                db.merge(_ME(src=sid, dst=t.id, type="summary_of", weight=0.05))
+        db.commit()
+
+memory_consolidation_scheduler = MemoryConsolidationScheduler()
+
 # Initialize Neo4j on startup
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on application startup"""
     try:
-        # Initialize Neo4j service
-        from app.services.neo4j_service import neo4j_service
-        await neo4j_service.connect()
-        logger.info("✅ Neo4j knowledge graph service initialized")
+        # Initialize Neo4j service when enabled
+        if GRAPH_BACKEND == "neo4j":
+            from app.services.neo4j_service import neo4j_service
+            await neo4j_service.connect()
+            logger.info("✅ Neo4j knowledge graph service initialized")
         
         # Initialize intelligence pipeline
         from app.services.intelligence_pipeline import intelligence_pipeline
@@ -4073,6 +4253,9 @@ async def startup_event():
         asyncio.create_task(dream_service.start_dream_scheduler())
         logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
         
+        # Start memory consolidation scheduler (hot graph-in-Postgres)
+        await memory_consolidation_scheduler.start()
+        
     except Exception as e:
         logger.warning(f"⚠️ Services initialization failed (will use fallback): {e}")
 
@@ -4082,6 +4265,7 @@ async def shutdown_event():
     try:
         # Stop notification scheduler
         await notification_scheduler.stop()
+        await memory_consolidation_scheduler.stop()
         
         from app.services.neo4j_service import neo4j_service
         neo4j_service.close()

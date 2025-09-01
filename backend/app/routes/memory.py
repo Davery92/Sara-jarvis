@@ -1,473 +1,409 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Form
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-from app.core.deps import get_current_user
-from app.db.session import get_db
-from app.models.user import User
-from app.services.memory_service import MemoryService
-import logging
+from typing import Optional, List, Dict, Any
+from sqlalchemy.orm import Session
+from sqlalchemy import text as sql_text
+import json
+import uuid
+import time
+import os as _os
 
-logger = logging.getLogger(__name__)
-
-router = APIRouter()
-
-
-class MemorySearchRequest(BaseModel):
-    query: str
-    scopes: List[str] = ["episodes", "notes", "docs", "summaries"]
-    limit: int = 10
-
-
-class MemorySearchResult(BaseModel):
-    type: str  # episode, note, document, summary
-    score: float
-    text: str
-    metadata: Dict[str, Any]
+from app.main_simple import (
+    SessionLocal,
+    get_current_user,
+    embedding_service,
+    EMBEDDING_DIM,
+    PGVECTOR_AVAILABLE,
+    DATABASE_URL,
+    MemoryTrace,
+    MemoryEmbedding,
+)
 
 
-class MemorySearchResponse(BaseModel):
-    results: List[MemorySearchResult]
-    query: str
-    total_results: int
+router = APIRouter(prefix="/memory", tags=["memory"])
 
 
-class EpisodeResponse(BaseModel):
-    id: str
-    source: str
-    role: str
+class MemoryTraceCreate(BaseModel):
     content: str
-    importance: float
-    meta: Dict[str, Any]
-    created_at: str
+    role: Optional[str] = None
+    heads: Optional[List[str]] = None  # e.g., ["semantic", "entity"]
+    salience: Optional[float] = None
+    source: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None
+
+_redis_client = None
 
 
-class EpisodesListResponse(BaseModel):
-    episodes: List[EpisodeResponse]
-    total: int
-    page: int
-    per_page: int
-
-
-class SummaryResponse(BaseModel):
-    id: str
-    scope: str
-    content: str
-    meta: Dict[str, Any]
-    created_at: str
-
-
-class SummariesListResponse(BaseModel):
-    summaries: List[SummaryResponse]
-    total: int
-    page: int
-    per_page: int
-
-
-@router.post("/search", response_model=MemorySearchResponse)
-async def search_memory(
-    request: MemorySearchRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Search across all memory types using semantic similarity"""
-    
+def _get_redis():
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
     try:
-        memory_service = MemoryService(db)
-        
-        # Validate scopes
-        valid_scopes = ["episodes", "notes", "docs", "summaries"]
-        invalid_scopes = [scope for scope in request.scopes if scope not in valid_scopes]
-        if invalid_scopes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid scopes: {invalid_scopes}. Valid scopes: {valid_scopes}"
-            )
-        
-        # Perform memory search
-        results = await memory_service.search_memory(
-            user_id=str(current_user.id),
-            query=request.query,
-            scopes=request.scopes,
-            limit=request.limit
+        import redis  # type: ignore
+        url = _os.getenv("REDIS_URL", "redis://redis:6379/0")
+        _redis_client = redis.from_url(url, decode_responses=True)
+        return _redis_client
+    except Exception:
+        return None
+
+
+@router.post("/trace")
+async def create_trace(payload: MemoryTraceCreate, current_user=Depends(get_current_user)):
+    heads = payload.heads or ["semantic"]
+    # Generate embeddings per head (same content for now; future: head-specific transforms)
+    q_embeddings: Dict[str, List[float]] = {}
+    for h in heads:
+        emb = await embedding_service.generate_embedding(payload.content)
+        if not emb:
+            raise HTTPException(status_code=502, detail="Embedding service failed")
+        # Normalize to EMBEDDING_DIM
+        if len(emb) < EMBEDDING_DIM:
+            emb = emb + [0.0] * (EMBEDDING_DIM - len(emb))
+        elif len(emb) > EMBEDDING_DIM:
+            emb = emb[:EMBEDDING_DIM]
+        q_embeddings[h] = emb
+
+    db: Session = SessionLocal()
+    try:
+        trace_id = str(uuid.uuid4())
+        trace = MemoryTrace(
+            id=trace_id,
+            user_id=current_user.id,
+            content=payload.content,
+            role=payload.role,
+            salience=payload.salience,
+            source=json.dumps(payload.source) if payload.source else None,
+            meta=json.dumps(payload.meta) if payload.meta else None,
         )
-        
-        # Format results
-        formatted_results = []
-        for result in results:
-            metadata = {
-                "id": result.get("episode_id") or result.get("note_id") or result.get("doc_id") or result.get("summary_id"),
-                "created_at": result.get("created_at", "").isoformat() if result.get("created_at") else None
+        db.add(trace)
+
+        for head, emb in q_embeddings.items():
+            me = MemoryEmbedding(
+                trace_id=trace_id,
+                head=head,
+                embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
+            )
+            db.add(me)
+
+        db.commit()
+        # Push to Redis working set (recency buffer)
+        try:
+            r = _get_redis()
+            if r:
+                key = f"user:{current_user.id}:memory:recent"
+                item = json.dumps({
+                    "trace_id": trace_id,
+                    "content": payload.content,
+                    "role": payload.role,
+                    "ts": int(time.time())
+                })
+                r.zadd(key, {item: int(time.time())})
+                # keep only latest 1000
+                r.zremrangebyrank(key, 0, -1001)
+                ttl = int(_os.getenv("REDIS_FOCUS_TTL_SECONDS", "172800"))
+                r.expire(key, ttl)
+        except Exception:
+            pass
+
+        return {"trace_id": trace_id, "heads": list(q_embeddings.keys())}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to store trace: {e}")
+    finally:
+        db.close()
+
+
+@router.get("/recall")
+async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
+                 heads: Optional[str] = Query(None), time_window: Optional[str] = Query(None),
+                 current_user=Depends(get_current_user)):
+    heads_list: Optional[List[str]] = [h.strip() for h in heads.split(",")] if heads else None
+    # Compute query embedding
+    q_emb = await embedding_service.generate_embedding(q)
+    if not q_emb:
+        raise HTTPException(status_code=502, detail="Embedding service failed")
+    if len(q_emb) < EMBEDDING_DIM:
+        q_emb = q_emb + [0.0] * (EMBEDDING_DIM - len(q_emb))
+    elif len(q_emb) > EMBEDDING_DIM:
+        q_emb = q_emb[:EMBEDDING_DIM]
+
+    db: Session = SessionLocal()
+    try:
+        results: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # 1) Redis recent
+        try:
+            r = _get_redis()
+            if r:
+                key = f"user:{current_user.id}:memory:recent"
+                raw = r.zrevrange(key, 0, 49)  # latest 50
+                for item in raw:
+                    try:
+                        obj = json.loads(item)
+                        tid = obj.get("trace_id")
+                        if not tid or tid in seen:
+                            continue
+                        results.append({
+                            "trace_id": tid,
+                            "content": obj.get("content"),
+                            "role": obj.get("role"),
+                            "created_at": None,
+                            "head": "recent",
+                            "score": 0.0
+                        })
+                        seen.add(tid)
+                        if len(results) >= k:
+                            return {
+                                "query": q,
+                                "k": k,
+                                "heads": heads_list,
+                                "time_window": time_window,
+                                "results": results,
+                            }
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
+            # Use pgvector distance operator
+            head_filter = ""
+            params: Dict[str, Any] = {
+                "user_id": current_user.id,
+                "qvec": str(q_emb),
+                "k": k,
             }
-            
-            # Add type-specific metadata
-            if result["type"] == "episode":
-                metadata.update({
-                    "source": result.get("source"),
-                    "role": result.get("role"),
-                    "importance": result.get("importance")
+            time_filter = ""
+            if time_window:
+                # parse like "30d" or "7d"; default days
+                try:
+                    days = int(time_window.rstrip('d'))
+                except Exception:
+                    days = 30
+                time_filter = " AND t.created_at >= NOW() - INTERVAL '" + str(days) + " days'"
+            if not time_window:
+                # Hot tier default window
+                time_filter = " AND t.created_at >= NOW() - INTERVAL '30 days'"
+            if heads_list:
+                head_filter = " AND e.head = ANY(:heads)"
+                params["heads"] = heads_list
+            sql = f"""
+                SELECT t.id, t.content, t.role, t.created_at, e.head,
+                       (e.embedding <=> :qvec) AS distance
+                FROM memory_embedding e
+                JOIN memory_trace t ON t.id = e.trace_id
+                WHERE t.user_id = :user_id
+                {head_filter}
+                {time_filter}
+                ORDER BY e.embedding <=> :qvec
+                LIMIT :k
+            """
+            rows = db.execute(sql_text(sql), params).fetchall()
+            for row in rows:
+                results.append({
+                    "trace_id": row[0],
+                    "content": row[1],
+                    "role": row[2],
+                    "created_at": row[3].isoformat() if row[3] else None,
+                    "head": row[4],
+                    "score": float(row[5]),
                 })
-            elif result["type"] == "note":
-                metadata.update({
-                    "title": result.get("title")
-                })
-            elif result["type"] == "document":
-                metadata.update({
-                    "doc_title": result.get("doc_title"),
-                    "chunk_idx": result.get("chunk_idx"),
-                    "breadcrumb": result.get("breadcrumb")
-                })
-            elif result["type"] == "summary":
-                metadata.update({
-                    "scope": result.get("scope")
-                })
-            
-            formatted_results.append(MemorySearchResult(
-                type=result["type"],
-                score=result["score"],
-                text=result["text"],
-                metadata=metadata
-            ))
-        
-        return MemorySearchResponse(
-            results=formatted_results,
-            query=request.query,
-            total_results=len(formatted_results)
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to search memory: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search memory")
 
-
-@router.get("/search", response_model=MemorySearchResponse)
-async def search_memory_get(
-    q: str = Query(..., description="Search query"),
-    scopes: str = Query("episodes,notes,docs,summaries", description="Comma-separated list of scopes"),
-    limit: int = Query(10, ge=1, le=50),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Search memory via GET request (for simple queries)"""
-    
-    try:
-        # Parse scopes
-        scope_list = [scope.strip() for scope in scopes.split(",") if scope.strip()]
-        
-        request = MemorySearchRequest(
-            query=q,
-            scopes=scope_list,
-            limit=limit
-        )
-        
-        return await search_memory(request, current_user, db)
-        
-    except Exception as e:
-        logger.error(f"Failed to search memory via GET: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search memory")
-
-
-@router.get("/episodes", response_model=EpisodesListResponse)
-async def list_episodes(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    source: Optional[str] = Query(None),
-    role: Optional[str] = Query(None),
-    min_importance: Optional[float] = Query(None, ge=0.0, le=1.0),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """List user's episodes with filtering"""
-    
-    try:
-        from app.models.episode import Episode
-        from sqlalchemy import desc
-        
-        query = db.query(Episode).filter(Episode.user_id == str(current_user.id))
-        
-        # Apply filters
-        if source:
-            query = query.filter(Episode.source == source)
-        if role:
-            query = query.filter(Episode.role == role)
-        if min_importance is not None:
-            query = query.filter(Episode.importance >= min_importance)
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        offset = (page - 1) * per_page
-        episodes = query.order_by(desc(Episode.created_at)).offset(offset).limit(per_page).all()
-        
-        episode_responses = [
-            EpisodeResponse(
-                id=str(episode.id),
-                source=episode.source,
-                role=episode.role,
-                content=episode.content,
-                importance=episode.importance,
-                meta=episode.meta,
-                created_at=episode.created_at.isoformat()
-            )
-            for episode in episodes
-        ]
-        
-        return EpisodesListResponse(
-            episodes=episode_responses,
-            total=total,
-            page=page,
-            per_page=per_page
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to list episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve episodes")
-
-
-@router.get("/summaries", response_model=SummariesListResponse)
-async def list_summaries(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    scope: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """List user's semantic summaries"""
-    
-    try:
-        from app.models.memory import SemanticSummary
-        from sqlalchemy import desc
-        
-        query = db.query(SemanticSummary).filter(SemanticSummary.user_id == str(current_user.id))
-        
-        # Apply scope filter
-        if scope:
-            query = query.filter(SemanticSummary.scope == scope)
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        offset = (page - 1) * per_page
-        summaries = query.order_by(desc(SemanticSummary.created_at)).offset(offset).limit(per_page).all()
-        
-        summary_responses = [
-            SummaryResponse(
-                id=str(summary.id),
-                scope=summary.scope,
-                content=summary.content,
-                meta=summary.meta,
-                created_at=summary.created_at.isoformat()
-            )
-            for summary in summaries
-        ]
-        
-        return SummariesListResponse(
-            summaries=summary_responses,
-            total=total,
-            page=page,
-            per_page=per_page
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to list summaries: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve summaries")
-
-
-@router.post("/episodes/{episode_id}/importance")
-async def update_episode_importance(
-    episode_id: str,
-    importance: float = Form(..., ge=0.0, le=1.0),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update the importance score of an episode"""
-    
-    try:
-        from app.models.episode import Episode
-        
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == str(current_user.id)
-        ).first()
-        
-        if not episode:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Episode not found"
-            )
-        
-        episode.importance = importance
-        db.commit()
-        
-        return {"message": "Episode importance updated successfully", "new_importance": importance}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update episode importance: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update episode importance")
-
-
-@router.delete("/episodes/{episode_id}")
-async def delete_episode(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete an episode"""
-    
-    try:
-        from app.models.episode import Episode
-        
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == str(current_user.id)
-        ).first()
-        
-        if not episode:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Episode not found"
-            )
-        
-        db.delete(episode)
-        db.commit()
-        
-        return {"message": "Episode deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete episode: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete episode")
-
-
-@router.post("/summaries/generate")
-async def generate_summary(
-    scope: str = Form(...),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Generate a new summary for a specific scope"""
-    
-    try:
-        memory_service = MemoryService(db)
-        
-        # Validate scope
-        valid_scopes = ["chat", "notes", "documents", "daily", "weekly", "monthly"]
-        if scope not in valid_scopes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid scope. Valid scopes: {valid_scopes}"
-            )
-        
-        # Generate summary based on scope
-        if scope in ["daily", "weekly", "monthly"]:
-            # Time-based summaries
-            from datetime import datetime, timedelta, timezone
-            
-            now = datetime.now(timezone.utc)
-            if scope == "daily":
-                start_time = now - timedelta(days=1)
-            elif scope == "weekly":
-                start_time = now - timedelta(weeks=1)
-            else:  # monthly
-                start_time = now - timedelta(days=30)
-            
-            from app.models.episode import Episode
-            episodes = db.query(Episode).filter(
-                Episode.user_id == str(current_user.id),
-                Episode.created_at >= start_time
-            ).order_by(Episode.importance.desc()).limit(50).all()
-            
-            if episodes:
-                summary = await memory_service.create_time_summary(
-                    user_id=str(current_user.id),
-                    scope=scope,
-                    episodes=episodes
+            # Expand via edges: include neighbors of top results (1 hop), de-duplicated
+            if results:
+                top_ids = [r["trace_id"] for r in results[: max(1, min(5, k))]]
+                edge_sql = sql_text(
+                    """
+                    SELECT t.id, t.content, t.role, t.created_at, 'edge' AS head
+                    FROM memory_edge me
+                    JOIN memory_trace t ON t.id = me.dst
+                    WHERE me.src = ANY(:ids) AND t.user_id = :user_id
+                    LIMIT :cap
+                    """
                 )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"No episodes found for {scope} summary"
-                )
+                edge_rows = db.execute(edge_sql, {"ids": top_ids, "user_id": current_user.id, "cap": k}).fetchall()
+                for row in edge_rows:
+                    tid = row[0]
+                    if tid in seen:
+                        continue
+                    results.append({
+                        "trace_id": tid,
+                        "content": row[1],
+                        "role": row[2],
+                        "created_at": row[3].isoformat() if row[3] else None,
+                        "head": row[4],
+                        "score": 0.5
+                    })
+                    seen.add(tid)
         else:
-            # Content-based summaries
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=f"Summary generation for scope '{scope}' not yet implemented"
-            )
-        
+            # Fallback: naive in-Python cosine similarity over recent items
+            import numpy as np  # lazy import
+            qv = np.array(q_emb, dtype=float)
+            # Fetch recent embeddings to bound computation
+            query = db.query(MemoryEmbedding, MemoryTrace).join(MemoryTrace, MemoryTrace.id == MemoryEmbedding.trace_id)
+            query = query.filter(MemoryTrace.user_id == current_user.id)
+            if heads_list:
+                query = query.filter(MemoryEmbedding.head.in_(heads_list))
+            items = query.order_by(MemoryEmbedding.created_at.desc()).limit(500).all()
+            scored = []
+            for me, mt in items:
+                try:
+                    ev = json.loads(me.embedding) if isinstance(me.embedding, str) else me.embedding
+                    v = np.array(ev, dtype=float)
+                    sim = float(np.dot(qv, v) / (np.linalg.norm(qv) * np.linalg.norm(v) + 1e-8))
+                    scored.append((sim, mt, me.head))
+                except Exception:
+                    continue
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for sim, mt, head in scored[:k]:
+                results.append({
+                    "trace_id": mt.id,
+                    "content": mt.content,
+                    "role": mt.role,
+                    "created_at": mt.created_at.isoformat() if mt.created_at else None,
+                    "head": head,
+                    "score": float(1.0 - sim),  # align with distance-like semantics
+                })
+
         return {
-            "message": f"Summary generated successfully for scope '{scope}'",
-            "summary_id": str(summary.id)
+            "query": q,
+            "k": k,
+            "heads": heads_list,
+            "time_window": time_window,
+            "results": results,
         }
-        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recall failed: {e}")
+    finally:
+        db.close()
+
+
+class ConsolidateRequest(BaseModel):
+    day: Optional[str] = None  # ISO date, e.g., 2025-08-31
+
+
+@router.post("/consolidate")
+async def consolidate(payload: ConsolidateRequest = None, current_user=Depends(get_current_user)):
+    """One-shot consolidation: create a simple daily summary and temporal edges between same-day traces.
+    This is a lightweight stub to be extended with LLM summarization and richer edge extraction.
+    """
+    from datetime import datetime, timedelta
+    db: Session = SessionLocal()
+    try:
+        if payload and payload.day:
+            try:
+                day_dt = datetime.fromisoformat(payload.day)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid day format")
+        else:
+            day_dt = datetime.utcnow() - timedelta(days=1)
+        start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+
+        # Fetch traces from that day
+        traces = db.query(MemoryTrace).filter(
+            MemoryTrace.user_id == current_user.id,
+            MemoryTrace.created_at >= start,
+            MemoryTrace.created_at < end,
+        ).order_by(MemoryTrace.created_at.asc()).all()
+
+        if not traces:
+            return {"status": "ok", "message": "No traces to consolidate for day"}
+
+        # Create a basic summary trace
+        # Simple heuristic summary for now
+        key_phrases = []
+        try:
+            for t in traces:
+                content_low = (t.content or "").lower()
+                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
+                    if kw in content_low:
+                        key_phrases.append(kw)
+            key_phrases = list(dict.fromkeys(key_phrases))[:8]
+        except Exception:
+            key_phrases = []
+        summary_content = (
+            f"Daily summary for {start.date()}: {len(traces)} events captured."
+            + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
+        )
+        summary_id = str(uuid.uuid4())
+        summary = MemoryTrace(
+            id=summary_id,
+            user_id=current_user.id,
+            content=summary_content,
+            role="summary",
+            salience=0.5,
+            source=json.dumps({"type": "consolidation"}),
+            meta=json.dumps({"day": str(start.date())}),
+        )
+        db.add(summary)
+
+        # Summary embedding
+        try:
+            emb = await embedding_service.generate_embedding(summary_content)
+            if emb:
+                me = MemoryEmbedding(
+                    trace_id=summary_id,
+                    head="semantic",
+                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
+                )
+                db.add(me)
+        except Exception:
+            pass
+
+        # Temporal edges between consecutive items
+        from app.main_simple import MemoryEdge
+        for a, b in zip(traces, traces[1:]):
+            edge = MemoryEdge(src=a.id, dst=b.id, type="temporal", weight=0.1)
+            db.merge(edge)
+        # Connect summary to day traces
+        for t in traces:
+            db.merge(MemoryEdge(src=summary_id, dst=t.id, type="summary_of", weight=0.05))
+        db.commit()
+        return {"status": "ok", "summary_trace": summary_id, "edges_created": max(0, len(traces) - 1)}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to generate summary: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate summary")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Consolidation failed: {e}")
+    finally:
+        db.close()
 
 
-@router.get("/stats")
-async def get_memory_stats(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get memory statistics for the user"""
-    
+class ForgetRequest(BaseModel):
+    trace_id: str
+
+
+@router.post("/forget")
+async def forget(payload: ForgetRequest, current_user=Depends(get_current_user)):
+    db: Session = SessionLocal()
     try:
-        from app.models.episode import Episode
-        from app.models.memory import SemanticSummary
-        from app.models.note import Note
-        from app.models.doc import Document, DocChunk
-        from sqlalchemy import func
-        
-        # Get counts
-        episodes_count = db.query(Episode).filter(Episode.user_id == str(current_user.id)).count()
-        summaries_count = db.query(SemanticSummary).filter(SemanticSummary.user_id == str(current_user.id)).count()
-        notes_count = db.query(Note).filter(Note.user_id == current_user.id).count()
-        documents_count = db.query(Document).filter(Document.user_id == current_user.id).count()
-        chunks_count = db.query(DocChunk).join(Document).filter(Document.user_id == current_user.id).count()
-        
-        # Get importance distribution
-        importance_stats = db.query(
-            func.avg(Episode.importance).label('avg_importance'),
-            func.min(Episode.importance).label('min_importance'),
-            func.max(Episode.importance).label('max_importance')
-        ).filter(Episode.user_id == str(current_user.id)).first()
-        
-        # Get recent activity (last 7 days)
-        from datetime import datetime, timedelta, timezone
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        recent_episodes = db.query(Episode).filter(
-            Episode.user_id == str(current_user.id),
-            Episode.created_at >= week_ago
-        ).count()
-        
-        return {
-            "episodes": episodes_count,
-            "summaries": summaries_count,
-            "notes": notes_count,
-            "documents": documents_count,
-            "document_chunks": chunks_count,
-            "importance_stats": {
-                "average": float(importance_stats.avg_importance or 0),
-                "minimum": float(importance_stats.min_importance or 0),
-                "maximum": float(importance_stats.max_importance or 0)
-            },
-            "recent_activity": {
-                "episodes_last_7_days": recent_episodes
-            }
-        }
-        
+        trace = db.query(MemoryTrace).filter(MemoryTrace.id == payload.trace_id, MemoryTrace.user_id == current_user.id).first()
+        if not trace:
+            raise HTTPException(status_code=404, detail="Trace not found")
+        db.query(MemoryEmbedding).filter(MemoryEmbedding.trace_id == payload.trace_id).delete()
+        db.delete(trace)
+        db.commit()
+        # Remove from Redis
+        try:
+            r = _get_redis()
+            if r:
+                key = f"user:{current_user.id}:memory:recent"
+                raw = r.zrange(key, 0, -1)
+                for item in raw:
+                    try:
+                        obj = json.loads(item)
+                        if obj.get("trace_id") == payload.trace_id:
+                            r.zrem(key, item)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return {"trace_id": payload.trace_id, "deleted": True}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to get memory stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve memory statistics")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete trace: {e}")
+    finally:
+        db.close()

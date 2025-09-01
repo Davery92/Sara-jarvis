@@ -168,6 +168,23 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     let firstStreamChunk = true
     
     try {
+      const saveTrace = async (content: string, role: 'user' | 'assistant') => {
+        try {
+          if (!content || content.trim().length === 0) return
+          await fetch(`${APP_CONFIG.apiUrl}/memory/trace`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ content, role, heads: ['semantic'] })
+          })
+        } catch (err) {
+          // Non-fatal: memory trace save is best-effort
+          console.warn('Failed to save memory trace:', err)
+        }
+      }
+
+      // Best-effort save of user's message to memory
+      saveTrace(userMessage.content, 'user')
       const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -295,6 +312,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       }
                       return newMessages
                     })
+                    // Best-effort save of assistant response to memory
+                    saveTrace(finalContent, 'assistant')
                     break
                     
                   case 'response_ready':
