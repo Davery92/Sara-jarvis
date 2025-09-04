@@ -14,10 +14,8 @@ import pytz
 from app.db.session import SessionLocal
 from app.models.user import User
 from app.models.episode import Episode
-# Import Timer and Reminder from main_simple where the actual database schema is defined
-import sys
-sys.path.insert(0, '/home/david/jarvis/backend')
-from app.main_simple import Timer, Reminder
+# Import Timer and Reminder from models
+from app.models import Timer, Reminder
 from app.services.content_intelligence import content_intelligence, ContentType
 from app.services.metadata_extractor import metadata_extractor
 from app.services.tagging_system import smart_tagger

@@ -11,6 +11,7 @@ import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
 import Settings from './pages/Settings'
+import Fitness from './pages/Fitness'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
@@ -1342,6 +1343,13 @@ function App() {
                   <span>Habits</span>
                 </button>
                 <button
+                  onClick={() => { setView('fitness'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">💪</span>
+                  <span>Fitness</span>
+                </button>
+                <button
                   onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1427,6 +1435,13 @@ function App() {
             >
               <span className="material-icons">track_changes</span>
               <span className="text-xs">Habits</span>
+            </button>
+            <button
+              onClick={() => setView('fitness')}
+              className={`flex flex-col items-center ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">fitness_center</span>
+              <span className="text-xs">Fitness</span>
             </button>
             <button
               onClick={() => { setView('documents'); loadDocuments(); }}
@@ -1518,16 +1533,16 @@ function App() {
                         <div className="space-y-2 text-sm text-gray-400">
                           <div className="flex justify-between">
                             <span>Responses (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.successful_responses_7d}</span>
+                            <span className="text-white font-medium">{analytics?.ai_system?.successful_responses_7d ?? 0}</span>
                           </div>
                           <div className="flex justify-between">
                             <span>Tool Calls (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.tool_calls_successful_7d}</span>
+                            <span className="text-white font-medium">{analytics?.ai_system?.tool_calls_successful_7d ?? 0}</span>
                           </div>
                           <div className="flex justify-between">
                             <span>Embedding Service:</span>
-                            <span className={`font-medium ${analytics.ai_system.embedding_service_health ? 'text-green-400' : 'text-red-400'}`}>
-                              {analytics.ai_system.embedding_service_health ? 'HEALTHY' : 'DOWN'}
+                            <span className={`font-medium ${analytics?.ai_system?.embedding_service_health ? 'text-green-400' : 'text-red-400'}`}>
+                              {analytics?.ai_system?.embedding_service_health ? 'HEALTHY' : 'DOWN'}
                             </span>
                           </div>
                         </div>
@@ -2094,6 +2109,10 @@ function App() {
             </div>
           )}
 
+          {view === 'fitness' && (
+            <Fitness />
+          )}
+
           {view === 'vulnerability-watch' && (
             <VulnerabilityWatch onToast={showToast} />
           )}
@@ -2399,6 +2418,13 @@ function App() {
           >
             <span className="material-icons text-lg">track_changes</span>
             <span className="text-xs">Habits</span>
+          </button>
+          <button
+            onClick={() => setView('fitness')}
+            className={`flex flex-col items-center p-2 ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">fitness_center</span>
+            <span className="text-xs">Fitness</span>
           </button>
           <button
             onClick={() => { setView('documents'); loadDocuments(); }}

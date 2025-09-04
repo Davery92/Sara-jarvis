@@ -33,16 +33,17 @@ services:
       - "8000:8000"
     restart: unless-stopped
     environment:
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://100.104.68.115:11434/v1}
       - OPENAI_MODEL=gpt-oss:120b
       - OPENAI_API_KEY=dummy
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://100.104.68.115:11434}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
-      - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["http://10.185.1.188:3000","http://localhost:3000"]
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN-}
+      - COOKIE_SECURE=${COOKIE_SECURE-false}
+      - CORS_ORIGINS=["http://10.185.1.188:3000","http://localhost:3000","https://sara.avery.cloud"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@db:5432/sara_hub}
       - MINIO_URL=http://minio:9000
       - MINIO_BUCKET=sara-docs

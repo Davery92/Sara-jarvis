@@ -1,0 +1,42 @@
+{
+  "id": "3d_full_body",
+  "name": "3-Day Full Body",
+  "phases": ["Base", "Build", "Deload"],
+  "microcycle_weeks": 4,
+  "days": [
+    {
+      "dow": 0,
+      "title": "Full Body A",
+      "duration_min": 60,
+      "blocks": [
+        {"exercises": ["Back Squat"], "sets": 4, "reps": "5", "rpe": "7-8", "rest": 120},
+        {"exercises": ["Bench Press"], "sets": 4, "reps": "6-8", "rpe": "7-8", "rest": 120},
+        {"exercises": ["Row"], "sets": 3, "reps": "8-10", "rpe": "7-8", "rest": 90},
+        {"exercises": ["Core"], "sets": 3, "reps": "10-15", "rest": 60}
+      ]
+    },
+    {
+      "dow": 2,
+      "title": "Full Body B",
+      "duration_min": 58,
+      "blocks": [
+        {"exercises": ["Deadlift"], "sets": 3, "reps": "3-5", "rpe": "7-8", "rest": 180},
+        {"exercises": ["Overhead Press"], "sets": 4, "reps": "6-8", "rpe": "7-8", "rest": 120},
+        {"exercises": ["Pull-up"], "sets": 3, "reps": "AMRAP", "rest": 90},
+        {"exercises": ["Accessory"], "sets": 2, "reps": "10-12", "rest": 60}
+      ]
+    },
+    {
+      "dow": 4,
+      "title": "Full Body C",
+      "duration_min": 55,
+      "blocks": [
+        {"exercises": ["Front Squat"], "sets": 3, "reps": "5-6", "rpe": "7-8", "rest": 150},
+        {"exercises": ["Incline Press"], "sets": 3, "reps": "8-10", "rpe": "7-8", "rest": 120},
+        {"exercises": ["Lat Pulldown"], "sets": 3, "reps": "10-12", "rest": 90},
+        {"exercises": ["Core"], "sets": 3, "reps": "10-15", "rest": 60}
+      ]
+    }
+  ]
+}
+

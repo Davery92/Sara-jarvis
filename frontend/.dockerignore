@@ -1,0 +1,21 @@
+# Frontend Docker build context ignore
+.git
+node_modules/
+dist/
+.cache/
+.vite/
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env/config
+.env
+.env.local
+.env.*.local
+
+# Editor/IDE
+.vscode/
+.idea/

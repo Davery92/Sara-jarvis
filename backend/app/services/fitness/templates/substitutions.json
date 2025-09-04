@@ -1,0 +1,48 @@
+{
+  "squat": [
+    {"name": "Back Squat", "requires": ["barbell", "rack"]},
+    {"name": "Front Squat", "requires": ["barbell", "rack"]},
+    {"name": "Goblet Squat", "requires": ["dumbbell"]},
+    {"name": "Goblet Squat", "requires": ["kettlebell"]}
+  ],
+  "hinge": [
+    {"name": "Deadlift", "requires": ["barbell"]},
+    {"name": "Trap Bar Deadlift", "requires": ["trapbar"]},
+    {"name": "Romanian Deadlift", "requires": ["barbell"]},
+    {"name": "KB Deadlift", "requires": ["kettlebell"]},
+    {"name": "KB Swing", "requires": ["kettlebell"]}
+  ],
+  "press": [
+    {"name": "Bench Press", "requires": ["barbell", "bench", "rack"]},
+    {"name": "Incline Press", "requires": ["barbell", "bench", "rack"]},
+    {"name": "Overhead Press", "requires": ["barbell"]},
+    {"name": "KB Press", "requires": ["kettlebell"]},
+    {"name": "KB Push Press", "requires": ["kettlebell"]}
+  ],
+  "pull": [
+    {"name": "Pull-up", "requires": ["pullupbar"]},
+    {"name": "Lat Pulldown", "requires": ["cable"]},
+    {"name": "Row", "requires": ["barbell"]},
+    {"name": "KB Row", "requires": ["kettlebell"]}
+  ],
+  "single_leg": [
+    {"name": "Single-Leg", "requires": ["dumbbell"]},
+    {"name": "Single-Leg", "requires": ["kettlebell"]}
+  ],
+  "core": [
+    {"name": "Core", "requires": []}
+  ],
+  "accessory": [
+    {"name": "Accessory", "requires": []},
+    {"name": "Shoulder Accessory", "requires": []},
+    {"name": "Biceps Accessory", "requires": []},
+    {"name": "Triceps Accessory", "requires": []},
+    {"name": "Calves", "requires": []},
+    {"name": "Rear Delt", "requires": []}
+  ],
+  "locomotion": [
+    {"name": "Zone2 Run", "requires": ["shoes"]},
+    {"name": "Run Intervals", "requires": ["shoes"]}
+  ]
+}
+

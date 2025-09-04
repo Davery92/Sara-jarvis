@@ -1,0 +1,34 @@
+{
+  "id": "ppl_5d",
+  "name": "5-Day Push/Pull/Legs Split",
+  "phases": ["Base", "Build", "Peak", "Deload"],
+  "microcycle_weeks": 4,
+  "days": [
+    {"dow": 0, "title": "Push A", "duration_min": 60, "blocks": [
+      {"exercises": ["Bench Press"], "sets": 4, "reps": "5-6", "rpe": "7-8", "rest": 150},
+      {"exercises": ["Overhead Press"], "sets": 3, "reps": "6-8", "rpe": "7-8", "rest": 120},
+      {"exercises": ["Triceps Accessory"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 1, "title": "Pull A", "duration_min": 58, "blocks": [
+      {"exercises": ["Barbell Row"], "sets": 4, "reps": "6-8", "rpe": "7-8", "rest": 120},
+      {"exercises": ["Pull-up"], "sets": 3, "reps": "AMRAP", "rest": 120},
+      {"exercises": ["Biceps Accessory"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 3, "title": "Legs A", "duration_min": 60, "blocks": [
+      {"exercises": ["Back Squat"], "sets": 4, "reps": "5", "rpe": "7-8", "rest": 180},
+      {"exercises": ["Romanian Deadlift"], "sets": 3, "reps": "6-8", "rest": 150},
+      {"exercises": ["Calves"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 4, "title": "Push B", "duration_min": 55, "blocks": [
+      {"exercises": ["Incline Press"], "sets": 3, "reps": "6-8", "rpe": "7-8", "rest": 150},
+      {"exercises": ["Dips"], "sets": 3, "reps": "AMRAP", "rest": 120},
+      {"exercises": ["Shoulder Accessory"], "sets": 2, "reps": "12-15", "rest": 60}
+    ]},
+    {"dow": 5, "title": "Pull B", "duration_min": 55, "blocks": [
+      {"exercises": ["Deadlift"], "sets": 3, "reps": "3-5", "rpe": "7-8", "rest": 180},
+      {"exercises": ["Lat Pulldown"], "sets": 3, "reps": "10-12", "rest": 90},
+      {"exercises": ["Rear Delt"], "sets": 2, "reps": "12-15", "rest": 60}
+    ]}
+  ]
+}
+

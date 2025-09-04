@@ -121,11 +121,11 @@ class NightlyDreamService:
             # Generate daily summary and insights
             await self._generate_daily_summary(user_id, daily_episodes)
             
+            # TODO: Restore dreaming service once refactored
             # Also run the dreaming service to generate PostgreSQL insights
-            from app.main_simple import dreaming_service
-            if len(daily_episodes) >= 3:  # Only run if there are enough episodes
-                logger.info(f"   💭 Running dream cycle to generate insights...")
-                await dreaming_service.dream_cycle(user_id, min_episodes=3)
+            # if len(daily_episodes) >= 3:  # Only run if there are enough episodes
+            #     logger.info(f"   💭 Running dream cycle to generate insights...")
+            #     await dreaming_service.dream_cycle(user_id, min_episodes=3)
             
             logger.info(f"✅ Processed {len(conversation_sessions)} conversation sessions for user {user_id}")
             

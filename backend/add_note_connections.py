@@ -14,7 +14,8 @@ import uuid
 # Add the app directory to the path so we can import models
 sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
 
-from main_simple import Base, NoteConnection
+from app.db.base import Base
+from app.models import NoteConnection
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub")

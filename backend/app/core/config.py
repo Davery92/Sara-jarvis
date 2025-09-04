@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
+from pydantic import field_validator
+import json
 import os
 
 
@@ -13,6 +15,8 @@ class Settings(BaseSettings):
     # LLM Configuration
     openai_base_url: str = "http://100.104.68.115:11434/v1"
     openai_model: str = "gpt-oss:120b"
+    # Optional secondary model for notifications/light tasks
+    openai_notification_model: Optional[str] = None
     openai_api_key: str = "dummy"
     embedding_base_url: str = "http://100.104.68.115:11434"
     embedding_model: str = "bge-m3"
@@ -37,10 +41,10 @@ class Settings(BaseSettings):
     jwt_secret: str = "sara-hub-jwt-secret-change-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24 * 7  # 1 week
-    cookie_domain: str = ".sara.avery.cloud"
-    cookie_secure: bool = True
+    cookie_domain: Optional[str] = None  # None allows all domains for development
+    cookie_secure: bool = False  # False for HTTP development
     cookie_samesite: str = "lax"
-    cors_origins: List[str] = ["https://sara.avery.cloud"]
+    cors_origins: List[str] = ["https://sara.avery.cloud", "http://10.185.1.188:3000", "http://localhost:3000"]
     
     # Database
     database_url: str = "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
@@ -66,6 +70,25 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: Any) -> Any:
+        """Allow CORS_ORIGINS to be provided as JSON array or comma-separated string."""
+        if isinstance(v, str):
+            sv = v.strip()
+            if not sv:
+                return []
+            if sv.startswith("["):
+                try:
+                    parsed = json.loads(sv)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    pass
+            # Fallback: comma-separated
+            return [s.strip() for s in sv.split(",") if s.strip()]
+        return v
 
 
 settings = Settings()

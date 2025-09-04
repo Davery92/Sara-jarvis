@@ -1,0 +1,37 @@
+{
+  "Back Squat": {"pattern": "squat", "equipment": ["barbell", "rack"], "main_lift": true, "accessory": false},
+  "Front Squat": {"pattern": "squat", "equipment": ["barbell", "rack"], "main_lift": true, "accessory": false},
+  "Goblet Squat": {"pattern": "squat", "equipment": ["dumbbell", "kettlebell"], "main_lift": true, "accessory": false},
+  "Trap Bar Deadlift": {"pattern": "hinge", "equipment": ["trapbar"], "main_lift": true, "accessory": false},
+  "Deadlift": {"pattern": "hinge", "equipment": ["barbell"], "main_lift": true, "accessory": false},
+  "Romanian Deadlift": {"pattern": "hinge", "equipment": ["barbell"], "main_lift": false, "accessory": true},
+  "Bench Press": {"pattern": "press", "equipment": ["barbell", "bench", "rack"], "main_lift": true, "accessory": false},
+  "Incline Press": {"pattern": "press", "equipment": ["barbell", "bench", "rack"], "main_lift": false, "accessory": false},
+  "Overhead Press": {"pattern": "press", "equipment": ["barbell"], "main_lift": true, "accessory": false},
+  "Dips": {"pattern": "press", "equipment": ["dipbars"], "main_lift": false, "accessory": true},
+  "Row": {"pattern": "pull", "equipment": ["barbell"], "main_lift": false, "accessory": false},
+  "Barbell Row": {"pattern": "pull", "equipment": ["barbell"], "main_lift": false, "accessory": false},
+  "Pull-up": {"pattern": "pull", "equipment": ["pullupbar"], "main_lift": false, "accessory": false},
+  "Lat Pulldown": {"pattern": "pull", "equipment": ["cable"], "main_lift": false, "accessory": false},
+  "Core": {"pattern": "core", "equipment": [], "main_lift": false, "accessory": true},
+  "Accessory": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Shoulder Accessory": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Biceps Accessory": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Triceps Accessory": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Calves": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Rear Delt": {"pattern": "accessory", "equipment": [], "main_lift": false, "accessory": true},
+  "Hinge": {"pattern": "hinge", "equipment": ["barbell"], "main_lift": false, "accessory": false},
+  "Single-Leg": {"pattern": "single_leg", "equipment": ["dumbbell", "kettlebell"], "main_lift": false, "accessory": false},
+
+  "KB Front Squat": {"pattern": "squat", "equipment": ["kettlebell"], "main_lift": true, "accessory": false},
+  "KB Press": {"pattern": "press", "equipment": ["kettlebell"], "main_lift": true, "accessory": false},
+  "KB Push Press": {"pattern": "press", "equipment": ["kettlebell"], "main_lift": true, "accessory": false},
+  "KB Row": {"pattern": "pull", "equipment": ["kettlebell"], "main_lift": false, "accessory": false},
+  "KB Swing": {"pattern": "hinge", "equipment": ["kettlebell"], "main_lift": false, "accessory": false},
+  "KB Clean": {"pattern": "hinge", "equipment": ["kettlebell"], "main_lift": false, "accessory": false},
+  "KB Deadlift": {"pattern": "hinge", "equipment": ["kettlebell"], "main_lift": true, "accessory": false},
+
+  "Zone2 Run": {"pattern": "locomotion", "equipment": ["shoes"], "main_lift": false, "accessory": false},
+  "Run Intervals": {"pattern": "locomotion", "equipment": ["shoes"], "main_lift": false, "accessory": false}
+}
+

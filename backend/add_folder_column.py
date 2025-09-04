@@ -4,7 +4,7 @@ import os
 sys.path.append('/home/david/jarvis/backend')
 
 from sqlalchemy import create_engine
-from app.main_simple import Base
+from app.db.base import Base
 
 # Database connection
 DATABASE_URL = "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"

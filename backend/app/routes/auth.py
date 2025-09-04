@@ -57,6 +57,11 @@ async def signup(user_data: UserCreate, db: Session = Depends(get_db)):
         created_at=user.created_at.isoformat()
     )
 
+# Backward-compatible alias for frontend expecting /auth/register
+@router.post("/register", response_model=UserResponse)
+async def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    return await signup(user_data, db)
+
 
 @router.post("/login", response_model=UserResponse)
 async def login(user_data: UserLogin, response: Response, db: Session = Depends(get_db)):
@@ -73,16 +78,19 @@ async def login(user_data: UserLogin, response: Response, db: Session = Depends(
     # Create access token
     access_token = create_access_token(data={"sub": str(user.id)})
     
+    # Prepare cookie parameters, avoid setting invalid empty domain
+    cookie_kwargs = {
+        "key": "access_token",
+        "value": access_token,
+        "secure": settings.cookie_secure,
+        "httponly": True,
+        "samesite": settings.cookie_samesite,
+        "max_age": settings.jwt_expire_hours * 3600,
+    }
+    if settings.cookie_domain:
+        cookie_kwargs["domain"] = settings.cookie_domain
     # Set secure HTTP-only cookie
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        domain=settings.cookie_domain,
-        secure=settings.cookie_secure,
-        httponly=True,
-        samesite=settings.cookie_samesite,
-        max_age=settings.jwt_expire_hours * 3600  # Convert hours to seconds
-    )
+    response.set_cookie(**cookie_kwargs)
     
     return UserResponse(
         id=str(user.id),
@@ -95,13 +103,16 @@ async def login(user_data: UserLogin, response: Response, db: Session = Depends(
 async def logout(response: Response):
     """Logout user by clearing JWT cookie"""
     
-    response.delete_cookie(
-        key="access_token",
-        domain=settings.cookie_domain,
-        secure=settings.cookie_secure,
-        httponly=True,
-        samesite=settings.cookie_samesite
-    )
+    # Mirror cookie deletion parameters; omit domain if unset/empty
+    delete_kwargs = {
+        "key": "access_token",
+        "secure": settings.cookie_secure,
+        "httponly": True,
+        "samesite": settings.cookie_samesite,
+    }
+    if settings.cookie_domain:
+        delete_kwargs["domain"] = settings.cookie_domain
+    response.delete_cookie(**delete_kwargs)
     
     return {"message": "Successfully logged out"}
 

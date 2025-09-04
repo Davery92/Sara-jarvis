@@ -13,6 +13,13 @@ from app.tools.knowledge_graph import (
 )
 from app.tools.web_search import WebSearchTool
 from app.tools.open_page import OpenPageTool
+from app.tools.fitness import (
+    FitnessSaveProfileTool,
+    FitnessSaveGoalsTool, 
+    FitnessProposePlanTool,
+    FitnessCommitPlanTool,
+    FitnessAdjustTodayTool
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -59,6 +66,13 @@ class ToolRegistry:
             # Web Search
             WebSearchTool(),
             OpenPageTool(),
+            
+            # Fitness
+            FitnessSaveProfileTool(),
+            FitnessSaveGoalsTool(),
+            FitnessProposePlanTool(),
+            FitnessCommitPlanTool(),
+            FitnessAdjustTodayTool(),
         ]
         
         for tool in tools:

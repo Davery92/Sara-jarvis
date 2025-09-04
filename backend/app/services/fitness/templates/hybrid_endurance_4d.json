@@ -1,0 +1,23 @@
+{
+  "id": "hybrid_endurance_4d",
+  "name": "4-Day Hybrid Endurance-Centric",
+  "phases": ["Base", "Build", "Deload"],
+  "microcycle_weeks": 4,
+  "days": [
+    {"dow": 0, "title": "Strength Upper", "duration_min": 50, "blocks": [
+      {"exercises": ["Bench Press"], "sets": 4, "reps": "6-8", "rpe": "7-8", "rest": 120},
+      {"exercises": ["Row"], "sets": 4, "reps": "8-10", "rest": 90}
+    ]},
+    {"dow": 1, "title": "Zone 2 Run", "duration_min": 40, "blocks": [
+      {"exercises": ["Zone2 Run"], "sets": 1, "reps": "40min"}
+    ]},
+    {"dow": 3, "title": "Strength Lower", "duration_min": 50, "blocks": [
+      {"exercises": ["Back Squat"], "sets": 4, "reps": "5", "rpe": "7-8", "rest": 150},
+      {"exercises": ["Hinge"], "sets": 3, "reps": "6-8", "rest": 120}
+    ]},
+    {"dow": 5, "title": "Intervals", "duration_min": 35, "blocks": [
+      {"exercises": ["Run Intervals"], "sets": 8, "reps": "1min on/1min off"}
+    ]}
+  ]
+}
+

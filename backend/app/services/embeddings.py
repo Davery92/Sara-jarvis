@@ -6,6 +6,22 @@ from app.core.llm import llm_client
 logger = logging.getLogger(__name__)
 
 
+class EmbeddingService:
+    """Service for generating embeddings using the LLM client"""
+    
+    async def generate_embedding(self, text: str) -> List[float]:
+        """Generate embedding for a single text"""
+        return await get_embedding(text)
+    
+    async def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts in batch"""
+        return await get_embeddings_batch(texts)
+
+
+# Create a singleton instance
+embedding_service = EmbeddingService()
+
+
 async def get_embedding(text: str) -> List[float]:
     """Get embedding for a single text"""
     try:

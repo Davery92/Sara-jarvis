@@ -432,6 +432,83 @@ class ApiClient {
     const response = await this.client.get('/api/notifications/history')
     return response.data
   }
+
+  // Fitness endpoints
+  async fitnessProposePlan(payload: any): Promise<any> {
+    const response = await this.client.post('/fitness/plan/propose', payload)
+    return response.data
+  }
+
+  async fitnessCommitPlan(payload: any): Promise<any> {
+    const response = await this.client.post('/fitness/plan/commit', payload)
+    return response.data
+  }
+
+  async fitnessReadiness(payload: any): Promise<any> {
+    const response = await this.client.post('/fitness/readiness', payload)
+    return response.data
+  }
+
+  async fitnessStartWorkout(workoutId: string): Promise<any> {
+    const response = await this.client.post(`/fitness/workouts/${workoutId}/start`)
+    return response.data
+  }
+
+  async fitnessLogSet(workoutId: string, payload: any): Promise<any> {
+    const response = await this.client.post(`/fitness/workouts/${workoutId}/set`, payload)
+    return response.data
+  }
+
+  async fitnessRest(workoutId: string, action: 'start' | 'end'): Promise<any> {
+    const response = await this.client.post(`/fitness/workouts/${workoutId}/rest/${action}`)
+    return response.data
+  }
+
+  async fitnessComplete(workoutId: string): Promise<any> {
+    const response = await this.client.post(`/fitness/workouts/${workoutId}/complete`)
+    return response.data
+  }
+
+  async fitnessExport(format: string): Promise<any> {
+    const response = await this.client.get(`/fitness/export?fmt=${format}`)
+    return response.data
+  }
+
+  async fitnessResetOnboarding(): Promise<any> {
+    const response = await this.client.post('/fitness/onboarding/reset')
+    return response.data
+  }
+
+  async fitnessDisconnectHealth(): Promise<any> {
+    const response = await this.client.post('/fitness/health/disconnect')
+    return response.data
+  }
+
+  // Conversational onboarding endpoints
+  async fitnessStartChatOnboarding(payload: any): Promise<any> {
+    const response = await this.client.post('/fitness/onboarding/chat/start', payload)
+    return response.data
+  }
+
+  async fitnessContinueChatOnboarding(sessionId: string, payload: any): Promise<any> {
+    const response = await this.client.post(`/fitness/onboarding/chat/${sessionId}/continue`, payload)
+    return response.data
+  }
+
+  async fitnessGetChatOnboardingStatus(sessionId: string): Promise<any> {
+    const response = await this.client.get(`/fitness/onboarding/chat/${sessionId}/status`)
+    return response.data
+  }
+
+  async fitnessGoBackChatOnboarding(sessionId: string): Promise<any> {
+    const response = await this.client.post(`/fitness/onboarding/chat/${sessionId}/back`)
+    return response.data
+  }
+
+  async fitnessCompleteChatOnboarding(sessionId: string): Promise<any> {
+    const response = await this.client.post(`/fitness/onboarding/chat/${sessionId}/complete`)
+    return response.data
+  }
 }
 
 // Create and export a singleton instance

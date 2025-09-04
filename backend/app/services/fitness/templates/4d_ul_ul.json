@@ -1,0 +1,29 @@
+{
+  "id": "4d_ul_ul",
+  "name": "4-Day Upper/Lower",
+  "phases": ["Base", "Build", "Deload"],
+  "microcycle_weeks": 4,
+  "days": [
+    {"dow": 0, "title": "Upper A", "duration_min": 60, "blocks": [
+      {"exercises": ["Bench Press"], "sets": 4, "reps": "5-6", "rpe": "7-8", "rest": 150},
+      {"exercises": ["Row"], "sets": 4, "reps": "8-10", "rpe": "7-8", "rest": 120},
+      {"exercises": ["Shoulder Accessory"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 1, "title": "Lower A", "duration_min": 60, "blocks": [
+      {"exercises": ["Back Squat"], "sets": 4, "reps": "5", "rpe": "7-8", "rest": 180},
+      {"exercises": ["Hinge"], "sets": 3, "reps": "6-8", "rest": 150},
+      {"exercises": ["Core"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 3, "title": "Upper B", "duration_min": 58, "blocks": [
+      {"exercises": ["Overhead Press"], "sets": 4, "reps": "6-8", "rpe": "7-8", "rest": 150},
+      {"exercises": ["Pull-up"], "sets": 4, "reps": "AMRAP", "rest": 120},
+      {"exercises": ["Arms"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]},
+    {"dow": 4, "title": "Lower B", "duration_min": 55, "blocks": [
+      {"exercises": ["Deadlift"], "sets": 3, "reps": "3-5", "rpe": "7-8", "rest": 180},
+      {"exercises": ["Single-Leg"], "sets": 3, "reps": "8-10", "rest": 120},
+      {"exercises": ["Core"], "sets": 3, "reps": "10-12", "rest": 60}
+    ]}
+  ]
+}
+

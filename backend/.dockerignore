@@ -1,0 +1,21 @@
+# Backend Docker build context ignore
+.git
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.DS_Store
+
+# Local artifacts
+sara_hub.db
+logs/
+uploads/
+.env
+
+# Editor/IDE
+.vscode/
+.idea/

@@ -8,16 +8,11 @@ import uuid
 import time
 import os as _os
 
-from app.main_simple import (
-    SessionLocal,
-    get_current_user,
-    embedding_service,
-    EMBEDDING_DIM,
-    PGVECTOR_AVAILABLE,
-    DATABASE_URL,
-    MemoryTrace,
-    MemoryEmbedding,
-)
+from app.db.session import SessionLocal
+from app.core.deps import get_current_user
+from app.services.embeddings import embedding_service
+from app.core.config import settings
+from app.db.base import Base
 
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -56,11 +51,11 @@ async def create_trace(payload: MemoryTraceCreate, current_user=Depends(get_curr
         emb = await embedding_service.generate_embedding(payload.content)
         if not emb:
             raise HTTPException(status_code=502, detail="Embedding service failed")
-        # Normalize to EMBEDDING_DIM
-        if len(emb) < EMBEDDING_DIM:
-            emb = emb + [0.0] * (EMBEDDING_DIM - len(emb))
-        elif len(emb) > EMBEDDING_DIM:
-            emb = emb[:EMBEDDING_DIM]
+        # Normalize to settings.embedding_dim
+        if len(emb) < settings.embedding_dim:
+            emb = emb + [0.0] * (settings.embedding_dim - len(emb))
+        elif len(emb) > settings.embedding_dim:
+            emb = emb[:settings.embedding_dim]
         q_embeddings[h] = emb
 
     db: Session = SessionLocal()
@@ -81,7 +76,7 @@ async def create_trace(payload: MemoryTraceCreate, current_user=Depends(get_curr
             me = MemoryEmbedding(
                 trace_id=trace_id,
                 head=head,
-                embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
+                embedding=emb if (True and settings.database_url.startswith("postgresql")) else json.dumps(emb),
             )
             db.add(me)
 
@@ -122,10 +117,10 @@ async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
     q_emb = await embedding_service.generate_embedding(q)
     if not q_emb:
         raise HTTPException(status_code=502, detail="Embedding service failed")
-    if len(q_emb) < EMBEDDING_DIM:
-        q_emb = q_emb + [0.0] * (EMBEDDING_DIM - len(q_emb))
-    elif len(q_emb) > EMBEDDING_DIM:
-        q_emb = q_emb[:EMBEDDING_DIM]
+    if len(q_emb) < settings.embedding_dim:
+        q_emb = q_emb + [0.0] * (settings.embedding_dim - len(q_emb))
+    elif len(q_emb) > settings.embedding_dim:
+        q_emb = q_emb[:settings.embedding_dim]
 
     db: Session = SessionLocal()
     try:
@@ -165,7 +160,7 @@ async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
                         continue
         except Exception:
             pass
-        if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
+        if True and settings.database_url.startswith("postgresql"):
             # Use pgvector distance operator
             head_filter = ""
             params: Dict[str, Any] = {
@@ -345,14 +340,14 @@ async def consolidate(payload: ConsolidateRequest = None, current_user=Depends(g
                 me = MemoryEmbedding(
                     trace_id=summary_id,
                     head="semantic",
-                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
+                    embedding=emb if (True and settings.database_url.startswith("postgresql")) else json.dumps(emb),
                 )
                 db.add(me)
         except Exception:
             pass
 
         # Temporal edges between consecutive items
-        from app.main_simple import MemoryEdge
+        from app.models import MemoryEdge
         for a, b in zip(traces, traces[1:]):
             edge = MemoryEdge(src=a.id, dst=b.id, type="temporal", weight=0.1)
             db.merge(edge)

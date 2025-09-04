@@ -4,6 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
+### Quick Start Development
+```bash
+# Primary development workflow (Makefile targets)
+make setup     # Create venv and install dependencies
+make migrate   # Run database migrations via Alembic
+make serve     # Start backend API server with auto-reload
+make stop      # Stop running services
+
+# Alternative: Use the full bootstrap script
+./scripts/full_api_boot.sh  # Complete setup + migrate + start in one command
+```
+
 ### Docker Container Management
 ```bash
 # Start all data services (recommended for development)
@@ -34,15 +46,19 @@ docker compose build --no-cache frontend
 # Local development (alternative)
 cd frontend
 npm run dev        # Start development server on port 3000
-npm run build      # Build for production (requires TypeScript fixes)
+npm run build      # Build for production
 npm run lint       # Run ESLint
 npm run preview    # Preview production build
 ```
 
 ### Backend (FastAPI + Python)
 ```bash
-# Running locally (current setup)
+# Running locally (preferred for development)
 cd backend
+# The full_api_boot.sh script handles all environment setup automatically
+../scripts/full_api_boot.sh
+
+# Manual setup (alternative)
 export DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
 export OPENAI_BASE_URL=http://100.104.68.115:11434/v1
 export OPENAI_MODEL=gpt-oss:120b
@@ -51,10 +67,7 @@ export EMBEDDING_BASE_URL=http://100.104.68.115:11434
 export EMBEDDING_MODEL=bge-m3
 export EMBEDDING_DIM=1024
 export ASSISTANT_NAME=Sara
-python3 app/main_simple.py
-
-# Running in Docker (production)
-docker compose up -d backend       # Requires fixing large dependencies
+python3 -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Database Operations
@@ -62,7 +75,12 @@ docker compose up -d backend       # Requires fixing large dependencies
 # Connect to PostgreSQL
 psql postgresql://sara:sara123@10.185.1.180:5432/sara_hub
 
-# Run migration scripts
+# Run Alembic migrations (preferred method)
+cd backend
+alembic upgrade heads            # Apply all migrations
+alembic revision -m "description" # Create new migration
+
+# Legacy migration scripts (deprecated)
 python3 backend/migrate_users.py        # Migrate from SQLite to PostgreSQL
 python3 backend/add_folder_column.py    # Update database schema
 python3 backend/add_note_connections.py # Add knowledge garden connections table
@@ -74,7 +92,7 @@ python3 backend/add_note_connections.py # Add knowledge garden connections table
 Sara is a personal AI hub with human-like memory built as a full-stack application:
 
 - **Frontend**: React SPA using App-interactive.tsx (not App.tsx) as main entry point
-- **Backend**: FastAPI server with main_simple.py as primary implementation
+- **Backend**: FastAPI server with modular architecture (app.main)
 - **Database**: PostgreSQL 16 with pgvector extension for semantic search
 - **Storage**: MinIO for document uploads
 - **LLM**: OpenAI-compatible endpoint (gpt-oss:120b via http://100.104.68.115:11434)
@@ -148,7 +166,7 @@ docker compose ps
 - **Features**: Chat, Notes (Obsidian-style), Documents, Timers, Reminders, Calendar
 
 #### Backend Architecture
-- **Main Server**: `main_simple.py` contains all endpoints in single file
+- **Main Server**: Modular FastAPI application (`app.main`) with route separation
 - **Database**: SQLAlchemy ORM with PostgreSQL + pgvector
 - **AI Tools**: Tool-based system in `app/tools/` with registry pattern
 - **Memory System**: Episodic memory with importance scoring and compaction
@@ -225,6 +243,7 @@ Tools are registered in `app/tools/registry.py`:
 4. **CORS**: Must include both development and production origins
 5. **Embeddings**: Uses bge-m3 model via OpenAI-compatible endpoint
 6. **Authentication**: Uses HTTP-only cookies, not localStorage tokens
+7. **Migrations**: Use Alembic (backend/alembic/) for schema changes, not manual scripts
 
 ### Knowledge Garden Components
 
@@ -257,7 +276,8 @@ Tools are registered in `app/tools/registry.py`:
 
 ### File Structure Highlights
 - `frontend/src/App-interactive.tsx`: Main application component
-- `backend/app/main_simple.py`: Primary FastAPI server implementation
+- `backend/app/main.py`: Primary FastAPI server implementation
+- `backend/app/routes/`: API route modules
 - `backend/app/tools/`: AI tool implementations
 - `docker-compose.yml`: Complete service orchestration
 - `frontend/src/config.ts`: Dynamic API URL configuration
@@ -315,3 +335,31 @@ Sara features a complete autonomous personality system with living sprite animat
 - **Smart Notifications**: Respectful, duplicate-free notifications
 - **Activity Monitoring**: Idle detection triggers contextual assistance
 - **User Controls**: Comprehensive settings and feedback mechanisms
+
+### Recent Feature Additions
+
+#### Fitness Module (September 2025)
+- **Database**: New fitness-related tables via Alembic migrations
+- **Models**: `backend/app/models/fitness.py` - Workout, exercise, nutrition tracking
+- **Routes**: `backend/app/routes/fitness.py` - CRUD endpoints for fitness data
+- **Tools**: `backend/app/tools/fitness.py` - AI tool integration for fitness planning
+- **Frontend**: `frontend/src/pages/Fitness.tsx` - UI for fitness tracking
+- **Services**: `backend/app/services/fitness/` - Business logic and analytics
+
+#### Habit Tracking System
+- **Database Tables**: habits, habit_logs, habit_streaks via migrations
+- **Alembic Migrations**: 
+  - `70161b318c97_add_habit_tracking_tables.py`
+  - `3fe9de76a45e_add_streak_columns_to_habits.py`
+- **Test Files**: `test_habit_system.py`, `simple_habit_test.py`
+
+### Testing
+```bash
+# Run specific test files
+python3 test_habit_system.py
+python3 simple_habit_test.py
+
+# Test fitness module components
+python3 test_fitness_readiness_scenarios.py
+python3 test_fitness_push_skip_workout.py
+```

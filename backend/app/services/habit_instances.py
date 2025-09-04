@@ -29,7 +29,7 @@ class HabitInstanceGenerator:
         Returns list of instance IDs created
         """
         from app.services.habit_scheduler import HabitScheduler
-        from app.main_simple import HabitInstance  # Import here to avoid circular imports
+        from app.models import HabitInstance  # Import here to avoid circular imports
         
         instance_ids = []
         
@@ -94,7 +94,7 @@ class HabitInstanceGenerator:
         end_date: date
     ) -> Dict[str, List[str]]:
         """Generate instances for all user's habits in date range"""
-        from app.main_simple import Habit  # Import here to avoid circular imports
+        from app.models import Habit  # Import here to avoid circular imports
         
         # Get all active habits for user
         habits = db.query(Habit).filter(
@@ -181,7 +181,7 @@ class HabitInstanceGenerator:
     ) -> bool:
         """Update instance progress based on logs"""
         from app.services.habit_progress import HabitProgressCalculator
-        from app.main_simple import HabitInstance
+        from app.models import HabitInstance
         
         instance = db.query(HabitInstance).filter(HabitInstance.id == instance_id).first()
         if not instance:
@@ -230,7 +230,7 @@ class HabitInstanceGenerator:
     @staticmethod
     def cleanup_old_instances(db: Session, older_than_days: int = 90) -> int:
         """Clean up old instances to prevent database bloat"""
-        from app.main_simple import HabitInstance
+        from app.models import HabitInstance
         
         cutoff_date = date.today() - timedelta(days=older_than_days)
         
@@ -252,7 +252,7 @@ class HabitInstanceGenerator:
         target_date: date
     ) -> Optional[Dict[str, Any]]:
         """Get or create instance for a specific habit and date"""
-        from app.main_simple import HabitInstance, Habit
+        from app.models import HabitInstance, Habit
         
         # Try to find existing instance
         instance = db.query(HabitInstance).filter(

@@ -13,12 +13,11 @@ from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text, desc, and_, or_
 
-from ..main_simple import (
-    AutonomousInsight, BackgroundSweep, 
-    ActivitySession, UserProfile, Habit, HabitInstance,
-    Document, Conversation, ConversationTurn, IntelligentMemoryService,
-    logger
-)
+from ..models import Habit, HabitInstance
+from ..models.user import User
+from ..models.doc import Document
+import logging
+logger = logging.getLogger(__name__)
 from ..models.episode import Episode
 from ..models.note import Note
 from ..services.memory_service import MemoryService
@@ -622,7 +621,7 @@ class AutonomousSweepService:
         
         if mode == 'guardian':
             # Check for recent vulnerability reports
-            from ..main_simple import VulnerabilityReport
+            from ..models import VulnerabilityReport
             recent_report = self.db.query(VulnerabilityReport).filter(
                 VulnerabilityReport.user_id == user_id
             ).order_by(desc(VulnerabilityReport.created_at)).first()
@@ -736,7 +735,7 @@ class AutonomousSweepService:
             return insights
         
         # Get notes without many connections
-        from ..main_simple import NoteConnection
+        from ..models import NoteConnection
         notes = self.db.query(Note).filter(Note.user_id == user_id).all()
         
         for note in notes:

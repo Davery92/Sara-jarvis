@@ -11,8 +11,8 @@ import uuid
 class Document(Base):
     __tablename__ = "document"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     title = Column(String, nullable=False)
     storage_key = Column(String, nullable=False)  # S3/MinIO object key
     mime_type = Column(String)
@@ -30,8 +30,8 @@ class Document(Base):
 class DocChunk(Base):
     __tablename__ = "doc_chunk"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    file_id = Column(UUID(as_uuid=True), ForeignKey("document.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    file_id = Column(String, ForeignKey("document.id", ondelete="CASCADE"), nullable=False)
     chunk_idx = Column(Integer, nullable=False)
     text = Column(Text, nullable=False)
     breadcrumb = Column(String, default="")  # Title > H2 > H3

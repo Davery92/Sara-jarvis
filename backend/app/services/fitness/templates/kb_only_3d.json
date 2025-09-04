@@ -1,0 +1,24 @@
+{
+  "id": "kb_only_3d",
+  "name": "3-Day Kettlebell Only",
+  "phases": ["Base", "Build", "Deload"],
+  "microcycle_weeks": 4,
+  "days": [
+    {"dow": 1, "title": "KB Strength A", "duration_min": 45, "blocks": [
+      {"exercises": ["KB Front Squat"], "sets": 5, "reps": "5", "rpe": "7-8", "rest": 90},
+      {"exercises": ["KB Press"], "sets": 5, "reps": "5", "rpe": "7-8", "rest": 90},
+      {"exercises": ["KB Row"], "sets": 4, "reps": "8-10", "rest": 60}
+    ]},
+    {"dow": 3, "title": "KB Power", "duration_min": 40, "blocks": [
+      {"exercises": ["KB Swing"], "sets": 10, "reps": "10", "rest": 45},
+      {"exercises": ["KB Clean"], "sets": 5, "reps": "5", "rest": 60},
+      {"exercises": ["Core"], "sets": 3, "reps": "12-15", "rest": 45}
+    ]},
+    {"dow": 5, "title": "KB Strength B", "duration_min": 45, "blocks": [
+      {"exercises": ["KB Deadlift"], "sets": 5, "reps": "5", "rest": 90},
+      {"exercises": ["KB Push Press"], "sets": 5, "reps": "3-5", "rest": 90},
+      {"exercises": ["KB Row"], "sets": 4, "reps": "8-10", "rest": 60}
+    ]}
+  ]
+}
+
