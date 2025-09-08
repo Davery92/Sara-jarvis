@@ -7,7 +7,12 @@ export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="/home/david/jarvis/backend"
 
 # Production environment variables
-export DATABASE_URL="sqlite:///./sara_hub.db"
+# Respect existing DATABASE_URL; do not override if set. Avoid SQLite in production by default.
+if [ -z "$DATABASE_URL" ]; then
+  # Uncomment and set your production database URI (PostgreSQL recommended)
+  # export DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.188:5432/sara_hub"
+  echo "WARN: DATABASE_URL is not set. The backend will use its configured default."
+fi
 export OPENAI_BASE_URL="http://100.104.68.115:11434/v1"
 export OPENAI_MODEL="gpt-oss:120b"
 export OPENAI_API_KEY="dummy"
@@ -19,10 +24,14 @@ export DOMAIN="sara.avery.cloud"
 export FRONTEND_URL="https://sara.avery.cloud"
 export BACKEND_URL="https://sara.avery.cloud/api"
 export COOKIE_DOMAIN=".sara.avery.cloud"
-export CORS_ORIGINS='["https://sara.avery.cloud", "http://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000"]'
+export CORS_ORIGINS='["https://sara.avery.cloud", "http://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000", "http://10.185.1.188:3000"]'
 export JWT_SECRET="sara-hub-jwt-secret-production"
 export COOKIE_SECURE="false"
 export TIMEZONE="America/New_York"
+
+# Web search (SearXNG) and caching
+export SEARXNG_BASE_URL="${SEARXNG_BASE_URL:-http://10.185.1.8:4000}"
+export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 
 # MinIO/Storage (local file system for now)
 export MINIO_URL="file://./uploads"
@@ -57,8 +66,8 @@ echo ""
 echo "🎉 Sara Hub Production is running!"
 echo ""
 echo "📍 Frontend: https://sara.avery.cloud ← Your domain"
-echo "📍 Backend API: http://10.185.1.180:8000"
-echo "📍 Internal: http://10.185.1.180:3000 ← Point domain here"
+echo "📍 Backend API: http://10.185.1.188:8000 (prod) / http://10.185.1.180:8000 (dev)"
+echo "📍 Internal: http://10.185.1.188:3000 (prod) / http://10.185.1.180:3000 (dev)"
 echo ""
 echo "🔧 Nginx Proxy Manager:"
 echo "   Domain: sara.avery.cloud"

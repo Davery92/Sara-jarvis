@@ -1,0 +1,17 @@
+# Reduce build context to keep dependency layer cache intact
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+uploads/
+logs/
+venv/
+.venv/
+.env
+*.env
+dist/
+node_modules/
+alembic/versions/*
+!.gitkeep

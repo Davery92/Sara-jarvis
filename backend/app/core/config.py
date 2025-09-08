@@ -40,7 +40,16 @@ class Settings(BaseSettings):
     cookie_domain: str = ".sara.avery.cloud"
     cookie_secure: bool = True
     cookie_samesite: str = "lax"
-    cors_origins: List[str] = ["https://sara.avery.cloud"]
+    cors_origins: List[str] = [
+        "https://sara.avery.cloud",
+        "http://sara.avery.cloud",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://10.185.1.180:3000",
+        "http://10.185.1.188:3000",
+        "http://10.185.1.180",
+        "http://10.185.1.188",
+    ]
     
     # Database
     database_url: str = "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"

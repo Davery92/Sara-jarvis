@@ -111,6 +111,18 @@ EMBEDDING_MODEL=bge-m3
 ASSISTANT_NAME=Sara
 DOMAIN=sara.avery.cloud
 COOKIE_DOMAIN=.sara.avery.cloud
+
+### Database Safety
+- Set `DATABASE_URL` to a persistent PostgreSQL instance for production. Avoid SQLite in production.
+- The `start-production.sh` script now respects an existing `DATABASE_URL` and does not force SQLite; export `DATABASE_URL` before starting.
+- If using Docker Compose, data is stored in named volumes (e.g., `postgres_data`). Do not run `docker compose down -v` in production unless you intend to delete data.
+
+### CORS
+- Backend allows both dev and prod frontends by default: `http://10.185.1.180:3000`, `http://10.185.1.188:3000`, localhost, and `sara.avery.cloud`.
+- Override with `CORS_ORIGINS` or `CORS_ALLOW_REGEX` as needed.
+
+### AI/Embedding Defaults
+- Defaults point to `http://100.104.68.115:11434` (chat via `/v1`, embeddings root). You can update these via the Settings UI or environment variables `OPENAI_BASE_URL` and `EMBEDDING_BASE_URL`.
 ```
 
 ### Frontend Configuration
@@ -159,6 +171,13 @@ This provides:
 - MinIO for file storage
 - Full FastAPI backend
 - Production-ready configuration
+
+### 🧩 Faster Rebuilds (Python deps)
+- Backend Dockerfile now uses BuildKit cache for pip; enable BuildKit to leverage it:
+  - `export DOCKER_BUILDKIT=1` (or set in your shell profile)
+- A backend `.dockerignore` keeps the build context stable so the `requirements.txt` layer stays cached.
+- Rebuild normally with cache: `docker compose build backend` (avoid `--no-cache`).
+- Dependencies are only reinstalled when `backend/requirements.txt` changes.
 
 ## 🔒 Security Notes
 

@@ -27,7 +27,10 @@ import json
 from fastapi import UploadFile
 from app.tools.registry import tool_registry
 from fastapi import APIRouter
+from urllib.parse import urlparse
 import pytz
+from app.tools.registry import tool_registry
+from app.services.search_service import search_service
 
 # Import vulnerability services
 try:
@@ -91,15 +94,20 @@ if _cors_env:
         # Fallback: comma-separated
         _parsed_env_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
 
+# Default allowed origins (overridden by CORS_ORIGINS env when provided)
 CORS_ORIGINS = _parsed_env_origins or [
     "https://sara.avery.cloud",
     "http://sara.avery.cloud",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://10.185.1.180:3000",
+    "http://10.185.1.188:3000",
+    "http://10.185.1.180",
+    "http://10.185.1.188",
 ]
 
 # Optional regex for dynamic IPs; leave unset by default
-ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOW_REGEX") or None
+ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOW_REGEX") or r"^https?://(10\.185\.1\.(180|188))(\:\d+)?$"
 
 # NTFY Configuration
 NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
@@ -2254,7 +2262,21 @@ class SimpleLLMClient:
 class EmbeddingService:
     def __init__(self):
         # Create client lazily per-call to avoid event loop/session lifecycle issues
-        self.base_url = EMBEDDING_BASE_URL
+        # Normalize embedding base URL
+        base = (EMBEDDING_BASE_URL or "").strip().rstrip("/")
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(base)
+            if not p.scheme or not p.netloc:
+                logger.warning("Embedding base URL invalid or empty; falling back to OPENAI_BASE_URL root")
+                base = (OPENAI_BASE_URL or "").rstrip("/")
+                if base.endswith("/v1"):
+                    base = base[:-3].rstrip("/")
+        except Exception:
+            base = (OPENAI_BASE_URL or "").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3].rstrip("/")
+        self.base_url = base
         self.model = EMBEDDING_MODEL
         self.dimension = EMBEDDING_DIM
     
@@ -3008,7 +3030,14 @@ class EmotionalAnalyzer:
     """Real-time emotional analysis using fast model"""
     
     def __init__(self, fast_model_url: str = None):
-        self.fast_model_url = fast_model_url or os.getenv("FAST_MODEL_URL", OPENAI_BASE_URL)
+        # Prefer explicit FAST_MODEL_URL, else OPENAI_BASE_URL
+        self.fast_model_url = fast_model_url or os.getenv("FAST_MODEL_URL") or OPENAI_BASE_URL
+        try:
+            parsed = urlparse(self.fast_model_url or "")
+            if not parsed.scheme:
+                self.fast_model_url = OPENAI_BASE_URL
+        except Exception:
+            self.fast_model_url = OPENAI_BASE_URL
         self.fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")  # Your fast model
         
     async def analyze_emotional_state(self, content: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -4291,6 +4320,37 @@ async def root():
 async def health():
     return {"status": "healthy", "assistant": ASSISTANT_NAME}
 
+# ================ Diagnostics & Tools =================
+@app.get("/tools")
+async def list_tools():
+    """List available AI tools (name and description)"""
+    tools = []
+    try:
+        for t in tool_registry.get_all_tools():
+            tools.append({
+                "name": getattr(t, "name", "unknown"),
+                "description": getattr(t, "description", "")
+            })
+    except Exception as e:
+        logger.error(f"Failed to enumerate tools: {e}")
+    return {"tools": tools}
+
+@app.get("/search/health")
+async def search_health():
+    """Check connectivity to SearXNG and reranker endpoints"""
+    searx_url = f"{search_service.searx_base}/search"
+    status = {"searxng": {"base": search_service.searx_base, "ok": False, "error": None}}
+    try:
+        r = await search_service.http.get(searx_url, params={"q": "ping", "format": "json", "language": search_service.lang})
+        status["searxng"]["ok"] = r.status_code == 200
+        if r.status_code != 200:
+            status["searxng"]["error"] = f"HTTP {r.status_code}"
+    except Exception as e:
+        status["searxng"]["error"] = str(e)
+
+    status["reranker"] = {"base": search_service.reranker_base, "model": search_service.reranker_model}
+    return status
+
 @app.post("/auth/signup", response_model=UserResponse)
 async def signup(user_data: UserCreate, request: Request, response: Response, db: Session = Depends(get_db)):
     existing_user = db.query(User).filter(User.email == user_data.email).first()
@@ -4420,7 +4480,7 @@ def get_personality_system_prompt(personality_mode: str, assistant_name: str, us
         f"Use web_search for questions that require external, up-to-date information. "
         f"web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. "
         f"Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. "
-        f"When you use web_search, synthesize a concise answer first; the system will attach sources automatically. "
+        f"You may use multiple rounds of tool calls to refine results. After using tools, synthesize a concise answer and include a short 'Sources' list with titles and URLs for the top 3–5 items. "
         f"Use search_notes when the user asks about saved information, create_note to save information, "
         f"create_reminder to set time-based reminders, list_reminders to show active reminders, "
         f"complete_reminder to mark reminders as done, start_timer to start productivity timers, "
@@ -6466,9 +6526,34 @@ async def update_ai_settings(
     
     updated_settings = {}
     
+    def _valid_url(u: str) -> bool:
+        try:
+            p = urlparse(u or "")
+            return p.scheme in ("http", "https") and bool(p.netloc)
+        except Exception:
+            return False
+
+    def _normalize_openai(u: str) -> str:
+        u = (u or "").strip().rstrip("/")
+        if not _valid_url(u):
+            raise HTTPException(status_code=400, detail="Invalid openai_base_url; must include http(s)://")
+        if not u.endswith("/v1"):
+            u = u + "/v1"
+        return u
+
+    def _normalize_embedding(u: str) -> str:
+        u = (u or "").strip().rstrip("/")
+        if not _valid_url(u):
+            raise HTTPException(status_code=400, detail="Invalid embedding_base_url; must include http(s)://")
+        # Ensure base has no /v1 suffix; EmbeddingService appends /v1/embeddings
+        if u.endswith("/v1"):
+            u = u[:-3]
+            u = u.rstrip("/")
+        return u
+
     if settings.openai_base_url is not None:
-        OPENAI_BASE_URL = settings.openai_base_url
-        updated_settings["openai_base_url"] = settings.openai_base_url
+        OPENAI_BASE_URL = _normalize_openai(settings.openai_base_url)
+        updated_settings["openai_base_url"] = OPENAI_BASE_URL
         
     if settings.openai_model is not None:
         OPENAI_MODEL = settings.openai_model
@@ -6479,8 +6564,8 @@ async def update_ai_settings(
         updated_settings["openai_notification_model"] = settings.openai_notification_model
         
     if settings.embedding_base_url is not None:
-        EMBEDDING_BASE_URL = settings.embedding_base_url
-        updated_settings["embedding_base_url"] = settings.embedding_base_url
+        EMBEDDING_BASE_URL = _normalize_embedding(settings.embedding_base_url)
+        updated_settings["embedding_base_url"] = EMBEDDING_BASE_URL
         
     if settings.embedding_model is not None:
         EMBEDDING_MODEL = settings.embedding_model

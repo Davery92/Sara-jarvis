@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -10,8 +11,10 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --ignore-installed \
-    && pip install --no-cache-dir email-validator aiofiles lxml_html_clean
+# Use BuildKit cache to avoid re-downloading wheels on rebuilds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt --ignore-installed \
+    && pip install email-validator aiofiles lxml_html_clean
 
 # Copy application code
 COPY . .

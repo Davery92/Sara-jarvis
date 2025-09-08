@@ -50,12 +50,16 @@ def _get_redis():
 @router.post("/trace")
 async def create_trace(payload: MemoryTraceCreate, current_user=Depends(get_current_user)):
     heads = payload.heads or ["semantic"]
-    # Generate embeddings per head (same content for now; future: head-specific transforms)
+    # Generate embeddings per head (best-effort). If embedding fails, still store the trace.
     q_embeddings: Dict[str, List[float]] = {}
     for h in heads:
-        emb = await embedding_service.generate_embedding(payload.content)
+        try:
+            emb = await embedding_service.generate_embedding(payload.content)
+        except Exception:
+            emb = None
         if not emb:
-            raise HTTPException(status_code=502, detail="Embedding service failed")
+            # Best-effort: skip embeddings if service is unavailable
+            continue
         # Normalize to EMBEDDING_DIM
         if len(emb) < EMBEDDING_DIM:
             emb = emb + [0.0] * (EMBEDDING_DIM - len(emb))

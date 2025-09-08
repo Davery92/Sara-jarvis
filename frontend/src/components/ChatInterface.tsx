@@ -218,20 +218,25 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
 
       const decoder = new TextDecoder()
-      
+      let sseBuffer = ''
+
       try {
         while (true) {
           const { done, value } = await reader.read()
-          
           if (done) break
-          
-          const chunk = decoder.decode(value)
-          const lines = chunk.split('\n')
-          
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
+
+          // Append chunk to buffer and process full SSE events separated by blank lines
+          sseBuffer += decoder.decode(value, { stream: true })
+          const parts = sseBuffer.split('\n\n')
+          // Keep the last (possibly incomplete) part in the buffer
+          sseBuffer = parts.pop() || ''
+
+          for (const part of parts) {
+            // Find the first data: line; backend sends one JSON payload per event
+            const dataLine = part.split('\n').find(l => l.startsWith('data: '))
+            if (dataLine) {
               try {
-                const eventData = JSON.parse(line.slice(6))
+                const eventData = JSON.parse(dataLine.slice(6))
                 
                 switch (eventData.type) {
                   case 'tool_calls_start':
@@ -336,7 +341,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     break
                 }
               } catch (e) {
-                console.warn('Failed to parse SSE data:', line)
+                console.warn('Failed to parse SSE data:', dataLine)
               }
             }
           }

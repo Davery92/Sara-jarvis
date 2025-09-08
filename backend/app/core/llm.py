@@ -61,8 +61,12 @@ class LLMClient:
         """Get embedding for text using embedding endpoint"""
         
         # Use embedding base URL if different from chat
+        # Normalize embedding base to ensure /v1 path is present
+        emb_base = (settings.embedding_base_url or "").rstrip("/")
+        if not emb_base.endswith("/v1"):
+            emb_base = emb_base + "/v1"
         embedding_client = httpx.AsyncClient(
-            base_url=settings.embedding_base_url,
+            base_url=emb_base,
             headers=self.headers,
             timeout=60.0
         )

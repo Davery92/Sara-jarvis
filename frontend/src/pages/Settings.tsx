@@ -6,7 +6,14 @@ import { apiClient, AISettingsUpdate } from '../api/client'
 import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
 
 export default function Settings() {
-  const [formData, setFormData] = useState<AISettingsUpdate>({})
+  const [formData, setFormData] = useState<AISettingsUpdate>({
+    openai_base_url: 'http://100.104.68.115:11434/v1',
+    openai_model: 'gpt-oss:120b',
+    openai_notification_model: 'gpt-oss:20b',
+    embedding_base_url: 'http://100.104.68.115:11434',
+    embedding_model: 'bge-m3',
+    embedding_dimension: 1024,
+  })
   const [showGTKY, setShowGTKY] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const queryClient = useQueryClient()
@@ -67,7 +74,15 @@ export default function Settings() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    updateSettingsMutation.mutate(formData)
+    // Remove empty-string fields so we don't overwrite with blanks
+    const cleaned: AISettingsUpdate = {}
+    Object.entries(formData).forEach(([k, v]) => {
+      if (v !== '' && v !== undefined && v !== null) {
+        // @ts-ignore - dynamic assembly of payload
+        cleaned[k] = v
+      }
+    })
+    updateSettingsMutation.mutate(cleaned)
   }
 
   const handleTestConnection = () => {
@@ -150,7 +165,7 @@ export default function Settings() {
                     value={formData.openai_base_url || ''}
                     onChange={(e) => handleInputChange('openai_base_url', e.target.value)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
-                    placeholder={settings?.openai_base_url || 'http://localhost:11434/v1'}
+                    placeholder={settings?.openai_base_url || 'http://100.104.68.115:11434/v1'}
                   />
                   <p className="mt-1 text-xs text-gray-400">OpenAI-compatible API endpoint</p>
                 </div>
@@ -201,7 +216,7 @@ export default function Settings() {
                     value={formData.embedding_base_url || ''}
                     onChange={(e) => handleInputChange('embedding_base_url', e.target.value)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
-                    placeholder={settings?.embedding_base_url || 'http://localhost:11434'}
+                    placeholder={settings?.embedding_base_url || 'http://100.104.68.115:11434'}
                   />
                   <p className="mt-1 text-xs text-gray-400">Embedding service endpoint</p>
                 </div>
