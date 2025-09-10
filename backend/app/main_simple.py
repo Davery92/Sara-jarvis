@@ -4130,6 +4130,17 @@ try:
 except Exception as e:
     logger.warning(f"Memory routes not available: {e}")
 
+# Include Jarvis mode routes
+try:
+    from app.routes.jarvis_inbox import router as inbox_router
+    from app.routes.daily_brief import router as brief_router
+    app.include_router(inbox_router, prefix="/api")
+    app.include_router(brief_router, prefix="/api")
+    logger.info("Jarvis mode routes loaded successfully")
+except Exception as e:
+    logger.warning(f"Jarvis routes not available: {e}")
+    logger.warning("Running in Sara mode only")
+
 # ===================== NIGHTLY MEMORY CONSOLIDATION =====================
 class MemoryConsolidationScheduler:
     def __init__(self):
@@ -4304,8 +4315,7 @@ async def shutdown_event():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,  # Specific origins
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX,  # Optional regex when provided
+    allow_origins=["*"],  # Allow all origins for now
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4318,7 +4328,28 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "assistant": ASSISTANT_NAME}
+    from app.services.solo_mode_service import solo_mode_service
+    
+    response = {
+        "status": "healthy", 
+        "assistant": ASSISTANT_NAME
+    }
+    
+    # Add Jarvis mode information
+    if solo_mode_service.is_solo_mode():
+        response.update({
+            "mode": "jarvis",
+            "user": "owner",
+            "solo_mode": True
+        })
+    else:
+        response.update({
+            "mode": "sara",
+            "user": "multi-tenant",
+            "solo_mode": False
+        })
+    
+    return response
 
 # ================ Diagnostics & Tools =================
 @app.get("/tools")
@@ -6193,6 +6224,11 @@ async def knowledge_graph_health():
     """Check Neo4j connection health"""
     try:
         from app.services.neo4j_service import neo4j_service
+        logger.info(f"Neo4j driver status: {neo4j_service.driver}")
+        if not neo4j_service.driver:
+            logger.info("Attempting to connect to Neo4j...")
+            await neo4j_service.connect()
+            logger.info(f"After connect, driver status: {neo4j_service.driver}")
         await neo4j_service.verify_connection()
         return {
             "status": "healthy",
@@ -6200,6 +6236,7 @@ async def knowledge_graph_health():
             "message": "Knowledge graph is operational"
         }
     except Exception as e:
+        logger.error(f"Neo4j health check failed: {e}")
         return {
             "status": "unhealthy", 
             "neo4j_connected": False,

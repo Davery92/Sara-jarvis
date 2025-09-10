@@ -19,6 +19,8 @@ import Sprite, { SpriteHandle } from './components/Sprite'
 import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
+import JarvisInbox from './components/JarvisInbox'
+import DailyBrief from './components/DailyBrief'
 // Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
@@ -1363,6 +1365,20 @@ function App() {
                   <span>Vulnerability Watch</span>
                 </button>
                 <button
+                  onClick={() => { setView('jarvis-inbox'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'jarvis-inbox' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">📥</span>
+                  <span>Inbox</span>
+                </button>
+                <button
+                  onClick={() => { setView('daily-brief'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'daily-brief' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🌅</span>
+                  <span>Daily Brief</span>
+                </button>
+                <button
                   onClick={() => { setView('insights'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1448,6 +1464,20 @@ function App() {
             >
               <span className="material-icons">security</span>
               <span className="text-xs">Vulns</span>
+            </button>
+            <button
+              onClick={() => setView('jarvis-inbox')}
+              className={`flex flex-col items-center ${view === 'jarvis-inbox' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">inbox</span>
+              <span className="text-xs">Inbox</span>
+            </button>
+            <button
+              onClick={() => setView('daily-brief')}
+              className={`flex flex-col items-center ${view === 'daily-brief' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">wb_sunny</span>
+              <span className="text-xs">Brief</span>
             </button>
             {/* GTKY moved to Settings; Reflect removed */}
             <button
@@ -2096,6 +2126,14 @@ function App() {
 
           {view === 'vulnerability-watch' && (
             <VulnerabilityWatch onToast={showToast} />
+          )}
+
+          {view === 'jarvis-inbox' && (
+            <JarvisInbox />
+          )}
+
+          {view === 'daily-brief' && (
+            <DailyBrief />
           )}
 
           {view === 'insights' && (

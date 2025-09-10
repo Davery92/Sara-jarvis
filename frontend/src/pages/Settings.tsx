@@ -1,18 +1,24 @@
 import { useState, useEffect } from 'react'
-import { getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals } from '../utils/prefs'
+import { 
+  getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals,
+  getAIBaseUrl, setAIBaseUrl, getAIModel, setAIModel, getAINotificationModel, setAINotificationModel,
+  getEmbeddingBaseUrl, setEmbeddingBaseUrl, getEmbeddingModel, setEmbeddingModel, 
+  getEmbeddingDimension, setEmbeddingDimension
+} from '../utils/prefs'
 import { spriteBus } from '../state/spriteBus'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, AISettingsUpdate } from '../api/client'
 import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
+import { APP_CONFIG } from '../config'
 
 export default function Settings() {
   const [formData, setFormData] = useState<AISettingsUpdate>({
-    openai_base_url: 'http://100.104.68.115:11434/v1',
-    openai_model: 'gpt-oss:120b',
-    openai_notification_model: 'gpt-oss:20b',
-    embedding_base_url: 'http://100.104.68.115:11434',
-    embedding_model: 'bge-m3',
-    embedding_dimension: 1024,
+    openai_base_url: getAIBaseUrl(),
+    openai_model: getAIModel(),
+    openai_notification_model: getAINotificationModel(),
+    embedding_base_url: getEmbeddingBaseUrl(),
+    embedding_model: getEmbeddingModel(),
+    embedding_dimension: getEmbeddingDimension(),
   })
   const [showGTKY, setShowGTKY] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -51,16 +57,17 @@ export default function Settings() {
     },
   })
 
-  // Initialize form data when settings load
+  // Initialize form data when settings load, preferring localStorage values
   useEffect(() => {
     if (settings) {
       setFormData({
-        openai_base_url: settings.openai_base_url,
-        openai_model: settings.openai_model,
-        openai_notification_model: settings.openai_notification_model,
-        embedding_base_url: settings.embedding_base_url,
-        embedding_model: settings.embedding_model,
-        embedding_dimension: settings.embedding_dimension,
+        // Use localStorage values if available, otherwise fall back to server settings
+        openai_base_url: getAIBaseUrl() || settings.openai_base_url,
+        openai_model: getAIModel() || settings.openai_model,
+        openai_notification_model: getAINotificationModel() || settings.openai_notification_model,
+        embedding_base_url: getEmbeddingBaseUrl() || settings.embedding_base_url,
+        embedding_model: getEmbeddingModel() || settings.embedding_model,
+        embedding_dimension: getEmbeddingDimension() || settings.embedding_dimension,
       })
     }
   }, [settings])
@@ -70,6 +77,28 @@ export default function Settings() {
       ...prev,
       [field]: value
     }))
+    
+    // Save to localStorage immediately for persistence
+    switch (field) {
+      case 'openai_base_url':
+        setAIBaseUrl(value as string)
+        break
+      case 'openai_model':
+        setAIModel(value as string)
+        break
+      case 'openai_notification_model':
+        setAINotificationModel(value as string)
+        break
+      case 'embedding_base_url':
+        setEmbeddingBaseUrl(value as string)
+        break
+      case 'embedding_model':
+        setEmbeddingModel(value as string)
+        break
+      case 'embedding_dimension':
+        setEmbeddingDimension(value as number)
+        break
+    }
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -90,16 +119,16 @@ export default function Settings() {
   }
 
   const handleReset = () => {
-    if (settings) {
-      setFormData({
-        openai_base_url: settings.openai_base_url,
-        openai_model: settings.openai_model,
-        openai_notification_model: settings.openai_notification_model,
-        embedding_base_url: settings.embedding_base_url,
-        embedding_model: settings.embedding_model,
-        embedding_dimension: settings.embedding_dimension,
-      })
+    // Reset to localStorage values (or defaults if none saved)
+    const resetData = {
+      openai_base_url: getAIBaseUrl(),
+      openai_model: getAIModel(),
+      openai_notification_model: getAINotificationModel(),
+      embedding_base_url: getEmbeddingBaseUrl(),
+      embedding_model: getEmbeddingModel(),
+      embedding_dimension: getEmbeddingDimension(),
     }
+    setFormData(resetData)
   }
 
   if (isLoading) {
@@ -309,7 +338,7 @@ export default function Settings() {
 
             {/* Actions */}
             <div className="border-t border-gray-700 pt-6 flex flex-col sm:flex-row sm:justify-between sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
-              <div className="flex space-x-3">
+              <div className="flex flex-wrap gap-3">
                 <button
                   type="button"
                   onClick={handleTestConnection}
@@ -332,6 +361,35 @@ export default function Settings() {
                   className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors duration-200"
                 >
                   Reset
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Clear all saved URLs and reset to defaults
+                    setAIBaseUrl('')
+                    setAIModel('')
+                    setAINotificationModel('')
+                    setEmbeddingBaseUrl('')
+                    setEmbeddingModel('')
+                    setEmbeddingDimension(0)
+                    
+                    // Reset form to defaults
+                    setFormData({
+                      openai_base_url: 'http://100.104.68.115:11434/v1',
+                      openai_model: 'gpt-oss:120b',
+                      openai_notification_model: 'gpt-oss:20b',
+                      embedding_base_url: 'http://100.104.68.115:11434',
+                      embedding_model: 'bge-m3',
+                      embedding_dimension: 1024,
+                    })
+                    
+                    setTestResult({ success: true, message: 'Saved URLs cleared - reset to defaults' })
+                    setTimeout(() => setTestResult(null), 3000)
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-orange-400 bg-orange-900/20 border border-orange-500/30 rounded-lg hover:bg-orange-900/30 focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition-colors duration-200"
+                >
+                  Clear Saved URLs
                 </button>
               </div>
 
@@ -365,6 +423,7 @@ export default function Settings() {
               <h3 className="text-sm font-medium text-blue-400">Information</h3>
               <div className="mt-1 text-sm text-blue-300">
                 <p>Changes to these settings will affect how Sara processes your requests, generates responses, and creates push notifications. The notification model should be smaller/faster for quick message generation. Make sure your AI and embedding services are accessible before saving.</p>
+                <p className="mt-2"><strong>Auto-Save:</strong> URL and model settings are automatically saved to your browser's local storage as you type, so you don't need to re-enter them on each visit.</p>
               </div>
             </div>
 

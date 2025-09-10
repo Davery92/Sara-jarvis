@@ -170,8 +170,9 @@ class ApiClient {
       (error) => {
         // Handle authentication errors
         if (error.response?.status === 401) {
-          // Redirect to login or handle unauthorized access
-          window.location.href = '/login'
+          // Don't automatically redirect - let components handle auth state
+          // The main App-interactive.tsx handles its own authentication flow
+          console.warn('API request failed with 401 - authentication may be required')
         }
         return Promise.reject(error)
       }

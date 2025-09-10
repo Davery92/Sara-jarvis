@@ -13,7 +13,6 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: http://10.185.1.188:8000
         VITE_ASSISTANT_NAME: Sara
         VITE_DOMAIN: sara.avery.cloud
     ports:
@@ -21,7 +20,6 @@ services:
     restart: unless-stopped
     environment:
       - VITE_SPRITE_BUS=true
-      - VITE_API_URL=http://10.185.1.188:8000
       - VITE_ASSISTANT_NAME=Sara
       - VITE_DOMAIN=${VITE_DOMAIN-sara.avery.cloud}
     depends_on:
@@ -45,7 +43,10 @@ services:
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
       - CORS_ORIGINS=["http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000"]
-      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@db:5432/sara_hub}
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - JARVIS_MODE=true
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - GRAPH_BACKEND=neo4j
       - MINIO_URL=http://minio:9000
       - MINIO_BUCKET=sara-docs
       - MINIO_ACCESS_KEY=sara

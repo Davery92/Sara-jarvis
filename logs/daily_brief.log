@@ -1,0 +1,63 @@
+2025-09-08 18:39:18,605 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-08 18:39:18,605 - __main__ - INFO - Multi-user mode detected - generating briefs for all users
+2025-09-08 18:39:18,605 - __main__ - WARNING - Multi-user brief generation not yet implemented
+2025-09-08 18:39:18,606 - __main__ - ERROR - Daily brief generation failed
+2025-09-08 18:40:56,038 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-08 18:40:56,039 - __main__ - INFO - Solo mode detected - generating brief for solo user
+2025-09-08 18:40:56,039 - __main__ - INFO - Generating daily brief for user 1
+2025-09-08 18:40:56,248 - __main__ - ERROR - Failed to generate brief for user 1: (psycopg.errors.UndefinedColumn) column reminder.text does not exist
+LINE 1: ...eminder_id, reminder.user_id AS reminder_user_id, reminder.t...
+                                                             ^
+[SQL: SELECT reminder.id AS reminder_id, reminder.user_id AS reminder_user_id, reminder.text AS reminder_text, reminder.due_at AS reminder_due_at, reminder.status AS reminder_status, reminder.created_at AS reminder_created_at 
+FROM reminder 
+WHERE reminder.user_id = %(user_id_1)s::UUID AND reminder.due_at <= %(due_at_1)s::TIMESTAMP WITH TIME ZONE AND reminder.status = %(status_1)s::VARCHAR ORDER BY reminder.due_at 
+ LIMIT %(param_1)s::INTEGER]
+[parameters: {'user_id_1': '1', 'due_at_1': datetime.datetime(2025, 9, 8, 23, 59, 59, 999999), 'status_1': 'scheduled', 'param_1': 3}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2025-09-08 18:40:56,250 - __main__ - ERROR - ❌ Failed to generate solo user brief
+2025-09-08 18:40:56,252 - __main__ - ERROR - Daily brief generation failed
+2025-09-08 18:57:57,650 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-08 18:57:59,014 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-09-08 18:57:59,014 - app.services.solo_mode_service - INFO - Solo user ID: 1
+2025-09-08 18:57:59,014 - __main__ - INFO - Generating daily brief for September 08, 2025
+2025-09-08 18:57:59,153 - __main__ - INFO - ✅ Created daily brief inbox item: c014ffd7-e17e-46b3-9812-d94c0f1a7d59
+2025-09-08 18:57:59,153 - __main__ - INFO -    Title: 🌅 Daily Brief Ready
+2025-09-08 18:57:59,153 - __main__ - INFO -    Priority: 8
+2025-09-08 18:57:59,191 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-09-08 19:11:42,398 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-08 19:11:43,977 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-09-08 19:11:43,977 - app.services.solo_mode_service - INFO - Solo user ID: 1
+2025-09-08 19:11:43,977 - __main__ - INFO - Generating daily brief for September 08, 2025
+2025-09-08 19:11:44,101 - __main__ - INFO - ✅ Created daily brief inbox item: c014ffd7-e17e-46b3-9812-d94c0f1a7d59
+2025-09-08 19:11:44,101 - __main__ - INFO -    Title: 🌅 Daily Brief Ready
+2025-09-08 19:11:44,101 - __main__ - INFO -    Priority: 8
+2025-09-08 19:11:44,107 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-09-09 06:30:01,318 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-09 06:30:01,318 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-09 06:30:06,244 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-09-09 06:30:06,244 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-09-09 06:30:06,244 - app.services.solo_mode_service - INFO - Solo user ID: 1
+2025-09-09 06:30:06,244 - app.services.solo_mode_service - INFO - Solo user ID: 1
+2025-09-09 06:30:06,245 - __main__ - INFO - Generating daily brief for September 09, 2025
+2025-09-09 06:30:06,245 - __main__ - INFO - Generating daily brief for September 09, 2025
+2025-09-09 06:30:06,654 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3e45410a-db4a-4cd0-a488-55e869e8e599 - 🌅 Daily Brief - September 09
+2025-09-09 06:30:06,654 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3e45410a-db4a-4cd0-a488-55e869e8e599 - 🌅 Daily Brief - September 09
+2025-09-09 06:30:06,655 - __main__ - INFO - ✅ Created daily brief inbox item: 3e45410a-db4a-4cd0-a488-55e869e8e599
+2025-09-09 06:30:06,655 - __main__ - INFO - ✅ Created daily brief inbox item: 3e45410a-db4a-4cd0-a488-55e869e8e599
+2025-09-09 06:30:06,655 - __main__ - INFO -    Title: 🌅 Daily Brief - September 09
+2025-09-09 06:30:06,655 - __main__ - INFO -    Title: 🌅 Daily Brief - September 09
+2025-09-09 06:30:06,655 - __main__ - INFO -    Priority: 8
+2025-09-09 06:30:06,655 - __main__ - INFO -    Priority: 8
+2025-09-09 06:30:06,667 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-09-09 06:30:06,667 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-09-09 13:29:50,552 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-09 13:29:52,021 - __main__ - ERROR - Script failed with exception: invalid literal for int() with base 10: '64f37c56-85cb-4590-8de9-adfc17d343ed'
+2025-09-09 13:48:40,423 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-09-09 13:48:41,928 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-09-09 13:48:41,928 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-09-09 13:48:41,928 - __main__ - INFO - Generating daily brief for September 09, 2025
+2025-09-09 13:48:42,079 - app.services.jarvis_inbox_service - INFO - Created inbox item: a7cd2826-de8f-4216-9d1d-5ec419f2a7cf - 🌅 Daily Brief - September 09
+2025-09-09 13:48:42,079 - __main__ - INFO - ✅ Created daily brief inbox item: a7cd2826-de8f-4216-9d1d-5ec419f2a7cf
+2025-09-09 13:48:42,079 - __main__ - INFO -    Title: 🌅 Daily Brief - September 09
+2025-09-09 13:48:42,080 - __main__ - INFO -    Priority: 8
+2025-09-09 13:48:42,085 - __main__ - INFO - 🎉 Daily brief generation completed successfully
