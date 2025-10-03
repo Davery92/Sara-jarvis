@@ -1,6 +1,6 @@
 /**
- * Jarvis Inbox Component - Unified notification system
- * 
+ * Sara Inbox Component - Unified notification system
+ *
  * This component displays all proactive notifications from monitors,
  * background tasks, and system insights.
  */
@@ -149,11 +149,11 @@ function getKindIcon(kind: string) {
   }
 }
 
-interface JarvisInboxProps {
+interface SaraInboxProps {
   className?: string;
 }
 
-export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
+export const SaraInbox: React.FC<SaraInboxProps> = ({ className }) => {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'new' | 'read' | 'archived'>('all');
@@ -200,7 +200,7 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
         {
           id: '1',
           kind: 'suggestion',
-          title: 'Welcome to Jarvis Mode',
+          title: 'Welcome to Sara',
           body: 'Your proactive AI assistant is now active. Expect intelligent insights and suggestions throughout the day.',
           source: 'system',
           priority: 8,
@@ -288,7 +288,7 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-700">
           <div className="flex items-center space-x-3">
-            <h2 className="text-xl font-semibold">📥 Jarvis Inbox</h2>
+            <h2 className="text-xl font-semibold">📥 Sara Inbox</h2>
             {unreadCount > 0 && (
               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-teal-500/20 text-teal-400">
                 {unreadCount} new
@@ -429,4 +429,4 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
   );
 };
 
-export default JarvisInbox;
+export default SaraInbox;

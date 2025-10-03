@@ -4135,9 +4135,11 @@ try:
     from app.routes.jarvis_inbox import router as inbox_router
     from app.routes.daily_brief import router as brief_router
     from app.routes.calendar import router as calendar_router
+    from app.routes.threads import router as threads_router
     app.include_router(inbox_router, prefix="/api")
     app.include_router(brief_router, prefix="/api")
     app.include_router(calendar_router, prefix="/events")
+    app.include_router(threads_router, prefix="/threads")
     logger.info("Jarvis mode routes loaded successfully")
 except Exception as e:
     logger.warning(f"Jarvis routes not available: {e}")
@@ -4317,7 +4319,7 @@ async def shutdown_event():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for now
+    allow_origins=CORS_ORIGINS,  # Use configured origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4389,8 +4391,10 @@ async def signup(user_data: UserCreate, request: Request, response: Response, db
     existing_user = db.query(User).filter(User.email == user_data.email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_password = pwd_context.hash(user_data.password)
+
+    # Hash password - use bcryptpy directly to avoid passlib version issues
+    import bcrypt
+    hashed_password = bcrypt.hashpw(user_data.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     user = User(email=user_data.email, password_hash=hashed_password)
     db.add(user)
     db.commit()
@@ -4425,7 +4429,18 @@ async def register(user_data: UserCreate, request: Request, response: Response, 
 @app.post("/auth/login", response_model=UserResponse)
 async def login(user_data: UserLogin, request: Request, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == user_data.email).first()
-    if not user or not pwd_context.verify(user_data.password, user.password_hash):
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    # Verify password - use bcryptpy directly to avoid passlib version issues
+    try:
+        import bcrypt
+        password_valid = bcrypt.checkpw(user_data.password.encode('utf-8'), user.password_hash.encode('utf-8'))
+    except (ValueError, Exception):
+        # If fails, password doesn't match
+        password_valid = False
+
+    if not password_valid:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     
     access_token = create_access_token(data={"sub": user.id})

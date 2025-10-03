@@ -1,7 +1,7 @@
 /**
- * Jarvis Sprite Component - Phase 3 TODO
- * 
- * This component displays the animated Jarvis sprite that shows system state:
+ * Sara Sprite Component - Phase 3 TODO
+ *
+ * This component displays the animated Sara sprite that shows system state:
  * - idle: Gentle breathing animation
  * - listening: Focused attention (keyboard focus)
  * - thinking: Processing animation (LLM streaming)
@@ -17,12 +17,12 @@ import React, { useEffect, useState } from 'react';
 
 type SpriteState = 'idle' | 'listening' | 'thinking' | 'tooling' | 'working' | 'notify' | 'error';
 
-interface JarvisSpriteProps {
+interface SaraSpriteProps {
   className?: string;
   size?: 'sm' | 'md' | 'lg';
 }
 
-export const JarvisSprite: React.FC<JarvisSpriteProps> = ({ 
+export const SaraSprite: React.FC<SaraSpriteProps> = ({ 
   className, 
   size = 'md' 
 }) => {
@@ -41,7 +41,7 @@ export const JarvisSprite: React.FC<JarvisSpriteProps> = ({
   }, []);
 
   const getSpriteClasses = () => {
-    const baseClasses = 'jarvis-sprite transition-all duration-300';
+    const baseClasses = 'sara-sprite transition-all duration-300';
     const sizeClasses = {
       sm: 'w-8 h-8',
       md: 'w-12 h-12', 
@@ -61,10 +61,10 @@ export const JarvisSprite: React.FC<JarvisSpriteProps> = ({
   };
 
   return (
-    <div className={getSpriteClasses()} title={`Jarvis is ${state}`}>
+    <div className={getSpriteClasses()} title={`Sara is ${state}`}>
       {/* TODO: Replace with actual sprite graphics */}
       <div className="w-full h-full rounded-full bg-gradient-to-br from-blue-400 to-purple-600 flex items-center justify-center text-white font-bold">
-        J
+        S
       </div>
       
       {/* Connection status indicator */}
@@ -76,4 +76,4 @@ export const JarvisSprite: React.FC<JarvisSpriteProps> = ({
   );
 };
 
-export default JarvisSprite;
+export default SaraSprite;

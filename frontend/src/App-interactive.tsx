@@ -20,12 +20,13 @@ import Sprite, { SpriteHandle } from './components/Sprite'
 import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
-import JarvisInbox from './components/JarvisInbox'
+import SaraInbox from './components/JarvisInbox'
 import DailyBrief from './components/DailyBrief'
 // Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
 import { getCalmMode } from './utils/prefs'
+import { CommandPalette } from './components/CommandPalette'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -73,6 +74,7 @@ function App() {
   const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isLogin, setIsLogin] = useState(true)
@@ -322,6 +324,21 @@ function App() {
         abortControllerRef.current.abort()
       }
     }
+  }, [])
+
+  // Command Palette keyboard shortcut (Cmd+K / Ctrl+K)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        e.stopPropagation()
+        setCommandPaletteOpen(prev => !prev)
+      }
+    }
+
+    // Use capture phase to intercept before browser handles it
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [])
 
   const loadTimersAndReminders = async () => {
@@ -1287,6 +1304,14 @@ function App() {
 
   return (
     <div className="p-4 md:p-8 pb-20 md:pb-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9', minHeight: '100vh'}}>
+      {/* Command Palette */}
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        onNavigate={(v) => { setView(v); if (v === 'notes') loadNotes(); }}
+        currentView={view}
+      />
+
       <div className="flex flex-col md:flex-row md:space-x-8">
         
         {/* Mobile Header */}
@@ -2127,7 +2152,7 @@ function App() {
           )}
 
           {view === 'jarvis-inbox' && (
-            <JarvisInbox />
+            <SaraInbox />
           )}
 
           {view === 'daily-brief' && (
