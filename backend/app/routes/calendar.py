@@ -174,12 +174,12 @@ async def create_event(
 
 @router.get("/{event_id}", response_model=EventResponse)
 async def get_event(
-    event_id: UUID,
+    event_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get a specific event"""
-    
+
     event = db.query(Event).filter(
         Event.id == event_id,
         Event.user_id == current_user.id
@@ -204,58 +204,59 @@ async def get_event(
 
 
 @router.patch("/{event_id}", response_model=EventResponse)
+@router.put("/{event_id}", response_model=EventResponse)
 async def update_event(
-    event_id: UUID,
+    event_id: str,
     event_update: EventUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Update an event"""
-    
+
     try:
         event = db.query(Event).filter(
             Event.id == event_id,
             Event.user_id == current_user.id
         ).first()
-        
+
         if not event:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Event not found"
             )
-        
+
         # Update fields
         if event_update.title is not None:
             event.title = event_update.title
-            
+
         if event_update.starts_at is not None:
             # Ensure timezone-aware
             if event_update.starts_at.tzinfo is None:
                 event_update.starts_at = event_update.starts_at.replace(tzinfo=timezone.utc)
             event.starts_at = event_update.starts_at
-            
+
         if event_update.ends_at is not None:
             # Ensure timezone-aware
             if event_update.ends_at.tzinfo is None:
                 event_update.ends_at = event_update.ends_at.replace(tzinfo=timezone.utc)
             event.ends_at = event_update.ends_at
-            
+
         if event_update.location is not None:
             event.location = event_update.location
-            
+
         if event_update.description is not None:
             event.description = event_update.description
-        
+
         # Validate that start time is before end time
         if event.starts_at >= event.ends_at:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Start time must be before end time"
             )
-        
+
         db.commit()
         db.refresh(event)
-        
+
         return EventResponse(
             id=str(event.id),
             title=event.title,
@@ -266,7 +267,7 @@ async def update_event(
             created_at=event.created_at.isoformat(),
             updated_at=event.updated_at.isoformat()
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -277,12 +278,12 @@ async def update_event(
 
 @router.delete("/{event_id}")
 async def delete_event(
-    event_id: UUID,
+    event_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Delete an event"""
-    
+
     try:
         event = db.query(Event).filter(
             Event.id == event_id,
@@ -391,12 +392,12 @@ async def get_upcoming_events(
 
 @router.get("/conflicts/{event_id}", response_model=List[EventResponse])
 async def get_conflicting_events(
-    event_id: UUID,
+    event_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Find events that conflict with the given event's time"""
-    
+
     try:
         # Get the source event
         source_event = db.query(Event).filter(
