@@ -12,7 +12,12 @@
       "Bash(docker logs:*)",
       "Bash(docker compose:*)",
       "Bash(cat:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(DOCKER_BUILDKIT=1 docker compose build backend)",
+      "Bash(npm run build:*)",
+      "Bash(docker cp:*)",
+      "Bash(cd:*)",
+      "Bash(./scripts/quick_rebuild_backend.sh:*)"
     ],
     "deny": [],
     "ask": [],

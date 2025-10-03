@@ -2,6 +2,7 @@
 Daily Brief API Routes - RESTful API for daily briefings
 """
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ from app.models.user import User
 from app.models.daily_brief import DailyBrief
 from app.services.daily_brief_service import daily_brief_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/brief", tags=["daily-brief"])
 
 
@@ -23,10 +26,10 @@ class BriefSectionItem(BaseModel):
     title: str
     subtitle: Optional[str] = None
     type: str  # reminder, calendar_event, insight, suggestion, etc.
-    source_id: Optional[int] = None
+    source_id: Optional[str] = None
     action: Optional[str] = None
     # Additional fields can be added as needed
-    
+
     class Config:
         extra = "allow"  # Allow additional fields
 
@@ -38,7 +41,7 @@ class BriefSection(BaseModel):
 
 
 class DailyBriefResponse(BaseModel):
-    id: int
+    id: str
     brief_date: date
     sections: list[BriefSection]
     generated_at: datetime
@@ -49,11 +52,11 @@ class DailyBriefResponse(BaseModel):
     dream_highlights_count: int
     viewed_at: Optional[datetime]
     pinned_items: list[str]
-    
+
     # Computed properties
     total_items: int
     is_today: bool
-    
+
     class Config:
         from_attributes = True
 
@@ -127,7 +130,7 @@ async def get_daily_brief(
 
 @router.post("/daily/{brief_id}/pin")
 async def pin_brief_item(
-    brief_id: int,
+    brief_id: str,
     request: PinItemRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -144,13 +147,51 @@ async def pin_brief_item(
         user_id=current_user.id,
         item_id=request.item_id
     )
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="Daily brief not found")
-    
-    # TODO: In a more advanced implementation, this would actually create
-    # a reminder from the pinned item's details
-    
+
+    # Create a reminder from the pinned item
+    try:
+        from app.models.reminder import Reminder
+        from datetime import datetime, timedelta
+
+        # Get the brief to find the pinned item details
+        brief = db.query(DailyBrief).filter(
+            DailyBrief.id == brief_id,
+            DailyBrief.user_id == current_user.id
+        ).first()
+
+        if brief:
+            # Find the item in the brief sections
+            item_title = None
+            item_subtitle = None
+
+            for section in brief.sections:
+                for item in section.get('items', []):
+                    if item.get('id') == request.item_id:
+                        item_title = item.get('title')
+                        item_subtitle = item.get('subtitle')
+                        break
+                if item_title:
+                    break
+
+            # Create reminder with the pinned item details
+            if item_title:
+                reminder = Reminder(
+                    user_id=current_user.id,
+                    title=f"📌 {item_title}",
+                    description=item_subtitle or "Pinned from daily brief",
+                    due_date=datetime.now() + timedelta(hours=4),  # Due in 4 hours
+                    completed=False
+                )
+                db.add(reminder)
+                db.commit()
+                logger.info(f"Created reminder from pinned brief item: {item_title}")
+    except Exception as e:
+        logger.error(f"Failed to create reminder from pinned item: {e}")
+        # Don't fail the request if reminder creation fails
+
     return {"status": "pinned", "item_id": request.item_id}
 
 
@@ -193,7 +234,7 @@ async def get_brief_history(
 
 @router.post("/daily/{brief_id}/regenerate")
 async def regenerate_brief(
-    brief_id: int,
+    brief_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

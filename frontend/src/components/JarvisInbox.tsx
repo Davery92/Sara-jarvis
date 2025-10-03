@@ -20,6 +20,135 @@ interface InboxItem {
   payload?: any;
 }
 
+interface ItemDetailModalProps {
+  item: InboxItem;
+  onClose: () => void;
+}
+
+const renderPayload = (payload: any) => {
+  if (!payload || typeof payload !== 'object') {
+    return <div className="text-gray-400 text-sm">No additional details</div>;
+  }
+
+  // Handle brief-specific payload
+  if (payload.sections && Array.isArray(payload.sections)) {
+    return (
+      <div className="space-y-3">
+        {payload.date && (
+          <div className="mb-2">
+            <span className="text-gray-500 text-sm">Date: </span>
+            <span className="text-white">{new Date(payload.date).toLocaleDateString()}</span>
+          </div>
+        )}
+        {payload.sections.map((section: any, idx: number) => (
+          <div key={idx} className="border-l-2 border-teal-500 pl-3">
+            <div className="text-white font-medium mb-1">{section.title}</div>
+            {section.items && Array.isArray(section.items) && (
+              <ul className="space-y-1">
+                {section.items.map((item: any, itemIdx: number) => (
+                  <li key={itemIdx} className="text-gray-300 text-sm">
+                    • {typeof item === 'string' ? item : JSON.stringify(item)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Generic fallback for other payloads
+  return (
+    <div className="space-y-2">
+      {Object.entries(payload).map(([key, value]) => (
+        <div key={key}>
+          <span className="text-gray-500 text-sm capitalize">{key.replace(/_/g, ' ')}: </span>
+          <span className="text-white text-sm">
+            {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const ItemDetailModal: React.FC<ItemDetailModalProps> = ({ item, onClose }) => {
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-2xl w-full p-6">
+        <div className="flex items-start justify-between mb-4">
+          <div className="flex items-center space-x-3">
+            <span className="text-3xl">{getKindIcon(item.kind)}</span>
+            <h3 className="text-xl font-semibold text-white">{item.title}</h3>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+
+        {item.body && (
+          <div className="mb-6">
+            <p className="text-gray-300 whitespace-pre-wrap">{item.body}</p>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-4 mb-6 text-sm">
+          <div>
+            <div className="text-gray-500 mb-1">Priority</div>
+            <div className="text-white font-medium">{item.priority}/10</div>
+          </div>
+          <div>
+            <div className="text-gray-500 mb-1">Source</div>
+            <div className="text-white font-medium">{item.source || 'Unknown'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 mb-1">Type</div>
+            <div className="text-white font-medium capitalize">{item.kind}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 mb-1">Created</div>
+            <div className="text-white font-medium">
+              {new Date(item.created_at).toLocaleString()}
+            </div>
+          </div>
+        </div>
+
+        {item.payload && (
+          <div className="mb-6">
+            <div className="text-gray-500 mb-2 text-sm">Additional Details</div>
+            <div className="bg-gray-800 rounded p-4 space-y-3">
+              {renderPayload(item.payload)}
+            </div>
+          </div>
+        )}
+
+        <div className="flex space-x-2">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 bg-teal-600 text-white rounded hover:bg-teal-700 transition-colors"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+function getKindIcon(kind: string) {
+  switch (kind) {
+    case 'insight': return '💡';
+    case 'alert': return '🚨';
+    case 'reminder': return '📅';
+    case 'suggestion': return '💭';
+    default: return '📥';
+  }
+}
+
 interface JarvisInboxProps {
   className?: string;
 }
@@ -29,6 +158,7 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'new' | 'read' | 'archived'>('all');
   const [unreadCount, setUnreadCount] = useState(0);
+  const [selectedItem, setSelectedItem] = useState<InboxItem | null>(null);
 
   // Fetch inbox items
   const fetchInboxItems = async () => {
@@ -142,16 +272,6 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
     fetchInboxItems();
   }, [filter]);
 
-  const getKindIcon = (kind: string) => {
-    switch (kind) {
-      case 'insight': return '💡';
-      case 'alert': return '🚨';
-      case 'reminder': return '📅';
-      case 'suggestion': return '💭';
-      default: return '📥';
-    }
-  };
-
   const getKindColor = (kind: string) => {
     switch (kind) {
       case 'insight': return 'text-blue-400';
@@ -230,18 +350,19 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
               {items.map((item) => (
                 <div
                   key={item.id}
-                  className={`p-4 border rounded-lg transition-all ${
+                  className={`p-4 border rounded-lg transition-all cursor-pointer ${
                     item.status === 'new'
-                      ? 'border-teal-500/30 bg-teal-500/5'
-                      : 'border-gray-700 bg-gray-800/30'
+                      ? 'border-teal-500/30 bg-teal-500/5 hover:bg-teal-500/10'
+                      : 'border-gray-700 bg-gray-800/30 hover:bg-gray-800/50'
                   }`}
+                  onClick={() => setSelectedItem(item)}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex items-start space-x-3 flex-1">
                       <span className={`text-2xl ${getKindColor(item.kind)}`}>
                         {getKindIcon(item.kind)}
                       </span>
-                      
+
                       <div className="flex-1">
                         <div className="flex items-center space-x-2 mb-1">
                           <h3 className="font-medium text-white">{item.title}</h3>
@@ -268,7 +389,10 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
                     <div className="flex items-center space-x-2 ml-4">
                       {item.status === 'new' && (
                         <button
-                          onClick={() => markAsRead(item.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            markAsRead(item.id);
+                          }}
                           className="p-2 text-gray-400 hover:text-teal-400 transition-colors"
                           title="Mark as read"
                         >
@@ -276,7 +400,10 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
                         </button>
                       )}
                       <button
-                        onClick={() => archiveItem(item.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          archiveItem(item.id);
+                        }}
                         className="p-2 text-gray-400 hover:text-yellow-400 transition-colors"
                         title="Archive"
                       >
@@ -290,6 +417,14 @@ export const JarvisInbox: React.FC<JarvisInboxProps> = ({ className }) => {
           )}
         </div>
       </div>
+
+      {/* Item Detail Modal */}
+      {selectedItem && (
+        <ItemDetailModal
+          item={selectedItem}
+          onClose={() => setSelectedItem(null)}
+        />
+      )}
     </div>
   );
 };

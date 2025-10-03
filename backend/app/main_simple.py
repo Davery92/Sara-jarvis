@@ -4134,8 +4134,10 @@ except Exception as e:
 try:
     from app.routes.jarvis_inbox import router as inbox_router
     from app.routes.daily_brief import router as brief_router
+    from app.routes.calendar import router as calendar_router
     app.include_router(inbox_router, prefix="/api")
     app.include_router(brief_router, prefix="/api")
+    app.include_router(calendar_router, prefix="/events")
     logger.info("Jarvis mode routes loaded successfully")
 except Exception as e:
     logger.warning(f"Jarvis routes not available: {e}")

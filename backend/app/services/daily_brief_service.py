@@ -20,13 +20,19 @@ from app.models.daily_brief import DailyBrief
 from app.models.jarvis_inbox import JarvisInbox, InboxKind
 from app.db.session import SessionLocal
 
-# Import models from main_simple since that's where they're actually defined
-try:
-    from app.main_simple import Reminder, Event as CalendarEvent
-except ImportError:
-    # Fallback to separate model files if main_simple import fails
-    from app.models.reminder import Reminder
-    from app.models.calendar import Event as CalendarEvent
+# Import models - use late import to avoid circular dependency
+Reminder = None
+CalendarEvent = None
+
+def _get_models():
+    """Lazy load models to avoid circular imports"""
+    global Reminder, CalendarEvent
+    if Reminder is None:
+        from app import main_simple
+        from app.models.calendar import Event
+        Reminder = main_simple.Reminder
+        CalendarEvent = Event
+    return Reminder, CalendarEvent
 
 logger = logging.getLogger(__name__)
 
@@ -144,13 +150,16 @@ class DailyBriefService:
     
     async def _build_priorities_section(self, db: Session, user_id: str, target_date: date) -> BriefSection:
         """Build top priorities section from high-priority reminders"""
-        
+
         section = BriefSection("priorities", "🎯 Top Priorities")
-        
+
+        # Get models
+        Reminder, _ = _get_models()
+
         # Get reminders for today and overdue (using actual model fields)
         today_start = datetime.combine(target_date, datetime.min.time())
         today_end = datetime.combine(target_date, datetime.max.time())
-        
+
         reminders = db.query(Reminder).filter(
             and_(
                 Reminder.user_id == user_id,
@@ -178,13 +187,16 @@ class DailyBriefService:
     
     async def _build_calendar_section(self, db: Session, user_id: str, target_date: date) -> BriefSection:
         """Build calendar overview section"""
-        
+
         section = BriefSection("calendar", "📅 Calendar Overview")
-        
+
+        # Get models
+        _, CalendarEvent = _get_models()
+
         # Get today's events
         start_of_day = datetime.combine(target_date, datetime.min.time())
         end_of_day = datetime.combine(target_date, datetime.max.time())
-        
+
         events = db.query(CalendarEvent).filter(
             and_(
                 CalendarEvent.user_id == user_id,
@@ -361,11 +373,12 @@ class DailyBriefService:
     
     def _is_cache_valid(self, brief: DailyBrief) -> bool:
         """Check if cached brief is still valid"""
-        
+
         if not brief.generated_at:
             return False
-        
-        age = datetime.now() - brief.generated_at
+
+        from datetime import timezone
+        age = datetime.now(timezone.utc) - brief.generated_at
         return age.total_seconds() < (self.cache_duration_hours * 3600)
     
     def mark_viewed(self, db: Session, brief_id: str, user_id: str) -> bool:

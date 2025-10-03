@@ -9,10 +9,10 @@ import uuid
 class Folder(Base):
     __tablename__ = "folder"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
-    parent_id = Column(UUID(as_uuid=True), ForeignKey("folder.id", ondelete="CASCADE"), nullable=True)
+    parent_id = Column(String, ForeignKey("folder.id", ondelete="CASCADE"), nullable=True)
     
     # For ordering folders/files in UI
     sort_order = Column(Integer, default=0)

@@ -11,8 +11,8 @@ import uuid
 class SemanticSummary(Base):
     __tablename__ = "semantic_summary"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     scope = Column(String, nullable=False)  # session:XYZ, daily:YYYY-MM-DD, weekly:YYYY-WW, topic:slug
     summary = Column(Text, nullable=False)
     embedding = Column(Vector(settings.embedding_dim), nullable=False)

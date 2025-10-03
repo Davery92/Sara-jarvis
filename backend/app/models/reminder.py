@@ -9,8 +9,8 @@ import uuid
 class Reminder(Base):
     __tablename__ = "reminder"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     text = Column(String, nullable=False)
     due_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String, default="scheduled")  # scheduled, completed, cancelled
@@ -26,8 +26,8 @@ class Reminder(Base):
 class Timer(Base):
     __tablename__ = "timer"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     label = Column(String)
     ends_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String, default="running")  # running, completed, cancelled

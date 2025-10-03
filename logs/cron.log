@@ -53,3 +53,267 @@
 2025-09-09 05:00:08,526 - INFO -    ⚠️  KEV: 10
 2025-09-09 05:00:08,527 - INFO -    📱 Notification sent: True
 2025-09-09 05:00:08,528 - INFO - 🎉 Daily vulnerability report generation completed successfully in 4.72 seconds
+2025-09-10 05:00:03,408 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-10 05:00:03.408569
+2025-09-10 05:00:03,410 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-10 05:00:04,836 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-10 05:00:04,836 - INFO - 🔑 Access token received
+2025-09-10 05:00:04,836 - INFO - 🚀 Generating vulnerability report...
+2025-09-10 05:00:06,561 - INFO - ✅ Report generated successfully!
+2025-09-10 05:00:06,561 - INFO -    📊 Total vulnerabilities: 0
+2025-09-10 05:00:06,562 - INFO -    🚨 Critical: 0
+2025-09-10 05:00:06,562 - INFO -    ⚠️  KEV: 0
+2025-09-10 05:00:06,562 - INFO -    📱 Notification sent: True
+2025-09-10 05:00:06,564 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.16 seconds
+2025-09-11 05:00:02,435 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-11 05:00:02.435487
+2025-09-11 05:00:02,437 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-11 05:00:03,092 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-11 05:00:03,092 - INFO - 🔑 Access token received
+2025-09-11 05:00:03,093 - INFO - 🚀 Generating vulnerability report...
+2025-09-11 05:00:12,209 - INFO - ✅ Report generated successfully!
+2025-09-11 05:00:12,210 - INFO -    📊 Total vulnerabilities: 0
+2025-09-11 05:00:12,210 - INFO -    🚨 Critical: 0
+2025-09-11 05:00:12,210 - INFO -    ⚠️  KEV: 0
+2025-09-11 05:00:12,210 - INFO -    📱 Notification sent: True
+2025-09-11 05:00:12,211 - INFO - 🎉 Daily vulnerability report generation completed successfully in 9.78 seconds
+2025-09-12 05:00:02,364 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-12 05:00:02.364345
+2025-09-12 05:00:02,441 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-12 05:00:03,193 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-12 05:00:03,193 - INFO - 🔑 Access token received
+2025-09-12 05:00:03,194 - INFO - 🚀 Generating vulnerability report...
+2025-09-12 05:00:07,411 - INFO - ✅ Report generated successfully!
+2025-09-12 05:00:07,412 - INFO -    📊 Total vulnerabilities: 1
+2025-09-12 05:00:07,412 - INFO -    🚨 Critical: 1
+2025-09-12 05:00:07,412 - INFO -    ⚠️  KEV: 1
+2025-09-12 05:00:07,413 - INFO -    📱 Notification sent: True
+2025-09-12 05:00:07,416 - INFO - 🎉 Daily vulnerability report generation completed successfully in 5.05 seconds
+2025-09-13 05:00:01,961 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-13 05:00:01.961193
+2025-09-13 05:00:01,962 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-13 05:00:02,421 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-13 05:00:02,421 - INFO - 🔑 Access token received
+2025-09-13 05:00:02,421 - INFO - 🚀 Generating vulnerability report...
+2025-09-13 05:00:04,001 - INFO - ✅ Report generated successfully!
+2025-09-13 05:00:04,001 - INFO -    📊 Total vulnerabilities: 0
+2025-09-13 05:00:04,001 - INFO -    🚨 Critical: 0
+2025-09-13 05:00:04,001 - INFO -    ⚠️  KEV: 0
+2025-09-13 05:00:04,001 - INFO -    📱 Notification sent: True
+2025-09-13 05:00:04,003 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.04 seconds
+2025-09-14 05:00:02,799 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-14 05:00:02.799464
+2025-09-14 05:00:02,800 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-14 05:00:03,338 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-14 05:00:03,339 - INFO - 🔑 Access token received
+2025-09-14 05:00:03,339 - INFO - 🚀 Generating vulnerability report...
+2025-09-14 05:00:05,500 - INFO - ✅ Report generated successfully!
+2025-09-14 05:00:05,500 - INFO -    📊 Total vulnerabilities: 0
+2025-09-14 05:00:05,500 - INFO -    🚨 Critical: 0
+2025-09-14 05:00:05,500 - INFO -    ⚠️  KEV: 0
+2025-09-14 05:00:05,500 - INFO -    📱 Notification sent: True
+2025-09-14 05:00:05,502 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.70 seconds
+2025-09-15 05:00:02,558 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-15 05:00:02.558419
+2025-09-15 05:00:02,559 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-15 05:00:03,027 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-15 05:00:03,028 - INFO - 🔑 Access token received
+2025-09-15 05:00:03,028 - INFO - 🚀 Generating vulnerability report...
+2025-09-15 05:00:04,833 - INFO - ✅ Report generated successfully!
+2025-09-15 05:00:04,833 - INFO -    📊 Total vulnerabilities: 0
+2025-09-15 05:00:04,833 - INFO -    🚨 Critical: 0
+2025-09-15 05:00:04,834 - INFO -    ⚠️  KEV: 0
+2025-09-15 05:00:04,834 - INFO -    📱 Notification sent: True
+2025-09-15 05:00:04,836 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.28 seconds
+2025-09-16 05:00:02,810 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-16 05:00:02.810133
+2025-09-16 05:00:02,811 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-16 05:00:03,258 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-16 05:00:03,258 - INFO - 🔑 Access token received
+2025-09-16 05:00:03,258 - INFO - 🚀 Generating vulnerability report...
+2025-09-16 05:00:05,211 - INFO - ✅ Report generated successfully!
+2025-09-16 05:00:05,212 - INFO -    📊 Total vulnerabilities: 0
+2025-09-16 05:00:05,212 - INFO -    🚨 Critical: 0
+2025-09-16 05:00:05,212 - INFO -    ⚠️  KEV: 0
+2025-09-16 05:00:05,213 - INFO -    📱 Notification sent: True
+2025-09-16 05:00:05,215 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.40 seconds
+2025-09-17 05:00:02,881 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-17 05:00:02.881223
+2025-09-17 05:00:02,884 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-17 05:00:03,724 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-17 05:00:03,725 - INFO - 🔑 Access token received
+2025-09-17 05:00:03,725 - INFO - 🚀 Generating vulnerability report...
+2025-09-17 05:00:07,577 - INFO - ✅ Report generated successfully!
+2025-09-17 05:00:07,577 - INFO -    📊 Total vulnerabilities: 0
+2025-09-17 05:00:07,578 - INFO -    🚨 Critical: 0
+2025-09-17 05:00:07,578 - INFO -    ⚠️  KEV: 0
+2025-09-17 05:00:07,578 - INFO -    📱 Notification sent: True
+2025-09-17 05:00:07,580 - INFO - 🎉 Daily vulnerability report generation completed successfully in 4.70 seconds
+2025-09-18 05:00:02,282 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-18 05:00:02.281857
+2025-09-18 05:00:02,285 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-18 05:00:03,079 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-18 05:00:03,079 - INFO - 🔑 Access token received
+2025-09-18 05:00:03,080 - INFO - 🚀 Generating vulnerability report...
+2025-09-18 05:00:04,564 - INFO - ✅ Report generated successfully!
+2025-09-18 05:00:04,565 - INFO -    📊 Total vulnerabilities: 0
+2025-09-18 05:00:04,566 - INFO -    🚨 Critical: 0
+2025-09-18 05:00:04,566 - INFO -    ⚠️  KEV: 0
+2025-09-18 05:00:04,566 - INFO -    📱 Notification sent: True
+2025-09-18 05:00:04,569 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.29 seconds
+2025-09-19 05:00:03,347 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-19 05:00:03.347378
+2025-09-19 05:00:03,350 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-19 05:00:04,297 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-19 05:00:04,297 - INFO - 🔑 Access token received
+2025-09-19 05:00:04,298 - INFO - 🚀 Generating vulnerability report...
+2025-09-19 05:00:07,133 - INFO - ✅ Report generated successfully!
+2025-09-19 05:00:07,134 - INFO -    📊 Total vulnerabilities: 0
+2025-09-19 05:00:07,134 - INFO -    🚨 Critical: 0
+2025-09-19 05:00:07,134 - INFO -    ⚠️  KEV: 0
+2025-09-19 05:00:07,134 - INFO -    📱 Notification sent: True
+2025-09-19 05:00:07,136 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.79 seconds
+2025-09-20 05:00:01,998 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-20 05:00:01.998108
+2025-09-20 05:00:02,000 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-20 05:00:02,967 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-20 05:00:02,967 - INFO - 🔑 Access token received
+2025-09-20 05:00:02,968 - INFO - 🚀 Generating vulnerability report...
+2025-09-20 05:00:05,611 - INFO - ✅ Report generated successfully!
+2025-09-20 05:00:05,611 - INFO -    📊 Total vulnerabilities: 0
+2025-09-20 05:00:05,612 - INFO -    🚨 Critical: 0
+2025-09-20 05:00:05,612 - INFO -    ⚠️  KEV: 0
+2025-09-20 05:00:05,612 - INFO -    📱 Notification sent: True
+2025-09-20 05:00:05,613 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.62 seconds
+2025-09-21 05:00:02,513 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-21 05:00:02.513850
+2025-09-21 05:00:02,515 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-21 05:00:03,094 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-21 05:00:03,095 - INFO - 🔑 Access token received
+2025-09-21 05:00:03,095 - INFO - 🚀 Generating vulnerability report...
+2025-09-21 05:00:05,113 - INFO - ✅ Report generated successfully!
+2025-09-21 05:00:05,113 - INFO -    📊 Total vulnerabilities: 0
+2025-09-21 05:00:05,114 - INFO -    🚨 Critical: 0
+2025-09-21 05:00:05,114 - INFO -    ⚠️  KEV: 0
+2025-09-21 05:00:05,114 - INFO -    📱 Notification sent: True
+2025-09-21 05:00:05,116 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.60 seconds
+2025-09-22 05:00:01,997 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-22 05:00:01.996890
+2025-09-22 05:00:01,998 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-22 05:00:02,471 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-22 05:00:02,472 - INFO - 🔑 Access token received
+2025-09-22 05:00:02,472 - INFO - 🚀 Generating vulnerability report...
+2025-09-22 05:00:04,109 - INFO - ✅ Report generated successfully!
+2025-09-22 05:00:04,110 - INFO -    📊 Total vulnerabilities: 0
+2025-09-22 05:00:04,110 - INFO -    🚨 Critical: 0
+2025-09-22 05:00:04,111 - INFO -    ⚠️  KEV: 0
+2025-09-22 05:00:04,111 - INFO -    📱 Notification sent: True
+2025-09-22 05:00:04,113 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.12 seconds
+2025-09-23 05:00:02,433 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-23 05:00:02.433435
+2025-09-23 05:00:02,434 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-23 05:00:03,225 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-23 05:00:03,225 - INFO - 🔑 Access token received
+2025-09-23 05:00:03,225 - INFO - 🚀 Generating vulnerability report...
+2025-09-23 05:00:06,685 - INFO - ✅ Report generated successfully!
+2025-09-23 05:00:06,686 - INFO -    📊 Total vulnerabilities: 0
+2025-09-23 05:00:06,686 - INFO -    🚨 Critical: 0
+2025-09-23 05:00:06,687 - INFO -    ⚠️  KEV: 0
+2025-09-23 05:00:06,687 - INFO -    📱 Notification sent: True
+2025-09-23 05:00:06,689 - INFO - 🎉 Daily vulnerability report generation completed successfully in 4.26 seconds
+2025-09-24 05:00:02,427 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-24 05:00:02.427655
+2025-09-24 05:00:02,430 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-24 05:00:03,203 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-24 05:00:03,204 - INFO - 🔑 Access token received
+2025-09-24 05:00:03,204 - INFO - 🚀 Generating vulnerability report...
+2025-09-24 05:00:04,747 - INFO - ✅ Report generated successfully!
+2025-09-24 05:00:04,748 - INFO -    📊 Total vulnerabilities: 1
+2025-09-24 05:00:04,748 - INFO -    🚨 Critical: 0
+2025-09-24 05:00:04,748 - INFO -    ⚠️  KEV: 1
+2025-09-24 05:00:04,749 - INFO -    📱 Notification sent: True
+2025-09-24 05:00:04,751 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.32 seconds
+2025-09-25 05:00:02,983 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-25 05:00:02.983262
+2025-09-25 05:00:03,027 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-25 05:00:03,906 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-25 05:00:03,906 - INFO - 🔑 Access token received
+2025-09-25 05:00:03,907 - INFO - 🚀 Generating vulnerability report...
+2025-09-25 05:00:06,359 - INFO - ✅ Report generated successfully!
+2025-09-25 05:00:06,359 - INFO -    📊 Total vulnerabilities: 0
+2025-09-25 05:00:06,359 - INFO -    🚨 Critical: 0
+2025-09-25 05:00:06,359 - INFO -    ⚠️  KEV: 0
+2025-09-25 05:00:06,359 - INFO -    📱 Notification sent: True
+2025-09-25 05:00:06,361 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.38 seconds
+2025-09-26 05:00:03,499 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-26 05:00:03.499546
+2025-09-26 05:00:03,518 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-26 05:00:04,303 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-26 05:00:04,303 - INFO - 🔑 Access token received
+2025-09-26 05:00:04,303 - INFO - 🚀 Generating vulnerability report...
+2025-09-26 05:00:06,484 - INFO - ✅ Report generated successfully!
+2025-09-26 05:00:06,485 - INFO -    📊 Total vulnerabilities: 2
+2025-09-26 05:00:06,485 - INFO -    🚨 Critical: 1
+2025-09-26 05:00:06,486 - INFO -    ⚠️  KEV: 2
+2025-09-26 05:00:06,486 - INFO -    📱 Notification sent: True
+2025-09-26 05:00:06,490 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.99 seconds
+2025-09-27 05:00:02,397 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-27 05:00:02.397743
+2025-09-27 05:00:02,400 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-27 05:00:03,361 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-27 05:00:03,362 - INFO - 🔑 Access token received
+2025-09-27 05:00:03,362 - INFO - 🚀 Generating vulnerability report...
+2025-09-27 05:00:05,010 - INFO - ✅ Report generated successfully!
+2025-09-27 05:00:05,011 - INFO -    📊 Total vulnerabilities: 0
+2025-09-27 05:00:05,011 - INFO -    🚨 Critical: 0
+2025-09-27 05:00:05,011 - INFO -    ⚠️  KEV: 0
+2025-09-27 05:00:05,011 - INFO -    📱 Notification sent: True
+2025-09-27 05:00:05,014 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.62 seconds
+2025-09-28 05:00:03,300 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-28 05:00:03.300375
+2025-09-28 05:00:03,363 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-28 05:00:04,256 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-28 05:00:04,256 - INFO - 🔑 Access token received
+2025-09-28 05:00:04,257 - INFO - 🚀 Generating vulnerability report...
+2025-09-28 05:00:06,512 - INFO - ✅ Report generated successfully!
+2025-09-28 05:00:06,513 - INFO -    📊 Total vulnerabilities: 0
+2025-09-28 05:00:06,513 - INFO -    🚨 Critical: 0
+2025-09-28 05:00:06,513 - INFO -    ⚠️  KEV: 0
+2025-09-28 05:00:06,513 - INFO -    📱 Notification sent: True
+2025-09-28 05:00:06,514 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.21 seconds
+2025-09-29 05:00:02,115 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-29 05:00:02.115617
+2025-09-29 05:00:02,117 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-29 05:00:02,622 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-29 05:00:02,622 - INFO - 🔑 Access token received
+2025-09-29 05:00:02,622 - INFO - 🚀 Generating vulnerability report...
+2025-09-29 05:00:05,798 - INFO - ✅ Report generated successfully!
+2025-09-29 05:00:05,799 - INFO -    📊 Total vulnerabilities: 0
+2025-09-29 05:00:05,799 - INFO -    🚨 Critical: 0
+2025-09-29 05:00:05,799 - INFO -    ⚠️  KEV: 0
+2025-09-29 05:00:05,800 - INFO -    📱 Notification sent: True
+2025-09-29 05:00:05,803 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.69 seconds
+2025-09-30 05:00:01,554 - INFO - 🌅 Starting daily vulnerability report generation at 2025-09-30 05:00:01.554397
+2025-09-30 05:00:01,555 - INFO - 🔐 Authenticating with Sara Hub...
+2025-09-30 05:00:02,012 - INFO - ✅ Authenticated as david@avery.cloud
+2025-09-30 05:00:02,013 - INFO - 🔑 Access token received
+2025-09-30 05:00:02,014 - INFO - 🚀 Generating vulnerability report...
+2025-09-30 05:00:04,491 - INFO - ✅ Report generated successfully!
+2025-09-30 05:00:04,492 - INFO -    📊 Total vulnerabilities: 5
+2025-09-30 05:00:04,492 - INFO -    🚨 Critical: 2
+2025-09-30 05:00:04,492 - INFO -    ⚠️  KEV: 5
+2025-09-30 05:00:04,492 - INFO -    📱 Notification sent: True
+2025-09-30 05:00:04,494 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.94 seconds
+2025-10-01 05:00:02,626 - INFO - 🌅 Starting daily vulnerability report generation at 2025-10-01 05:00:02.626067
+2025-10-01 05:00:02,628 - INFO - 🔐 Authenticating with Sara Hub...
+2025-10-01 05:00:03,445 - INFO - ✅ Authenticated as david@avery.cloud
+2025-10-01 05:00:03,445 - INFO - 🔑 Access token received
+2025-10-01 05:00:03,446 - INFO - 🚀 Generating vulnerability report...
+2025-10-01 05:00:04,183 - INFO - ✅ Report generated successfully!
+2025-10-01 05:00:04,183 - INFO -    📊 Total vulnerabilities: 0
+2025-10-01 05:00:04,184 - INFO -    🚨 Critical: 0
+2025-10-01 05:00:04,184 - INFO -    ⚠️  KEV: 0
+2025-10-01 05:00:04,185 - INFO -    📱 Notification sent: True
+2025-10-01 05:00:04,187 - INFO - 🎉 Daily vulnerability report generation completed successfully in 1.56 seconds
+2025-10-02 05:00:01,965 - INFO - 🌅 Starting daily vulnerability report generation at 2025-10-02 05:00:01.965120
+2025-10-02 05:00:01,966 - INFO - 🔐 Authenticating with Sara Hub...
+2025-10-02 05:00:02,849 - INFO - ✅ Authenticated as david@avery.cloud
+2025-10-02 05:00:02,850 - INFO - 🔑 Access token received
+2025-10-02 05:00:02,850 - INFO - 🚀 Generating vulnerability report...
+2025-10-02 05:00:04,200 - INFO - ✅ Report generated successfully!
+2025-10-02 05:00:04,200 - INFO -    📊 Total vulnerabilities: 0
+2025-10-02 05:00:04,201 - INFO -    🚨 Critical: 0
+2025-10-02 05:00:04,201 - INFO -    ⚠️  KEV: 0
+2025-10-02 05:00:04,202 - INFO -    📱 Notification sent: True
+2025-10-02 05:00:04,205 - INFO - 🎉 Daily vulnerability report generation completed successfully in 2.24 seconds
+2025-10-03 05:00:02,252 - INFO - 🌅 Starting daily vulnerability report generation at 2025-10-03 05:00:02.252185
+2025-10-03 05:00:02,264 - INFO - 🔐 Authenticating with Sara Hub...
+2025-10-03 05:00:03,161 - INFO - ✅ Authenticated as david@avery.cloud
+2025-10-03 05:00:03,161 - INFO - 🔑 Access token received
+2025-10-03 05:00:03,161 - INFO - 🚀 Generating vulnerability report...
+2025-10-03 05:00:05,785 - INFO - ✅ Report generated successfully!
+2025-10-03 05:00:05,785 - INFO -    📊 Total vulnerabilities: 5
+2025-10-03 05:00:05,785 - INFO -    🚨 Critical: 3
+2025-10-03 05:00:05,785 - INFO -    ⚠️  KEV: 5
+2025-10-03 05:00:05,785 - INFO -    📱 Notification sent: True
+2025-10-03 05:00:05,788 - INFO - 🎉 Daily vulnerability report generation completed successfully in 3.54 seconds

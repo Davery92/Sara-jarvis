@@ -30,7 +30,7 @@ class InboxItemCreate(BaseModel):
 
 
 class InboxItemResponse(BaseModel):
-    id: int
+    id: str
     kind: InboxKind
     title: str
     body: Optional[str]
@@ -43,7 +43,7 @@ class InboxItemResponse(BaseModel):
     created_at: datetime
     read_at: Optional[datetime]
     archived_at: Optional[datetime]
-    
+
     class Config:
         from_attributes = True
 
@@ -136,33 +136,33 @@ async def get_inbox_items(
 
 @router.post("/{item_id}/read")
 async def mark_item_read(
-    item_id: int,
+    item_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Mark an inbox item as read"""
-    
+
     success = inbox_service.mark_read(db=db, item_id=item_id, user_id=current_user.id)
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="Inbox item not found")
-    
+
     return {"status": "read"}
 
 
 @router.post("/{item_id}/archive")
 async def archive_item(
-    item_id: int,
+    item_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Archive an inbox item"""
-    
+
     success = inbox_service.archive(db=db, item_id=item_id, user_id=current_user.id)
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="Inbox item not found")
-    
+
     return {"status": "archived"}
 
 
@@ -231,21 +231,21 @@ async def get_inbox_stats(
 
 @router.delete("/{item_id}")
 async def delete_item(
-    item_id: int,
+    item_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Delete an inbox item (admin use)"""
-    
+
     item = db.query(JarvisInbox).filter(
         JarvisInbox.id == item_id,
         JarvisInbox.user_id == current_user.id
     ).first()
-    
+
     if not item:
         raise HTTPException(status_code=404, detail="Inbox item not found")
-    
+
     db.delete(item)
     db.commit()
-    
+
     return {"status": "deleted"}

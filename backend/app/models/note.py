@@ -11,9 +11,9 @@ import uuid
 class Note(Base):
     __tablename__ = "note"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
-    folder_id = Column(UUID(as_uuid=True), ForeignKey("folder.id", ondelete="CASCADE"), nullable=True)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    folder_id = Column(String, ForeignKey("folder.id", ondelete="CASCADE"), nullable=True)
     title = Column(String, default="")
     content = Column(Text, nullable=False)
     embedding = Column(Vector(settings.embedding_dim))

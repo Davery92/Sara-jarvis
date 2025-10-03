@@ -11,8 +11,8 @@ import uuid
 class Episode(Base):
     __tablename__ = "episode"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     source = Column(String, nullable=False)  # chat, note, doc, system, tool
     role = Column(String, nullable=False)    # user, assistant, system, tool
     content = Column(Text, nullable=False)
@@ -31,8 +31,8 @@ class Episode(Base):
 class MemoryVector(Base):
     __tablename__ = "memory_vector"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    episode_id = Column(UUID(as_uuid=True), ForeignKey("episode.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
     text = Column(Text, nullable=False)
     embedding = Column(Vector(settings.embedding_dim), nullable=False)
@@ -48,7 +48,7 @@ class MemoryVector(Base):
 class MemoryHot(Base):
     __tablename__ = "memory_hot"
 
-    episode_id = Column(UUID(as_uuid=True), ForeignKey("episode.id", ondelete="CASCADE"), primary_key=True)
+    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), primary_key=True)
     last_accessed = Column(DateTime(timezone=True), server_default=func.now())
     accesses = Column(Integer, default=1)
     

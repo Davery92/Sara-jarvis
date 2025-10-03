@@ -10,6 +10,7 @@ import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
+import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
@@ -2053,10 +2054,7 @@ function App() {
           )}
 
           {view === 'calendar' && (
-            <div className="bg-card border border-card rounded-xl p-6">
-              <h2 className="text-lg font-semibold mb-4">CALENDAR</h2>
-              <p className="text-gray-400 text-center py-8">Calendar view coming soon...</p>
-            </div>
+            <CalendarView />
           )}
 
           {view === 'habits' && (

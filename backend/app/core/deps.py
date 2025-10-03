@@ -11,24 +11,25 @@ async def get_current_user(
     db: Session = Depends(get_db)
 ) -> User:
     """Get the current authenticated user from JWT cookie"""
-    
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     if not access_token:
         raise credentials_exception
-    
+
     payload = verify_token(access_token)
     if payload is None:
         raise credentials_exception
-    
+
     user_id: str = payload.get("sub")
     if user_id is None:
         raise credentials_exception
-    
+
+    # Database uses string IDs, not UUIDs
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise credentials_exception
