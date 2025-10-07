@@ -12,6 +12,7 @@ import KnowledgeGraph from './components/KnowledgeGraph'
 import VulnerabilityWatch from './components/VulnerabilityWatch'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
+import ShadowHistory from './components/ShadowHistory'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
@@ -71,7 +72,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, shadow-history, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -1391,6 +1392,13 @@ function App() {
                   <span>Vulnerability Watch</span>
                 </button>
                 <button
+                  onClick={() => { setView('shadow-history'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded ${view === 'shadow-history' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">🕵️</span>
+                  <span>Shadow History</span>
+                </button>
+                <button
                   onClick={() => { setView('jarvis-inbox'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded ${view === 'jarvis-inbox' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1490,6 +1498,13 @@ function App() {
             >
               <span className="material-icons">security</span>
               <span className="text-xs">Vulns</span>
+            </button>
+            <button
+              onClick={() => setView('shadow-history')}
+              className={`flex flex-col items-center ${view === 'shadow-history' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="text-xl">🕵️</span>
+              <span className="text-xs">Shadow</span>
             </button>
             <button
               onClick={() => setView('jarvis-inbox')}
@@ -2149,6 +2164,10 @@ function App() {
 
           {view === 'vulnerability-watch' && (
             <VulnerabilityWatch onToast={showToast} />
+          )}
+
+          {view === 'shadow-history' && (
+            <ShadowHistory />
           )}
 
           {view === 'jarvis-inbox' && (

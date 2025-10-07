@@ -5,6 +5,7 @@ from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool
+from app.tools.shadow import ShadowStartTool
 from app.tools.knowledge_graph import (
     KnowledgeGraphSearchTool, 
     ConnectionFinderTool, 
@@ -45,7 +46,10 @@ class ToolRegistry:
             TimersStartTool(),
             TimersStatusTool(),
             TimersCancelTool(),
-            
+
+            # Shadow Mode
+            ShadowStartTool(),
+
             # Calendar
             CalendarListTool(),
             CalendarCreateTool(),

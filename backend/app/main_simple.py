@@ -1375,6 +1375,23 @@ class SimpleLLMClient:
             result = await self.search_documents_tool(arguments["query"], user_id)
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
+        elif function_name == "start_shadow_session":
+            result = await self.start_shadow_session_tool(
+                arguments.get("duration_minutes"),
+                arguments.get("context"),
+                user_id
+            )
+        elif function_name == "add_shadow_note":
+            result = await self.add_shadow_note_tool(
+                arguments["note_type"],
+                arguments["content"],
+                arguments.get("due_date"),
+                user_id
+            )
+        elif function_name == "wrap_shadow_session":
+            result = await self.wrap_shadow_session_tool(user_id)
+        elif function_name == "get_shadow_status":
+            result = await self.get_shadow_status_tool(user_id)
         else:
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
@@ -2094,6 +2111,164 @@ class SimpleLLMClient:
         except Exception as e:
             logger.error(f"Error searching dream insights: {e}")
             return []
+
+    async def start_shadow_session_tool(self, duration_minutes, context, user_id):
+        """🕵️ Start a Shadow Mode work capture session"""
+        try:
+            from app.services.shadow_session_service import shadow_session_service
+
+            session = await shadow_session_service.start_session(
+                user_id=str(user_id),
+                duration_minutes=duration_minutes if duration_minutes else None,
+                context=context if context else None
+            )
+
+            duration_str = f" for {duration_minutes} minutes" if duration_minutes else ""
+            context_str = f" (Context: {context})" if context else ""
+
+            return f"🕵️ Shadow Mode session started{duration_str}! I'll help you capture tasks, decisions, questions, and ideas as we work{context_str}. Session ID: {session.id}"
+
+        except ValueError as e:
+            # Handle case where session already exists
+            return f"⚠️ {str(e)}"
+        except Exception as e:
+            logger.error(f"Error starting shadow session: {e}")
+            return f"❌ Failed to start Shadow session: {str(e)}"
+
+    async def add_shadow_note_tool(self, note_type, content, due_date, user_id):
+        """📌 Add a note to the active Shadow session"""
+        try:
+            from app.services.shadow_session_service import shadow_session_service
+            from datetime import datetime
+
+            # Get active session
+            session = await shadow_session_service.get_active_session(str(user_id))
+            if not session:
+                return "⚠️ No active Shadow session found. Start one first with 'Shadow me' or 'start shadow session'."
+
+            # Parse due date if provided
+            due_date_obj = None
+            if due_date:
+                try:
+                    due_date_obj = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+                except Exception as e:
+                    logger.warning(f"Failed to parse due date {due_date}: {e}")
+
+            # Add note
+            note = await shadow_session_service.add_note(
+                session_id=session.id,
+                note_type=note_type,
+                content=content,
+                due_date=due_date_obj
+            )
+
+            emoji_map = {
+                "task": "✅",
+                "decision": "🎯",
+                "question": "❓",
+                "idea": "💡",
+                "bookmark": "🔖"
+            }
+            emoji = emoji_map.get(note_type, "📝")
+
+            due_str = f" (due: {due_date_obj.strftime('%Y-%m-%d')})" if due_date_obj else ""
+            return f"{emoji} Added {note_type}: {content}{due_str}"
+
+        except Exception as e:
+            logger.error(f"Error adding shadow note: {e}")
+            return f"❌ Failed to add note: {str(e)}"
+
+    async def wrap_shadow_session_tool(self, user_id):
+        """🎁 Wrap up the Shadow session and generate summary"""
+        try:
+            from app.services.shadow_session_service import shadow_session_service
+            from app.services.shadow_summary_generator import shadow_summary_generator
+
+            # Get active session
+            session = await shadow_session_service.get_active_session(str(user_id))
+            if not session:
+                return "⚠️ No active Shadow session found."
+
+            # Wrap session
+            await shadow_session_service.wrap_session(session.id)
+
+            # Generate summary
+            summary = await shadow_summary_generator.generate_summary(session.id)
+
+            # Format summary for chat
+            response_parts = ["🎁 **Shadow Session Complete!**", ""]
+            response_parts.append(f"**Duration:** {int((session.ended_at - session.started_at).total_seconds() / 60)} minutes")
+
+            if summary.tasks:
+                response_parts.append(f"\n✅ **Tasks Captured:** {len(summary.tasks)}")
+                for task in summary.tasks[:5]:  # Show first 5
+                    response_parts.append(f"  • {task['content']}")
+
+            if summary.decisions:
+                response_parts.append(f"\n🎯 **Decisions Made:** {len(summary.decisions)}")
+                for decision in summary.decisions[:3]:
+                    response_parts.append(f"  • {decision['content']}")
+
+            if summary.questions:
+                response_parts.append(f"\n❓ **Questions Noted:** {len(summary.questions)}")
+                for question in summary.questions[:3]:
+                    response_parts.append(f"  • {question['content']}")
+
+            if summary.ideas:
+                response_parts.append(f"\n💡 **Ideas Generated:** {len(summary.ideas)}")
+                for idea in summary.ideas[:3]:
+                    response_parts.append(f"  • {idea['content']}")
+
+            if summary.changeset and summary.changeset.get('files'):
+                response_parts.append(f"\n📝 **Files Modified:** {len(summary.changeset['files'])}")
+
+            response_parts.append(f"\n💾 Full summary saved. Session ID: {session.id}")
+
+            return "\n".join(response_parts)
+
+        except Exception as e:
+            logger.error(f"Error wrapping shadow session: {e}")
+            return f"❌ Failed to wrap session: {str(e)}"
+
+    async def get_shadow_status_tool(self, user_id):
+        """📊 Get status of active Shadow session"""
+        try:
+            from app.services.shadow_session_service import shadow_session_service
+            from datetime import datetime, timezone
+
+            # Get active session
+            session = await shadow_session_service.get_active_session(str(user_id))
+            if not session:
+                return "💤 No active Shadow session. Say 'Shadow me' to start capturing your work!"
+
+            # Get comprehensive status
+            status = await shadow_session_service.get_session_status(session.id)
+
+            # Format status
+            response_parts = ["🕵️ **Active Shadow Session**", ""]
+
+            if status['context']:
+                response_parts.append(f"**Context:** {status['context']}")
+
+            duration_mins = status['duration_seconds'] // 60
+            response_parts.append(f"**Duration:** {duration_mins} minutes")
+
+            if status['time_remaining_seconds'] and status['time_remaining_seconds'] > 0:
+                remaining_mins = status['time_remaining_seconds'] // 60
+                response_parts.append(f"**Time Remaining:** {remaining_mins} minutes")
+
+            response_parts.append(f"\n**Captured:**")
+            response_parts.append(f"  • Tasks: {status['note_counts']['task']}")
+            response_parts.append(f"  • Decisions: {status['note_counts']['decision']}")
+            response_parts.append(f"  • Questions: {status['note_counts']['question']}")
+            response_parts.append(f"  • Ideas: {status['note_counts']['idea']}")
+            response_parts.append(f"  • Events: {status['event_count']}")
+
+            return "\n".join(response_parts)
+
+        except Exception as e:
+            logger.error(f"Error getting shadow status: {e}")
+            return f"❌ Failed to get status: {str(e)}"
 
     async def store_conversation(self, messages, response_content, user_id, conversation_id=None):
         """Store the conversation in enhanced episodic memory with emotional and topical analysis"""
@@ -4136,11 +4311,17 @@ try:
     from app.routes.daily_brief import router as brief_router
     from app.routes.calendar import router as calendar_router
     from app.routes.threads import router as threads_router
+    from app.routes.shadow import router as shadow_router
+    from app.routes.wyoming import router as wyoming_router
+    from app.routes.agent_downloads import router as downloads_router
     app.include_router(inbox_router, prefix="/api")
     app.include_router(brief_router, prefix="/api")
     app.include_router(calendar_router, prefix="/events")
     app.include_router(threads_router, prefix="/threads")
-    logger.info("Jarvis mode routes loaded successfully")
+    app.include_router(shadow_router, prefix="/shadow", tags=["Shadow Mode"])
+    app.include_router(wyoming_router, tags=["Voice/Wyoming"])
+    app.include_router(downloads_router, prefix="/api", tags=["Agent Downloads"])
+    logger.info("Jarvis mode routes loaded successfully (including Shadow Mode + Voice)")
 except Exception as e:
     logger.warning(f"Jarvis routes not available: {e}")
     logger.warning("Running in Sara mode only")
@@ -4270,6 +4451,60 @@ class MemoryConsolidationScheduler:
 
 memory_consolidation_scheduler = MemoryConsolidationScheduler()
 
+# Shadow Mode Auto-Wrap Background Task
+async def shadow_auto_wrap_task():
+    """Background task that checks for expired Shadow sessions and auto-wraps them"""
+    logger.info("🕵️ Shadow auto-wrap task started")
+
+    while True:
+        try:
+            await asyncio.sleep(60)  # Check every minute
+
+            from app.db.session import SessionLocal
+            from app.models.shadow import ShadowSession
+            from app.services.shadow_session_service import shadow_session_service
+            from app.services.shadow_summary_generator import shadow_summary_generator
+
+            db = SessionLocal()
+            try:
+                # Find active sessions that have exceeded their planned duration
+                now = datetime.utcnow()
+
+                # Get all active sessions with planned durations
+                active_sessions = db.query(ShadowSession).filter(
+                    ShadowSession.status == 'active',
+                    ShadowSession.duration_minutes.isnot(None)
+                ).all()
+
+                # Check each session to see if it's expired
+                expired_sessions = []
+                for session in active_sessions:
+                    expiry_time = session.started_at + timedelta(minutes=session.duration_minutes)
+                    if expiry_time <= now:
+                        expired_sessions.append(session)
+
+                for session in expired_sessions:
+                    try:
+                        logger.info(f"🕵️ Auto-wrapping expired Shadow session {session.id}")
+
+                        # Wrap the session
+                        wrapped_session = await shadow_session_service.wrap_session(session.id)
+
+                        # Generate summary
+                        summary = await shadow_summary_generator.generate_summary(session.id)
+
+                        logger.info(f"✅ Auto-wrapped session {session.id} - {len(summary.tasks)} tasks, {len(summary.decisions)} decisions")
+
+                    except Exception as e:
+                        logger.error(f"❌ Failed to auto-wrap session {session.id}: {e}")
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"❌ Shadow auto-wrap task error: {e}")
+            await asyncio.sleep(60)  # Continue checking even if there's an error
+
 # Initialize Neo4j on startup
 @app.on_event("startup")
 async def startup_event():
@@ -4296,7 +4531,11 @@ async def startup_event():
         import asyncio
         asyncio.create_task(dream_service.start_dream_scheduler())
         logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
-        
+
+        # Start Shadow auto-wrap background task
+        asyncio.create_task(shadow_auto_wrap_task())
+        logger.info("🕵️ Shadow auto-wrap task initialized - will check for expired sessions every minute")
+
         # Start memory consolidation scheduler (hot graph-in-Postgres)
         await memory_consolidation_scheduler.start()
         
@@ -4534,6 +4773,10 @@ def get_personality_system_prompt(personality_mode: str, assistant_name: str, us
         f"complete_reminder to mark reminders as done, start_timer to start productivity timers, "
         f"list_timers to check timer status, stop_timer to cancel timers, "
         f"search_documents to find information in uploaded files, and search_memory to recall past conversations. "
+        f"CRITICAL SHADOW MODE INSTRUCTION: When the user says 'shadow me for X minutes', 'shadow me', 'start shadow mode', or 'shadow session', "
+        f"you MUST call the start_shadow_session tool (NOT start_timer, NOT just respond conversationally). "
+        f"Do not roleplay or pretend to start a session - actually call the start_shadow_session function. "
+        f"Shadow Mode captures browser activity, VS Code files, tasks, decisions, and ideas via a desktop agent. "
         f"IMPORTANT: Use search_memory when the user asks about previous conversations, mentions something you should remember, "
         f"or when context from past interactions would be helpful. You remember everything we discuss! "
         f"When referencing information from documents, use search_documents and include citations when available. "
@@ -4805,9 +5048,80 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                     "required": ["query"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "start_shadow_session",
+                "description": "Start a SHADOW MODE session (NOT a timer) to automatically capture browser activity, VS Code files, tasks, decisions, and ideas from a desktop agent. Use this when the user says 'shadow me', 'start shadow mode', 'shadow session', or wants to track their work activity automatically.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Duration of the session in minutes (e.g., 30, 60, 90)"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Optional context describing what you'll be working on"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_shadow_note",
+                "description": "Add a task, decision, question, idea, or bookmark to the current Shadow session",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_type": {
+                            "type": "string",
+                            "description": "Type of note: 'task', 'decision', 'question', 'idea', or 'bookmark'",
+                            "enum": ["task", "decision", "question", "idea", "bookmark"]
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content of the note"
+                        },
+                        "due_date": {
+                            "type": "string",
+                            "description": "Optional due date for tasks (ISO format: '2025-10-05T17:00:00Z')"
+                        }
+                    },
+                    "required": ["note_type", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "wrap_shadow_session",
+                "description": "End the current Shadow session and generate a summary of all captured work",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_shadow_status",
+                "description": "Check if there's an active Shadow session and get its current status",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
         }
     ]
-    
+
     # Add personality-aware system message
     system_message = ChatMessage(
         role="system",

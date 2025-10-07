@@ -5,6 +5,7 @@ import { apiClient, ChatMessage } from '../api/client'
 import { APP_CONFIG } from '../config'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import ErrorBoundary from '../components/ErrorBoundary'
+import ShadowSessionPill from '../components/ShadowSessionPill'
 
 export default function Chat() {
   const {} = useAuth()
@@ -379,6 +380,9 @@ export default function Chat() {
           </form>
         </div>
       </div>
+
+      {/* Shadow Session Pill */}
+      <ShadowSessionPill />
     </div>
   )
 }

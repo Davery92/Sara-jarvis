@@ -17,7 +17,9 @@
       "Bash(npm run build:*)",
       "Bash(docker cp:*)",
       "Bash(cd:*)",
-      "Bash(./scripts/quick_rebuild_backend.sh:*)"
+      "Bash(./scripts/quick_rebuild_backend.sh:*)",
+      "Bash(pwdx:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": [],

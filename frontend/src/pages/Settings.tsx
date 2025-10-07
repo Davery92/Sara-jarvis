@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import { 
+import {
   getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals,
   getAIBaseUrl, setAIBaseUrl, getAIModel, setAIModel, getAINotificationModel, setAINotificationModel,
-  getEmbeddingBaseUrl, setEmbeddingBaseUrl, getEmbeddingModel, setEmbeddingModel, 
+  getEmbeddingBaseUrl, setEmbeddingBaseUrl, getEmbeddingModel, setEmbeddingModel,
   getEmbeddingDimension, setEmbeddingDimension
 } from '../utils/prefs'
 import { spriteBus } from '../state/spriteBus'
@@ -10,6 +10,50 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, AISettingsUpdate } from '../api/client'
 import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
 import { APP_CONFIG } from '../config'
+
+function AgentStatus() {
+  const { data: agentStatus } = useQuery({
+    queryKey: ['shadow', 'agent-status'],
+    queryFn: () => apiClient.getShadowAgentStatus(),
+    refetchInterval: 10000, // Poll every 10 seconds
+  })
+
+  if (!agentStatus || agentStatus.total_active === 0) {
+    return (
+      <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg">
+        <div className="flex items-center">
+          <div className="w-2 h-2 bg-gray-500 rounded-full mr-3"></div>
+          <p className="text-sm text-gray-400">No agents connected (agents appear when Shadow session is active)</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-4 space-y-2">
+      <h4 className="text-sm font-medium text-white">Connected Agents</h4>
+      {agentStatus.agents.map((agent: any, idx: number) => (
+        <div key={idx} className="p-3 bg-green-900/20 border border-green-500/30 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <div className="w-2 h-2 bg-green-500 rounded-full mr-3 animate-pulse"></div>
+              <div>
+                <p className="text-sm font-medium text-green-300">Agent Online</p>
+                <p className="text-xs text-gray-400">
+                  Monitoring: {agent.monitoring.browser && 'Browser'} {agent.monitoring.browser && agent.monitoring.editor && '+ '}{agent.monitoring.editor && 'VS Code'}
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-gray-400">{agent.event_count} events</p>
+              <p className="text-xs text-gray-500">Last seen: {new Date(agent.last_seen).toLocaleTimeString()}</p>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 export default function Settings() {
   const [formData, setFormData] = useState<AISettingsUpdate>({
@@ -409,6 +453,174 @@ export default function Settings() {
               </button>
             </div>
           </form>
+        </div>
+
+        {/* Voice Agent Downloads */}
+        <div className="mt-8 bg-card border border-card rounded-xl p-6">
+          <div className="flex items-center mb-4">
+            <svg className="w-6 h-6 text-green-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            <h3 className="text-lg font-medium text-white">🎙️ Voice Control Agent</h3>
+          </div>
+
+          <p className="text-gray-400 text-sm mb-6">
+            Download the voice-controlled desktop agent. Say "sarah" to activate voice commands and interact with Sara hands-free.
+            Supports Shadow Mode, reminders, notes, and all Sara features via voice.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Windows Voice Agent */}
+            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+              <div className="flex items-center mb-3">
+                <svg className="w-8 h-8 text-blue-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
+                </svg>
+                <div>
+                  <h4 className="text-white font-medium">Windows Voice Agent</h4>
+                  <p className="text-xs text-gray-400">Single-file installer</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-300 mb-3">
+                Wake word detection, voice commands, system tray control. No installation required!
+              </p>
+              <a
+                href="http://10.185.1.180:8000/api/agent/downloads/windows"
+                download="SaraShadowAgent-Installer.exe"
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-medium w-full justify-center"
+              >
+                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Download for Windows
+              </a>
+              <p className="text-xs text-gray-500 mt-2">
+                Just run the .exe - it will appear in your system tray. Say "sarah" to activate!
+              </p>
+            </div>
+
+            {/* macOS Voice Agent */}
+            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+              <div className="flex items-center mb-3">
+                <svg className="w-8 h-8 text-purple-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
+                </svg>
+                <div>
+                  <h4 className="text-white font-medium">macOS Voice Agent</h4>
+                  <p className="text-xs text-gray-400">DMG installer</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-300 mb-3">
+                Wake word detection, voice commands, menu bar control. Drag-and-drop installation!
+              </p>
+              <a
+                href="http://10.185.1.180:8000/api/agent/downloads/macos"
+                download="SaraShadowAgent-Installer.dmg"
+                className="inline-flex items-center px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm font-medium w-full justify-center"
+              >
+                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Download for macOS
+              </a>
+              <p className="text-xs text-gray-500 mt-2">
+                Open DMG, drag to Applications. Grant microphone permission when prompted.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-green-900/20 border border-green-500/30 rounded-lg">
+            <p className="text-sm text-green-300">
+              <strong>Voice Modes:</strong> Always-On (continuously listens), Shadow-Only (active during sessions), or Push-to-Talk (manual activation).
+              Configure via system tray menu.
+            </p>
+          </div>
+        </div>
+
+        {/* Shadow Agent Downloads */}
+        <div className="mt-8 bg-card border border-card rounded-xl p-6">
+          <div className="flex items-center mb-4">
+            <svg className="w-6 h-6 text-purple-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            <h3 className="text-lg font-medium text-white">🕵️ Shadow Mode Desktop Agent</h3>
+          </div>
+
+          <p className="text-gray-400 text-sm mb-6">
+            Download and install the Shadow Mode agent to automatically capture browser and VS Code activity during Shadow sessions.
+            The agent runs in the background and only sends events when a Shadow session is active.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Windows Agent */}
+            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+              <div className="flex items-center mb-3">
+                <svg className="w-8 h-8 text-blue-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
+                </svg>
+                <div>
+                  <h4 className="text-white font-medium">Windows Agent</h4>
+                  <p className="text-xs text-gray-400">PowerShell installer</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-300 mb-3">
+                Supports Chrome, Firefox, Edge, Brave, Opera, and VS Code on Windows 10/11
+              </p>
+              <a
+                href="http://10.185.1.180:8000/shadow/agent/download/windows"
+                download="sara-shadow-agent-install.ps1"
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-medium w-full justify-center"
+              >
+                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Download for Windows
+              </a>
+              <p className="text-xs text-gray-500 mt-2">
+                Run: <code className="bg-gray-900 px-1 rounded">powershell -ExecutionPolicy Bypass -File install.ps1</code>
+              </p>
+            </div>
+
+            {/* macOS/Linux Agent */}
+            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+              <div className="flex items-center mb-3">
+                <svg className="w-8 h-8 text-gray-300 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
+                </svg>
+                <div>
+                  <h4 className="text-white font-medium">macOS / Linux Agent</h4>
+                  <p className="text-xs text-gray-400">Bash installer</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-300 mb-3">
+                Supports Chrome, Safari, Firefox, Brave, and VS Code on macOS/Linux
+              </p>
+              <a
+                href="http://10.185.1.180:8000/shadow/agent/download/macos"
+                download="sara-shadow-agent-install.sh"
+                className="inline-flex items-center px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition text-sm font-medium w-full justify-center"
+              >
+                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Download for macOS/Linux
+              </a>
+              <p className="text-xs text-gray-500 mt-2">
+                Run: <code className="bg-gray-900 px-1 rounded">bash install.sh [API_URL]</code>
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-purple-900/20 border border-purple-500/30 rounded-lg">
+            <p className="text-sm text-purple-300">
+              <strong>Privacy:</strong> The agent only captures metadata (window titles, URLs, file paths) when a Shadow session is active.
+              No screenshots or keystrokes are recorded.
+            </p>
+          </div>
+
+          {/* Agent Status */}
+          <AgentStatus />
         </div>
 
         {/* Information */}

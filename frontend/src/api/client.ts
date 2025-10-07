@@ -112,6 +112,76 @@ export interface VulnerabilityReport {
   created_at: string
 }
 
+export interface ShadowSession {
+  id: string
+  user_id: string
+  device_id?: string
+  status: 'active' | 'paused' | 'wrapped' | 'committed'
+  duration_minutes?: number
+  privacy_mode: boolean
+  started_at: string
+  paused_at?: string
+  resumed_at?: string
+  ended_at?: string
+  context?: string
+  calendar_event_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ShadowNote {
+  id: string
+  session_id: string
+  note_type: 'task' | 'decision' | 'question' | 'idea' | 'bookmark'
+  content: string
+  source: string
+  due_date?: string
+  priority?: string
+  timestamp: string
+}
+
+export interface ShadowSummary {
+  id: string
+  session_id: string
+  decisions: any[]
+  tasks: any[]
+  questions: any[]
+  ideas: any[]
+  refs: any[]
+  timeline: any[]
+  changeset: {
+    files: string[]
+    commits: any[]
+  }
+  full_text: string
+  committed: boolean
+  committed_note_id?: string
+  created_at: string
+}
+
+export interface ShadowSessionStatus {
+  session_id: string
+  status: string
+  device_id?: string
+  privacy_mode: boolean
+  context?: string
+  started_at: string
+  ended_at?: string
+  duration_seconds: number
+  duration_minutes_planned?: number
+  time_remaining_seconds?: number
+  event_count: number
+  event_types: Record<string, number>
+  note_counts: {
+    task: number
+    decision: number
+    question: number
+    idea: number
+    bookmark: number
+  }
+  total_notes: number
+}
+
 export interface VulnerabilityReportList {
   id: string
   report_date: string
@@ -431,6 +501,69 @@ class ApiClient {
 
   async getNotificationHistory(): Promise<NotificationResponse[]> {
     const response = await this.client.get('/api/notifications/history')
+    return response.data
+  }
+
+  // Shadow Mode endpoints
+  async getActiveShadowSession(): Promise<ShadowSession | null> {
+    try {
+      const response = await this.client.get('/shadow/active')
+      return response.data
+    } catch (error: any) {
+      if (error.response?.status === 404) {
+        return null
+      }
+      throw error
+    }
+  }
+
+  async startShadowSession(data: { duration_minutes?: number; context?: string; privacy_mode?: boolean }): Promise<any> {
+    const response = await this.client.post('/shadow/start', data)
+    return response.data
+  }
+
+  async getShadowSessionStatus(sessionId: string): Promise<ShadowSessionStatus> {
+    const response = await this.client.get(`/shadow/${sessionId}/status`)
+    return response.data
+  }
+
+  async addShadowNote(sessionId: string, data: { note_type: string; content: string; due_date?: string; priority?: string }): Promise<any> {
+    const response = await this.client.post(`/shadow/${sessionId}/note`, data)
+    return response.data
+  }
+
+  async pauseShadowSession(sessionId: string): Promise<ShadowSession> {
+    const response = await this.client.post(`/shadow/${sessionId}/pause`)
+    return response.data
+  }
+
+  async resumeShadowSession(sessionId: string): Promise<ShadowSession> {
+    const response = await this.client.post(`/shadow/${sessionId}/resume`)
+    return response.data
+  }
+
+  async wrapShadowSession(sessionId: string): Promise<any> {
+    const response = await this.client.post(`/shadow/${sessionId}/wrap`)
+    return response.data
+  }
+
+  async commitShadowSummary(sessionId: string, data: { edited_summary?: string }): Promise<any> {
+    const response = await this.client.post(`/shadow/${sessionId}/commit`, data)
+    return response.data
+  }
+
+  async getRecentShadowSessions(limit: number = 10): Promise<ShadowSession[]> {
+    const response = await this.client.get(`/shadow/recent?limit=${limit}`)
+    return response.data
+  }
+
+  async getShadowAgentStatus(): Promise<any> {
+    const response = await this.client.get('/shadow/agent/status')
+    return response.data
+  }
+
+  async getShadowSessionSummary(sessionId: string): Promise<any> {
+    const response = await this.client.get(`/shadow/${sessionId}/summary`)
     return response.data
   }
 }
