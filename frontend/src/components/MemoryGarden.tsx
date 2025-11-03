@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { APP_CONFIG } from '../config'
 import KnowledgeGraph from './KnowledgeGraph'
-import TimelineView from './TimelineView'
 import MemoryManager from './MemoryManager'
 
 interface DreamInsight {
@@ -36,12 +35,28 @@ export default function MemoryGarden({
   editingNote,
   setEditingNote
 }: MemoryGardenProps) {
-  const [currentView, setCurrentView] = useState<'graph' | 'timeline' | 'insights' | 'memory'>('graph')
+  const [currentView, setCurrentView] = useState<'graph' | 'insights' | 'memory'>('graph')
   const [dreamInsights, setDreamInsights] = useState<DreamInsight[]>([])
   const [loadingInsights, setLoadingInsights] = useState(false)
+  const [isMobile, setIsMobile] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
     fetchDreamInsights()
+  }, [])
+
+  // Mobile detection
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768)
+      // Auto-close sidebar on mobile
+      if (window.innerWidth < 768) {
+        setSidebarOpen(false)
+      }
+    }
+    checkMobile()
+    window.addEventListener('resize', checkMobile)
+    return () => window.removeEventListener('resize', checkMobile)
   }, [])
 
   const fetchDreamInsights = async () => {
@@ -77,9 +92,21 @@ export default function MemoryGarden({
   }
 
   return (
-    <div className="flex h-screen w-full bg-[#18181b] text-[#f8fafc]">
+    <div className="flex h-screen w-full bg-[#18181b] text-[#f8fafc] relative">
+      {/* Mobile Overlay */}
+      {isMobile && sidebarOpen && (
+        <div
+          className="absolute inset-0 bg-black bg-opacity-50 z-40"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* Left Sidebar */}
-      <aside className="flex w-64 flex-col border-r border-[#3f3f46] p-4">
+      <aside className={`${
+        isMobile ? 'absolute left-0 top-0 h-full z-50 transition-transform duration-300' : ''
+      } ${
+        isMobile && !sidebarOpen ? '-translate-x-full' : 'translate-x-0'
+      } flex w-full max-w-xs md:w-64 md:relative flex-col border-r border-[#3f3f46] p-4 bg-[#18181b]`}>
         <div className="mb-6 flex items-center gap-2">
           <div className="h-8 w-8 bg-[#0d7ff2] rounded flex items-center justify-center">
             <span className="text-white font-bold text-sm">S</span>
@@ -91,25 +118,14 @@ export default function MemoryGarden({
           <button
             onClick={() => setCurrentView('graph')}
             className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
-              currentView === 'graph' 
-                ? 'bg-[#3f3f46] text-[#f8fafc]' 
+              currentView === 'graph'
+                ? 'bg-[#3f3f46] text-[#f8fafc]'
                 : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
             }`}
           >
             Knowledge Graph
           </button>
-          
-          <button
-            onClick={() => setCurrentView('timeline')}
-            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
-              currentView === 'timeline' 
-                ? 'bg-[#3f3f46] text-[#f8fafc]' 
-                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
-            }`}
-          >
-            Timeline
-          </button>
-          
+
           <button
             onClick={() => setCurrentView('insights')}
             className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
@@ -142,10 +158,21 @@ export default function MemoryGarden({
       {/* Main Content */}
       <main className="flex flex-1 flex-col">
         {/* Header */}
-        <header className="flex h-14 items-center border-b border-[#3f3f46] px-6">
+        <header className="flex h-14 items-center border-b border-[#3f3f46] px-6 gap-4">
+          {/* Mobile Menu Button */}
+          {isMobile && (
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-2 text-[#a1a1aa] hover:text-[#f8fafc] tap-target"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          )}
+
           <h2 className="text-lg font-medium">
             {currentView === 'graph' && 'Knowledge Graph'}
-            {currentView === 'timeline' && 'Memory Timeline'}
             {currentView === 'insights' && 'Dream Insights'}
             {currentView === 'memory' && 'Memory Management'}
           </h2>
@@ -163,7 +190,7 @@ export default function MemoryGarden({
         <div className="flex-1 p-6">
           {currentView === 'graph' && (
             <div className="h-full">
-              <KnowledgeGraph 
+              <KnowledgeGraph
                 notes={notes}
                 onNodeClick={(nodeId, nodeType) => {
                   if (nodeType === 'note') {
@@ -174,18 +201,6 @@ export default function MemoryGarden({
                 useApiData={true}
               />
             </div>
-          )}
-
-          {currentView === 'timeline' && (
-            <TimelineView
-              notes={notes}
-              onItemClick={(item) => {
-                if (item.type === 'note' && item.metadata?.note_id) {
-                  const noteId = item.metadata.note_id
-                  setEditingNote(noteId)
-                }
-              }}
-            />
           )}
 
           {currentView === 'insights' && (

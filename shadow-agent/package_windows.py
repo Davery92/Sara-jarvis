@@ -28,8 +28,22 @@ def create_spec_file():
     """Generate PyInstaller spec file for single-file executable"""
     spec_content = """# -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import sys
+import os
 
 block_cipher = None
+
+# Find openwakeword models directory
+openwakeword_data = []
+try:
+    import openwakeword
+    oww_path = Path(openwakeword.__file__).parent
+    resources_path = oww_path / 'resources'
+    if resources_path.exists():
+        openwakeword_data = [(str(resources_path), 'openwakeword/resources')]
+        print(f"Found openwakeword resources at {resources_path}")
+except Exception as e:
+    print(f"Warning: Could not find openwakeword resources: {e}")
 
 # Collect all voice agent files
 a = Analysis(
@@ -41,14 +55,18 @@ a = Analysis(
         ('models', 'models'),
         # Include config template
         ('config.json.example', '.'),
-    ],
+    ] + openwakeword_data,
     hiddenimports=[
         'openwakeword',
+        'openwakeword.model',
+        'openwakeword.utils',
         'sounddevice',
         'numpy',
         'scipy',
         'torch',
         'onnxruntime',
+        'onnxruntime.capi',
+        'onnxruntime.capi.onnxruntime_pybind11_state',
         'websockets',
         'pystray',
         'PIL',
@@ -56,6 +74,8 @@ a = Analysis(
         'PIL.ImageDraw',
         'pyaudio',
         'wave',
+        'io',
+        'encodings.utf_8',
     ],
     hookspath=[],
     hooksconfig={},

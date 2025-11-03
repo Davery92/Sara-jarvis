@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "6gb", "--maxmemory-policy", "allkeys-lfu"]
+    restart: unless-stopped
+    volumes:
+      - /data/redis:/data
+    ports:
+      - "6379:6379"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      - VITE_SPRITE_BUS=true
+      - VITE_ASSISTANT_NAME=Sara
+      - VITE_DOMAIN=${VITE_DOMAIN-sara.avery.cloud}
+      - VITE_API_DOMAIN=${VITE_API_DOMAIN-sara-api.avery.cloud}
+    volumes:
+      # Mount source code for live editing
+      - ./frontend:/app
+      # Exclude node_modules (use container's version)
+      - /app/node_modules
+      # Exclude dist (use container's version)
+      - /app/dist
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
+      - OPENAI_MODEL=GLM-4.5-Air-Q5_K_M
+      - OPENAI_API_KEY=dummy
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://100.104.68.115:11434}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - ASSISTANT_NAME=Sara
+      - DOMAIN=${DOMAIN-sara.avery.cloud}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000"]
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - JARVIS_MODE=true
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - GRAPH_BACKEND=neo4j
+      - MINIO_URL=http://minio:9000
+      - MINIO_BUCKET=sara-docs
+      - MINIO_ACCESS_KEY=sara
+      - MINIO_SECRET_KEY=sara123
+      - JWT_SECRET=sara-hub-jwt-secret-change-in-production
+      - TIMEZONE=America/New_York
+      - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=sara-graph-secret
+    volumes:
+      # Mount source code for live editing
+      - ./backend:/app
+      # Exclude Python cache
+      - /app/__pycache__
+      - /app/app/__pycache__
+    depends_on:
+      db:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sara_hub
+      POSTGRES_USER: sara
+      POSTGRES_PASSWORD: sara123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: sara
+      MINIO_ROOT_PASSWORD: sara1234
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  neo4j:
+    image: neo4j:5.15-community
+    profiles: ["graph-neo4j"]
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/sara-graph-secret
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*,gds.*
+      NEO4J_apoc_export_file_enabled: 'true'
+      NEO4J_apoc_import_file_enabled: 'true'
+      NEO4J_apoc_import_file_use__neo4j__config: 'true'
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: 'yes'
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "sara-graph-secret", "RETURN 1;"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 25s
+
+volumes:
+  postgres_data:
+  minio_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:

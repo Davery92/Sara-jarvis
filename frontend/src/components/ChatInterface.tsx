@@ -484,7 +484,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   }
 
   return (
-    <div className="relative flex h-[calc(100vh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden">
+    <div className="relative flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden">
       {/* Mobile Sidebar Overlay */}
       {isMobile && !sidebarCollapsed && (
         <div 
@@ -495,7 +495,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       
       {/* Sidebar */}
       <div className={`${
-        sidebarCollapsed ? 'w-0' : isMobile ? 'absolute left-0 top-0 h-full w-80 z-50' : 'w-80'
+        sidebarCollapsed ? 'w-0' : isMobile ? 'absolute left-0 top-0 h-full w-full max-w-xs z-50' : 'w-80'
       } transition-all duration-300 bg-gray-800 border-r border-gray-700 flex flex-col overflow-hidden`}>
         {!sidebarCollapsed && (
           <>
@@ -815,8 +815,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             </div>
           )}
           
-          <form onSubmit={handleSendMessage} className="p-4">
-            <div className="flex space-x-4">
+          <form onSubmit={handleSendMessage} className="p-3 md:p-4">
+            <div className="flex space-x-2 md:space-x-4">
               <input
                 type="text"
                 value={message}
@@ -840,7 +840,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading}
-                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-4 rounded-lg transition-colors flex items-center"
+                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 md:px-4 rounded-lg transition-colors flex items-center tap-target"
                 title="Upload document"
               >
                 {isUploading ? (
@@ -850,10 +850,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 )}
               </button>
               
-              <button 
-                type="submit" 
+              <button
+                type="submit"
                 disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0)}
-                className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-6 rounded-lg transition-colors flex items-center"
+                className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-4 md:px-6 rounded-lg transition-colors flex items-center tap-target"
               >
                 <span className="material-icons">send</span>
               </button>

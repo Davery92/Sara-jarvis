@@ -12,14 +12,22 @@ LOG_DIR = Path.home() / ".sara"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "shadow-agent-voice.log"
 
+# Set UTF-8 encoding for console output on Windows
+if sys.platform == 'win32':
+    import io
+    # Force UTF-8 for stdout/stderr BEFORE logging setup
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
+
 logger = logging.getLogger(__name__)
 
 # Import voice components

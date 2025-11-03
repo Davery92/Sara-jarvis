@@ -224,7 +224,9 @@ class NightlyDreamService:
             logger.info(f"     ✅ Generated {len(tags)} smart tags")
             
             # Step 4: Store in Neo4j with full intelligence
-            success = await enhanced_neo4j.store_intelligent_content(
+            # Note: store_intelligent_content is now synchronous, so we run it in a thread pool
+            success = await asyncio.to_thread(
+                enhanced_neo4j.store_intelligent_content,
                 content_id=session_content_id,
                 user_id=user_id,
                 title=session_title,
@@ -454,7 +456,9 @@ class NightlyDreamService:
             tags.append(summary_tag)
             
             # Store intelligent summary
-            await enhanced_neo4j.store_intelligent_content(
+            # Note: store_intelligent_content is now synchronous, so we run it in a thread pool
+            await asyncio.to_thread(
+                enhanced_neo4j.store_intelligent_content,
                 content_id=summary_id,
                 user_id=user_id,
                 title=f"Daily Summary - {datetime.now().strftime('%Y-%m-%d')}",

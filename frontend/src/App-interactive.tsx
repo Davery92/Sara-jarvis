@@ -9,7 +9,6 @@ import MermaidDiagram from './components/MermaidDiagram'
 import MemoryGarden from './components/MemoryGarden'
 import SimplifiedNotes from './components/SimplifiedNotes'
 import KnowledgeGraph from './components/KnowledgeGraph'
-import VulnerabilityWatch from './components/VulnerabilityWatch'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
 import ShadowHistory from './components/ShadowHistory'
@@ -21,8 +20,8 @@ import Sprite, { SpriteHandle } from './components/Sprite'
 import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
-import SaraInbox from './components/JarvisInbox'
-import DailyBrief from './components/DailyBrief'
+import FitnessSection from './components/fitness/FitnessSection'
+import RecipesSection from './components/fitness/RecipesSection'
 // Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
@@ -72,7 +71,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, vulnerability-watch, shadow-history, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, shadow-history, fitness, recipes, settings
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -264,35 +263,6 @@ function App() {
       const interval = setInterval(loadTimersAndReminders, 60000) // Reduced from 30s to 60s
       return () => clearInterval(interval)
     }
-  }, [isAuthenticated])
-
-  // Optional: bias sprite tone based on latest vulnerability report (feature-flagged by spriteBus usage)
-  useEffect(() => {
-    if (!isAuthenticated) return
-    if (!APP_CONFIG.flags?.spriteBus) return
-
-    let cancelled = false
-    const fetchVulnTone = async () => {
-      try {
-        const resp = await fetch(`${APP_CONFIG.apiUrl}/api/vulnerability-reports/latest`, { credentials: 'include' })
-        if (!resp.ok) return
-        const data = await resp.json()
-        if (cancelled) return
-        const critical = (data?.critical_count || 0) > 0
-        const kev = (data?.kev_count || 0) > 0
-        if (critical || kev) {
-          spriteBus.setTone('serious', 'vuln:latest')
-        } else {
-          spriteBus.setTone(undefined, 'vuln:latest')
-        }
-      } catch (e) {
-        // ignore network errors silently
-      }
-    }
-    // fetch immediately and then every 10 minutes
-    fetchVulnTone()
-    const interval = setInterval(fetchVulnTone, 10 * 60 * 1000)
-    return () => { cancelled = true; clearInterval(interval) }
   }, [isAuthenticated])
 
   // Load analytics and notes when view changes to dashboard
@@ -1035,12 +1005,10 @@ function App() {
         },
         onOpen: () => {
           // Navigate to most relevant view based on notification type
-          if (message.toLowerCase().includes('vuln')) {
-            setView('vulnerability-watch')
-          } else if (message.toLowerCase().includes('timer')) {
+          if (message.toLowerCase().includes('timer')) {
             setView('dashboard')
           } else if (message.toLowerCase().includes('reminder')) {
-            setView('dashboard') 
+            setView('dashboard')
           } else {
             setView('chat')
           }
@@ -1117,9 +1085,7 @@ function App() {
           const views = {
             coach: 'habits',
             analyst: 'memory-garden',
-            companion: 'chat',
-            guardian: 'vulnerability-watch',
-            concierge: 'calendar',
+            companion: 'chat',            concierge: 'calendar',
             librarian: 'notes'
           }
           setView(views[mode] || 'dashboard')
@@ -1185,9 +1151,7 @@ function App() {
                 const viewMap: Record<string, string> = {
                   'habit_salvage': 'habits',
                   'content_pattern': 'notes',
-                  'knowledge_connection': 'notes',
-                  'security_alert': 'vulnerability-watch',
-                  'calendar_prep': 'calendar',
+                  'knowledge_connection': 'notes',                  'calendar_prep': 'calendar',
                   'weekly_summary': 'dashboard',
                   'gtky_prompt': 'settings',
                   'reflection_prompt': 'dashboard',
@@ -1329,109 +1293,101 @@ function App() {
         {/* Mobile Navigation Overlay */}
         {isMobileMenuOpen && (
           <div className="md:hidden fixed inset-0 bg-black bg-opacity-50 z-50" onClick={() => setIsMobileMenuOpen(false)}>
-            <div className="bg-gray-900 w-64 h-full p-4" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-6">
+            <div className="bg-gray-900 w-full max-w-sm h-full flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="flex justify-between items-center p-4 border-b border-gray-700 flex-shrink-0">
                 <div className="p-3 bg-white text-black rounded-lg font-bold text-xl">S</div>
-                <button onClick={() => setIsMobileMenuOpen(false)} className="text-gray-400">✕</button>
+                <button onClick={() => setIsMobileMenuOpen(false)} className="text-gray-400 text-2xl tap-target">✕</button>
               </div>
-              <nav className="flex flex-col space-y-4">
+              <nav className="flex-1 overflow-y-auto p-4 space-y-2">
                 <button
                   onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">🏠</span>
+                  <span className="material-icons">home</span>
                   <span>Home</span>
                 </button>
                 <button
                   onClick={() => { setView('chat'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">💬</span>
+                  <span className="material-icons">chat</span>
                   <span>Chat</span>
                 </button>
                 <button
                   onClick={() => { setView('notes'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">📝</span>
+                  <span className="material-icons">notes</span>
                   <span>Notes</span>
                 </button>
                 <button
                   onClick={() => { setView('memory-garden'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">🧠</span>
+                  <span className="material-icons">psychology</span>
                   <span>Memory Garden</span>
                 </button>
                 <button
                   onClick={() => { setView('habits'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">🎯</span>
+                  <span className="material-icons">track_changes</span>
                   <span>Habits</span>
                 </button>
                 <button
                   onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">📄</span>
+                  <span className="material-icons">description</span>
                   <span>Documents</span>
                 </button>
                 <button
                   onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">📅</span>
+                  <span className="material-icons">calendar_today</span>
                   <span>Calendar</span>
                 </button>
                 <button
-                  onClick={() => { setView('vulnerability-watch'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'vulnerability-watch' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  onClick={() => { setView('fitness'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">🛡️</span>
-                  <span>Vulnerability Watch</span>
+                  <span className="text-xl">💪</span>
+                  <span>Fitness</span>
+                </button>
+                <button
+                  onClick={() => { setView('recipes'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'recipes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="text-xl">👨‍🍳</span>
+                  <span>Recipes</span>
                 </button>
                 <button
                   onClick={() => { setView('shadow-history'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'shadow-history' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'shadow-history' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="text-xl">🕵️</span>
                   <span>Shadow History</span>
                 </button>
                 <button
-                  onClick={() => { setView('jarvis-inbox'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'jarvis-inbox' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">📥</span>
-                  <span>Inbox</span>
-                </button>
-                <button
-                  onClick={() => { setView('daily-brief'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'daily-brief' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">🌅</span>
-                  <span>Daily Brief</span>
-                </button>
-                <button
                   onClick={() => { setView('insights'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="text-xl">🧠</span>
                   <span>Sara's Insights</span>
                 </button>
-                {/* GTKY now accessible within Settings; Reflection removed */}
                 <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="text-xl">⚙️</span>
+                  <span className="material-icons">settings</span>
                   <span>Settings</span>
                 </button>
                 <button
                   onClick={() => { logout(); setIsMobileMenuOpen(false); }}
-                  className="flex items-center space-x-3 p-3 rounded text-gray-400 hover:text-white mt-8 border-t border-gray-700 pt-4"
+                  className="flex items-center space-x-3 p-3 rounded w-full text-gray-400 hover:text-white mt-6 border-t border-gray-700 pt-6 tap-target"
                 >
-                  <span className="text-xl">🚪</span>
+                  <span className="material-icons">logout</span>
                   <span>Logout</span>
                 </button>
               </nav>
@@ -1493,11 +1449,18 @@ function App() {
               <span className="text-xs">Calendar</span>
             </button>
             <button
-              onClick={() => setView('vulnerability-watch')}
-              className={`flex flex-col items-center ${view === 'vulnerability-watch' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setView('fitness')}
+              className={`flex flex-col items-center ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">security</span>
-              <span className="text-xs">Vulns</span>
+              <span className="text-xl">💪</span>
+              <span className="text-xs">Fitness</span>
+            </button>
+            <button
+              onClick={() => setView('recipes')}
+              className={`flex flex-col items-center ${view === 'recipes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="text-xl">👨‍🍳</span>
+              <span className="text-xs">Recipes</span>
             </button>
             <button
               onClick={() => setView('shadow-history')}
@@ -1507,18 +1470,11 @@ function App() {
               <span className="text-xs">Shadow</span>
             </button>
             <button
-              onClick={() => setView('jarvis-inbox')}
-              className={`flex flex-col items-center ${view === 'jarvis-inbox' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setView('insights')}
+              className={`flex flex-col items-center ${view === 'insights' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">inbox</span>
-              <span className="text-xs">Inbox</span>
-            </button>
-            <button
-              onClick={() => setView('daily-brief')}
-              className={`flex flex-col items-center ${view === 'daily-brief' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">wb_sunny</span>
-              <span className="text-xs">Brief</span>
+              <span className="material-icons">psychology</span>
+              <span className="text-xs">Insights</span>
             </button>
             {/* GTKY moved to Settings; Reflect removed */}
             <button
@@ -2162,21 +2118,18 @@ function App() {
             </div>
           )}
 
-          {view === 'vulnerability-watch' && (
-            <VulnerabilityWatch onToast={showToast} />
+          {view === 'fitness' && (
+            <FitnessSection />
+          )}
+
+          {view === 'recipes' && (
+            <RecipesSection />
           )}
 
           {view === 'shadow-history' && (
             <ShadowHistory />
           )}
 
-          {view === 'jarvis-inbox' && (
-            <SaraInbox />
-          )}
-
-          {view === 'daily-brief' && (
-            <DailyBrief />
-          )}
 
           {view === 'insights' && (
             <InsightInbox onToast={showToast} onNavigate={setView} />
@@ -2443,63 +2396,56 @@ function App() {
       </div>
       
       {/* Mobile Bottom Navigation */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40">
-        <div className="flex justify-around py-2">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40 overflow-x-auto scrollbar-hidden">
+        <div className="flex py-2 px-2 gap-1" style={{minWidth: 'fit-content'}}>
           <button
             onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
-            className={`flex flex-col items-center p-2 ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400'}`}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">home</span>
-            <span className="text-xs">Home</span>
+            <span className="text-xs whitespace-nowrap">Home</span>
           </button>
           <button
             onClick={() => setView('chat')}
-            className={`flex flex-col items-center p-2 ${view === 'chat' ? 'text-teal-400' : 'text-gray-400'}`}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">chat</span>
-            <span className="text-xs">Chat</span>
+            <span className="text-xs whitespace-nowrap">Chat</span>
           </button>
           <button
             onClick={() => { setView('notes'); loadNotes(); }}
-            className={`flex flex-col items-center p-2 ${view === 'notes' ? 'text-teal-400' : 'text-gray-400'}`}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">notes</span>
-            <span className="text-xs">Notes</span>
-          </button>
-          <button
-            onClick={() => { setView('memory-garden'); loadNotes(); }}
-            className={`flex flex-col items-center p-2 ${view === 'memory-garden' ? 'text-teal-400' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">psychology</span>
-            <span className="text-xs">Memory</span>
-          </button>
-          <button
-            onClick={() => setView('habits')}
-            className={`flex flex-col items-center p-2 ${view === 'habits' ? 'text-teal-400' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">track_changes</span>
-            <span className="text-xs">Habits</span>
-          </button>
-          <button
-            onClick={() => { setView('documents'); loadDocuments(); }}
-            className={`flex flex-col items-center p-2 ${view === 'documents' ? 'text-teal-400' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">description</span>
-            <span className="text-xs">Docs</span>
+            <span className="text-xs whitespace-nowrap">Notes</span>
           </button>
           <button
             onClick={() => setView('calendar')}
-            className={`flex flex-col items-center p-2 ${view === 'calendar' ? 'text-teal-400' : 'text-gray-400'}`}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">calendar_today</span>
-            <span className="text-xs">Calendar</span>
+            <span className="text-xs whitespace-nowrap">Calendar</span>
           </button>
           <button
-            onClick={() => setView('vulnerability-watch')}
-            className={`flex flex-col items-center p-2 ${view === 'vulnerability-watch' ? 'text-teal-400' : 'text-gray-400'}`}
+            onClick={() => setView('fitness')}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
-            <span className="material-icons text-lg">security</span>
-            <span className="text-xs">Vulns</span>
+            <span className="text-xl">💪</span>
+            <span className="text-xs whitespace-nowrap">Fitness</span>
+          </button>
+          <button
+            onClick={() => { setView('memory-garden'); loadNotes(); }}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">psychology</span>
+            <span className="text-xs whitespace-nowrap">Memory</span>
+          </button>
+          <button
+            onClick={() => setIsMobileMenuOpen(true)}
+            className="flex flex-col items-center px-3 py-2 rounded flex-shrink-0 text-gray-400 tap-target"
+          >
+            <span className="material-icons text-lg">more_horiz</span>
+            <span className="text-xs whitespace-nowrap">More</span>
           </button>
         </div>
       </nav>

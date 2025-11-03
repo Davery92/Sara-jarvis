@@ -10,25 +10,21 @@ interface ApiRequestOptions {
  * Make an authenticated API request
  */
 export async function apiRequest<T = any>(
-  endpoint: string, 
+  endpoint: string,
   options: ApiRequestOptions = {}
 ): Promise<T> {
   const { method = 'GET', body, headers = {} } = options;
-  
-  // Get auth token from localStorage (this is how the existing app handles auth)
-  const token = localStorage.getItem('token');
-  
+
+  // Sara uses HTTP-only cookie-based authentication, not Bearer tokens
+  // Cookies are automatically included via credentials: 'include'
+
   const requestHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     ...headers
   };
 
-  if (token) {
-    requestHeaders['Authorization'] = `Bearer ${token}`;
-  }
-
-  const url = endpoint.startsWith('http') 
-    ? endpoint 
+  const url = endpoint.startsWith('http')
+    ? endpoint
     : `${APP_CONFIG.apiUrl}${endpoint}`;
 
   const response = await fetch(url, {

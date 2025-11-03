@@ -45,8 +45,27 @@ export default function NotesKnowledgeGarden({
   const [memoryContext, setMemoryContext] = useState<any[]>([])
   const [loadingMemory, setLoadingMemory] = useState(false)
   const [noteMode, setNoteMode] = useState<'edit' | 'view'>('edit')
+  const [isMobile, setIsMobile] = useState(false)
+  const [mobileTab, setMobileTab] = useState<'list' | 'editor' | 'links'>('list')
 
   const currentNote = editingNote ? notes.find(n => n.id === editingNote) : null
+
+  // Mobile detection
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768)
+    }
+    checkMobile()
+    window.addEventListener('resize', checkMobile)
+    return () => window.removeEventListener('resize', checkMobile)
+  }, [])
+
+  // Auto-switch to editor tab when a note is selected on mobile
+  useEffect(() => {
+    if (isMobile && editingNote && mobileTab === 'list') {
+      setMobileTab('editor')
+    }
+  }, [editingNote, isMobile])
 
   // Find backlinks and related notes for current note
   useEffect(() => {
@@ -161,9 +180,13 @@ export default function NotesKnowledgeGarden({
   }, [editNoteContent, editNoteTitle])
 
   return (
-    <div className="flex h-screen w-full bg-[#18181b] text-[#f8fafc]">
+    <div className={`flex h-screen w-full bg-[#18181b] text-[#f8fafc] relative ${
+      isMobile ? 'pb-20' : ''
+    }`}>
       {/* Left Sidebar */}
-      <aside className="flex w-64 flex-col border-r border-[#3f3f46] p-4">
+      <aside className={`flex w-full md:w-80 flex-col border-r border-[#3f3f46] p-4 transition-all duration-300 ${
+        isMobile && mobileTab !== 'list' ? 'hidden' : ''
+      }`}>
         <div className="mb-6 flex items-center gap-2">
           <div className="h-8 w-8 bg-[#0d7ff2] rounded flex items-center justify-center">
             <span className="text-white font-bold text-sm">S</span>
@@ -284,7 +307,9 @@ export default function NotesKnowledgeGarden({
       </aside>
 
       {/* Main Content */}
-      <main className="flex flex-1 flex-col">
+      <main className={`flex flex-1 flex-col ${
+        isMobile && mobileTab !== 'editor' ? 'hidden' : ''
+      }`}>
         {/* Header */}
         <header className="flex h-14 items-center border-b border-[#3f3f46] px-6">
           <div className="relative w-full max-w-md">
@@ -481,7 +506,9 @@ export default function NotesKnowledgeGarden({
 
           {/* Right Sidebar - Context Panel */}
           {currentView === 'notes' && editingNote && (
-            <aside className="w-72 border-l border-[#3f3f46] p-4">
+            <aside className={`w-full md:w-80 border-l border-[#3f3f46] p-4 transition-all duration-300 ${
+              isMobile && mobileTab !== 'links' ? 'hidden' : ''
+            }`}>
               <div className="space-y-6">
                 {/* Backlinks */}
                 <div>
@@ -616,6 +643,49 @@ export default function NotesKnowledgeGarden({
           )}
         </div>
       </main>
+
+      {/* Mobile Bottom Tab Bar */}
+      {isMobile && (
+        <div className="fixed bottom-0 left-0 right-0 bg-[#18181b] border-t border-[#3f3f46] flex items-center justify-around px-4 py-3 z-50">
+          <button
+            onClick={() => setMobileTab('list')}
+            className={`flex flex-col items-center gap-1 px-4 py-2 rounded tap-target ${
+              mobileTab === 'list' ? 'text-[#0d7ff2]' : 'text-[#a1a1aa]'
+            }`}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            <span className="text-xs font-medium">Notes</span>
+          </button>
+
+          <button
+            onClick={() => setMobileTab('editor')}
+            className={`flex flex-col items-center gap-1 px-4 py-2 rounded tap-target transition-colors ${
+              mobileTab === 'editor' ? 'text-[#0d7ff2]' : !editingNote ? 'text-[#52525b] opacity-50' : 'text-[#a1a1aa]'
+            }`}
+            disabled={!editingNote}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+            <span className="text-xs font-medium">Editor</span>
+          </button>
+
+          <button
+            onClick={() => setMobileTab('links')}
+            className={`flex flex-col items-center gap-1 px-4 py-2 rounded tap-target transition-colors ${
+              mobileTab === 'links' ? 'text-[#0d7ff2]' : !editingNote ? 'text-[#52525b] opacity-50' : 'text-[#a1a1aa]'
+            }`}
+            disabled={!editingNote}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+            </svg>
+            <span className="text-xs font-medium">Links</span>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

@@ -5,10 +5,17 @@ Detects "sarah" wake word with configurable sensitivity
 import numpy as np
 import time
 import logging
+import sys
 from pathlib import Path
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
+
+# Force ONNX runtime on Windows (tflite-runtime not available)
+if sys.platform == 'win32':
+    import os
+    os.environ['OPENWAKEWORD_INFERENCE_FRAMEWORK'] = 'onnx'
+    logger.info("Configured openWakeWord to use ONNX runtime (Windows)")
 
 
 class WakeWordDetector:
@@ -49,17 +56,29 @@ class WakeWordDetector:
         if model_path is None:
             # Default to sarah model in models/ directory
             # Try ONNX first (Windows), then TFLite (Linux/Mac)
-            agent_root = Path(__file__).parent.parent
-            onnx_path = agent_root / "models" / "sarah.onnx"
-            tflite_path = agent_root / "models" / "sarah.tflite"
+
+            # Check if running from PyInstaller bundle
+            if getattr(sys, 'frozen', False):
+                # Running in a PyInstaller bundle
+                bundle_dir = Path(sys._MEIPASS)
+                logger.info(f"Running from PyInstaller bundle: {bundle_dir}")
+            else:
+                # Running in normal Python environment
+                bundle_dir = Path(__file__).parent.parent
+
+            onnx_path = bundle_dir / "models" / "sarah.onnx"
+            tflite_path = bundle_dir / "models" / "sarah.tflite"
+
+            logger.info(f"Looking for models in: {bundle_dir / 'models'}")
 
             if onnx_path.exists():
                 model_path = onnx_path
-                logger.info("Found ONNX model (Windows compatible)")
+                logger.info(f"Found ONNX model: {onnx_path}")
             elif tflite_path.exists():
                 model_path = tflite_path
-                logger.info("Found TFLite model")
+                logger.info(f"Found TFLite model: {tflite_path}")
             else:
+                logger.warning(f"No custom model found at {bundle_dir / 'models'}")
                 model_path = None
 
         self.model_path = Path(model_path) if model_path else None

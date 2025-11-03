@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -31,15 +31,8 @@ from urllib.parse import urlparse
 import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
+from app.core import config
 
-# Import vulnerability services
-try:
-    from app.services.vulnerability_service import fetch_all_vulnerability_data, VulnerabilityProcessor
-    from app.services.vulnerability_notifications import VulnerabilityNotificationService, notify_report_ready
-    VULNERABILITY_SERVICES_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"Vulnerability services not available: {e}")
-    VULNERABILITY_SERVICES_AVAILABLE = False
 
 # Import GTKY service
 try:
@@ -78,7 +71,8 @@ except ImportError:
 
 # Configuration
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sara_hub.db")
+# IMPORTANT: Always use PostgreSQL, never SQLite
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@db:5432/sara_hub")
 JWT_SECRET = os.getenv("JWT_SECRET", "sara-hub-jwt-secret-development")
 JWT_ALGORITHM = "HS256"
 # CORS configuration for frontend origins
@@ -352,44 +346,6 @@ class DreamInsight(Base):
     
     created_at = Column(DateTime, server_default=func.now())
 
-class VulnerabilityReport(Base):
-    """Daily vulnerability reports generated from multiple sources"""
-    __tablename__ = "vulnerability_report"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Report metadata
-    report_date = Column(DateTime, nullable=False, unique=True)
-    title = Column(String, nullable=False)
-    summary = Column(Text, nullable=True)  # Brief summary for notifications
-    
-    # Report content
-    content = Column(Text, nullable=False)  # Markdown content
-    vulnerabilities_count = Column(Integer, default=0)
-    critical_count = Column(Integer, default=0)
-    kev_count = Column(Integer, default=0)  # Known Exploited Vulnerabilities
-    vulnerability_ids = Column(Text, nullable=True)  # JSON list of CVE IDs in this report
-    
-    # Processing status
-    processed_to_neo4j = Column(Integer, default=0)  # Boolean flag for Neo4j integration
-    
-    created_at = Column(DateTime, server_default=func.now())
-
-class NotificationLog(Base):
-    """Track NTFY notifications to prevent spam and for debugging"""
-    __tablename__ = "notification_log"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Notification details
-    notification_type = Column(String, nullable=False)  # 'report_ready', 'critical_vuln'
-    reference_id = Column(String, nullable=True)  # report_id or cve_id
-    title = Column(String, nullable=False)
-    message = Column(Text, nullable=False)
-    
-    # Delivery tracking
-    ntfy_response = Column(Text, nullable=True)
-    sent_at = Column(DateTime, server_default=func.now())
 
 # Habit Tracking Models
 class Habit(Base):
@@ -788,40 +744,6 @@ class ConversationTurnResponse(BaseModel):
     message_index: int
     created_at: str
 
-class VulnerabilityReportResponse(BaseModel):
-    id: str
-    report_date: str
-    title: str
-    summary: Optional[str]
-    content: str
-    vulnerabilities_count: int
-    critical_count: int
-    kev_count: int
-    created_at: str
-
-class VulnerabilityReportListResponse(BaseModel):
-    id: str
-    report_date: str
-    title: str
-    summary: Optional[str]
-    vulnerabilities_count: int
-    critical_count: int
-    kev_count: int
-    created_at: str
-
-class NotificationRequest(BaseModel):
-    type: str  # 'report_ready' or 'critical_vuln'
-    title: str
-    message: str
-    reference_id: Optional[str] = None
-
-class NotificationResponse(BaseModel):
-    id: str
-    notification_type: str
-    title: str
-    message: str
-    sent_at: str
-
 # Habit Tracking Pydantic Models
 class HabitCreate(BaseModel):
     title: str
@@ -1056,8 +978,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def get_cookie_domain(request: Request) -> str:
     """Determine the appropriate cookie domain based on the request host."""
     host = request.headers.get("host", "")
-    if "sara.avery.cloud" in host:
-        return ".sara.avery.cloud"
+    # Check if host is avery.cloud or any subdomain
+    if host.endswith("avery.cloud") or "avery.cloud:" in host:
+        return ".avery.cloud"
     else:
         # For local development, don't set a domain (defaults to current host)
         return None
@@ -1130,63 +1053,112 @@ class SimpleLLMClient:
             })
     
     async def _stream_response(self, payload):
-        """Stream response from LLM and emit text chunks"""
+        """Stream response from LLM with XML filtering for GLM-4.5"""
+        import re
+
         full_content = ""
+        emitted_content = ""  # Track what we've already sent to user
         tool_calls = []
-        
+
         try:
-            async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions", 
-                                        json=payload, 
+            async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions",
+                                        json=payload,
                                         headers={"Authorization": "Bearer dummy"}) as response:
                 response.raise_for_status()
-                
+
                 async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+
+                    # OpenAI SSE format uses "data: " prefix
                     if line.startswith("data: "):
-                        line_data = line[6:]
-                        if line_data == "[DONE]":
-                            break
-                        
-                        try:
-                            chunk = json.loads(line_data)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            
-                            # Handle content streaming
-                            if "content" in delta and delta["content"]:
-                                content_chunk = delta["content"]
-                                full_content += content_chunk
-                                await self.emit_event("text_chunk", {
-                                    "content": content_chunk,
-                                    "full_content": full_content
-                                })
-                            
-                            # Handle tool calls
-                            if "tool_calls" in delta:
-                                if not tool_calls:
-                                    tool_calls = delta["tool_calls"]
-                                else:
-                                    # Merge tool calls
-                                    for i, tc in enumerate(delta["tool_calls"]):
-                                        if i < len(tool_calls):
-                                            if "function" in tc and "arguments" in tc["function"]:
-                                                tool_calls[i]["function"]["arguments"] += tc["function"]["arguments"]
-                                        else:
-                                            tool_calls.append(tc)
-                                            
-                        except json.JSONDecodeError:
-                            continue
-            
-            # Return message object compatible with existing code
+                        line = line[6:]  # Remove "data: " prefix
+
+                    # Check for completion marker
+                    if line == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(line)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+
+                        # Handle content streaming with XML filtering
+                        if "content" in delta and delta["content"]:
+                            content_chunk = delta["content"]
+                            full_content += content_chunk
+
+                            # Filter out XML tags before emitting to user
+                            # Find all XML tag boundaries in current buffer
+                            unemitted = full_content[len(emitted_content):]
+
+                            # Check if we're inside an XML tag or if one is starting
+                            # Look for incomplete tags: <tool_call, <think, etc
+                            xml_tag_pattern = r'<(tool_call|think)(?:\s|>|$)'
+                            tag_match = re.search(xml_tag_pattern, unemitted)
+
+                            if tag_match:
+                                # Found start of XML tag - only emit content before it
+                                safe_content = unemitted[:tag_match.start()]
+                                if safe_content:
+                                    emitted_content += safe_content
+                                    await self.emit_event("text_chunk", {
+                                        "content": safe_content,
+                                        "full_content": emitted_content
+                                    })
+                            else:
+                                # Check if we might be at the start of a tag (e.g., just got "<")
+                                if unemitted and not unemitted.rstrip().endswith('<'):
+                                    # Safe to emit - no XML tag detected
+                                    emitted_content += unemitted
+                                    await self.emit_event("text_chunk", {
+                                        "content": unemitted,
+                                        "full_content": emitted_content
+                                    })
+                                # Otherwise, hold the buffer (might be start of XML tag)
+
+                        # Handle tool calls (standard OpenAI format)
+                        if "tool_calls" in delta:
+                            if not tool_calls:
+                                tool_calls = delta["tool_calls"]
+                            else:
+                                # Merge tool calls
+                                for i, tc in enumerate(delta["tool_calls"]):
+                                    if i < len(tool_calls):
+                                        if "function" in tc and "arguments" in tc["function"]:
+                                            tool_calls[i]["function"]["arguments"] += tc["function"]["arguments"]
+                                    else:
+                                        tool_calls.append(tc)
+
+                    except json.JSONDecodeError:
+                        continue
+
+            # After streaming completes, parse any XML tool calls
+            if "<tool_call>" in full_content or "<think>" in full_content:
+                logger.info("Detected GLM-4.5 XML format, parsing tool calls...")
+                cleaned_content, parsed_tool_calls = parse_glm45_tool_calls(full_content)
+
+                # Merge with any JSON tool calls from streaming (in case both formats present)
+                all_tool_calls = parsed_tool_calls if parsed_tool_calls else []
+                if tool_calls:
+                    all_tool_calls.extend(tool_calls)
+
+                return {
+                    "content": cleaned_content,
+                    "tool_calls": all_tool_calls if all_tool_calls else None
+                }
+
+            # Return message object compatible with existing code (standard OpenAI format)
             return {
                 "content": full_content,
                 "tool_calls": tool_calls if tool_calls else None
             }
-            
+
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             # Fallback to non-streaming
             payload_fallback = payload.copy()
             payload_fallback.pop("stream", None)
-            
+
             response = await self.client.post(
                 f"{OPENAI_BASE_URL}/chat/completions",
                 json=payload_fallback,
@@ -1203,7 +1175,8 @@ class SimpleLLMClient:
                 json={
                     "model": OPENAI_MODEL,
                     "messages": [{"role": m.role, "content": m.content} for m in messages],
-                    "temperature": 0.7
+                    "temperature": 0.7,
+                    "max_tokens": 2000
                 },
                 headers={"Authorization": "Bearer dummy"}
             )
@@ -1264,7 +1237,12 @@ class SimpleLLMClient:
                         })
                     
                     # Add assistant message with tool calls and tool responses
-                    current_messages.append(message)
+                    # IMPORTANT: llama-server requires "role" field in all messages
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": message.get("content", ""),
+                        "tool_calls": message["tool_calls"]
+                    })
                     current_messages.extend(tool_responses)
                     
                     # Truncate messages if conversation is getting too long to prevent 500 errors
@@ -1280,8 +1258,8 @@ class SimpleLLMClient:
                         "round": round_num + 1,
                         "status": "processing_tools"
                     })
-                    
-                    # Make follow-up request with streaming
+
+                    # Make follow-up request with streaming (with retry logic)
                     follow_up_payload = {
                         "model": OPENAI_MODEL,
                         "messages": current_messages,
@@ -1290,8 +1268,61 @@ class SimpleLLMClient:
                         "tools": tools,
                         "stream": True
                     }
-                    
-                    message = await self._stream_response(follow_up_payload)
+
+                    # Retry logic for JSONDecodeError
+                    max_retries = 2
+                    message = None
+                    last_error = None
+
+                    for retry_attempt in range(max_retries + 1):
+                        try:
+                            message = await self._stream_response(follow_up_payload)
+                            # Success - break out of retry loop
+                            if retry_attempt > 0:
+                                logger.info(f"✅ Retry {retry_attempt} succeeded for follow-up LLM call")
+                            break
+                        except json.JSONDecodeError as e:
+                            last_error = e
+                            logger.warning(f"⚠️ JSONDecodeError on attempt {retry_attempt + 1}/{max_retries + 1}: {e}")
+                            if retry_attempt < max_retries:
+                                logger.info(f"🔄 Retrying follow-up LLM call (attempt {retry_attempt + 2}/{max_retries + 1})...")
+                                import asyncio
+                                await asyncio.sleep(0.5)  # Brief delay before retry
+                            else:
+                                # All retries failed - synthesize a completion response from tool results
+                                logger.warning(f"❌ All {max_retries + 1} attempts failed. Synthesizing completion from tool results.")
+                                # Build a summary from tool responses
+                                tool_summary = []
+                                for tr in tool_responses:
+                                    if tr.get("content"):
+                                        tool_summary.append(str(tr["content"])[:200])
+                                completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                                message = {
+                                    "content": completion_msg,
+                                    "tool_calls": None
+                                }
+                        except Exception as e:
+                            # Other errors should be caught but not crash - fallback to tool results
+                            logger.error(f"❌ Unexpected error during LLM call: {e}")
+                            # Create a fallback message from tool results
+                            tool_summary = []
+                            for tr in tool_responses:
+                                if tr.get("content"):
+                                    tool_summary.append(str(tr["content"])[:200])
+                            completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                            message = {
+                                "content": completion_msg,
+                                "tool_calls": None
+                            }
+                            break  # Exit retry loop
+
+                    if message is None:
+                        # Fallback if something went wrong
+                        logger.error("Failed to get message after retries")
+                        message = {
+                            "content": "Tool execution completed successfully.",
+                            "tool_calls": None
+                        }
                     
                     # Enhanced debugging
                     logger.info(f"🔍 Round {round_num + 1} - Message keys: {list(message.keys())}")
@@ -1339,15 +1370,38 @@ class SimpleLLMClient:
             await self.store_conversation(messages, response_content, user_id, conversation_id)
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
-                
+
         except Exception as e:
-            logger.error(f"LLM error: {e}")
+            import traceback
+            logger.error(f"LLM error in chat_with_tools: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
     async def execute_tool(self, tool_call, user_id):
         """Execute a tool call and return the response"""
         function_name = tool_call["function"]["name"]
-        arguments = json.loads(tool_call["function"]["arguments"])
+        args_str = tool_call["function"]["arguments"]
+        logger.info(f"🔧 Tool {function_name} - raw arguments string: {repr(args_str)[:200]}")
+
+        # Handle empty arguments string from malformed tool calls
+        if not args_str or args_str.strip() == "":
+            logger.warning(f"⚠️ Empty arguments for {function_name}, using empty dict")
+            arguments = {}
+        else:
+            try:
+                arguments = json.loads(args_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Failed to parse arguments for {function_name}: {e}")
+                logger.error(f"   Raw args: {repr(args_str)}")
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps({
+                        "success": False,
+                        "message": f"Invalid tool arguments: {str(e)}",
+                        "data": None
+                    })
+                }
         
         logger.info(f"Executing tool {function_name} with arguments: {arguments}")
         
@@ -2292,11 +2346,19 @@ class SimpleLLMClient:
                 
                 # Store only new messages that aren't already stored
                 for message in messages:
-                    if message.role in ["user", "assistant"] and message.content not in existing_content:
+                    # Handle both ChatMessage objects and dict formats
+                    if isinstance(message, dict):
+                        role = message.get("role")
+                        content = message.get("content")
+                    else:
+                        role = message.role
+                        content = message.content
+
+                    if role in ["user", "assistant"] and content and content not in existing_content:
                         await intelligent_memory_service.store_episode(
                             user_id=user_id,
-                            role=message.role,
-                            content=message.content,
+                            role=role,
+                            content=content,
                             conversation_id=conversation_id,
                             source="chat",
                             memory_type="conversation"
@@ -2403,67 +2465,83 @@ class SimpleLLMClient:
             logger.warning(f"Error storing legacy conversation: {e}")
 
     async def generate_conversation_title(self, conversation_id, db):
-        """Generate a descriptive title for the conversation"""
+        """Generate a descriptive title for the conversation (only once)"""
         try:
-            # Get the first few user messages to generate a title
+            # Check if conversation already has a title
+            conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if not conversation:
+                return
+
+            # Skip if title already exists and is not empty
+            if conversation.title and conversation.title.strip():
+                logger.debug(f"Conversation {conversation_id} already has title: '{conversation.title}', skipping")
+                return
+
+            logger.debug(f"Generating title for conversation {conversation_id} (current title: '{conversation.title}')")
+
+            # Get only the FIRST user message to generate a title
             turns = db.query(ConversationTurn).filter(
                 ConversationTurn.conversation_id == conversation_id,
                 ConversationTurn.role == "user"
-            ).order_by(ConversationTurn.message_index).limit(3).all()
-            
+            ).order_by(ConversationTurn.message_index).limit(1).all()
+
             if not turns:
                 return
-            
-            # Create a summary of the user's initial messages
-            user_messages = [turn.content for turn in turns]
-            combined_content = " | ".join(user_messages)
-            
+
+            # Use only the first message as the title
+            first_message = turns[0].content
+
             # Generate a short title (keep it simple for now)
-            if len(combined_content) > 100:
-                title = combined_content[:97] + "..."
+            if len(first_message) > 100:
+                title = first_message[:97] + "..."
             else:
-                title = combined_content
-            
+                title = first_message
+
             # Update the conversation with the title
-            conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-            if conversation:
-                conversation.title = title
-                conversation.updated_at = datetime.now()
-                db.commit()
-                
+            conversation.title = title
+            conversation.updated_at = datetime.now()
+            db.commit()
+            logger.info(f"Generated title for conversation {conversation_id}: {title}")
+
         except Exception as e:
             logger.error(f"Error generating conversation title: {e}")
 
 class EmbeddingService:
     def __init__(self):
-        # Create client lazily per-call to avoid event loop/session lifecycle issues
-        # Normalize embedding base URL
-        base = (EMBEDDING_BASE_URL or "").strip().rstrip("/")
+        # Don't cache settings at init time - read them dynamically
+        # This allows runtime settings updates to take effect
+        pass
+
+    def _get_current_settings(self):
+        """Get current settings dynamically so runtime updates work"""
+        # Read from config.settings which gets updated by settings endpoint
+        base = (config.settings.embedding_base_url or "").strip().rstrip("/")
         try:
             from urllib.parse import urlparse
             p = urlparse(base)
             if not p.scheme or not p.netloc:
                 logger.warning("Embedding base URL invalid or empty; falling back to OPENAI_BASE_URL root")
-                base = (OPENAI_BASE_URL or "").rstrip("/")
+                base = (config.settings.openai_base_url or "").rstrip("/")
                 if base.endswith("/v1"):
                     base = base[:-3].rstrip("/")
         except Exception:
-            base = (OPENAI_BASE_URL or "").rstrip("/")
+            base = (config.settings.openai_base_url or "").rstrip("/")
             if base.endswith("/v1"):
                 base = base[:-3].rstrip("/")
-        self.base_url = base
-        self.model = EMBEDDING_MODEL
-        self.dimension = EMBEDDING_DIM
+        return base, config.settings.embedding_model, config.settings.embedding_dim
     
     async def generate_embedding(self, text: str) -> list[float]:
         """Generate embedding for text using BGE-M3 model"""
         try:
+            # Get current settings dynamically for runtime updates to work
+            base_url, model, dimension = self._get_current_settings()
+
             # Use the embeddings endpoint
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.base_url}/v1/embeddings",
+                    f"{base_url}/v1/embeddings",
                     json={
-                        "model": self.model,
+                        "model": model,
                         "input": text,
                         "encoding_format": "float"
                     },
@@ -2471,21 +2549,21 @@ class EmbeddingService:
                     timeout=30.0
                 )
             response.raise_for_status()
-            
+
             result = response.json()
             embedding = result["data"][0]["embedding"]
-            
+
             # Ensure the embedding has the correct dimension
-            if len(embedding) != self.dimension:
-                logger.warning(f"Expected embedding dimension {self.dimension}, got {len(embedding)}")
+            if len(embedding) != dimension:
+                logger.warning(f"Expected embedding dimension {dimension}, got {len(embedding)}")
                 # Pad or truncate to match expected dimension
-                if len(embedding) < self.dimension:
-                    embedding.extend([0.0] * (self.dimension - len(embedding)))
+                if len(embedding) < dimension:
+                    embedding.extend([0.0] * (dimension - len(embedding)))
                 else:
-                    embedding = embedding[:self.dimension]
-            
+                    embedding = embedding[:dimension]
+
             return embedding
-            
+
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             return None
@@ -2493,12 +2571,105 @@ class EmbeddingService:
     async def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts"""
         try:
+            # Get current dimension for default fallback
+            _, _, dimension = self._get_current_settings()
             # For now, process individually to avoid API limits
-            return [await self.generate_embedding(text) or ([0.0] * self.dimension) for text in texts]
-            
+            return [await self.generate_embedding(text) or ([0.0] * dimension) for text in texts]
+
         except Exception as e:
+            # Get current dimension for error fallback
+            _, _, dimension = self._get_current_settings()
             logger.error(f"Error generating batch embeddings: {e}")
-            return [[0.0] * self.dimension] * len(texts)
+            return [[0.0] * dimension] * len(texts)
+
+
+# ============================================================================
+# GLM-4.5 XML Tool Call Parser
+# ============================================================================
+
+def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
+    """
+    Parse GLM-4.5 XML-formatted tool calls and convert to OpenAI JSON format.
+
+    GLM-4.5 Format:
+        <tool_call>function_name </tool_call>
+        <tool_call>function_name <arg_key>param</arg_key> <arg_value>value</arg_value></tool_call>
+
+    OpenAI Format:
+        {
+            "tool_calls": [{
+                "id": "call_xxx",
+                "type": "function",
+                "function": {"name": "function_name", "arguments": "{}"}
+            }]
+        }
+
+    Returns:
+        (cleaned_content, tool_calls_list)
+    """
+    import re
+    import uuid
+
+    # Find all tool_call blocks
+    tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+    matches = re.findall(tool_call_pattern, content, re.DOTALL)
+
+    if not matches:
+        # No tool calls found, return original content
+        return content, []
+
+    tool_calls = []
+
+    for match in matches:
+        match = match.strip()
+
+        # Extract function name (first word)
+        parts = match.split()
+        if not parts:
+            logger.warning(f"Empty tool_call block found")
+            continue
+
+        function_name = parts[0]
+
+        # Parse arguments if present
+        arguments = {}
+        arg_key_pattern = r'<arg_key>(.*?)</arg_key>'
+        arg_value_pattern = r'<arg_value>(.*?)</arg_value>'
+
+        keys = re.findall(arg_key_pattern, match)
+        values = re.findall(arg_value_pattern, match)
+
+        # Match keys with values
+        for key, value in zip(keys, values):
+            arguments[key.strip()] = value.strip()
+
+        # Create OpenAI-compatible tool call
+        tool_call = {
+            "id": f"call_{str(uuid.uuid4())[:8]}",
+            "type": "function",
+            "function": {
+                "name": function_name,
+                "arguments": json.dumps(arguments) if arguments else "{}"
+            }
+        }
+
+        tool_calls.append(tool_call)
+        logger.info(f"Parsed GLM-4.5 tool call: {function_name} with args: {arguments}")
+
+    # Remove all tool_call XML tags from content
+    cleaned_content = re.sub(tool_call_pattern, '', content, flags=re.DOTALL).strip()
+
+    # Also handle <think> tags (GLM-4.5 reasoning)
+    think_pattern = r'<think>(.*?)</think>'
+    think_matches = re.findall(think_pattern, cleaned_content, re.DOTALL)
+    if think_matches:
+        # Extract reasoning content but don't include in final response
+        reasoning = " ".join([m.strip() for m in think_matches])
+        logger.debug(f"GLM-4.5 reasoning: {reasoning[:100]}...")
+        cleaned_content = re.sub(think_pattern, '', cleaned_content, flags=re.DOTALL).strip()
+
+    return cleaned_content, tool_calls
+
 
 llm_client = SimpleLLMClient()
 embedding_service = EmbeddingService()
@@ -2871,7 +3042,7 @@ Message: [message]"""
                     },
                     headers={"Authorization": "Bearer dummy"}
                 )
-                
+
                 if response.status_code == 200:
                     result = response.json()
                     ai_response = result["choices"][0]["message"]["content"]
@@ -3247,7 +3418,7 @@ Return JSON format:
                     },
                     headers={"Authorization": "Bearer dummy"}
                 )
-                
+
                 if response.status_code == 200:
                     result = response.json()
                     ai_response = result["choices"][0]["message"]["content"].strip()
@@ -4307,15 +4478,11 @@ except Exception as e:
 
 # Include Jarvis mode routes
 try:
-    from app.routes.jarvis_inbox import router as inbox_router
-    from app.routes.daily_brief import router as brief_router
     from app.routes.calendar import router as calendar_router
     from app.routes.threads import router as threads_router
     from app.routes.shadow import router as shadow_router
     from app.routes.wyoming import router as wyoming_router
     from app.routes.agent_downloads import router as downloads_router
-    app.include_router(inbox_router, prefix="/api")
-    app.include_router(brief_router, prefix="/api")
     app.include_router(calendar_router, prefix="/events")
     app.include_router(threads_router, prefix="/threads")
     app.include_router(shadow_router, prefix="/shadow", tags=["Shadow Mode"])
@@ -4325,6 +4492,22 @@ try:
 except Exception as e:
     logger.warning(f"Jarvis routes not available: {e}")
     logger.warning("Running in Sara mode only")
+
+# Include Fitness routes (independent of Jarvis mode)
+try:
+    from app.routes.fitness import router as fitness_router
+    app.include_router(fitness_router, prefix="/api/fitness", tags=["Fitness"])
+    logger.info("✅ Fitness routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Fitness routes failed to load: {e}")
+
+# Include Food Database routes
+try:
+    from app.routes.food_database import router as food_db_router
+    app.include_router(food_db_router, prefix="/api/fitness", tags=["Food Database"])
+    logger.info("✅ Food database routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Food database routes failed to load: {e}")
 
 # ===================== NIGHTLY MEMORY CONSOLIDATION =====================
 class MemoryConsolidationScheduler:
@@ -4506,10 +4689,54 @@ async def shadow_auto_wrap_task():
             await asyncio.sleep(60)  # Continue checking even if there's an error
 
 # Initialize Neo4j on startup
+def load_settings_from_db():
+    """Load persistent settings from database on startup"""
+    global OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
+    global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+
+    try:
+        db = SessionLocal()
+        result = db.execute(sql_text("SELECT key, value FROM app_settings")).fetchall()
+        settings_dict = {row[0]: row[1] for row in result}
+        db.close()
+
+        if settings_dict:
+            logger.info(f"📝 Loading {len(settings_dict)} persisted settings from database")
+
+            if "openai_base_url" in settings_dict:
+                OPENAI_BASE_URL = settings_dict["openai_base_url"]
+                config.settings.openai_base_url = OPENAI_BASE_URL
+
+            if "openai_model" in settings_dict:
+                OPENAI_MODEL = settings_dict["openai_model"]
+                config.settings.openai_model = OPENAI_MODEL
+
+            if "openai_notification_model" in settings_dict:
+                OPENAI_NOTIFICATION_MODEL = settings_dict["openai_notification_model"]
+
+            if "embedding_base_url" in settings_dict:
+                EMBEDDING_BASE_URL = settings_dict["embedding_base_url"]
+                config.settings.embedding_base_url = EMBEDDING_BASE_URL
+
+            if "embedding_model" in settings_dict:
+                EMBEDDING_MODEL = settings_dict["embedding_model"]
+                config.settings.embedding_model = EMBEDDING_MODEL
+
+            if "embedding_dim" in settings_dict:
+                EMBEDDING_DIM = int(settings_dict["embedding_dim"])
+                config.settings.embedding_dim = EMBEDDING_DIM
+
+            logger.info("✅ Persisted settings loaded successfully")
+    except Exception as e:
+        logger.warning(f"Could not load persisted settings (using defaults): {e}")
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on application startup"""
     try:
+        # Load persisted settings FIRST before initializing services
+        load_settings_from_db()
+
         # Initialize Neo4j service when enabled
         if GRAPH_BACKEND == "neo4j":
             from app.services.neo4j_service import neo4j_service
@@ -4642,10 +4869,12 @@ async def signup(user_data: UserCreate, request: Request, response: Response, db
     # Auto-login after signup
     access_token = create_access_token(data={"sub": user.id})
     cookie_domain = get_cookie_domain(request)
+    # Detect if request is HTTPS
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     cookie_kwargs = {
         "key": "access_token",
         "value": access_token,
-        "secure": False,  # Development
+        "secure": is_secure,  # Use secure flag for HTTPS
         "httponly": True,
         "samesite": "lax",
         "max_age": 24*7*3600
@@ -4684,10 +4913,12 @@ async def login(user_data: UserLogin, request: Request, response: Response, db: 
     
     access_token = create_access_token(data={"sub": user.id})
     cookie_domain = get_cookie_domain(request)
+    # Detect if request is HTTPS
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     cookie_kwargs = {
         "key": "access_token",
         "value": access_token,
-        "secure": False,  # Development
+        "secure": is_secure,  # Use secure flag for HTTPS
         "httponly": True,
         "samesite": "lax",
         "max_age": 24*7*3600
@@ -6921,39 +7152,62 @@ async def update_ai_settings(
 
     if settings.openai_base_url is not None:
         OPENAI_BASE_URL = _normalize_openai(settings.openai_base_url)
+        config.settings.openai_base_url = OPENAI_BASE_URL
         updated_settings["openai_base_url"] = OPENAI_BASE_URL
-        
+
     if settings.openai_model is not None:
         OPENAI_MODEL = settings.openai_model
+        config.settings.openai_model = settings.openai_model
         updated_settings["openai_model"] = settings.openai_model
-        
+
     if settings.openai_notification_model is not None:
         OPENAI_NOTIFICATION_MODEL = settings.openai_notification_model
         updated_settings["openai_notification_model"] = settings.openai_notification_model
-        
+
     if settings.embedding_base_url is not None:
         EMBEDDING_BASE_URL = _normalize_embedding(settings.embedding_base_url)
+        config.settings.embedding_base_url = EMBEDDING_BASE_URL
         updated_settings["embedding_base_url"] = EMBEDDING_BASE_URL
-        
+
     if settings.embedding_model is not None:
         EMBEDDING_MODEL = settings.embedding_model
+        config.settings.embedding_model = settings.embedding_model
         updated_settings["embedding_model"] = settings.embedding_model
-        
+
     if settings.embedding_dimension is not None:
         EMBEDDING_DIM = settings.embedding_dimension
+        config.settings.embedding_dim = settings.embedding_dimension
         updated_settings["embedding_dimension"] = settings.embedding_dimension
     
-    # Reinitialize services with new settings
-    global llm_client, embedding_service
-    llm_client = SimpleLLMClient()
-    embedding_service = EmbeddingService()
-    
+    # Persist settings to database for survival across restarts
+    try:
+        db = SessionLocal()
+        for key, value in updated_settings.items():
+            # Use UPSERT (INSERT ... ON CONFLICT UPDATE) to save settings
+            db.execute(sql_text("""
+                INSERT INTO app_settings (key, value, updated_at, updated_by)
+                VALUES (:key, :value, CURRENT_TIMESTAMP, :updated_by)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = EXCLUDED.updated_at,
+                    updated_by = EXCLUDED.updated_by
+            """), {"key": key, "value": str(value), "updated_by": current_user.email})
+        db.commit()
+        db.close()
+        logger.info(f"💾 Persisted {len(updated_settings)} settings to database")
+    except Exception as e:
+        logger.error(f"Failed to persist settings to database: {e}")
+
+    # No need to reinitialize services - EmbeddingService now reads settings dynamically
+    # SimpleLLMClient and other services already read from config.settings which was updated above
+    logger.info(f"✅ Settings applied immediately - services will use new URLs on next call")
+
     logger.info(f"AI settings updated by user {current_user.email}: {updated_settings}")
-    
+
     return {
-        "message": "AI settings updated successfully",
+        "message": "AI settings updated successfully and persisted",
         "updated_settings": updated_settings,
-        "note": "Some changes may require application restart to take full effect"
+        "note": "Settings applied immediately and will persist across restarts."
     }
 
 @app.post("/settings/ai/test")
@@ -6978,7 +7232,7 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
             headers={"Authorization": "Bearer dummy"},
             timeout=10.0
         )
-        
+
         if response.status_code == 200:
             test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
         else:
@@ -7000,298 +7254,6 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
     
     return test_results
 
-# =============================================================================
-# VULNERABILITY WATCH ENDPOINTS
-# =============================================================================
-
-@app.get("/api/vulnerability-reports", response_model=list[VulnerabilityReportListResponse])
-async def get_vulnerability_reports(current_user: User = Depends(get_current_user)):
-    """Get all vulnerability reports"""
-    db = SessionLocal()
-    try:
-        reports = db.query(VulnerabilityReport).filter(
-            VulnerabilityReport.user_id == current_user.id
-        ).order_by(VulnerabilityReport.report_date.desc()).all()
-        
-        return [
-            VulnerabilityReportListResponse(
-                id=report.id,
-                report_date=report.report_date.isoformat(),
-                title=report.title,
-                summary=report.summary,
-                vulnerabilities_count=report.vulnerabilities_count,
-                critical_count=report.critical_count,
-                kev_count=report.kev_count,
-                created_at=report.created_at.isoformat()
-            ) for report in reports
-        ]
-    finally:
-        db.close()
-
-@app.get("/api/vulnerability-reports/{report_id}", response_model=VulnerabilityReportResponse)
-async def get_vulnerability_report(report_id: str, current_user: User = Depends(get_current_user)):
-    """Get a specific vulnerability report"""
-    db = SessionLocal()
-    try:
-        report = db.query(VulnerabilityReport).filter(
-            VulnerabilityReport.id == report_id,
-            VulnerabilityReport.user_id == current_user.id
-        ).first()
-        
-        if not report:
-            raise HTTPException(status_code=404, detail="Vulnerability report not found")
-        
-        return VulnerabilityReportResponse(
-            id=report.id,
-            report_date=report.report_date.isoformat(),
-            title=report.title,
-            summary=report.summary,
-            content=report.content,
-            vulnerabilities_count=report.vulnerabilities_count,
-            critical_count=report.critical_count,
-            kev_count=report.kev_count,
-            created_at=report.created_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.get("/api/vulnerability-reports/latest", response_model=VulnerabilityReportResponse)
-async def get_latest_vulnerability_report(current_user: User = Depends(get_current_user)):
-    """Get the most recent vulnerability report"""
-    db = SessionLocal()
-    try:
-        report = db.query(VulnerabilityReport).filter(
-            VulnerabilityReport.user_id == current_user.id
-        ).order_by(VulnerabilityReport.report_date.desc()).first()
-        
-        if not report:
-            raise HTTPException(status_code=404, detail="No vulnerability reports found")
-        
-        return VulnerabilityReportResponse(
-            id=report.id,
-            report_date=report.report_date.isoformat(),
-            title=report.title,
-            summary=report.summary,
-            content=report.content,
-            vulnerabilities_count=report.vulnerabilities_count,
-            critical_count=report.critical_count,
-            kev_count=report.kev_count,
-            created_at=report.created_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.post("/api/vulnerability-reports/generate")
-async def generate_vulnerability_report(
-    current_user: User = Depends(get_current_user),
-    request: Request = None
-):
-    """Generate a new daily vulnerability report"""
-    if not VULNERABILITY_SERVICES_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Vulnerability services not available")
-    
-    from datetime import date
-    
-    db = SessionLocal()
-    try:
-        logger.info("🚀 Starting vulnerability report generation...")
-        
-        # Check if report already exists for today
-        today = date.today()
-        existing_report = db.query(VulnerabilityReport).filter(
-            VulnerabilityReport.user_id == current_user.id,
-            VulnerabilityReport.report_date == today
-        ).first()
-        
-        # Check if regeneration is requested via query parameter
-        regenerate = request.query_params.get("regenerate", "false").lower() == "true" if request else False
-        logger.info(f"Regenerate parameter: {regenerate}, query_params: {request.query_params if request else 'No request'}")
-        
-        if existing_report and not regenerate:
-            logger.warning(f"Report already exists for {today}")
-            return {
-                "message": "Report already exists for today", 
-                "report_id": existing_report.id,
-                "vulnerabilities_count": existing_report.vulnerabilities_count,
-                "critical_count": existing_report.critical_count,
-                "kev_count": existing_report.kev_count,
-                "notification_sent": False
-            }
-        elif existing_report and regenerate:
-            logger.info(f"Regenerating existing report for {today}")
-            # Delete existing report to create a new one
-            db.delete(existing_report)
-            db.commit()
-        
-        # Fetch vulnerability data
-        vulnerabilities = await fetch_all_vulnerability_data()
-        
-        # Get previous day's vulnerability IDs to identify NEW vulnerabilities only
-        from datetime import timedelta
-        yesterday = today - timedelta(days=1)
-        previous_report = db.query(VulnerabilityReport).filter(
-            VulnerabilityReport.user_id == current_user.id,
-            VulnerabilityReport.report_date == yesterday
-        ).first()
-        
-        previous_vuln_ids = set()
-        if previous_report and previous_report.vulnerability_ids:
-            import json
-            try:
-                previous_vuln_ids = set(json.loads(previous_report.vulnerability_ids))
-            except (json.JSONDecodeError, TypeError):
-                previous_vuln_ids = set()
-        
-        # Filter to only NEW vulnerabilities (not in previous report)
-        current_vuln_ids = {v.cve_id for v in vulnerabilities}
-        new_vulnerabilities = [v for v in vulnerabilities if v.cve_id not in previous_vuln_ids]
-        
-        logger.info(f"📊 Total fetched: {len(vulnerabilities)}, Previous: {len(previous_vuln_ids)}, NEW: {len(new_vulnerabilities)}")
-        
-        # Generate markdown report with Sara's AI analysis (using NEW vulnerabilities only)
-        content, summary = await VulnerabilityProcessor.generate_markdown_report(new_vulnerabilities, today, is_new_only=True)
-        
-        # Count statistics (for ALL vulnerabilities, but report on NEW ones)
-        kev_count = len([v for v in new_vulnerabilities if v.known_exploited])
-        critical_count = len([v for v in new_vulnerabilities if v.severity == 'Critical' or (v.cvss_score is not None and v.cvss_score >= 9.0)])
-        
-        # Create report record (store ALL vulnerability IDs for next day's comparison)
-        import json
-        report = VulnerabilityReport(
-            user_id=current_user.id,
-            report_date=today,
-            title=f"Daily Vulnerability Report - {today.strftime('%B %d, %Y')}",
-            summary=summary,
-            content=content,
-            vulnerabilities_count=len(new_vulnerabilities),  # Count of NEW vulnerabilities only
-            critical_count=critical_count,
-            kev_count=kev_count,
-            vulnerability_ids=json.dumps(list(current_vuln_ids))  # Store ALL for comparison
-        )
-        
-        db.add(report)
-        db.commit()
-        db.refresh(report)
-        
-        # Send NTFY notification
-        ntfy_service = VulnerabilityNotificationService(
-            NTFY_SERVER_URL, 
-            NTFY_VULNERABILITY_TOPIC, 
-            NTFY_ENABLED
-        )
-        
-        notification_result = await notify_report_ready(
-            ntfy_service, 
-            report.title, 
-            summary, 
-            report.id
-        )
-        
-        # Log notification
-        notification_log = NotificationLog(
-            user_id=current_user.id,
-            notification_type=notification_result["notification_type"],
-            reference_id=notification_result["reference_id"],
-            title=notification_result["title"],
-            message=notification_result["message"],
-            ntfy_response=json.dumps(notification_result)
-        )
-        db.add(notification_log)
-        db.commit()
-        
-        logger.info(f"✅ Vulnerability report generated successfully: {report.id}")
-        
-        return {
-            "message": "Vulnerability report generated successfully",
-            "report_id": report.id,
-            "vulnerabilities_count": len(new_vulnerabilities),  # NEW vulnerabilities only
-            "critical_count": critical_count,
-            "kev_count": kev_count,
-            "total_vulnerabilities": len(vulnerabilities),  # Total fetched for reference
-            "notification_sent": notification_result["success"]
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Error generating vulnerability report: {e}")
-        raise HTTPException(status_code=500, detail=f"Error generating vulnerability report: {str(e)}")
-    finally:
-        db.close()
-
-@app.post("/api/notifications/ntfy", response_model=NotificationResponse)
-async def send_ntfy_notification(
-    notification: NotificationRequest,
-    current_user: User = Depends(get_current_user)
-):
-    """Send NTFY notification manually (for testing)"""
-    if not VULNERABILITY_SERVICES_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Vulnerability services not available")
-    
-    db = SessionLocal()
-    try:
-        ntfy_service = VulnerabilityNotificationService(
-            NTFY_SERVER_URL, 
-            NTFY_VULNERABILITY_TOPIC, 
-            NTFY_ENABLED
-        )
-        
-        # Send notification
-        success = await ntfy_service._send_notification(
-            title=notification.title,
-            message=notification.message,
-            priority=3,
-            tags=["shield", "test"]
-        )
-        
-        # Log notification
-        notification_log = NotificationLog(
-            user_id=current_user.id,
-            notification_type=notification.type,
-            reference_id=notification.reference_id,
-            title=notification.title,
-            message=notification.message,
-            ntfy_response=json.dumps({"success": success})
-        )
-        
-        db.add(notification_log)
-        db.commit()
-        db.refresh(notification_log)
-        
-        return NotificationResponse(
-            id=notification_log.id,
-            notification_type=notification_log.notification_type,
-            title=notification_log.title,
-            message=notification_log.message,
-            sent_at=notification_log.sent_at.isoformat()
-        )
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Error sending notification: {e}")
-        raise HTTPException(status_code=500, detail=f"Error sending notification: {str(e)}")
-    finally:
-        db.close()
-
-@app.get("/api/notifications/history", response_model=list[NotificationResponse])
-async def get_notification_history(current_user: User = Depends(get_current_user)):
-    """Get notification history for debugging"""
-    db = SessionLocal()
-    try:
-        notifications = db.query(NotificationLog).filter(
-            NotificationLog.user_id == current_user.id
-        ).order_by(NotificationLog.sent_at.desc()).limit(50).all()
-        
-        return [
-            NotificationResponse(
-                id=notif.id,
-                notification_type=notif.notification_type,
-                title=notif.title,
-                message=notif.message,
-                sent_at=notif.sent_at.isoformat()
-            ) for notif in notifications
-        ]
-    finally:
-        db.close()
 
 # ==========================================
 # HABIT TRACKING ENDPOINTS

@@ -566,6 +566,50 @@ class ApiClient {
     const response = await this.client.get(`/shadow/${sessionId}/summary`)
     return response.data
   }
+
+  // Food Database endpoints
+  async searchFoods(query: string, limit: number = 20): Promise<any[]> {
+    const response = await this.client.get(`/api/fitness/foods/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+    return response.data
+  }
+
+  async getRecentFoods(limit: number = 5): Promise<any[]> {
+    const response = await this.client.get(`/api/fitness/foods/recent?limit=${limit}`)
+    return response.data
+  }
+
+  async createFood(data: any): Promise<any> {
+    const response = await this.client.post('/api/fitness/foods', data)
+    return response.data
+  }
+
+  // Food Log endpoints
+  async logFood(data: any): Promise<any> {
+    const response = await this.client.post('/api/fitness/food-log', data)
+    return response.data
+  }
+
+  async updateFoodLog(id: string, data: any): Promise<any> {
+    const response = await this.client.put(`/api/fitness/food-log/${id}`, data)
+    return response.data
+  }
+
+  async getFoodLogs(date?: string): Promise<any[]> {
+    const url = date ? `/api/fitness/food-log?date=${date}` : '/api/fitness/food-log'
+    const response = await this.client.get(url)
+    return response.data
+  }
+
+  async deleteFoodLog(id: string): Promise<void> {
+    await this.client.delete(`/api/fitness/food-log/${id}`)
+  }
+
+  // Recipe endpoints
+  async getRecipes(limit?: number): Promise<any[]> {
+    const params = limit ? `?limit=${limit}` : ''
+    const response = await this.client.get(`/api/fitness/recipes${params}`)
+    return response.data
+  }
 }
 
 // Create and export a singleton instance

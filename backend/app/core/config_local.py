@@ -27,8 +27,8 @@ class LocalSettings(BaseSettings):
     cookie_samesite: str = "lax"
     cors_origins: List[str] = ["https://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000"]
     
-    # Database - SQLite for local development
-    database_url: str = "sqlite:///./sara_hub.db"
+    # Database - IMPORTANT: Always use PostgreSQL, never SQLite
+    database_url: str = "postgresql+psycopg://sara:sara123@db:5432/sara_hub"
     
     # Storage - Local file system
     minio_url: str = "file://./uploads"

@@ -396,6 +396,106 @@ Respond with only valid JSON."""
             db.rollback()
             return 0
 
+    async def _fetch_fitness_metrics(
+        self,
+        db: Session,
+        user_id: str,
+        day: datetime
+    ) -> Dict[str, Any]:
+        """Fetch fitness metrics for the day"""
+        from sqlalchemy import text as sql_text
+
+        start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+
+        metrics = {}
+
+        try:
+            # Get workout logs for the day
+            workout_sql = sql_text("""
+                SELECT
+                    COUNT(DISTINCT wl.workout_id) as workouts_count,
+                    COUNT(wl.id) as total_sets,
+                    SUM(wl.weight * wl.reps) as total_volume,
+                    AVG(wl.rpe) as avg_rpe
+                FROM workout_log wl
+                WHERE wl.user_id = :user_id
+                AND wl.created_at >= :start
+                AND wl.created_at < :end
+            """)
+
+            workout_result = db.execute(workout_sql, {
+                "user_id": user_id,
+                "start": start,
+                "end": end
+            }).fetchone()
+
+            metrics["workouts"] = {
+                "count": workout_result.workouts_count or 0,
+                "total_sets": workout_result.total_sets or 0,
+                "total_volume": round(workout_result.total_volume or 0, 1),
+                "avg_rpe": round(workout_result.avg_rpe or 0, 1)
+            }
+
+            # Get nutrition for the day
+            nutrition_sql = sql_text("""
+                SELECT
+                    COUNT(*) as meals_count,
+                    SUM(calories) as total_calories,
+                    SUM(protein) as total_protein,
+                    SUM(carbs) as total_carbs,
+                    SUM(fats) as total_fats
+                FROM food_log
+                WHERE user_id = :user_id
+                AND DATE(created_at) = DATE(:day)
+            """)
+
+            nutrition_result = db.execute(nutrition_sql, {
+                "user_id": user_id,
+                "day": day
+            }).fetchone()
+
+            metrics["nutrition"] = {
+                "meals_count": nutrition_result.meals_count or 0,
+                "calories": round(nutrition_result.total_calories or 0, 1),
+                "protein": round(nutrition_result.total_protein or 0, 1),
+                "carbs": round(nutrition_result.total_carbs or 0, 1),
+                "fats": round(nutrition_result.total_fats or 0, 1)
+            }
+
+            # Get weekly comparison
+            week_start = day - timedelta(days=7)
+            weekly_sql = sql_text("""
+                SELECT
+                    COUNT(DISTINCT wl.workout_id) as workouts_count,
+                    SUM(wl.weight * wl.reps) as total_volume
+                FROM workout_log wl
+                WHERE wl.user_id = :user_id
+                AND wl.created_at >= :week_start
+                AND wl.created_at < :start
+            """)
+
+            weekly_result = db.execute(weekly_sql, {
+                "user_id": user_id,
+                "week_start": week_start,
+                "start": start
+            }).fetchone()
+
+            metrics["weekly_avg"] = {
+                "workouts": round((weekly_result.workouts_count or 0) / 7, 1),
+                "volume": round((weekly_result.total_volume or 0) / 7, 1)
+            }
+
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Failed to fetch fitness metrics: {e}")
+            return {
+                "workouts": {"count": 0, "total_sets": 0, "total_volume": 0, "avg_rpe": 0},
+                "nutrition": {"meals_count": 0, "calories": 0, "protein": 0, "carbs": 0, "fats": 0},
+                "weekly_avg": {"workouts": 0, "volume": 0}
+            }
+
     async def _generate_insights(
         self,
         db: Session,
@@ -411,6 +511,8 @@ Respond with only valid JSON."""
         insights = []
 
         try:
+            # Fetch fitness metrics for the day
+            fitness_metrics = await self._fetch_fitness_metrics(db, user_id, day)
             # Insight 1: Daily summary
             if summaries:
                 daily_summary = DreamInsight(
@@ -456,6 +558,68 @@ Respond with only valid JSON."""
                 )
                 db.add(forgotten_gem)
                 insights.append(forgotten_gem.id)
+
+            # Insight 4: Fitness - Workout Summary
+            if fitness_metrics["workouts"]["count"] > 0:
+                workout_summary = DreamInsight(
+                    user_id=user_id,
+                    dream_date=day,
+                    insight_type="fitness_workout",
+                    confidence=0.9,
+                    title=f"Training Day - {fitness_metrics['workouts']['count']} Workout{'s' if fitness_metrics['workouts']['count'] > 1 else ''}",
+                    content=f"Completed {fitness_metrics['workouts']['total_sets']} sets with {fitness_metrics['workouts']['total_volume']}lbs total volume (avg RPE: {fitness_metrics['workouts']['avg_rpe']})",
+                    related_episodes=json.dumps([])
+                )
+                db.add(workout_summary)
+                insights.append(workout_summary.id)
+
+            # Insight 5: Fitness - Nutrition Summary
+            if fitness_metrics["nutrition"]["meals_count"] > 0:
+                nutrition_summary = DreamInsight(
+                    user_id=user_id,
+                    dream_date=day,
+                    insight_type="fitness_nutrition",
+                    confidence=0.9,
+                    title=f"Nutrition - {fitness_metrics['nutrition']['meals_count']} Meals Logged",
+                    content=f"{fitness_metrics['nutrition']['calories']}cal | {fitness_metrics['nutrition']['protein']}g protein, {fitness_metrics['nutrition']['carbs']}g carbs, {fitness_metrics['nutrition']['fats']}g fats",
+                    related_episodes=json.dumps([])
+                )
+                db.add(nutrition_summary)
+                insights.append(nutrition_summary.id)
+
+            # Insight 6: Fitness - Training Trend
+            if fitness_metrics["workouts"]["count"] > 0 and fitness_metrics["weekly_avg"]["workouts"] > 0:
+                volume_change = fitness_metrics["workouts"]["total_volume"] - fitness_metrics["weekly_avg"]["volume"]
+                if abs(volume_change) > fitness_metrics["weekly_avg"]["volume"] * 0.2:  # 20% change
+                    trend_direction = "increased" if volume_change > 0 else "decreased"
+                    trend_insight = DreamInsight(
+                        user_id=user_id,
+                        dream_date=day,
+                        insight_type="fitness_trend",
+                        confidence=0.75,
+                        title=f"Training Volume {trend_direction.title()}",
+                        content=f"Today's volume ({fitness_metrics['workouts']['total_volume']}lbs) {trend_direction} by {abs(volume_change):.0f}lbs compared to your 7-day average ({fitness_metrics['weekly_avg']['volume']}lbs)",
+                        related_episodes=json.dumps([])
+                    )
+                    db.add(trend_insight)
+                    insights.append(trend_insight.id)
+
+            # Insight 7: Fitness - Protein Target
+            if fitness_metrics["nutrition"]["protein"] > 0:
+                # Assume target of 0.8g per lb bodyweight (adjust as needed)
+                # For now, check if they hit >100g as a simple threshold
+                if fitness_metrics["nutrition"]["protein"] >= 100:
+                    protein_insight = DreamInsight(
+                        user_id=user_id,
+                        dream_date=day,
+                        insight_type="fitness_nutrition",
+                        confidence=0.8,
+                        title="Protein Goal Achieved",
+                        content=f"Hit {fitness_metrics['nutrition']['protein']}g protein today - great for recovery and muscle growth",
+                        related_episodes=json.dumps([])
+                    )
+                    db.add(protein_insight)
+                    insights.append(protein_insight.id)
 
             db.commit()
             return insights

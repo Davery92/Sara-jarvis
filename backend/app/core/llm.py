@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     def __init__(self):
+        # Read from settings object which can be updated at runtime
         self.base_url = settings.openai_base_url
         self.model = settings.openai_model
         self.headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
@@ -27,16 +28,16 @@ class LLMClient:
         max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """Send chat completion request to OpenAI-compatible endpoint"""
-        
+
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
         }
-        
+
         if max_tokens:
             payload["max_tokens"] = max_tokens
-            
+
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
@@ -45,7 +46,7 @@ class LLMClient:
             logger.info(f"Sending chat request to {self.base_url}")
             response = await self.client.post("/chat/completions", json=payload)
             response.raise_for_status()
-            
+
             result = response.json()
             logger.info("Chat completion successful")
             return result

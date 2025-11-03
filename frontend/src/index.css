@@ -10,6 +10,15 @@
   
   body {
     @apply bg-gray-50 text-gray-900;
+    overflow-x: hidden;
+    /* Support for dynamic viewport height on mobile browsers */
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  * {
+    /* Prevent horizontal overflow globally */
+    max-width: 100%;
   }
   
   .dark body {
@@ -46,5 +55,58 @@
   
   .dark .input-field {
     @apply bg-gray-700 border-gray-600 text-gray-100 placeholder-gray-400;
+  }
+}
+
+@layer utilities {
+  /* Mobile-friendly utilities */
+  .mobile-safe-height {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .mobile-safe-min-height {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  /* Touch-friendly tap targets (minimum 44x44px) */
+  .tap-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Prevent text selection on tap */
+  .no-tap-highlight {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Smooth scrolling for mobile */
+  .smooth-scroll {
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+  }
+
+  /* Hide scrollbar but keep functionality */
+  .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hidden {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Mobile-friendly horizontal scroll with snap */
+  .scroll-snap-x {
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .scroll-snap-center {
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
   }
 }

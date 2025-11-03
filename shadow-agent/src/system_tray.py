@@ -102,8 +102,8 @@ class SystemTrayUI:
         return pystray.Menu(
             # Status display
             pystray.MenuItem(
-                lambda: f"Status: {self.current_state.value.title()}",
-                lambda: None,
+                lambda item: f"Status: {self.current_state.value.title()}",
+                lambda item: None,
                 enabled=False
             ),
             pystray.Menu.SEPARATOR,
@@ -114,19 +114,19 @@ class SystemTrayUI:
                 pystray.Menu(
                     pystray.MenuItem(
                         "Always-On",
-                        lambda: self._set_mode(VoiceMode.ALWAYS_ON),
+                        lambda item: self._set_mode(VoiceMode.ALWAYS_ON),
                         checked=lambda item: self.current_mode == VoiceMode.ALWAYS_ON,
                         radio=True
                     ),
                     pystray.MenuItem(
                         "Shadow-Only",
-                        lambda: self._set_mode(VoiceMode.SHADOW_ONLY),
+                        lambda item: self._set_mode(VoiceMode.SHADOW_ONLY),
                         checked=lambda item: self.current_mode == VoiceMode.SHADOW_ONLY,
                         radio=True
                     ),
                     pystray.MenuItem(
                         "Push-to-Talk",
-                        lambda: self._set_mode(VoiceMode.PUSH_TO_TALK),
+                        lambda item: self._set_mode(VoiceMode.PUSH_TO_TALK),
                         checked=lambda item: self.current_mode == VoiceMode.PUSH_TO_TALK,
                         radio=True
                     )
@@ -137,16 +137,16 @@ class SystemTrayUI:
             # Actions
             pystray.MenuItem(
                 "Test Voice",
-                self._test_voice,
+                lambda item: self._test_voice(),
                 enabled=lambda item: self.current_mode == VoiceMode.PUSH_TO_TALK
             ),
-            pystray.MenuItem("Settings", self._open_settings),
-            pystray.MenuItem("View Logs", self._view_logs),
+            pystray.MenuItem("Settings", lambda item: self._open_settings()),
+            pystray.MenuItem("View Logs", lambda item: self._view_logs()),
             pystray.Menu.SEPARATOR,
 
             # Exit
-            pystray.MenuItem("Restart Agent", self._restart_agent),
-            pystray.MenuItem("Quit", self._quit)
+            pystray.MenuItem("Restart Agent", lambda item: self._restart_agent()),
+            pystray.MenuItem("Quit", lambda item: self._quit())
         )
 
     def _set_mode(self, mode: VoiceMode):

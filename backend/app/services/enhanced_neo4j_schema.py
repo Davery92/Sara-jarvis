@@ -3,6 +3,7 @@ Enhanced Neo4j Schema for Intelligent Content Storage
 Stores rich metadata, tags, entities, and relationships from content intelligence.
 """
 import logging
+import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
@@ -19,12 +20,13 @@ class EnhancedNeo4jService:
     def __init__(self):
         self.base_service = neo4j_service
     
-    async def initialize_enhanced_schema(self):
+    def initialize_enhanced_schema(self):
         """Initialize the enhanced schema with new node types and relationships"""
         logger.info("🔧 Initializing enhanced Neo4j schema...")
-        
+
         if not self.base_service.driver:
-            await self.base_service.connect()
+            # Note: base_service.connect() should be called before using this service
+            logger.warning("⚠️ Neo4j driver not initialized")
         
         with self.base_service.driver.session() as session:
             # Create enhanced constraints
@@ -70,7 +72,7 @@ class EnhancedNeo4jService:
         
         logger.info("✅ Enhanced Neo4j schema initialized")
     
-    async def store_intelligent_content(
+    def store_intelligent_content(
         self,
         content_id: str,
         user_id: str,
@@ -82,17 +84,17 @@ class EnhancedNeo4jService:
         tags: List[Tag]
     ) -> bool:
         """Store content with full intelligence data in Neo4j"""
-        
+
         logger.info(f"💾 Storing intelligent content: {title} ({content_type.value})")
-        
+
         with self.base_service.driver.session() as session:
             try:
                 # Start transaction
                 with session.begin_transaction() as tx:
-                    
+
                     # 1. Create/update main content node with enhanced metadata
                     content_query = """
-                    MATCH (u:User {id: $user_id})
+                    MERGE (u:User {id: $user_id})
                     MERGE (c:Content {id: $content_id})
                     SET c.title = $title,
                         c.content = $content,
@@ -106,7 +108,7 @@ class EnhancedNeo4jService:
                     MERGE (u)-[:CREATED]->(c)
                     RETURN c
                     """
-                    
+
                     tx.run(content_query,
                         user_id=user_id,
                         content_id=content_id,
@@ -118,33 +120,33 @@ class EnhancedNeo4jService:
                         intent=metadata.intent,
                         chunk_count=len(chunks)
                     )
-                    
+
                     # 2. Store content chunks
-                    await self._store_chunks(tx, content_id, chunks)
-                    
+                    self._store_chunks(tx, content_id, chunks)
+
                     # 3. Store entities and create relationships
-                    await self._store_entities(tx, content_id, metadata.entities)
-                    
+                    self._store_entities(tx, content_id, metadata.entities)
+
                     # 4. Store topics and create relationships
-                    await self._store_topics(tx, content_id, metadata.topics)
-                    
+                    self._store_topics(tx, content_id, metadata.topics)
+
                     # 5. Store tags and create relationships
-                    await self._store_tags(tx, content_id, tags)
-                    
+                    self._store_tags(tx, content_id, tags)
+
                     # 6. Store temporal information
-                    await self._store_temporal_info(tx, content_id, metadata.temporal_info)
-                    
+                    self._store_temporal_info(tx, content_id, metadata.temporal_info)
+
                     # 7. Store actionable items as separate nodes
-                    await self._store_actionable_items(tx, content_id, metadata.actionable_items)
-                
+                    self._store_actionable_items(tx, content_id, metadata.actionable_items)
+
                 logger.info(f"✅ Stored intelligent content: {content_id}")
                 return True
-                
+
             except Exception as e:
                 logger.error(f"❌ Failed to store intelligent content: {e}")
                 return False
     
-    async def _store_chunks(self, tx, parent_content_id: str, chunks: List[ContentChunk]):
+    def _store_chunks(self, tx, parent_content_id: str, chunks: List[ContentChunk]):
         """Store content chunks as separate nodes"""
         chunk_query = """
         MATCH (parent:Content {id: $parent_id})
@@ -155,14 +157,17 @@ class EnhancedNeo4jService:
             order: $order,
             parent_content_id: $parent_id,
             parent_section: $parent_section,
-            metadata: $metadata,
+            metadata_json: $metadata_json,
             created_at: datetime()
         })
         CREATE (parent)-[:HAS_CHUNK {order: $order}]->(chunk)
         """
-        
+
         for chunk in chunks:
             chunk_id = f"{parent_content_id}_chunk_{chunk.order}"
+            # Serialize metadata to JSON string for Neo4j compatibility
+            metadata_json = json.dumps(chunk.metadata) if chunk.metadata else "{}"
+
             tx.run(chunk_query,
                 parent_id=parent_content_id,
                 chunk_id=chunk_id,
@@ -170,10 +175,10 @@ class EnhancedNeo4jService:
                 chunk_type=chunk.chunk_type.value,
                 order=chunk.order,
                 parent_section=chunk.parent_section,
-                metadata=chunk.metadata
+                metadata_json=metadata_json
             )
     
-    async def _store_entities(self, tx, content_id: str, entities: List[Entity]):
+    def _store_entities(self, tx, content_id: str, entities: List[Entity]):
         """Store entities and link to content"""
         entity_query = """
         MATCH (content:Content {id: $content_id})
@@ -201,7 +206,7 @@ class EnhancedNeo4jService:
                 context=entity.context
             )
     
-    async def _store_topics(self, tx, content_id: str, topics: List[Topic]):
+    def _store_topics(self, tx, content_id: str, topics: List[Topic]):
         """Store topics and link to content"""
         topic_query = """
         MATCH (content:Content {id: $content_id})
@@ -228,7 +233,7 @@ class EnhancedNeo4jService:
                 relevance=topic.relevance
             )
     
-    async def _store_tags(self, tx, content_id: str, tags: List[Tag]):
+    def _store_tags(self, tx, content_id: str, tags: List[Tag]):
         """Store tags and link to content"""
         tag_query = """
         MATCH (content:Content {id: $content_id})
@@ -262,7 +267,7 @@ class EnhancedNeo4jService:
                 aliases=tag.aliases
             )
     
-    async def _store_temporal_info(self, tx, content_id: str, temporal_info: TemporalInfo):
+    def _store_temporal_info(self, tx, content_id: str, temporal_info: TemporalInfo):
         """Store temporal information"""
         if temporal_info.durations or temporal_info.schedules:
             temporal_query = """
@@ -283,7 +288,7 @@ class EnhancedNeo4jService:
                 schedules=temporal_info.schedules
             )
     
-    async def _store_actionable_items(self, tx, content_id: str, actionable_items: List[str]):
+    def _store_actionable_items(self, tx, content_id: str, actionable_items: List[str]):
         """Store actionable items as separate nodes"""
         if actionable_items:
             action_query = """
@@ -306,7 +311,7 @@ class EnhancedNeo4jService:
                 )
     
     # Enhanced query methods
-    async def find_content_by_tags(self, user_id: str, tag_names: List[str], limit: int = 20) -> List[Dict]:
+    def find_content_by_tags(self, user_id: str, tag_names: List[str], limit: int = 20) -> List[Dict]:
         """Find content by tags"""
         with self.base_service.driver.session() as session:
             query = """
@@ -318,11 +323,11 @@ class EnhancedNeo4jService:
             ORDER BY tag_matches DESC, content.importance_score DESC
             LIMIT $limit
             """
-            
+
             result = session.run(query, user_id=user_id, tag_names=tag_names, limit=limit)
             return [dict(record) for record in result]
-    
-    async def find_content_by_urgency(self, user_id: str, min_urgency: float = 0.5, limit: int = 10) -> List[Dict]:
+
+    def find_content_by_urgency(self, user_id: str, min_urgency: float = 0.5, limit: int = 10) -> List[Dict]:
         """Find urgent content"""
         with self.base_service.driver.session() as session:
             query = """
@@ -333,11 +338,11 @@ class EnhancedNeo4jService:
             ORDER BY content.urgency_score DESC, content.importance_score DESC
             LIMIT $limit
             """
-            
+
             result = session.run(query, user_id=user_id, min_urgency=min_urgency, limit=limit)
             return [dict(record) for record in result]
-    
-    async def find_related_content(self, content_id: str, similarity_threshold: float = 0.3) -> List[Dict]:
+
+    def find_related_content(self, content_id: str, similarity_threshold: float = 0.3) -> List[Dict]:
         """Find content related by shared entities, topics, or tags"""
         with self.base_service.driver.session() as session:
             query = """
@@ -370,7 +375,7 @@ class EnhancedNeo4jService:
             result = session.run(query, content_id=content_id, similarity_threshold=similarity_threshold)
             return [dict(record) for record in result]
     
-    async def get_content_analytics(self, user_id: str) -> Dict[str, Any]:
+    def get_content_analytics(self, user_id: str) -> Dict[str, Any]:
         """Get analytics about user's content"""
         with self.base_service.driver.session() as session:
             query = """

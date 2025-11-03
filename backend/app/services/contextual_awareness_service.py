@@ -328,7 +328,13 @@ class ContextualAwarenessService:
             from app.services.neo4j_service import neo4j_service
             
             # Find high priority content
-            priority_results = await enhanced_neo4j.find_content_by_urgency(user_id, min_urgency=0.7, limit=5)
+            # Note: find_content_by_urgency is now synchronous, so we run it in a thread pool
+            priority_results = await asyncio.to_thread(
+                enhanced_neo4j.find_content_by_urgency,
+                user_id,
+                min_urgency=0.7,
+                limit=5
+            )
             
             priority_items = []
             for result in priority_results:
@@ -442,7 +448,9 @@ class ContextualAwarenessService:
             tags.append(context_tag)
             
             # Store/update in Neo4j
-            success = await enhanced_neo4j.store_intelligent_content(
+            # Note: store_intelligent_content is now synchronous, so we run it in a thread pool
+            success = await asyncio.to_thread(
+                enhanced_neo4j.store_intelligent_content,
                 content_id=context_id,
                 user_id=user_id,
                 title=context_title,

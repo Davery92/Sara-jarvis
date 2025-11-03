@@ -4,11 +4,13 @@ const getApiUrl = () => {
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL
   }
-  
-  // If we're on the production domain with HTTPS, use the API endpoint
+
+  // If we're on the production domain with HTTPS, use the API domain
   const prodDomain = import.meta.env.VITE_DOMAIN
+
   if (typeof window !== 'undefined' && prodDomain && window.location.host.includes(prodDomain)) {
-    return `https://${prodDomain}/api`
+    const apiDomain = import.meta.env.VITE_API_DOMAIN || `sara-api.${prodDomain.replace('sara.', '')}`
+    return `https://${apiDomain}`
   }
 
   // Otherwise use local/LAN development backend using current hostname

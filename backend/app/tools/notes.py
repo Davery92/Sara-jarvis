@@ -290,3 +290,166 @@ class NotesEditTool(BaseTool):
             )
         finally:
             db.close()
+
+
+class NotesDeleteTool(BaseTool):
+    """Tool for deleting notes"""
+
+    @property
+    def name(self) -> str:
+        return "notes_delete"
+
+    @property
+    def description(self) -> str:
+        return "Delete a note by its ID. This action cannot be undone."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "string",
+                    "description": "The ID of the note to delete"
+                }
+            },
+            "required": ["note_id"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """Delete a note"""
+
+        note_id = kwargs.get("note_id")
+
+        if not note_id:
+            return ToolResult(
+                success=False,
+                message="Note ID is required"
+            )
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            # Find the note
+            note = db.query(Note).filter(
+                Note.id == note_id,
+                Note.user_id == user_id
+            ).first()
+
+            if not note:
+                return ToolResult(
+                    success=False,
+                    message="Note not found"
+                )
+
+            # Store title for response message
+            note_title = note.title or "Untitled"
+
+            # Delete the note
+            db.delete(note)
+            db.commit()
+
+            return ToolResult(
+                success=True,
+                data={
+                    "note_id": note_id,
+                    "deleted_title": note_title
+                },
+                message=f"Deleted note: {note_title}"
+            )
+
+        except Exception as e:
+            db.rollback()
+            return ToolResult(
+                success=False,
+                message=f"Failed to delete note: {str(e)}"
+            )
+        finally:
+            db.close()
+
+
+class NotesListTool(BaseTool):
+    """Tool for listing all notes"""
+
+    @property
+    def name(self) -> str:
+        return "notes_list"
+
+    @property
+    def description(self) -> str:
+        return "List all notes for the user, optionally filtered by folder. Returns note IDs, titles, and preview of content."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "folder_id": {
+                    "type": "string",
+                    "description": "Optional folder ID to filter notes by folder"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of notes to return (default: 20)",
+                    "default": 20
+                }
+            }
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """List all notes"""
+
+        folder_id = kwargs.get("folder_id")
+        limit = kwargs.get("limit", 20)
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            # Build query
+            query = db.query(Note).filter(Note.user_id == user_id)
+
+            if folder_id:
+                query = query.filter(Note.folder_id == folder_id)
+
+            # Order by most recent first
+            query = query.order_by(Note.updated_at.desc()).limit(limit)
+
+            notes = query.all()
+
+            # Format results
+            notes_list = []
+            citations = []
+            for note in notes:
+                # Preview first 100 chars of content
+                content_preview = note.content[:100] + "..." if len(note.content) > 100 else note.content
+
+                notes_list.append({
+                    "note_id": str(note.id),
+                    "title": note.title or "Untitled",
+                    "content_preview": content_preview,
+                    "folder_id": note.folder_id,
+                    "created_at": note.created_at.isoformat(),
+                    "updated_at": note.updated_at.isoformat()
+                })
+                citations.append(f"note:{note.id}")
+
+            return ToolResult(
+                success=True,
+                data={
+                    "notes": notes_list,
+                    "total": len(notes_list),
+                    "folder_id": folder_id
+                },
+                message=f"Found {len(notes_list)} note(s)",
+                citations=citations
+            )
+
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                message=f"Failed to list notes: {str(e)}"
+            )
+        finally:
+            db.close()

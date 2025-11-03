@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.4
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Use BuildKit cache to avoid re-downloading wheels on rebuilds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt --ignore-installed \
+    && pip install email-validator aiofiles lxml_html_clean
+
+# Don't copy code - it will be mounted as a volume
+# This way code changes are instant
+
+# Expose port
+EXPOSE 8000
+
+# Run with auto-reload for development
+CMD ["uvicorn", "app.main_simple:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

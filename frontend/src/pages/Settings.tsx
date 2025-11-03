@@ -66,6 +66,8 @@ export default function Settings() {
   })
   const [showGTKY, setShowGTKY] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [fitnessPrompt, setFitnessPrompt] = useState('')
+  const [fitnessSaveResult, setFitnessSaveResult] = useState<{ success: boolean; message: string } | null>(null)
   const queryClient = useQueryClient()
 
   // Fetch current AI settings
@@ -115,6 +117,24 @@ export default function Settings() {
       })
     }
   }, [settings])
+
+  // Fetch fitness settings
+  useEffect(() => {
+    const fetchFitnessSettings = async () => {
+      try {
+        const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/settings`, {
+          credentials: 'include',
+        })
+        if (response.ok) {
+          const data = await response.json()
+          setFitnessPrompt(data.system_prompt || '')
+        }
+      } catch (error) {
+        console.error('Failed to fetch fitness settings:', error)
+      }
+    }
+    fetchFitnessSettings()
+  }, [])
 
   const handleInputChange = (field: keyof AISettingsUpdate, value: string | number) => {
     setFormData(prev => ({
@@ -173,6 +193,27 @@ export default function Settings() {
       embedding_dimension: getEmbeddingDimension(),
     }
     setFormData(resetData)
+  }
+
+  const handleSaveFitnessPrompt = async () => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ system_prompt: fitnessPrompt }),
+      })
+      if (response.ok) {
+        setFitnessSaveResult({ success: true, message: 'Fitness system prompt saved successfully!' })
+        setTimeout(() => setFitnessSaveResult(null), 3000)
+      } else {
+        setFitnessSaveResult({ success: false, message: 'Failed to save fitness prompt' })
+        setTimeout(() => setFitnessSaveResult(null), 5000)
+      }
+    } catch (error) {
+      setFitnessSaveResult({ success: false, message: 'Failed to save fitness prompt' })
+      setTimeout(() => setFitnessSaveResult(null), 5000)
+    }
   }
 
   if (isLoading) {
@@ -387,7 +428,7 @@ export default function Settings() {
                   type="button"
                   onClick={handleTestConnection}
                   disabled={testSettingsMutation.isPending}
-                  className="px-4 py-2 text-sm font-medium text-teal-400 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                  className="px-4 py-2 text-sm font-medium text-teal-400 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 tap-target"
                 >
                   {testSettingsMutation.isPending ? (
                     <div className="flex items-center space-x-2">
@@ -402,7 +443,7 @@ export default function Settings() {
                 <button
                   type="button"
                   onClick={handleReset}
-                  className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors duration-200"
+                  className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors duration-200 tap-target"
                 >
                   Reset
                 </button>
@@ -431,7 +472,7 @@ export default function Settings() {
                     setTestResult({ success: true, message: 'Saved URLs cleared - reset to defaults' })
                     setTimeout(() => setTestResult(null), 3000)
                   }}
-                  className="px-4 py-2 text-sm font-medium text-orange-400 bg-orange-900/20 border border-orange-500/30 rounded-lg hover:bg-orange-900/30 focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition-colors duration-200"
+                  className="px-4 py-2 text-sm font-medium text-orange-400 bg-orange-900/20 border border-orange-500/30 rounded-lg hover:bg-orange-900/30 focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition-colors duration-200 tap-target"
                 >
                   Clear Saved URLs
                 </button>
@@ -440,7 +481,7 @@ export default function Settings() {
               <button
                 type="submit"
                 disabled={updateSettingsMutation.isPending}
-                className="px-6 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                className="px-6 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 tap-target"
               >
                 {updateSettingsMutation.isPending ? (
                   <div className="flex items-center space-x-2">
@@ -621,6 +662,89 @@ export default function Settings() {
 
           {/* Agent Status */}
           <AgentStatus />
+        </div>
+
+        {/* Fitness System Prompt */}
+        <div className="mt-8 bg-card border border-card rounded-xl p-6">
+          <div className="flex items-center mb-4">
+            <svg className="w-6 h-6 text-orange-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <h3 className="text-lg font-medium text-white">Fitness System Prompt</h3>
+          </div>
+
+          <p className="text-gray-400 text-sm mb-4">
+            Customize Sara's fitness coaching behavior. Use template variables to dynamically insert system information into the prompt.
+          </p>
+
+          {/* Result Alert */}
+          {fitnessSaveResult && (
+            <div className={`mb-4 p-3 rounded-lg ${
+              fitnessSaveResult.success
+                ? 'bg-green-900/20 border border-green-500/30 text-green-400'
+                : 'bg-red-900/20 border border-red-500/30 text-red-400'
+            }`}>
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  {fitnessSaveResult.success ? (
+                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                    </svg>
+                  ) : (
+                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </div>
+                <div className="ml-3">
+                  <p className="text-sm font-medium">{fitnessSaveResult.message}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label htmlFor="fitnessPrompt" className="block text-sm font-medium text-gray-300 mb-2">
+                Custom System Prompt
+              </label>
+              <textarea
+                id="fitnessPrompt"
+                value={fitnessPrompt}
+                onChange={(e) => setFitnessPrompt(e.target.value)}
+                rows={8}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 text-white placeholder-gray-400 font-mono text-sm"
+                placeholder="You are a fitness coach. Today is {{SYSTEM_DATE}}..."
+              />
+              <p className="mt-2 text-xs text-gray-400">
+                This prompt will be used when Sara provides fitness-related suggestions and analysis.
+              </p>
+            </div>
+
+            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+              <h4 className="text-sm font-medium text-white mb-2">Available Template Variables</h4>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_DATE}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_TIME}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_DAY_OF_WEEK}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_MONTH}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_YEAR}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{USER_NAME}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{USER_EMAIL}}`}</code>
+                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{ASSISTANT_NAME}}`}</code>
+              </div>
+              <p className="mt-2 text-xs text-gray-400">
+                Variables are automatically replaced with current values when Sara processes your requests.
+              </p>
+            </div>
+
+            <button
+              onClick={handleSaveFitnessPrompt}
+              className="w-full px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition text-sm font-medium"
+            >
+              Save Fitness Prompt
+            </button>
+          </div>
         </div>
 
         {/* Information */}

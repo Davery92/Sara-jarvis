@@ -1,0 +1,3368 @@
+"""
+Fitness Routes
+API endpoints for fitness tracking: notes, food logging, workouts
+"""
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
+from typing import List, Optional, Dict, Any
+from datetime import datetime, date
+import uuid
+import logging
+import re
+import asyncio
+import json
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from app.db.session import get_db
+import httpx
+import io
+
+# Tool imports
+from app.tools.fitness import (
+    FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
+    FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
+    WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool
+)
+from app.prompts.fitness_system_prompt import get_fitness_system_prompt
+from app.main_simple import SimpleLLMClient
+from app.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# Simple message class for SimpleLLMClient compatibility
+class SimpleMessage:
+    """Simple message object compatible with SimpleLLMClient"""
+    def __init__(self, role: str, content: str):
+        self.role = role
+        self.content = content
+
+# Pydantic models for request/response
+class FitnessNoteCreate(BaseModel):
+    title: Optional[str] = ""
+    content: str
+    category: str  # nutrition, workout, goal, progress, general
+
+
+class FitnessNoteUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    category: Optional[str] = None
+
+
+class FoodItem(BaseModel):
+    name: str
+    quantity: float
+    unit: str
+
+
+class FoodLogCreate(BaseModel):
+    meal_type: str  # breakfast, lunch, dinner, snack
+    food_items: List[FoodItem]
+    detailed_items: Optional[List[dict]] = None  # Detailed food items from food database
+    calories: Optional[float] = None
+    protein: Optional[float] = None
+    carbs: Optional[float] = None
+    fats: Optional[float] = None
+    notes: Optional[str] = ""
+    logged_at: Optional[str] = None
+
+
+class WorkoutSetLog(BaseModel):
+    workout_id: Optional[str] = None  # Optional now - can be auto-generated
+    exercise_name: Optional[str] = None  # For quick logging without pre-existing workout
+    exercise_id: Optional[str] = None
+    set_index: int
+    weight: Optional[int] = None
+    reps: Optional[int] = None
+    rpe: Optional[int] = None
+    notes: Optional[str] = ""
+
+
+class FitnessChatRequest(BaseModel):
+    message: str
+    context: Optional[Dict[str, Any]] = {}
+
+
+class NutritionGoals(BaseModel):
+    calories: Optional[int] = 2000
+    protein: Optional[int] = 150
+    carbs: Optional[int] = 200
+    fats: Optional[int] = 70
+
+
+class RecoveryLogCreate(BaseModel):
+    log_date: str  # YYYY-MM-DD format
+    hrv: Optional[int] = None
+    heart_rate: Optional[int] = None
+    sleep_hours: Optional[float] = None
+    soreness_level: Optional[int] = None  # 1-10
+    body_weight: Optional[float] = None  # Body weight
+    weight_unit: Optional[str] = "lbs"  # 'lbs' or 'kg'
+    notes: Optional[str] = ""
+
+
+class RecoveryLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    log_date: str
+    hrv: Optional[int] = None
+    heart_rate: Optional[int] = None
+    sleep_hours: Optional[float] = None
+    soreness_level: Optional[int] = None
+    body_weight: Optional[float] = None
+    weight_unit: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class IngredientItem(BaseModel):
+    name: str
+    quantity: float
+    unit: str  # g, oz, cup, tbsp, etc.
+    # Optional manual nutrition override (per total quantity)
+    calories: Optional[float] = None
+    protein: Optional[float] = None
+    carbs: Optional[float] = None
+    fats: Optional[float] = None
+
+
+
+
+class RecipeCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    category: Optional[str] = None  # breakfast, lunch, dinner, snack, dessert
+    ingredients: List[IngredientItem]
+    instructions: str
+    prep_time_minutes: Optional[int] = None
+    servings: int = 1
+
+
+class RecipeUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    ingredients: Optional[List[IngredientItem]] = None
+    instructions: Optional[str] = None
+    prep_time_minutes: Optional[int] = None
+    servings: Optional[int] = None
+
+
+class RecipeResponse(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    description: Optional[str]
+    category: Optional[str]
+    ingredients: List[IngredientItem]
+    instructions: str
+    prep_time_minutes: Optional[int]
+    servings: int
+    calories: Optional[float]
+    protein: Optional[float]
+    carbs: Optional[float]
+    fats: Optional[float]
+    created_at: str
+    updated_at: str
+
+
+def get_current_user_id() -> str:
+    """Get current user ID (simplified for now)"""
+    # In production, this would come from JWT token
+    import os
+    return os.getenv("SOLO_USER_ID", "default-user")
+
+
+# ============================================================================
+# HELPER FUNCTIONS FOR MEMORY & DAILY LOGS
+# ============================================================================
+
+async def save_to_episodic_memory(
+    db: Session,
+    user_id: str,
+    source: str,
+    content: str,
+    importance: float = 0.6
+):
+    """Save fitness activity to episodic memory"""
+    try:
+        episode_sql = text("""
+            INSERT INTO episode (id, user_id, source, role, content, importance, created_at)
+            VALUES (:id, :user_id, :source, :role, :content, :importance, :created_at)
+        """)
+        db.execute(episode_sql, {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "source": source,
+            "role": "user",
+            "content": content,
+            "importance": importance,
+            "created_at": datetime.utcnow()
+        })
+        db.commit()
+        logger.info(f"💪 Saved {source} to episodic memory for user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to save to episodic memory: {e}")
+        db.rollback()
+
+
+async def update_daily_log(
+    db: Session,
+    user_id: str,
+    log_date: date,
+    activity_type: str,
+    nutrition_data: Optional[Dict] = None,
+    workout_data: Optional[Dict] = None
+):
+    """Update or create fitness daily log"""
+    try:
+        # Check if log exists for this date
+        check_sql = text("""
+            SELECT id FROM fitness_daily_log
+            WHERE user_id = :user_id AND log_date = :log_date
+        """)
+        result = db.execute(check_sql, {"user_id": user_id, "log_date": log_date})
+        existing = result.fetchone()
+
+        if existing:
+            # Update existing log
+            update_parts = ["updated_at = NOW()"]
+            params = {"user_id": user_id, "log_date": log_date}
+
+            if activity_type == "chat":
+                update_parts.append("chat_count = chat_count + 1")
+            elif activity_type == "food":
+                update_parts.append("food_entries = food_entries + 1")
+                if nutrition_data:
+                    update_parts.append("total_calories = COALESCE(total_calories, 0) + :calories")
+                    update_parts.append("total_protein = COALESCE(total_protein, 0) + :protein")
+                    update_parts.append("total_carbs = COALESCE(total_carbs, 0) + :carbs")
+                    update_parts.append("total_fats = COALESCE(total_fats, 0) + :fats")
+                    params.update({
+                        "calories": nutrition_data.get("calories", 0) or 0,
+                        "protein": nutrition_data.get("protein", 0) or 0,
+                        "carbs": nutrition_data.get("carbs", 0) or 0,
+                        "fats": nutrition_data.get("fats", 0) or 0
+                    })
+            elif activity_type == "workout":
+                update_parts.append("workout_sessions = workout_sessions + 1")
+                if workout_data:
+                    update_parts.append("total_sets = COALESCE(total_sets, 0) + 1")
+                    if workout_data.get("reps"):
+                        update_parts.append("total_reps = COALESCE(total_reps, 0) + :reps")
+                        params["reps"] = workout_data["reps"]
+            elif activity_type == "note":
+                update_parts.append("notes_created = notes_created + 1")
+
+            update_sql = text(f"""
+                UPDATE fitness_daily_log
+                SET {', '.join(update_parts)}
+                WHERE user_id = :user_id AND log_date = :log_date
+            """)
+            db.execute(update_sql, params)
+        else:
+            # Create new log
+            insert_sql = text("""
+                INSERT INTO fitness_daily_log (
+                    id, user_id, log_date,
+                    chat_count, food_entries, workout_sessions, notes_created,
+                    total_calories, total_protein, total_carbs, total_fats,
+                    total_sets, total_reps,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :id, :user_id, :log_date,
+                    :chat_count, :food_entries, :workout_sessions, :notes_created,
+                    :total_calories, :total_protein, :total_carbs, :total_fats,
+                    :total_sets, :total_reps,
+                    NOW(), NOW()
+                )
+            """)
+
+            params = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "log_date": log_date,
+                "chat_count": 1 if activity_type == "chat" else 0,
+                "food_entries": 1 if activity_type == "food" else 0,
+                "workout_sessions": 1 if activity_type == "workout" else 0,
+                "notes_created": 1 if activity_type == "note" else 0,
+                "total_calories": nutrition_data.get("calories") if nutrition_data else None,
+                "total_protein": nutrition_data.get("protein") if nutrition_data else None,
+                "total_carbs": nutrition_data.get("carbs") if nutrition_data else None,
+                "total_fats": nutrition_data.get("fats") if nutrition_data else None,
+                "total_sets": 1 if activity_type == "workout" else 0,
+                "total_reps": workout_data.get("reps") if workout_data else 0
+            }
+            db.execute(insert_sql, params)
+
+        db.commit()
+        logger.info(f"📊 Updated daily log for {log_date} - {activity_type}")
+    except Exception as e:
+        logger.error(f"Failed to update daily log: {e}")
+        db.rollback()
+
+
+# ============================================================================
+# FITNESS NOTES ENDPOINTS
+# ============================================================================
+
+@router.post("/notes")
+async def create_fitness_note(
+    note: FitnessNoteCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Create a fitness note - saves to episodic memory and daily log"""
+    tool = FitnessNoteCreateTool()
+    result = await tool.execute(
+        user_id=user_id,
+        title=note.title,
+        content=note.content,
+        category=note.category
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    # Save to episodic memory
+    note_content = f"Created fitness note [{note.category}]: {note.title}\n{note.content}"
+    await save_to_episodic_memory(db, user_id, "fitness_note", note_content)
+
+    # Update daily log
+    await update_daily_log(db, user_id, date.today(), "note")
+
+    return result.data
+
+
+@router.get("/notes/search")
+async def search_fitness_notes(
+    query: str,
+    category: str = "all",
+    limit: int = 10,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Search fitness notes"""
+    tool = FitnessNoteSearchTool()
+    result = await tool.execute(
+        user_id=user_id,
+        query=query,
+        category=category,
+        limit=limit
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return result.data
+
+
+@router.patch("/notes/{note_id}")
+async def update_fitness_note(
+    note_id: str,
+    updates: FitnessNoteUpdate,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Update a fitness note"""
+    tool = FitnessNoteEditTool()
+
+    # Build kwargs with only provided fields
+    kwargs = {"note_id": note_id}
+    if updates.title is not None:
+        kwargs["title"] = updates.title
+    if updates.content is not None:
+        kwargs["content"] = updates.content
+    if updates.category is not None:
+        kwargs["category"] = updates.category
+
+    result = await tool.execute(user_id=user_id, **kwargs)
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return result.data
+
+
+# ============================================================================
+# FOOD LOG ENDPOINTS
+# ============================================================================
+
+
+@router.get("/food-log")
+async def list_food_log(
+    limit: int = 50,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List recent food log entries"""
+    try:
+        query = text("""
+            SELECT id as log_id, user_id, meal_type, food_items, detailed_items, calories, protein, carbs, fats, notes, logged_at
+            FROM food_log
+            WHERE user_id = :user_id
+            ORDER BY logged_at DESC
+            LIMIT :limit
+        """)
+
+        result = db.execute(query, {"user_id": user_id, "limit": limit})
+        entries = [dict(row._mapping) for row in result]
+        return entries
+    except Exception as e:
+        logger.error(f"Failed to list food log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/food-log")
+async def create_food_log(
+    log: FoodLogCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Log a meal - saves to episodic memory and daily log"""
+    import json
+
+    try:
+        log_id = str(uuid.uuid4())
+        food_items = [item.dict() for item in log.food_items] if log.food_items else []
+
+        # Handle detailed_items if provided
+        detailed_items_json = None
+        if hasattr(log, 'detailed_items') and log.detailed_items:
+            detailed_items_json = json.dumps(log.detailed_items)
+
+        query = text("""
+            INSERT INTO food_log (
+                id, user_id, meal_type, food_items, detailed_items,
+                calories, protein, carbs, fats, notes, logged_at
+            ) VALUES (
+                :id, :user_id, :meal_type, CAST(:food_items AS jsonb), CAST(:detailed_items AS jsonb),
+                :calories, :protein, :carbs, :fats, :notes, :logged_at
+            )
+            RETURNING id
+        """)
+
+        result = db.execute(query, {
+            "id": log_id,
+            "user_id": user_id,
+            "meal_type": log.meal_type,
+            "food_items": json.dumps(food_items),
+            "detailed_items": detailed_items_json,
+            "calories": log.calories,
+            "protein": log.protein,
+            "carbs": log.carbs,
+            "fats": log.fats,
+            "notes": log.notes or "",
+            "logged_at": log.logged_at or datetime.now()
+        })
+
+        db.commit()
+
+        # Save to episodic memory
+        food_list = ", ".join([f"{item['name']} ({item['quantity']} {item['unit']})" for item in food_items])
+        food_content = f"Logged {log.meal_type}: {food_list}"
+        if log.calories:
+            food_content += f" | {log.calories} cal"
+        if log.protein:
+            food_content += f", {log.protein}g protein"
+        if log.notes:
+            food_content += f" | Notes: {log.notes}"
+        await save_to_episodic_memory(db, user_id, "fitness_food", food_content)
+
+        # Update daily log
+        nutrition_data = {
+            "calories": log.calories,
+            "protein": log.protein,
+            "carbs": log.carbs,
+            "fats": log.fats
+        }
+        await update_daily_log(db, user_id, date.today(), "food", nutrition_data=nutrition_data)
+
+        return {"success": True, "message": "Food logged successfully", "log_id": log_id}
+    except Exception as e:
+        logger.error(f"Failed to create food log: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/food-log/{log_id}")
+async def update_food_log_entry(
+    log_id: str,
+    request: FoodLogCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update a food log entry"""
+    try:
+        import json
+
+        food_items = [item.dict() for item in request.food_items] if request.food_items else []
+
+        # Handle detailed_items if provided
+        detailed_items_json = None
+        if hasattr(request, 'detailed_items') and request.detailed_items:
+            detailed_items_json = json.dumps(request.detailed_items)
+
+        query = text("""
+            UPDATE food_log
+            SET meal_type = :meal_type,
+                food_items = CAST(:food_items AS jsonb),
+                detailed_items = CAST(:detailed_items AS jsonb),
+                calories = :calories,
+                protein = :protein,
+                carbs = :carbs,
+                fats = :fats,
+                notes = :notes,
+                logged_at = :logged_at,
+                updated_at = NOW()
+            WHERE id = :log_id AND user_id = :user_id
+            RETURNING id
+        """)
+
+        result = db.execute(query, {
+            "log_id": log_id,
+            "user_id": user_id,
+            "meal_type": request.meal_type,
+            "food_items": json.dumps(food_items),
+            "detailed_items": detailed_items_json,
+            "calories": request.calories,
+            "protein": request.protein,
+            "carbs": request.carbs,
+            "fats": request.fats,
+            "notes": request.notes or "",
+            "logged_at": request.logged_at or datetime.now()
+        })
+
+        updated = result.fetchone()
+        db.commit()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        return {"success": True, "message": "Food log entry updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update food log entry: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/food-log/{log_id}")
+async def delete_food_log_entry(
+    log_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Delete a food log entry"""
+    try:
+        query = text("""
+            DELETE FROM food_log
+            WHERE id = :log_id AND user_id = :user_id
+            RETURNING id
+        """)
+
+        result = db.execute(query, {"log_id": log_id, "user_id": user_id})
+        deleted = result.fetchone()
+        db.commit()
+
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        return {"success": True, "message": "Food log entry deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete food log entry: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/food-log/search")
+async def search_food_logs(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    meal_type: str = "all",
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Search food logs by date range"""
+    tool = FoodLogSearchTool()
+    result = await tool.execute(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        meal_type=meal_type,
+        limit=limit
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return result.data
+
+
+@router.get("/food-log/summary")
+async def get_food_log_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    period: str = "week",
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get nutrition summary"""
+    tool = FoodLogSummaryTool()
+    result = await tool.execute(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        period=period
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return result.data
+
+
+# ============================================================================
+# WORKOUT LOG ENDPOINTS
+# ============================================================================
+
+@router.get("/workouts")
+async def list_workouts(
+    status: str = "all",
+    limit: int = 200,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    List workout logs (individual sets) for workout history
+
+    This endpoint returns workout_log entries (individual sets) rather than
+    workout plans. It's used by the frontend to display workout history.
+    """
+    from sqlalchemy import text
+
+    try:
+        # Query workout_log table joined with workout table to get exercise names
+        query = text("""
+            SELECT
+                wl.id,
+                wl.workout_id,
+                wl.exercise_id,
+                COALESCE(wl.exercise_id, w.title) as exercise_name,
+                wl.set_index,
+                wl.weight,
+                wl.reps,
+                wl.rpe,
+                wl.notes,
+                wl.created_at
+            FROM workout_log wl
+            LEFT JOIN workout w ON wl.workout_id = w.id
+            WHERE wl.user_id = :user_id
+            ORDER BY wl.created_at DESC
+            LIMIT :limit
+        """)
+
+        result = db.execute(query, {"user_id": user_id, "limit": limit})
+
+        workouts = []
+        for row in result.fetchall():
+            workouts.append({
+                "id": row.id,
+                "workout_id": row.workout_id,
+                "exercise_id": row.exercise_id,
+                "exercise_name": row.exercise_name,
+                "set_index": row.set_index,
+                "weight": row.weight,
+                "reps": row.reps,
+                "rpe": row.rpe,
+                "notes": row.notes,
+                "created_at": row.created_at.isoformat() if row.created_at else None
+            })
+
+        return {"workouts": workouts, "total": len(workouts)}
+
+    except Exception as e:
+        logger.error(f"Error fetching workout logs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch workout logs: {str(e)}")
+
+
+@router.post("/workout-log")
+async def log_workout_set(
+    log: WorkoutSetLog,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Log a workout set - saves to episodic memory and daily log
+
+    Supports two modes:
+    1. Structured: Provide workout_id for pre-existing workouts
+    2. Quick logging: Provide exercise_name, auto-creates workout entry
+    """
+    import uuid
+    from sqlalchemy import text
+
+    # If no workout_id but exercise_name provided, create a quick workout entry
+    workout_id = log.workout_id
+    if not workout_id and log.exercise_name:
+        # Create or find today's quick workout for this exercise
+        today_str = date.today().isoformat()
+        quick_workout_id = str(uuid.uuid4())
+
+        # Create a quick workout entry
+        create_workout_sql = text("""
+            INSERT INTO workout (id, user_id, title, phase, week, day_of_week, duration_min, status, prescription, created_at)
+            VALUES (:id, :user_id, :title, :phase, :week, :day_of_week, :duration_min, :status, :prescription, NOW())
+            ON CONFLICT DO NOTHING
+            RETURNING id
+        """)
+
+        import json
+        prescription = json.dumps({"exercises": [{"name": log.exercise_name}]})
+
+        try:
+            result = db.execute(create_workout_sql, {
+                "id": quick_workout_id,
+                "user_id": user_id,
+                "title": f"{log.exercise_name} ({today_str})",
+                "phase": "quick-log",
+                "week": 0,
+                "day_of_week": 0,  # 0 for quick/adhoc workouts
+                "duration_min": 0,
+                "status": "completed",
+                "prescription": prescription
+            })
+            db.commit()
+            workout_id = quick_workout_id
+            logger.info(f"Created quick workout: {workout_id} for exercise: {log.exercise_name}")
+        except Exception as e:
+            logger.warning(f"Failed to create quick workout, trying to find existing: {e}")
+            # Try to find existing quick workout for this exercise today
+            find_sql = text("""
+                SELECT id FROM workout
+                WHERE user_id = :user_id
+                AND title = :title
+                AND DATE(created_at) = DATE(NOW())
+                LIMIT 1
+            """)
+            existing = db.execute(find_sql, {
+                "user_id": user_id,
+                "title": f"{log.exercise_name} ({today_str})"
+            }).fetchone()
+
+            if existing:
+                workout_id = existing.id
+            else:
+                raise HTTPException(status_code=500, detail="Failed to create or find workout entry")
+
+    if not workout_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide either workout_id or exercise_name"
+        )
+
+    # Now log the set using the workout_id
+    tool = WorkoutLogCreateTool()
+    result = await tool.execute(
+        user_id=user_id,
+        workout_id=workout_id,
+        exercise_id=log.exercise_id or log.exercise_name,  # Use exercise_name as exercise_id if not provided
+        set_index=log.set_index,
+        weight=log.weight,
+        reps=log.reps,
+        rpe=log.rpe,
+        notes=log.notes
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    # Save to episodic memory
+    exercise_label = log.exercise_name or log.exercise_id or "exercise"
+    workout_content = f"Logged {exercise_label} set #{log.set_index}"
+    if log.weight:
+        workout_content += f" | {log.weight} lbs"
+    if log.reps:
+        workout_content += f" x {log.reps} reps"
+    if log.rpe:
+        workout_content += f" (RPE: {log.rpe})"
+    if log.notes:
+        workout_content += f" | Notes: {log.notes}"
+    await save_to_episodic_memory(db, user_id, "fitness_workout", workout_content)
+
+    # Update daily log
+    workout_data = {"reps": log.reps}
+    await update_daily_log(db, user_id, date.today(), "workout", workout_data=workout_data)
+
+    return result.data
+
+
+@router.delete("/workouts/{workout_set_id}")
+async def delete_workout_set(
+    workout_set_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Delete a workout set"""
+    from sqlalchemy import text
+
+    try:
+        # Delete the workout set
+        delete_sql = text("""
+            DELETE FROM workout_log
+            WHERE id = :set_id AND user_id = :user_id
+        """)
+        result = db.execute(delete_sql, {"set_id": workout_set_id, "user_id": user_id})
+        db.commit()
+
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Workout set not found")
+
+        return {"success": True, "message": "Workout set deleted"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete workout set: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/workouts/{workout_set_id}")
+async def update_workout_set(
+    workout_set_id: str,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update a workout set"""
+    from sqlalchemy import text
+
+    try:
+        # Get the request body
+        request_data = await request.json()
+
+        # Build dynamic UPDATE query based on provided fields
+        updates = []
+        params = {"set_id": workout_set_id, "user_id": user_id}
+
+        if "weight" in request_data and request_data["weight"] is not None:
+            updates.append("weight = :weight")
+            params["weight"] = request_data["weight"]
+        if "reps" in request_data and request_data["reps"] is not None:
+            updates.append("reps = :reps")
+            params["reps"] = request_data["reps"]
+        if "rpe" in request_data and request_data["rpe"] is not None:
+            updates.append("rpe = :rpe")
+            params["rpe"] = request_data["rpe"]
+        if "notes" in request_data and request_data["notes"] is not None:
+            updates.append("notes = :notes")
+            params["notes"] = request_data["notes"]
+        if "created_at" in request_data and request_data["created_at"] is not None:
+            updates.append("created_at = :created_at")
+            params["created_at"] = request_data["created_at"]
+
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        update_sql = text(f"""
+            UPDATE workout_log
+            SET {', '.join(updates)}
+            WHERE id = :set_id AND user_id = :user_id
+        """)
+        result = db.execute(update_sql, params)
+        db.commit()
+
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Workout set not found")
+
+        return {"success": True, "message": "Workout set updated"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update workout set: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workout-log/stats")
+async def get_workout_stats(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    period: str = "week",
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get workout statistics"""
+    tool = WorkoutStatsTool()
+    result = await tool.execute(
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+        period=period
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return result.data
+
+
+@router.get("/weight-suggestion")
+async def get_weight_suggestion(
+    exercise_name: str,
+    template_id: Optional[str] = None,
+    target_reps: int = 10,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get AI weight suggestion for an exercise
+
+    Uses progressive overload logic based on:
+    - Exercise history (last 4 weeks)
+    - RPE trends
+    - Recovery metrics
+    - Template starting weights (if provided)
+    """
+    try:
+        import json
+        from app.services.progressive_overload import suggest_weight
+
+        logger.info(f"Weight suggestion requested: exercise={exercise_name}, template_id={template_id}, user_id={user_id}")
+
+        # Get template starting weights if template_id provided
+        starting_weight = None
+        if template_id:
+            template_query = text("""
+                SELECT starting_weights
+                FROM fitness_template
+                WHERE id = :template_id AND user_id = :user_id
+            """)
+            template = db.execute(template_query, {
+                "template_id": template_id,
+                "user_id": user_id
+            }).fetchone()
+
+            logger.info(f"Template lookup result: found={template is not None}")
+
+            if template and template.starting_weights:
+                try:
+                    starting_weights_dict = template.starting_weights
+                    starting_weight = starting_weights_dict.get(exercise_name)
+                    logger.info(f"Starting weights from template: {starting_weights_dict}, for {exercise_name}: {starting_weight}")
+                except Exception as e:
+                    logger.error(f"Error parsing starting_weights: {e}")
+                    pass
+
+        # Get today's recovery data
+        today = date.today()
+        recovery_query = text("""
+            SELECT hrv, heart_rate, sleep_hours, soreness_level
+            FROM daily_recovery_log
+            WHERE user_id = :user_id AND log_date = :today
+        """)
+        recovery = db.execute(recovery_query, {"user_id": user_id, "today": today}).fetchone()
+        recovery_data = dict(recovery._mapping) if recovery else None
+
+        # Generate AI suggestion
+        suggestion = suggest_weight(
+            db=db,
+            user_id=user_id,
+            exercise_name=exercise_name,
+            target_reps=target_reps,
+            recovery_data=recovery_data,
+            starting_weight=starting_weight
+        )
+
+        logger.info(f"Weight suggestion result: {suggestion}")
+        return suggestion
+
+    except Exception as e:
+        logger.error(f"Failed to get weight suggestion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ============================================================================
+# FITNESS CHAT ENDPOINT
+# ============================================================================
+
+@router.post("/chat")
+async def fitness_chat(
+    request: FitnessChatRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Chat with fitness-focused Sara - with full fitness context access"""
+    try:
+        import httpx
+        import os
+        from datetime import datetime, timedelta
+        import uuid
+        import json
+
+        # Get LLM configuration
+        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+
+        # ===== GATHER FITNESS CONTEXT =====
+
+        # 1. Get custom system prompt from settings
+        custom_prompt_result = db.execute(text("""
+            SELECT system_prompt FROM fitness_settings WHERE user_id = :user_id
+        """), {"user_id": user_id}).fetchone()
+        custom_prompt = custom_prompt_result[0] if custom_prompt_result and custom_prompt_result[0] else None
+
+        # 2. Get nutrition goals
+        goals_result = db.execute(text("""
+            SELECT calories, protein, carbs, fats FROM fitness_goals WHERE user_id = :user_id
+        """), {"user_id": user_id}).fetchone()
+        goals = dict(goals_result._mapping) if goals_result else None
+
+        # 3. Get active training phase
+        phase_result = db.execute(text("""
+            SELECT id, name, goal, start_date, end_date, notes
+            FROM fitness_phase
+            WHERE user_id = :user_id AND status = 'active'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+        active_phase = dict(phase_result._mapping) if phase_result else None
+
+        # 4. Get today's scheduled templates
+        today_dow = datetime.now().strftime('%A').lower()
+        templates_result = db.execute(text("""
+            SELECT id, name, scheduled_days, exercises, notes
+            FROM fitness_template
+            WHERE user_id = :user_id
+            AND (:today = ANY(string_to_array(scheduled_days::text, ','))
+                OR scheduled_days::text LIKE :today_pattern)
+        """), {"user_id": user_id, "today": today_dow, "today_pattern": f'%{today_dow}%'}).fetchall()
+        todays_templates = [dict(t._mapping) for t in templates_result]
+
+        # 5. Get recent workouts (last 7 days) - grouped by session
+        week_ago = datetime.now() - timedelta(days=7)
+        recent_workouts = db.execute(text("""
+            SELECT session_date, COUNT(DISTINCT exercise_id) as exercise_count,
+                   STRING_AGG(DISTINCT notes, '; ') as notes
+            FROM workout_log
+            WHERE user_id = :user_id AND session_date >= :week_ago AND session_date IS NOT NULL
+            GROUP BY session_date
+            ORDER BY session_date DESC LIMIT 10
+        """), {"user_id": user_id, "week_ago": week_ago.date()}).fetchall()
+        recent_workouts_list = [dict(w._mapping) for w in recent_workouts]
+
+        # 6. Get recent food logs (last 3 days)
+        three_days_ago = datetime.now() - timedelta(days=3)
+        recent_food = db.execute(text("""
+            SELECT DATE(logged_at) as log_date, meal_type, food_items,
+                   calories, protein, carbs, fats
+            FROM food_log
+            WHERE user_id = :user_id AND logged_at >= :three_days_ago
+            ORDER BY logged_at DESC LIMIT 15
+        """), {"user_id": user_id, "three_days_ago": three_days_ago}).fetchall()
+        recent_food_list = [dict(f._mapping) for f in recent_food]
+
+        # 7. Get recent fitness notes
+        recent_notes = db.execute(text("""
+            SELECT category, content, created_at
+            FROM fitness_note
+            WHERE user_id = :user_id
+            ORDER BY created_at DESC LIMIT 10
+        """), {"user_id": user_id}).fetchall()
+        recent_notes_list = [dict(n._mapping) for n in recent_notes]
+
+        # 8. Get recent recovery data (last 7 days)
+        recovery_result = db.execute(text("""
+            SELECT log_date, hrv, heart_rate, sleep_hours, soreness_level, notes
+            FROM daily_recovery_log
+            WHERE user_id = :user_id
+            ORDER BY log_date DESC LIMIT 7
+        """), {"user_id": user_id}).fetchall()
+        recent_recovery = [dict(r._mapping) for r in recovery_result]
+
+        # 9. Get conversation history (last 20 messages)
+        history = db.execute(text("""
+            SELECT role, content, created_at
+            FROM episode
+            WHERE user_id = :user_id AND source = 'fitness_chat'
+            ORDER BY created_at DESC LIMIT 20
+        """), {"user_id": user_id}).fetchall()
+        conversation_history = [{"role": h[0], "content": h[1]} for h in reversed(history)]
+
+        # ===== BUILD CONTEXT-RICH SYSTEM PROMPT =====
+
+        context_prompt = get_fitness_system_prompt()
+
+        # Add custom prompt if available
+        if custom_prompt:
+            context_prompt = f"{custom_prompt}\n\n{context_prompt}"
+
+        # Add personalized context
+        context_sections = []
+
+        if goals:
+            context_sections.append(f"""
+**YOUR NUTRITION GOALS:**
+- Daily Calories: {goals['calories']}
+- Protein: {goals['protein']}g
+- Carbs: {goals['carbs']}g
+- Fats: {goals['fats']}g
+""")
+
+        if active_phase:
+            context_sections.append(f"""
+**CURRENT TRAINING PHASE:**
+- Phase: {active_phase['name']}
+- Goal: {active_phase['goal']}
+- Dates: {active_phase.get('start_date', 'Not set')} to {active_phase.get('end_date', 'Not set')}
+- Notes: {active_phase.get('notes', 'None')}
+""")
+
+        if todays_templates:
+            templates_text = "\n".join([
+                f"  • {t['name']}: {len(json.loads(t['exercises']) if isinstance(t['exercises'], str) else t['exercises'])} exercises"
+                for t in todays_templates
+            ])
+            context_sections.append(f"""
+**TODAY'S SCHEDULED WORKOUTS ({today_dow.upper()}):**
+{templates_text}
+""")
+
+        if recent_workouts_list:
+            workouts_text = "\n".join([
+                f"  • {w['session_date']}: {w.get('exercise_count', 0)} exercises - {w.get('notes', 'No notes') or 'No notes'}"
+                for w in recent_workouts_list[:5]
+            ])
+            context_sections.append(f"""
+**RECENT WORKOUTS (Last 7 days):**
+{workouts_text}
+""")
+
+        if recent_food_list:
+            food_text = "\n".join([
+                f"  • {f['log_date']} ({f['meal_type']}): {int(f['calories'] or 0)} cal, {int(f['protein'] or 0)}g protein"
+                for f in recent_food_list[:5]
+            ])
+            context_sections.append(f"""
+**RECENT MEALS (Last 3 days):**
+{food_text}
+""")
+
+        if recent_notes_list:
+            notes_text = "\n".join([
+                f"  • [{n['category']}] {n['content'][:100]}..."
+                for n in recent_notes_list[:3]
+            ])
+            context_sections.append(f"""
+**RECENT FITNESS NOTES:**
+{notes_text}
+""")
+
+        if recent_recovery:
+            # Get today's recovery data (first in list)
+            today_recovery = recent_recovery[0] if recent_recovery else None
+
+            # Calculate recovery averages
+            hrv_values = [r['hrv'] for r in recent_recovery if r['hrv'] is not None]
+            hr_values = [r['heart_rate'] for r in recent_recovery if r['heart_rate'] is not None]
+            sleep_values = [r['sleep_hours'] for r in recent_recovery if r['sleep_hours'] is not None]
+            soreness_values = [r['soreness_level'] for r in recent_recovery if r['soreness_level'] is not None]
+
+            avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else None
+            avg_hr = sum(hr_values) / len(hr_values) if hr_values else None
+            avg_sleep = sum(sleep_values) / len(sleep_values) if sleep_values else None
+            avg_soreness = sum(soreness_values) / len(soreness_values) if soreness_values else None
+
+            recovery_text = []
+            if today_recovery:
+                recovery_text.append(f"**Today's Recovery Status ({today_recovery['log_date']}):**")
+                if today_recovery['hrv']:
+                    recovery_text.append(f"  • HRV: {today_recovery['hrv']} ms")
+                if today_recovery['heart_rate']:
+                    recovery_text.append(f"  • Resting HR: {today_recovery['heart_rate']} bpm")
+                if today_recovery['sleep_hours']:
+                    recovery_text.append(f"  • Sleep: {today_recovery['sleep_hours']} hours")
+                if today_recovery['soreness_level']:
+                    soreness_desc = "Fresh" if today_recovery['soreness_level'] <= 2 else \
+                                   "Minimal" if today_recovery['soreness_level'] <= 4 else \
+                                   "Moderate" if today_recovery['soreness_level'] <= 6 else \
+                                   "High" if today_recovery['soreness_level'] <= 8 else "Very High"
+                    recovery_text.append(f"  • Soreness: {today_recovery['soreness_level']}/10 ({soreness_desc})")
+                if today_recovery['notes']:
+                    recovery_text.append(f"  • Notes: {today_recovery['notes']}")
+
+            if len(recent_recovery) > 1:
+                recovery_text.append(f"\n**7-Day Recovery Averages:**")
+                if avg_hrv:
+                    recovery_text.append(f"  • Avg HRV: {avg_hrv:.0f} ms")
+                if avg_hr:
+                    recovery_text.append(f"  • Avg Resting HR: {avg_hr:.0f} bpm")
+                if avg_sleep:
+                    recovery_text.append(f"  • Avg Sleep: {avg_sleep:.1f} hours")
+                if avg_soreness:
+                    recovery_text.append(f"  • Avg Soreness: {avg_soreness:.1f}/10")
+
+            context_sections.append("\n".join(recovery_text))
+
+        # Combine everything
+        full_context = context_prompt + "\n\n" + "\n".join(context_sections)
+
+        # ===== BUILD MESSAGES WITH HISTORY =====
+
+        messages = [{"role": "system", "content": full_context}]
+
+        # Add conversation history (keep last 10 exchanges)
+        messages.extend(conversation_history[-10:])
+
+        # Add current user message
+        messages.append({"role": "user", "content": request.message})
+
+        # ===== SAVE USER MESSAGE =====
+
+        user_episode_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO episode (id, user_id, source, role, content, importance, created_at)
+            VALUES (:id, :user_id, :source, :role, :content, :importance, :created_at)
+        """), {
+            "id": user_episode_id,
+            "user_id": user_id,
+            "source": "fitness_chat",
+            "role": "user",
+            "content": request.message,
+            "importance": 0.6,
+            "created_at": datetime.utcnow()
+        })
+        db.commit()
+
+        # ===== PREPARE FITNESS TOOLS =====
+
+        from app.tools.fitness import (
+            FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
+            FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
+            WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
+            TemplateListTool, TemplateGetTool
+        )
+        from app.tools.fitness.food_search_log import FoodSearchAndLogTool
+
+        # Create tool instances
+        fitness_tools = [
+            FitnessNoteCreateTool(), FitnessNoteSearchTool(), FitnessNoteEditTool(),
+            FoodSearchAndLogTool(),  # Natural language food logging with USDA search
+            FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
+            WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
+            TemplateListTool(), TemplateGetTool()
+        ]
+
+        # Get tool schemas
+        tools_schemas = [tool.to_openai_schema() for tool in fitness_tools]
+
+        # ===== CALL LLM WITH SimpleLLMClient (includes XML filtering) =====
+
+        logger.info(f"💪 Fitness chat starting with {len(messages)} context messages")
+
+        # Convert messages to SimpleMessage objects for SimpleLLMClient
+        message_objects = [SimpleMessage(msg["role"], msg["content"]) for msg in messages]
+
+        # Use SimpleLLMClient which handles XML filtering, multi-round tool calling
+        llm_client = SimpleLLMClient()
+
+        final_response = await llm_client.chat_with_tools(
+            messages=message_objects,
+            tools=tools_schemas,
+            user_id=user_id,
+            conversation_id=f"fitness_{user_id}"
+        )
+
+        # Remove any remaining XML tags from the response
+        final_response = re.sub(r'<tool_call>.*?</tool_call>', '', final_response, flags=re.DOTALL).strip()
+        final_response = re.sub(r'<[^>]+>', '', final_response).strip()
+
+        logger.info(f"✅ Fitness chat complete, response length: {len(final_response)}")
+
+        # Save Sara's response to memory
+        db.execute(text("""
+            INSERT INTO episode (id, user_id, source, role, content, importance, created_at)
+            VALUES (:id, :user_id, :source, :role, :content, :importance, :created_at)
+        """), {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "source": "fitness_chat",
+            "role": "assistant",
+            "content": final_response,
+            "importance": 0.6,
+            "created_at": datetime.utcnow()
+        })
+        db.commit()
+
+        logger.info(f"💪 Fitness chat complete for user {user_id}")
+
+        # Update daily log
+        await update_daily_log(db, user_id, date.today(), "chat")
+
+        return {
+            "response": final_response,
+            "model": OPENAI_MODEL
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Fitness chat error: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/chat/stream")
+async def fitness_chat_stream(
+    request: FitnessChatRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Streaming fitness chat endpoint"""
+    try:
+        from app.tools.fitness.template_tools import TemplateListTool, TemplateGetTool
+        from app.core.config import settings
+
+        OPENAI_MODEL = settings.openai_model
+        ASSISTANT_NAME = settings.assistant_name
+
+        # Build context (same as non-streaming version)
+        context_prompt = get_fitness_system_prompt()
+
+        # Get conversation history
+        history_result = db.execute(text("""
+            SELECT role, content
+            FROM episode
+            WHERE user_id = :user_id AND source = 'fitness_chat'
+            ORDER BY created_at DESC
+            LIMIT 20
+        """), {"user_id": user_id})
+
+        conversation_history = []
+        for row in reversed(list(history_result.fetchall())):
+            conversation_history.append({"role": row.role, "content": row.content})
+
+        # Build messages
+        messages = [{"role": "system", "content": context_prompt}]
+        messages.extend(conversation_history[-10:])
+        messages.append({"role": "user", "content": request.message})
+
+        # Save user message
+        user_episode_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO episode (id, user_id, source, role, content, importance, created_at)
+            VALUES (:id, :user_id, :source, :role, :content, :importance, :created_at)
+        """), {
+            "id": user_episode_id,
+            "user_id": user_id,
+            "source": "fitness_chat",
+            "role": "user",
+            "content": request.message,
+            "importance": 0.6,
+            "created_at": datetime.utcnow()
+        })
+        db.commit()
+
+        # Prepare fitness tools
+        from app.tools.fitness import (
+            FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
+            FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
+            WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
+            TemplateListTool, TemplateGetTool
+        )
+        from app.tools.fitness.food_search_log import FoodSearchAndLogTool
+
+        fitness_tools = [
+            FitnessNoteCreateTool(), FitnessNoteSearchTool(), FitnessNoteEditTool(),
+            FoodSearchAndLogTool(),
+            FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
+            WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
+            TemplateListTool(), TemplateGetTool()
+        ]
+
+        tools_schemas = [tool.to_openai_schema() for tool in fitness_tools]
+
+        async def generate_events():
+            try:
+                # Create event queue for streaming
+                event_queue = asyncio.Queue()
+
+                # Set up streaming LLM client
+                streaming_client = SimpleLLMClient()
+                streaming_client.set_event_queue(event_queue)
+
+                # Convert messages to SimpleMessage objects
+                message_objects = [SimpleMessage(msg["role"], msg["content"]) for msg in messages]
+
+                # Start LLM processing in background task
+                async def process_chat():
+                    response_content = await streaming_client.chat_with_tools(
+                        messages=message_objects,
+                        tools=tools_schemas,
+                        user_id=user_id,
+                        conversation_id=f"fitness_{user_id}"
+                    )
+
+                    # Clean up XML tags
+                    response_content = re.sub(r'<tool_call>.*?</tool_call>', '', response_content, flags=re.DOTALL).strip()
+                    response_content = re.sub(r'<[^>]+>', '', response_content).strip()
+
+                    # Save Sara's response to memory
+                    db.execute(text("""
+                        INSERT INTO episode (id, user_id, source, role, content, importance, created_at)
+                        VALUES (:id, :user_id, :source, :role, :content, :importance, :created_at)
+                    """), {
+                        "id": str(uuid.uuid4()),
+                        "user_id": user_id,
+                        "source": "fitness_chat",
+                        "role": "assistant",
+                        "content": response_content,
+                        "importance": 0.6,
+                        "created_at": datetime.utcnow()
+                    })
+                    db.commit()
+
+                    # Update daily log
+                    await update_daily_log(db, user_id, date.today(), "chat")
+
+                    await event_queue.put({
+                        "type": "final_response",
+                        "data": {
+                            "content": response_content,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                    })
+                    await event_queue.put({"type": "done"})
+
+                # Start processing
+                task = asyncio.create_task(process_chat())
+
+                # Stream events as they come in
+                while True:
+                    try:
+                        event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+
+                        if event.get("type") == "done":
+                            break
+
+                        # Format as Server-Sent Event
+                        event_data = json.dumps(event)
+                        yield f"data: {event_data}\n\n"
+
+                    except asyncio.TimeoutError:
+                        # Send heartbeat to keep connection alive
+                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    except Exception as e:
+                        logger.error(f"Error in event stream: {e}")
+                        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                        break
+
+                # Ensure task is cleaned up
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            except Exception as e:
+                logger.error(f"Error in fitness chat stream: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            generate_events(),
+            media_type="text/plain",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Fitness chat stream error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# DASHBOARD / STATS ENDPOINT
+# ============================================================================
+
+@router.get("/dashboard")
+async def get_fitness_dashboard(user_id: str = Depends(get_current_user_id)):
+    """Get fitness dashboard data"""
+    try:
+        # Get food summary for the week
+        food_tool = FoodLogSummaryTool()
+        food_result = await food_tool.execute(user_id=user_id, period="week")
+
+        # Get workout stats for the week
+        workout_tool = WorkoutStatsTool()
+        workout_result = await workout_tool.execute(user_id=user_id, period="week")
+
+        dashboard = {
+            "nutrition": food_result.data if food_result.success else {},
+            "workouts": workout_result.data if workout_result.success else {},
+            "updated_at": datetime.now().isoformat()
+        }
+
+        return dashboard
+
+    except Exception as e:
+        logger.error(f"Dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# DAILY LOG ENDPOINTS
+# ============================================================================
+
+@router.get("/daily-log/{log_date}")
+async def get_daily_log(
+    log_date: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get fitness daily log for a specific date (format: YYYY-MM-DD or 'today')"""
+    try:
+        # Handle 'today' keyword
+        if log_date.lower() == "today":
+            target_date = date.today()
+        else:
+            target_date = datetime.strptime(log_date, "%Y-%m-%d").date()
+
+        # Get daily log summary
+        log_sql = text("""
+            SELECT
+                log_date, chat_count, food_entries, workout_sessions, notes_created,
+                total_calories, total_protein, total_carbs, total_fats,
+                total_exercises, total_sets, total_reps,
+                summary, created_at, updated_at
+            FROM fitness_daily_log
+            WHERE user_id = :user_id AND log_date = :log_date
+        """)
+        result = db.execute(log_sql, {"user_id": user_id, "log_date": target_date})
+        log_row = result.fetchone()
+
+        if not log_row:
+            return {
+                "date": target_date.isoformat(),
+                "has_data": False,
+                "message": f"No fitness activity logged for {target_date.strftime('%A, %B %d, %Y')}"
+            }
+
+        # Get detailed episodes for this date
+        episodes_sql = text("""
+            SELECT source, role, content, created_at
+            FROM episode
+            WHERE user_id = :user_id
+              AND source LIKE 'fitness_%'
+              AND DATE(created_at) = :log_date
+            ORDER BY created_at
+        """)
+        episodes_result = db.execute(episodes_sql, {"user_id": user_id, "log_date": target_date})
+        episodes = []
+        for ep_row in episodes_result:
+            episodes.append({
+                "source": ep_row[0],
+                "role": ep_row[1],
+                "content": ep_row[2],
+                "time": ep_row[3].strftime("%I:%M %p")
+            })
+
+        return {
+            "date": target_date.isoformat(),
+            "day_name": target_date.strftime("%A"),
+            "has_data": True,
+            "summary": {
+                "chat_count": log_row[1],
+                "food_entries": log_row[2],
+                "workout_sessions": log_row[3],
+                "notes_created": log_row[4]
+            },
+            "nutrition": {
+                "total_calories": log_row[5],
+                "total_protein": log_row[6],
+                "total_carbs": log_row[7],
+                "total_fats": log_row[8]
+            },
+            "workout": {
+                "total_exercises": log_row[9],
+                "total_sets": log_row[10],
+                "total_reps": log_row[11]
+            },
+            "narrative_summary": log_row[12],
+            "activities": episodes,
+            "first_activity": log_row[13].strftime("%I:%M %p"),
+            "last_activity": log_row[14].strftime("%I:%M %p")
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD or 'today'")
+    except Exception as e:
+        logger.error(f"Get daily log error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/daily-logs")
+async def get_daily_logs_range(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 30,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get fitness daily logs for a date range"""
+    try:
+        # Default to last 30 days if not specified
+        if not end_date:
+            end = date.today()
+        else:
+            end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        if not start_date:
+            from datetime import timedelta
+            start = end - timedelta(days=limit-1)
+        else:
+            start = datetime.strptime(start_date, "%Y-%m-% d").date()
+
+        logs_sql = text("""
+            SELECT
+                log_date, chat_count, food_entries, workout_sessions, notes_created,
+                total_calories, total_protein, total_carbs, total_fats,
+                total_sets, total_reps
+            FROM fitness_daily_log
+            WHERE user_id = :user_id
+              AND log_date BETWEEN :start_date AND :end_date
+            ORDER BY log_date DESC
+            LIMIT :limit
+        """)
+        result = db.execute(logs_sql, {
+            "user_id": user_id,
+            "start_date": start,
+            "end_date": end,
+            "limit": limit
+        })
+
+        logs = []
+        for row in result:
+            logs.append({
+                "date": row[0].isoformat(),
+                "day_name": row[0].strftime("%A"),
+                "chat_count": row[1],
+                "food_entries": row[2],
+                "workout_sessions": row[3],
+                "notes_created": row[4],
+                "total_calories": row[5],
+                "total_protein": row[6],
+                "total_carbs": row[7],
+                "total_fats": row[8],
+                "total_sets": row[9],
+                "total_reps": row[10]
+            })
+
+        return {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "total_days": len(logs),
+            "logs": logs
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    except Exception as e:
+        logger.error(f"Get daily logs range error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NUTRITION GOALS ENDPOINTS
+# ============================================================================
+
+@router.get("/goals")
+async def get_nutrition_goals(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get user's nutrition goals or return defaults"""
+    try:
+        # Query for user's existing goals
+        result = db.execute(
+            text("""
+                SELECT calories, protein, carbs, fats
+                FROM fitness_goals
+                WHERE user_id = :user_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """),
+            {"user_id": user_id}
+        )
+        row = result.fetchone()
+
+        if row:
+            return {
+                "calories": row[0],
+                "protein": row[1],
+                "carbs": row[2],
+                "fats": row[3]
+            }
+        else:
+            # Return default goals
+            return {
+                "calories": 2000,
+                "protein": 150,
+                "carbs": 200,
+                "fats": 70
+            }
+
+    except Exception as e:
+        logger.error(f"Get nutrition goals error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/goals")
+async def update_nutrition_goals(
+    goals: NutritionGoals,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update user's nutrition goals"""
+    try:
+        # Check if user has existing goals
+        result = db.execute(
+            text("""
+                SELECT id FROM fitness_goals
+                WHERE user_id = :user_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """),
+            {"user_id": user_id}
+        )
+        existing = result.fetchone()
+
+        if existing:
+            # Update existing goals
+            db.execute(
+                text("""
+                    UPDATE fitness_goals
+                    SET calories = :calories,
+                        protein = :protein,
+                        carbs = :carbs,
+                        fats = :fats,
+                        updated_at = NOW()
+                    WHERE user_id = :user_id
+                """),
+                {
+                    "user_id": user_id,
+                    "calories": goals.calories,
+                    "protein": goals.protein,
+                    "carbs": goals.carbs,
+                    "fats": goals.fats
+                }
+            )
+        else:
+            # Insert new goals
+            db.execute(
+                text("""
+                    INSERT INTO fitness_goals (id, user_id, calories, protein, carbs, fats, created_at, updated_at)
+                    VALUES (gen_random_uuid(), :user_id, :calories, :protein, :carbs, :fats, NOW(), NOW())
+                """),
+                {
+                    "user_id": user_id,
+                    "calories": goals.calories,
+                    "protein": goals.protein,
+                    "carbs": goals.carbs,
+                    "fats": goals.fats
+                }
+            )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Nutrition goals updated successfully",
+            "goals": {
+                "calories": goals.calories,
+                "protein": goals.protein,
+                "carbs": goals.carbs,
+                "fats": goals.fats
+            }
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Update nutrition goals error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# TTS ENDPOINT (Wyoming/Piper)
+# ============================================================================
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "alloy"  # Default OpenAI-compatible voice (alloy, echo, fable, onyx, nova, shimmer)
+
+@router.post("/tts")
+async def text_to_speech(request: TTSRequest):
+    """Convert text to speech using Wyoming/Piper TTS"""
+    try:
+        TTS_URL = "http://10.185.1.8:9000/v1/audio/speech"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                TTS_URL,
+                json={
+                    "model": "tts-1",
+                    "input": request.text,
+                    "voice": request.voice
+                }
+            )
+
+            logger.info(f"Wyoming/Piper response: status={response.status_code}, size={len(response.content)} bytes")
+
+            if response.status_code == 200:
+                # Return audio as streaming response
+                return StreamingResponse(
+                    io.BytesIO(response.content),
+                    media_type="audio/wav",
+                    headers={
+                        "Content-Disposition": "inline; filename=speech.wav"
+                    }
+                )
+            else:
+                logger.error(f"Wyoming/Piper error: status={response.status_code}, body={response.text}")
+                raise HTTPException(status_code=500, detail=f"TTS service error: {response.text}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS error - Type: {type(e).__name__}, Message: {str(e)}, Repr: {repr(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+
+# ============================================
+# PHASE MANAGEMENT APIs
+# ============================================
+
+class PhaseCreate(BaseModel):
+    name: str
+    goal: Optional[str] = None
+    parent_phase_id: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    notes: Optional[str] = None
+
+class PhaseUpdate(BaseModel):
+    name: Optional[str] = None
+    goal: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+@router.get("/phases")
+async def list_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """List all phases for user (hierarchical)"""
+    try:
+        phases = db.execute(text("""
+            SELECT id, name, goal, parent_phase_id, start_date, end_date, status, notes, created_at, updated_at
+            FROM fitness_phase
+            WHERE user_id = :user_id
+            ORDER BY start_date DESC NULLS LAST, created_at DESC
+        """), {"user_id": user_id}).fetchall()
+
+        return {"phases": [dict(row._mapping) for row in phases]}
+    except Exception as e:
+        logger.error(f"Failed to list phases: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/phases")
+async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Create a new training phase"""
+    try:
+        phase_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO fitness_phase (id, user_id, name, goal, parent_phase_id, start_date, end_date, status, notes)
+            VALUES (:id, :user_id, :name, :goal, :parent_phase_id, :start_date, :end_date, :status, :notes)
+        """), {
+            "id": phase_id,
+            "user_id": user_id,
+            "name": phase.name,
+            "goal": phase.goal,
+            "parent_phase_id": phase.parent_phase_id,
+            "start_date": phase.start_date,
+            "end_date": phase.end_date,
+            "status": "planned",
+            "notes": phase.notes
+        })
+        db.commit()
+
+        return {"success": True, "phase_id": phase_id, "message": "Phase created successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create phase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/phases/{phase_id}")
+async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Update a phase"""
+    try:
+        updates = []
+        params = {"phase_id": phase_id, "user_id": user_id}
+
+        if phase.name is not None:
+            updates.append("name = :name")
+            params["name"] = phase.name
+        if phase.goal is not None:
+            updates.append("goal = :goal")
+            params["goal"] = phase.goal
+        if phase.start_date is not None:
+            updates.append("start_date = :start_date")
+            params["start_date"] = phase.start_date
+        if phase.end_date is not None:
+            updates.append("end_date = :end_date")
+            params["end_date"] = phase.end_date
+        if phase.status is not None:
+            updates.append("status = :status")
+            params["status"] = phase.status
+        if phase.notes is not None:
+            updates.append("notes = :notes")
+            params["notes"] = phase.notes
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            sql = f"UPDATE fitness_phase SET {', '.join(updates)} WHERE id = :phase_id AND user_id = :user_id"
+            db.execute(text(sql), params)
+            db.commit()
+
+        return {"success": True, "message": "Phase updated successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update phase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/phases/{phase_id}")
+async def delete_phase(phase_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Delete a phase"""
+    try:
+        db.execute(text("""
+            DELETE FROM fitness_phase WHERE id = :phase_id AND user_id = :user_id
+        """), {"phase_id": phase_id, "user_id": user_id})
+        db.commit()
+        return {"success": True, "message": "Phase deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete phase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/phases/active")
+async def get_active_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Get currently active phases"""
+    try:
+        phases = db.execute(text("""
+            SELECT id, name, goal, parent_phase_id, start_date, end_date, status, notes, created_at, updated_at
+            FROM fitness_phase
+            WHERE user_id = :user_id AND status = 'active'
+            ORDER BY start_date DESC NULLS LAST
+        """), {"user_id": user_id}).fetchall()
+
+        return {"phases": [dict(row._mapping) for row in phases]}
+    except Exception as e:
+        logger.error(f"Failed to get active phases: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/phases/{phase_id}/activate")
+async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """
+    Activate a training phase:
+    - Creates calendar events for all templates based on scheduled days
+    - Creates workout_session entries in 'planned' status
+    - Links sessions to calendar events
+    - Updates phase status to 'active'
+    """
+    try:
+        from datetime import datetime, timedelta
+        import json
+
+        # 1. Fetch phase details
+        phase = db.execute(text("""
+            SELECT id, name, start_date, end_date, status
+            FROM fitness_phase
+            WHERE id = :phase_id AND user_id = :user_id
+        """), {"phase_id": phase_id, "user_id": user_id}).fetchone()
+
+        if not phase:
+            raise HTTPException(status_code=404, detail="Phase not found")
+
+        phase_dict = dict(phase._mapping)
+
+        # Validation
+        if not phase_dict['start_date'] or not phase_dict['end_date']:
+            raise HTTPException(status_code=400, detail="Phase must have start_date and end_date to be activated")
+
+        if phase_dict['status'] == 'active':
+            raise HTTPException(status_code=400, detail="Phase is already active")
+
+        # 2. Fetch all templates for this phase
+        templates = db.execute(text("""
+            SELECT id, name, scheduled_days, exercises
+            FROM fitness_template
+            WHERE phase_id = :phase_id AND user_id = :user_id
+        """), {"phase_id": phase_id, "user_id": user_id}).fetchall()
+
+        if not templates:
+            raise HTTPException(status_code=400, detail="Phase has no templates assigned. Add workout templates before activating.")
+
+        # Day mapping
+        day_map = {
+            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+            'friday': 4, 'saturday': 5, 'sunday': 6
+        }
+
+        created_events = []
+        created_sessions = []
+
+        # 3. For each template, generate calendar events
+        for template_row in templates:
+            template = dict(template_row._mapping)
+            template_id = template['id']
+            template_name = template['name']
+            scheduled_days_json = template['scheduled_days']
+
+            # Parse scheduled days
+            try:
+                scheduled_days = json.loads(scheduled_days_json) if scheduled_days_json else []
+            except:
+                scheduled_days = []
+
+            if not scheduled_days:
+                logger.warning(f"Template {template_id} has no scheduled days, skipping")
+                continue
+
+            # Convert scheduled days to day numbers
+            scheduled_day_nums = []
+            for day in scheduled_days:
+                day_lower = day.lower().strip()
+                if day_lower in day_map:
+                    scheduled_day_nums.append(day_map[day_lower])
+
+            if not scheduled_day_nums:
+                logger.warning(f"Template {template_id} has invalid scheduled days, skipping")
+                continue
+
+            # 4. Generate all dates between start_date and end_date that match scheduled days
+            start_date = phase_dict['start_date']
+            end_date = phase_dict['end_date']
+
+            current_date = start_date
+            while current_date <= end_date:
+                # Check if this day of week matches any scheduled day
+                if current_date.weekday() in scheduled_day_nums:
+                    # Create calendar event
+                    event_id = str(uuid.uuid4())
+                    event_start = datetime.combine(current_date, datetime.min.time().replace(hour=9, minute=0))  # Default 9:00 AM
+                    event_end = datetime.combine(current_date, datetime.min.time().replace(hour=10, minute=30))  # Default 1.5 hours
+
+                    db.execute(text("""
+                        INSERT INTO event (id, user_id, title, starts_at, ends_at, description, location)
+                        VALUES (:id, :user_id, :title, :starts_at, :ends_at, :description, :location)
+                    """), {
+                        "id": event_id,
+                        "user_id": user_id,
+                        "title": f"🏋️ {template_name}",
+                        "starts_at": event_start,
+                        "ends_at": event_end,
+                        "description": f"Workout: {template_name}\nPhase: {phase_dict['name']}",
+                        "location": ""
+                    })
+
+                    # Create workout session
+                    session_id = str(uuid.uuid4())
+                    db.execute(text("""
+                        INSERT INTO workout_session (id, user_id, template_id, session_date, status, calendar_event_id)
+                        VALUES (:id, :user_id, :template_id, :session_date, :status, :calendar_event_id)
+                    """), {
+                        "id": session_id,
+                        "user_id": user_id,
+                        "template_id": template_id,
+                        "session_date": current_date,
+                        "status": "planned",
+                        "calendar_event_id": event_id
+                    })
+
+                    created_events.append({
+                        "event_id": event_id,
+                        "template_name": template_name,
+                        "date": current_date.isoformat()
+                    })
+
+                    created_sessions.append({
+                        "session_id": session_id,
+                        "template_id": template_id,
+                        "date": current_date.isoformat()
+                    })
+
+                # Move to next day
+                current_date += timedelta(days=1)
+
+        # 5. Update phase status to 'active'
+        db.execute(text("""
+            UPDATE fitness_phase
+            SET status = 'active', updated_at = CURRENT_TIMESTAMP
+            WHERE id = :phase_id AND user_id = :user_id
+        """), {"phase_id": phase_id, "user_id": user_id})
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": f"Phase '{phase_dict['name']}' activated successfully",
+            "summary": {
+                "phase_name": phase_dict['name'],
+                "start_date": phase_dict['start_date'].isoformat(),
+                "end_date": phase_dict['end_date'].isoformat(),
+                "templates_count": len(templates),
+                "events_created": len(created_events),
+                "sessions_created": len(created_sessions)
+            },
+            "created_events": created_events[:10],  # Return first 10 for preview
+            "created_sessions": created_sessions[:10]
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to activate phase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================
+# TEMPLATE MANAGEMENT APIs
+# ============================================
+
+class TemplateCreate(BaseModel):
+    name: str
+    phase_id: Optional[str] = None
+    scheduled_days: List[str] = []  # ["monday", "thursday", "saturday"]
+    exercises: List[Dict] = []  # [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rpe_target": 7}]
+    notes: Optional[str] = None
+
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    phase_id: Optional[str] = None
+    scheduled_days: Optional[List[str]] = None
+    exercises: Optional[List[Dict]] = None
+    notes: Optional[str] = None
+
+@router.get("/templates")
+async def list_templates(phase_id: Optional[str] = None, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """List all templates (optionally filtered by phase)"""
+    try:
+        sql = """
+            SELECT id, phase_id, name, scheduled_days, exercises, order_in_phase, notes, created_at, updated_at
+            FROM fitness_template
+            WHERE user_id = :user_id
+        """
+        params = {"user_id": user_id}
+
+        if phase_id:
+            sql += " AND phase_id = :phase_id"
+            params["phase_id"] = phase_id
+
+        sql += " ORDER BY order_in_phase, created_at"
+
+        templates = db.execute(text(sql), params).fetchall()
+
+        # Parse JSON fields
+        result = []
+        for row in templates:
+            template_dict = dict(row._mapping)
+            if template_dict.get("scheduled_days"):
+                import json
+                template_dict["scheduled_days"] = json.loads(template_dict["scheduled_days"])
+            if template_dict.get("exercises"):
+                import json
+                template_dict["exercises"] = json.loads(template_dict["exercises"])
+            result.append(template_dict)
+
+        return {"templates": result}
+    except Exception as e:
+        logger.error(f"Failed to list templates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/templates")
+async def create_template(template: TemplateCreate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Create a new workout template"""
+    try:
+        import json
+        template_id = str(uuid.uuid4())
+
+        db.execute(text("""
+            INSERT INTO fitness_template (id, user_id, phase_id, name, scheduled_days, exercises, notes, starting_weights)
+            VALUES (:id, :user_id, :phase_id, :name, :scheduled_days, :exercises, :notes, :starting_weights)
+        """), {
+            "id": template_id,
+            "user_id": user_id,
+            "phase_id": template.phase_id,
+            "name": template.name,
+            "scheduled_days": json.dumps(template.scheduled_days),
+            "exercises": json.dumps(template.exercises),
+            "notes": template.notes,
+            "starting_weights": json.dumps(template.starting_weights) if template.starting_weights else None
+        })
+        db.commit()
+
+        return {"success": True, "template_id": template_id, "message": "Template created successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create template: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/templates/today")
+async def get_today_template(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Get template scheduled for today"""
+    try:
+        import json
+        from datetime import datetime
+
+        day_of_week = datetime.now().strftime("%A").lower()
+
+        templates = db.execute(text("""
+            SELECT id, phase_id, name, scheduled_days, exercises, notes
+            FROM fitness_template
+            WHERE user_id = :user_id
+        """), {"user_id": user_id}).fetchall()
+
+        # Find templates that have today in their scheduled_days
+        matching_templates = []
+        for row in templates:
+            template_dict = dict(row._mapping)
+            scheduled_days = json.loads(template_dict.get("scheduled_days", "[]"))
+            if day_of_week in [d.lower() for d in scheduled_days]:
+                template_dict["scheduled_days"] = scheduled_days
+                template_dict["exercises"] = json.loads(template_dict.get("exercises", "[]"))
+                matching_templates.append(template_dict)
+
+        return {"templates": matching_templates, "day_of_week": day_of_week}
+    except Exception as e:
+        logger.error(f"Failed to get today's template: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/templates/{template_id}")
+async def update_template(template_id: str, template: TemplateUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Update a template"""
+    try:
+        import json
+        updates = []
+        params = {"template_id": template_id, "user_id": user_id}
+
+        if template.name is not None:
+            updates.append("name = :name")
+            params["name"] = template.name
+        if template.phase_id is not None:
+            updates.append("phase_id = :phase_id")
+            params["phase_id"] = template.phase_id
+        if template.scheduled_days is not None:
+            updates.append("scheduled_days = :scheduled_days")
+            params["scheduled_days"] = json.dumps(template.scheduled_days)
+        if template.exercises is not None:
+            updates.append("exercises = :exercises")
+            params["exercises"] = json.dumps(template.exercises)
+        if template.notes is not None:
+            updates.append("notes = :notes")
+            params["notes"] = template.notes
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            sql = f"UPDATE fitness_template SET {', '.join(updates)} WHERE id = :template_id AND user_id = :user_id"
+            db.execute(text(sql), params)
+            db.commit()
+
+        return {"success": True, "message": "Template updated successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update template: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/templates/{template_id}")
+async def delete_template(template_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Delete a template"""
+    try:
+        db.execute(text("""
+            DELETE FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id})
+        db.commit()
+        return {"success": True, "message": "Template deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete template: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================
+# FITNESS SETTINGS APIs
+# ============================================
+
+class FitnessSettingsUpdate(BaseModel):
+    system_prompt: Optional[str] = None
+
+@router.get("/settings")
+async def get_fitness_settings(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Get fitness settings including custom system prompt"""
+    try:
+        settings = db.execute(text("""
+            SELECT id, system_prompt, created_at, updated_at
+            FROM fitness_settings
+            WHERE user_id = :user_id
+        """), {"user_id": user_id}).fetchone()
+
+        if settings:
+            return dict(settings._mapping)
+        else:
+            # Return default
+            return {"system_prompt": None, "message": "No custom settings yet"}
+    except Exception as e:
+        logger.error(f"Failed to get settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/settings")
+async def update_fitness_settings(settings: FitnessSettingsUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Update fitness settings"""
+    try:
+        # Upsert settings
+        db.execute(text("""
+            INSERT INTO fitness_settings (id, user_id, system_prompt, updated_at)
+            VALUES (:id, :user_id, :system_prompt, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                system_prompt = EXCLUDED.system_prompt,
+                updated_at = CURRENT_TIMESTAMP
+        """), {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "system_prompt": settings.system_prompt
+        })
+        db.commit()
+
+        return {"success": True, "message": "Settings updated successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# RECOVERY LOG ENDPOINTS
+# =============================================================================
+
+@router.post("/recovery", response_model=RecoveryLogResponse)
+async def create_or_update_recovery_log(
+    recovery_data: RecoveryLogCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Create or update daily recovery log"""
+    try:
+        # Validate soreness level if provided
+        if recovery_data.soreness_level is not None:
+            if recovery_data.soreness_level < 1 or recovery_data.soreness_level > 10:
+                raise HTTPException(status_code=400, detail="Soreness level must be between 1 and 10")
+
+        # Parse log_date
+        try:
+            log_date = datetime.strptime(recovery_data.log_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        # Check if entry exists for this date
+        check_query = text("""
+            SELECT id FROM daily_recovery_log
+            WHERE user_id = :user_id AND log_date = :log_date
+        """)
+        existing = db.execute(check_query, {"user_id": user_id, "log_date": log_date}).fetchone()
+
+        if existing:
+            # Update existing entry
+            update_query = text("""
+                UPDATE daily_recovery_log
+                SET hrv = :hrv,
+                    heart_rate = :heart_rate,
+                    sleep_hours = :sleep_hours,
+                    soreness_level = :soreness_level,
+                    body_weight = :body_weight,
+                    weight_unit = :weight_unit,
+                    notes = :notes,
+                    updated_at = NOW()
+                WHERE user_id = :user_id AND log_date = :log_date
+                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            """)
+            result = db.execute(update_query, {
+                "user_id": user_id,
+                "log_date": log_date,
+                "hrv": recovery_data.hrv,
+                "heart_rate": recovery_data.heart_rate,
+                "sleep_hours": recovery_data.sleep_hours,
+                "soreness_level": recovery_data.soreness_level,
+                "body_weight": recovery_data.body_weight,
+                "weight_unit": recovery_data.weight_unit,
+                "notes": recovery_data.notes
+            }).fetchone()
+        else:
+            # Insert new entry
+            insert_query = text("""
+                INSERT INTO daily_recovery_log
+                (id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at)
+                VALUES (:id, :user_id, :log_date, :hrv, :heart_rate, :sleep_hours, :soreness_level, :body_weight, :weight_unit, :notes, NOW(), NOW())
+                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            """)
+            result = db.execute(insert_query, {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "log_date": log_date,
+                "hrv": recovery_data.hrv,
+                "heart_rate": recovery_data.heart_rate,
+                "sleep_hours": recovery_data.sleep_hours,
+                "soreness_level": recovery_data.soreness_level,
+                "body_weight": recovery_data.body_weight,
+                "weight_unit": recovery_data.weight_unit,
+                "notes": recovery_data.notes
+            }).fetchone()
+
+        db.commit()
+
+        # Convert result to response model
+        row = result._mapping
+        return RecoveryLogResponse(
+            id=row['id'],
+            user_id=row['user_id'],
+            log_date=row['log_date'].isoformat(),
+            hrv=row['hrv'],
+            heart_rate=row['heart_rate'],
+            sleep_hours=float(row['sleep_hours']) if row['sleep_hours'] else None,
+            soreness_level=row['soreness_level'],
+            body_weight=float(row['body_weight']) if row['body_weight'] else None,
+            weight_unit=row['weight_unit'],
+            notes=row['notes'],
+            created_at=row['created_at'].isoformat(),
+            updated_at=row['updated_at'].isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to save recovery log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/recovery/{log_date}", response_model=Optional[RecoveryLogResponse])
+async def get_recovery_log(
+    log_date: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get recovery log for a specific date"""
+    try:
+        # Parse and validate date
+        try:
+            parsed_date = datetime.strptime(log_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        query = text("""
+            SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            FROM daily_recovery_log
+            WHERE user_id = :user_id AND log_date = :log_date
+        """)
+        result = db.execute(query, {"user_id": user_id, "log_date": parsed_date}).fetchone()
+
+        if not result:
+            return None
+
+        row = result._mapping
+        return RecoveryLogResponse(
+            id=row['id'],
+            user_id=row['user_id'],
+            log_date=row['log_date'].isoformat(),
+            hrv=row['hrv'],
+            heart_rate=row['heart_rate'],
+            sleep_hours=float(row['sleep_hours']) if row['sleep_hours'] else None,
+            soreness_level=row['soreness_level'],
+            body_weight=float(row['body_weight']) if row['body_weight'] else None,
+            weight_unit=row['weight_unit'],
+            notes=row['notes'],
+            created_at=row['created_at'].isoformat(),
+            updated_at=row['updated_at'].isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get recovery log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/recovery/recent/list", response_model=List[RecoveryLogResponse])
+async def get_recent_recovery_logs(
+    days: int = 7,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get recent recovery logs (default: last 7 days)"""
+    try:
+        # Limit days to reasonable range
+        if days < 1:
+            days = 7
+        if days > 90:
+            days = 90
+
+        query = text("""
+            SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            FROM daily_recovery_log
+            WHERE user_id = :user_id
+            ORDER BY log_date DESC
+            LIMIT :limit
+        """)
+        results = db.execute(query, {"user_id": user_id, "limit": days}).fetchall()
+
+        recovery_logs = []
+        for row in results:
+            row_dict = row._mapping
+            recovery_logs.append(RecoveryLogResponse(
+                id=row_dict['id'],
+                user_id=row_dict['user_id'],
+                log_date=row_dict['log_date'].isoformat(),
+                hrv=row_dict['hrv'],
+                heart_rate=row_dict['heart_rate'],
+                sleep_hours=float(row_dict['sleep_hours']) if row_dict['sleep_hours'] else None,
+                soreness_level=row_dict['soreness_level'],
+                body_weight=float(row_dict['body_weight']) if row_dict['body_weight'] else None,
+                weight_unit=row_dict['weight_unit'],
+                notes=row_dict['notes'],
+                created_at=row_dict['created_at'].isoformat(),
+                updated_at=row_dict['updated_at'].isoformat()
+            ))
+
+        return recovery_logs
+
+    except Exception as e:
+        logger.error(f"Failed to get recent recovery logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# RECIPE ROUTES
+# ============================================================================
+
+def estimate_recipe_nutrition(ingredients: List[IngredientItem], servings: int = 1) -> dict:
+    """
+    Simple nutrition estimator based on common ingredients.
+    Returns per-serving macros.
+    """
+    # Basic nutrition database (per 100g)
+    nutrition_db = {
+        # Proteins
+        'chicken breast': {'calories': 165, 'protein': 31, 'carbs': 0, 'fats': 3.6},
+        'chicken': {'calories': 165, 'protein': 31, 'carbs': 0, 'fats': 3.6},
+        'ground beef': {'calories': 250, 'protein': 26, 'carbs': 0, 'fats': 17},
+        'beef': {'calories': 250, 'protein': 26, 'carbs': 0, 'fats': 17},
+        'salmon': {'calories': 206, 'protein': 22, 'carbs': 0, 'fats': 13},
+        'tuna': {'calories': 132, 'protein': 28, 'carbs': 0, 'fats': 1.3},
+        'eggs': {'calories': 143, 'protein': 13, 'carbs': 0.7, 'fats': 9.5},
+        'egg': {'calories': 143, 'protein': 13, 'carbs': 0.7, 'fats': 9.5},
+        'tofu': {'calories': 76, 'protein': 8, 'carbs': 1.9, 'fats': 4.8},
+
+        # Carbs
+        'rice': {'calories': 130, 'protein': 2.7, 'carbs': 28, 'fats': 0.3},
+        'pasta': {'calories': 131, 'protein': 5, 'carbs': 25, 'fats': 1.1},
+        'bread': {'calories': 265, 'protein': 9, 'carbs': 49, 'fats': 3.2},
+        'oats': {'calories': 389, 'protein': 17, 'carbs': 66, 'fats': 6.9},
+        'quinoa': {'calories': 120, 'protein': 4.4, 'carbs': 21, 'fats': 1.9},
+        'potato': {'calories': 77, 'protein': 2, 'carbs': 17, 'fats': 0.1},
+        'sweet potato': {'calories': 86, 'protein': 1.6, 'carbs': 20, 'fats': 0.1},
+
+        # Fats
+        'olive oil': {'calories': 884, 'protein': 0, 'carbs': 0, 'fats': 100},
+        'oil': {'calories': 884, 'protein': 0, 'carbs': 0, 'fats': 100},
+        'butter': {'calories': 717, 'protein': 0.9, 'carbs': 0.1, 'fats': 81},
+        'avocado': {'calories': 160, 'protein': 2, 'carbs': 8.5, 'fats': 14.7},
+        'nuts': {'calories': 607, 'protein': 20, 'carbs': 20, 'fats': 54},
+        'peanut butter': {'calories': 588, 'protein': 25, 'carbs': 20, 'fats': 50},
+
+        # Vegetables
+        'broccoli': {'calories': 34, 'protein': 2.8, 'carbs': 7, 'fats': 0.4},
+        'spinach': {'calories': 23, 'protein': 2.9, 'carbs': 3.6, 'fats': 0.4},
+        'tomato': {'calories': 18, 'protein': 0.9, 'carbs': 3.9, 'fats': 0.2},
+        'onion': {'calories': 40, 'protein': 1.1, 'carbs': 9.3, 'fats': 0.1},
+        'pepper': {'calories': 20, 'protein': 0.9, 'carbs': 4.6, 'fats': 0.2},
+
+        # Dairy
+        'milk': {'calories': 42, 'protein': 3.4, 'carbs': 5, 'fats': 1},
+        'cheese': {'calories': 402, 'protein': 25, 'carbs': 1.3, 'fats': 33},
+        'yogurt': {'calories': 59, 'protein': 3.5, 'carbs': 3.6, 'fats': 3.3},
+    }
+
+    total_calories = 0
+    total_protein = 0
+    total_carbs = 0
+    total_fats = 0
+
+    for ingredient in ingredients:
+        # If manual nutrition is provided, use it directly
+        if ingredient.calories is not None:
+            total_calories += ingredient.calories or 0
+            total_protein += ingredient.protein or 0
+            total_carbs += ingredient.carbs or 0
+            total_fats += ingredient.fats or 0
+            continue
+
+        # Otherwise, estimate from database
+        # Normalize ingredient name
+        ing_name = ingredient.name.lower().strip()
+
+        # Try to find a match in the database
+        nutrition = None
+        for key in nutrition_db:
+            if key in ing_name or ing_name in key:
+                nutrition = nutrition_db[key]
+                break
+
+        if not nutrition:
+            # Default to zero if not found (vegetables/herbs/spices)
+            nutrition = {'calories': 20, 'protein': 1, 'carbs': 4, 'fats': 0.1}
+
+        # Convert quantity to grams (simple conversion)
+        quantity_g = ingredient.quantity
+        if ingredient.unit.lower() in ['oz', 'ounce', 'ounces']:
+            quantity_g = ingredient.quantity * 28.35
+        elif ingredient.unit.lower() in ['lb', 'pound', 'pounds']:
+            quantity_g = ingredient.quantity * 453.6
+        elif ingredient.unit.lower() in ['cup', 'cups']:
+            quantity_g = ingredient.quantity * 240  # Approximate
+        elif ingredient.unit.lower() in ['tbsp', 'tablespoon', 'tablespoons']:
+            quantity_g = ingredient.quantity * 15
+        elif ingredient.unit.lower() in ['tsp', 'teaspoon', 'teaspoons']:
+            quantity_g = ingredient.quantity * 5
+        # else assume it's already in grams
+
+        # Calculate nutrition for this ingredient
+        multiplier = quantity_g / 100
+        total_calories += nutrition['calories'] * multiplier
+        total_protein += nutrition['protein'] * multiplier
+        total_carbs += nutrition['carbs'] * multiplier
+        total_fats += nutrition['fats'] * multiplier
+
+    # Return per-serving nutrition
+    return {
+        'calories': round(total_calories / servings, 1),
+        'protein': round(total_protein / servings, 1),
+        'carbs': round(total_carbs / servings, 1),
+        'fats': round(total_fats / servings, 1)
+    }
+
+
+@router.get("/recipes", response_model=List[RecipeResponse])
+async def list_recipes(
+    category: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List all recipes with optional category filter"""
+    try:
+        if category:
+            query = text("""
+                SELECT id, user_id, name, description, category, ingredients, instructions,
+                       prep_time_minutes, servings, calories, protein, carbs, fats,
+                       created_at, updated_at
+                FROM recipe
+                WHERE user_id = :user_id AND category = :category
+                ORDER BY created_at DESC
+            """)
+            results = db.execute(query, {"user_id": user_id, "category": category}).fetchall()
+        else:
+            query = text("""
+                SELECT id, user_id, name, description, category, ingredients, instructions,
+                       prep_time_minutes, servings, calories, protein, carbs, fats,
+                       created_at, updated_at
+                FROM recipe
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+            """)
+            results = db.execute(query, {"user_id": user_id}).fetchall()
+
+        recipes = []
+        for row in results:
+            row_dict = dict(row._mapping)
+            # Parse JSON ingredients
+            ingredients_data = row_dict['ingredients']
+            if isinstance(ingredients_data, str):
+                import json
+                ingredients_data = json.loads(ingredients_data)
+
+            ingredients = [IngredientItem(**ing) for ing in ingredients_data]
+
+            recipes.append(RecipeResponse(
+                id=row_dict['id'],
+                user_id=row_dict['user_id'],
+                name=row_dict['name'],
+                description=row_dict['description'],
+                category=row_dict['category'],
+                ingredients=ingredients,
+                instructions=row_dict['instructions'],
+                prep_time_minutes=row_dict['prep_time_minutes'],
+                servings=row_dict['servings'],
+                calories=float(row_dict['calories']) if row_dict['calories'] else None,
+                protein=float(row_dict['protein']) if row_dict['protein'] else None,
+                carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
+                fats=float(row_dict['fats']) if row_dict['fats'] else None,
+                created_at=row_dict['created_at'].isoformat(),
+                updated_at=row_dict['updated_at'].isoformat()
+            ))
+
+        return recipes
+
+    except Exception as e:
+        logger.error(f"Failed to list recipes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/recipes", response_model=RecipeResponse)
+async def create_recipe(
+    recipe: RecipeCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Create a new recipe with auto nutrition calculation"""
+    try:
+        import uuid
+        import json
+
+        recipe_id = str(uuid.uuid4())
+
+        # Calculate nutrition
+        nutrition = estimate_recipe_nutrition(recipe.ingredients, recipe.servings)
+
+        # Convert ingredients to JSON
+        ingredients_json = json.dumps([ing.dict() for ing in recipe.ingredients])
+
+        query = text("""
+            INSERT INTO recipe
+            (id, user_id, name, description, category, ingredients, instructions,
+             prep_time_minutes, servings, calories, protein, carbs, fats, created_at, updated_at)
+            VALUES (:id, :user_id, :name, :description, :category, :ingredients, :instructions,
+                    :prep_time_minutes, :servings, :calories, :protein, :carbs, :fats, NOW(), NOW())
+            RETURNING id, user_id, name, description, category, ingredients, instructions,
+                      prep_time_minutes, servings, calories, protein, carbs, fats, created_at, updated_at
+        """)
+
+        result = db.execute(query, {
+            "id": recipe_id,
+            "user_id": user_id,
+            "name": recipe.name,
+            "description": recipe.description,
+            "category": recipe.category,
+            "ingredients": ingredients_json,
+            "instructions": recipe.instructions,
+            "prep_time_minutes": recipe.prep_time_minutes,
+            "servings": recipe.servings,
+            "calories": nutrition['calories'],
+            "protein": nutrition['protein'],
+            "carbs": nutrition['carbs'],
+            "fats": nutrition['fats']
+        }).fetchone()
+
+        db.commit()
+
+        row_dict = dict(result._mapping)
+        ingredients_data = json.loads(row_dict['ingredients']) if isinstance(row_dict['ingredients'], str) else row_dict['ingredients']
+        ingredients = [IngredientItem(**ing) for ing in ingredients_data]
+
+        return RecipeResponse(
+            id=row_dict['id'],
+            user_id=row_dict['user_id'],
+            name=row_dict['name'],
+            description=row_dict['description'],
+            category=row_dict['category'],
+            ingredients=ingredients,
+            instructions=row_dict['instructions'],
+            prep_time_minutes=row_dict['prep_time_minutes'],
+            servings=row_dict['servings'],
+            calories=float(row_dict['calories']) if row_dict['calories'] else None,
+            protein=float(row_dict['protein']) if row_dict['protein'] else None,
+            carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
+            fats=float(row_dict['fats']) if row_dict['fats'] else None,
+            created_at=row_dict['created_at'].isoformat(),
+            updated_at=row_dict['updated_at'].isoformat()
+        )
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create recipe: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/recipes/{recipe_id}", response_model=RecipeResponse)
+async def get_recipe(
+    recipe_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get a specific recipe by ID"""
+    try:
+        import json
+
+        query = text("""
+            SELECT id, user_id, name, description, category, ingredients, instructions,
+                   prep_time_minutes, servings, calories, protein, carbs, fats,
+                   created_at, updated_at
+            FROM recipe
+            WHERE id = :recipe_id AND user_id = :user_id
+        """)
+
+        result = db.execute(query, {"recipe_id": recipe_id, "user_id": user_id}).fetchone()
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+
+        row_dict = dict(result._mapping)
+        ingredients_data = json.loads(row_dict['ingredients']) if isinstance(row_dict['ingredients'], str) else row_dict['ingredients']
+        ingredients = [IngredientItem(**ing) for ing in ingredients_data]
+
+        return RecipeResponse(
+            id=row_dict['id'],
+            user_id=row_dict['user_id'],
+            name=row_dict['name'],
+            description=row_dict['description'],
+            category=row_dict['category'],
+            ingredients=ingredients,
+            instructions=row_dict['instructions'],
+            prep_time_minutes=row_dict['prep_time_minutes'],
+            servings=row_dict['servings'],
+            calories=float(row_dict['calories']) if row_dict['calories'] else None,
+            protein=float(row_dict['protein']) if row_dict['protein'] else None,
+            carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
+            fats=float(row_dict['fats']) if row_dict['fats'] else None,
+            created_at=row_dict['created_at'].isoformat(),
+            updated_at=row_dict['updated_at'].isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get recipe: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/recipes/{recipe_id}", response_model=RecipeResponse)
+async def update_recipe(
+    recipe_id: str,
+    updates: RecipeUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update a recipe"""
+    try:
+        import json
+
+        # Check recipe exists
+        check_query = text("SELECT id FROM recipe WHERE id = :recipe_id AND user_id = :user_id")
+        exists = db.execute(check_query, {"recipe_id": recipe_id, "user_id": user_id}).fetchone()
+
+        if not exists:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+
+        # Build update query dynamically
+        update_fields = []
+        params = {"recipe_id": recipe_id, "user_id": user_id}
+
+        if updates.name is not None:
+            update_fields.append("name = :name")
+            params["name"] = updates.name
+
+        if updates.description is not None:
+            update_fields.append("description = :description")
+            params["description"] = updates.description
+
+        if updates.category is not None:
+            update_fields.append("category = :category")
+            params["category"] = updates.category
+
+        if updates.instructions is not None:
+            update_fields.append("instructions = :instructions")
+            params["instructions"] = updates.instructions
+
+        if updates.prep_time_minutes is not None:
+            update_fields.append("prep_time_minutes = :prep_time_minutes")
+            params["prep_time_minutes"] = updates.prep_time_minutes
+
+        if updates.servings is not None:
+            update_fields.append("servings = :servings")
+            params["servings"] = updates.servings
+
+        if updates.ingredients is not None:
+            # Recalculate nutrition
+            servings = updates.servings if updates.servings else 1
+            nutrition = estimate_recipe_nutrition(updates.ingredients, servings)
+
+            ingredients_json = json.dumps([ing.dict() for ing in updates.ingredients])
+            update_fields.append("ingredients = :ingredients")
+            update_fields.append("calories = :calories")
+            update_fields.append("protein = :protein")
+            update_fields.append("carbs = :carbs")
+            update_fields.append("fats = :fats")
+            params["ingredients"] = ingredients_json
+            params["calories"] = nutrition['calories']
+            params["protein"] = nutrition['protein']
+            params["carbs"] = nutrition['carbs']
+            params["fats"] = nutrition['fats']
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        update_fields.append("updated_at = NOW()")
+
+        update_query = text(f"""
+            UPDATE recipe
+            SET {', '.join(update_fields)}
+            WHERE id = :recipe_id AND user_id = :user_id
+            RETURNING id, user_id, name, description, category, ingredients, instructions,
+                      prep_time_minutes, servings, calories, protein, carbs, fats, created_at, updated_at
+        """)
+
+        result = db.execute(update_query, params).fetchone()
+        db.commit()
+
+        row_dict = dict(result._mapping)
+        ingredients_data = json.loads(row_dict['ingredients']) if isinstance(row_dict['ingredients'], str) else row_dict['ingredients']
+        ingredients = [IngredientItem(**ing) for ing in ingredients_data]
+
+        return RecipeResponse(
+            id=row_dict['id'],
+            user_id=row_dict['user_id'],
+            name=row_dict['name'],
+            description=row_dict['description'],
+            category=row_dict['category'],
+            ingredients=ingredients,
+            instructions=row_dict['instructions'],
+            prep_time_minutes=row_dict['prep_time_minutes'],
+            servings=row_dict['servings'],
+            calories=float(row_dict['calories']) if row_dict['calories'] else None,
+            protein=float(row_dict['protein']) if row_dict['protein'] else None,
+            carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
+            fats=float(row_dict['fats']) if row_dict['fats'] else None,
+            created_at=row_dict['created_at'].isoformat(),
+            updated_at=row_dict['updated_at'].isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update recipe: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/recipes/{recipe_id}")
+async def delete_recipe(
+    recipe_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Delete a recipe"""
+    try:
+        query = text("DELETE FROM recipe WHERE id = :recipe_id AND user_id = :user_id RETURNING id")
+        result = db.execute(query, {"recipe_id": recipe_id, "user_id": user_id}).fetchone()
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+
+        db.commit()
+        return {"message": "Recipe deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete recipe: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# =============================================================================
+# WORKOUT SESSION MANAGEMENT ENDPOINTS (Phase 6)
+# =============================================================================
+
+class WorkoutSetLog(BaseModel):
+    exercise_name: str
+    set_number: int
+    weight: Optional[float] = None
+    reps: Optional[int] = None
+    rpe: Optional[int] = None  # Rate of Perceived Exertion (1-10)
+    notes: Optional[str] = ""
+
+
+@router.get("/sessions/by-event/{event_id}")
+async def get_session_by_event_id(
+    event_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Helper endpoint to get workout session ID from calendar event ID
+    """
+    try:
+        query = text("""
+            SELECT id FROM workout_session
+            WHERE calendar_event_id = :event_id AND user_id = :user_id
+        """)
+        result = db.execute(query, {"event_id": event_id, "user_id": user_id}).fetchone()
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Workout session not found for this event")
+
+        return {"session_id": result.id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session by event ID: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}")
+async def get_workout_session(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get workout session details including template, exercises, and logged sets
+    """
+    try:
+        import json
+        from app.services.progressive_overload import suggest_weight
+
+        # Get session with template
+        session_query = text("""
+            SELECT
+                ws.id, ws.user_id, ws.template_id, ws.session_date, ws.status,
+                ws.started_at, ws.completed_at, ws.created_at,
+                ft.name as template_name, ft.exercises, ft.notes as template_notes,
+                ft.starting_weights
+            FROM workout_session ws
+            LEFT JOIN fitness_template ft ON ws.template_id = ft.id
+            WHERE ws.id = :session_id AND ws.user_id = :user_id
+        """)
+        session = db.execute(session_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Workout session not found")
+
+        session_dict = dict(session._mapping)
+
+        # Parse exercises JSON
+        if session_dict.get('exercises'):
+            session_dict['exercises'] = json.loads(session_dict['exercises'])
+        else:
+            session_dict['exercises'] = []
+
+        # Parse starting_weights JSON
+        starting_weights = None
+        if session_dict.get('starting_weights'):
+            try:
+                starting_weights = json.loads(session_dict['starting_weights'])
+            except:
+                starting_weights = None
+
+        # Get logged sets for this session
+        sets_query = text("""
+            SELECT id, exercise_id, set_index, weight, reps, rpe, notes, logged_at
+            FROM workout_log
+            WHERE session_id = :session_id
+            ORDER BY logged_at
+        """)
+        logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
+        session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
+
+        # Get today's recovery data
+        today = date.today()
+        recovery_query = text("""
+            SELECT hrv, heart_rate, sleep_hours, soreness_level
+            FROM daily_recovery_log
+            WHERE user_id = :user_id AND log_date = :today
+        """)
+        recovery = db.execute(recovery_query, {"user_id": user_id, "today": today}).fetchone()
+        session_dict['recovery_data'] = dict(recovery._mapping) if recovery else None
+
+        # Generate AI weight suggestions for each exercise
+        recovery_data = session_dict['recovery_data']
+        for exercise in session_dict['exercises']:
+            exercise_name = exercise['name']
+
+            # Extract target reps (parse "8-10" or "10" format)
+            target_reps = 10  # Default
+            if exercise.get('reps'):
+                try:
+                    reps_str = str(exercise['reps'])
+                    if '-' in reps_str:
+                        # Take the lower end of the range (e.g., "8-10" -> 8)
+                        target_reps = int(reps_str.split('-')[0])
+                    else:
+                        target_reps = int(reps_str)
+                except:
+                    target_reps = 10
+
+            # Get starting weight if configured
+            starting_weight = None
+            if starting_weights and exercise_name in starting_weights:
+                starting_weight = starting_weights[exercise_name]
+
+            # Generate AI suggestion
+            suggestion = suggest_weight(
+                db=db,
+                user_id=user_id,
+                exercise_name=exercise_name,
+                target_reps=target_reps,
+                recovery_data=recovery_data,
+                starting_weight=starting_weight
+            )
+
+            exercise['weight_suggestion'] = suggestion
+
+        return session_dict
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/start")
+async def start_workout_session(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Start a workout session
+    - Updates status to 'in_progress'
+    - Sets started_at timestamp
+    """
+    try:
+        # Verify session exists and belongs to user
+        check_query = text("""
+            SELECT status FROM workout_session
+            WHERE id = :session_id AND user_id = :user_id
+        """)
+        session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Workout session not found")
+
+        if session.status == 'completed':
+            raise HTTPException(status_code=400, detail="Cannot start a completed workout")
+
+        # Update session
+        update_query = text("""
+            UPDATE workout_session
+            SET status = 'in_progress', started_at = NOW(), updated_at = NOW()
+            WHERE id = :session_id AND user_id = :user_id
+        """)
+        db.execute(update_query, {"session_id": session_id, "user_id": user_id})
+        db.commit()
+
+        return {"message": "Workout session started", "session_id": session_id, "status": "in_progress"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to start workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/log-set")
+async def log_workout_set(
+    session_id: str,
+    set_data: WorkoutSetLog,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Log a single set during an active workout session
+    """
+    try:
+        # Verify session exists
+        check_query = text("""
+            SELECT id FROM workout_session
+            WHERE id = :session_id AND user_id = :user_id
+        """)
+        session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Workout session not found")
+
+        # Insert set log
+        log_id = str(uuid.uuid4())
+        insert_query = text("""
+            INSERT INTO workout_log (
+                id, user_id, session_id, exercise_id, set_index,
+                weight, reps, rpe, notes, logged_at
+            )
+            VALUES (
+                :id, :user_id, :session_id, :exercise_id, :set_index,
+                :weight, :reps, :rpe, :notes, NOW()
+            )
+        """)
+
+        db.execute(insert_query, {
+            "id": log_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "exercise_id": set_data.exercise_name,  # Using exercise name as ID for simplicity
+            "set_index": set_data.set_number,
+            "weight": set_data.weight,
+            "reps": set_data.reps,
+            "rpe": set_data.rpe,
+            "notes": set_data.notes
+        })
+        db.commit()
+
+        return {
+            "message": "Set logged successfully",
+            "log_id": log_id,
+            "exercise": set_data.exercise_name,
+            "set_number": set_data.set_number
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to log workout set: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/complete")
+async def complete_workout_session(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Complete a workout session
+    - Updates status to 'completed'
+    - Sets completed_at timestamp
+    - Aggregates exercise data to exercise_history table
+    """
+    try:
+        # Verify session exists
+        check_query = text("""
+            SELECT id, status FROM workout_session
+            WHERE id = :session_id AND user_id = :user_id
+        """)
+        session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Workout session not found")
+
+        if session.status == 'completed':
+            raise HTTPException(status_code=400, detail="Workout session already completed")
+
+        # Update session status
+        update_query = text("""
+            UPDATE workout_session
+            SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+            WHERE id = :session_id AND user_id = :user_id
+        """)
+        db.execute(update_query, {"session_id": session_id, "user_id": user_id})
+
+        # Aggregate exercise data to exercise_history
+        aggregate_query = text("""
+            INSERT INTO exercise_history (
+                id, user_id, exercise_name, session_id,
+                avg_weight, total_sets, total_reps, avg_rpe,
+                performance_date
+            )
+            SELECT
+                gen_random_uuid(),
+                :user_id,
+                exercise_id,
+                :session_id,
+                AVG(weight),
+                COUNT(*),
+                SUM(reps),
+                AVG(rpe),
+                CURRENT_DATE
+            FROM workout_log
+            WHERE session_id = :session_id AND user_id = :user_id
+            GROUP BY exercise_id
+        """)
+        db.execute(aggregate_query, {"session_id": session_id, "user_id": user_id})
+
+        db.commit()
+
+        # Get completion summary
+        summary_query = text("""
+            SELECT
+                COUNT(DISTINCT exercise_id) as exercises_completed,
+                COUNT(*) as total_sets,
+                SUM(weight * reps) as total_volume
+            FROM workout_log
+            WHERE session_id = :session_id
+        """)
+        summary = db.execute(summary_query, {"session_id": session_id}).fetchone()
+
+        return {
+            "message": "Workout session completed successfully",
+            "session_id": session_id,
+            "status": "completed",
+            "summary": dict(summary._mapping) if summary else {}
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to complete workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/exercises/{exercise_name}/history")
+async def get_exercise_history(
+    exercise_name: str,
+    limit: int = 10,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get recent performance history for a specific exercise
+    Used for AI weight suggestions and progress tracking
+    """
+    try:
+        history_query = text("""
+            SELECT
+                performance_date, avg_weight, total_sets, total_reps, avg_rpe
+            FROM exercise_history
+            WHERE user_id = :user_id AND exercise_name = :exercise_name
+            ORDER BY performance_date DESC
+            LIMIT :limit
+        """)
+        history = db.execute(history_query, {
+            "user_id": user_id,
+            "exercise_name": exercise_name,
+            "limit": limit
+        }).fetchall()
+
+        return {
+            "exercise_name": exercise_name,
+            "history": [dict(row._mapping) for row in history]
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get exercise history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

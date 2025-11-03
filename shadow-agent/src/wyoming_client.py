@@ -53,10 +53,100 @@ class WyomingClient:
     async def transcribe_audio(
         self,
         audio_data: np.ndarray,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        use_fast_path: bool = True
     ) -> Optional[str]:
         """
         Send audio to backend for transcription
+
+        Args:
+            audio_data: Audio samples (int16)
+            sample_rate: Sample rate in Hz
+            use_fast_path: Use direct HTTP to STT service (faster, bypasses Wyoming)
+
+        Returns:
+            Transcribed text or None if failed
+        """
+        if use_fast_path:
+            # FAST PATH: Direct HTTP POST to STT service (3-5x faster)
+            return await self._transcribe_audio_fast(audio_data, sample_rate)
+        else:
+            # LEGACY PATH: Wyoming protocol via WebSocket
+            return await self._transcribe_audio_wyoming(audio_data, sample_rate)
+
+    async def _transcribe_audio_fast(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int = 16000
+    ) -> Optional[str]:
+        """
+        Fast transcription using direct HTTP POST to STT service
+
+        Args:
+            audio_data: Audio samples (int16)
+            sample_rate: Sample rate in Hz
+
+        Returns:
+            Transcribed text or None if failed
+        """
+        try:
+            import aiohttp
+            import io
+            import wave
+            import time
+
+            start_time = time.time()
+
+            # Convert to WAV format in memory
+            wav_buffer = io.BytesIO()
+            with wave.open(wav_buffer, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio_data.tobytes())
+
+            wav_buffer.seek(0)
+
+            wav_prep_time = time.time() - start_time
+            logger.debug(f"⏱️ WAV prep: {wav_prep_time:.3f}s")
+
+            # STT service URL (from backend)
+            stt_url = "http://10.185.1.8:8585/v1/audio/transcriptions"
+
+            # Send directly to STT service
+            request_start = time.time()
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field('file', wav_buffer, filename='audio.wav', content_type='audio/wav')
+                form_data.add_field('model', 'base.en')  # Use actual model name, not OpenAI alias
+                form_data.add_field('language', 'en')
+
+                async with session.post(stt_url, data=form_data, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    request_time = time.time() - request_start
+                    logger.info(f"⏱️ STT request took {request_time:.3f}s")
+
+                    if response.status == 200:
+                        result = await response.json()
+                        transcript = result.get("text", "").strip()
+
+                        total_time = time.time() - start_time
+                        logger.info(f"📝 Transcript: {transcript} (total: {total_time:.3f}s)")
+                        return transcript
+                    else:
+                        logger.error(f"STT service error: {response.status}")
+                        return None
+
+        except Exception as e:
+            logger.error(f"Error during fast transcription: {e}")
+            return None
+
+    async def _transcribe_audio_wyoming(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int = 16000
+    ) -> Optional[str]:
+        """
+        Legacy transcription using Wyoming protocol via WebSocket
 
         Args:
             audio_data: Audio samples (int16)
