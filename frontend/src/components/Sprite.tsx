@@ -11,6 +11,7 @@ import './sprite.css'
 import { useSpriteState } from '../hooks/useSpriteState'
 import { spriteBus } from '../state/spriteBus'
 import SpriteHUD from './SpriteHUD'
+import SpriteChatPopup from './SpriteChatPopup'
 import { APP_CONFIG } from '../config'
 import { getCalmMode } from '../utils/prefs'
 import SpriteHaloCanvas from './SpriteHaloCanvas'
@@ -55,6 +56,8 @@ const Sprite = forwardRef<SpriteHandle, SpriteProps>(({ className = '', onNaviga
   const [notificationImportance, setNotificationImportance] = useState<'low' | 'medium' | 'high'>('medium')
   // HUD open state
   const [hudOpen, setHudOpen] = useState(false)
+  // Chat popup open state
+  const [chatPopupOpen, setChatPopupOpen] = useState(false)
   // Sprite state (base/overlay/tone) from centralized bus
   const { effective, acknowledge, visuals } = useSpriteState()
   const [isCalm, setIsCalm] = useState<boolean>(false)
@@ -225,27 +228,29 @@ const Sprite = forwardRef<SpriteHandle, SpriteProps>(({ className = '', onNaviga
     const badge = badgeRef.current
     const el = rootRef.current
     const toast = toastRef.current
-    
+
     // If there's a visible badge, navigate to insights
     const hasBadge = badge && !badge.hidden
-    
+
     if (badge) badge.hidden = true
     if (el) {
       el.classList.remove('show-toast')
       setToastVisible(false)
     }
     if (toast) toast.hidden = true
-    
+
     setState('speaking')
     setTimeout(() => setState('idle'), 900)
-    // Toggle HUD and acknowledge overlays/tone bias
-    setHudOpen(v => !v)
+    // Acknowledge overlays/tone bias
     spriteBus.acknowledge('sprite:click')
     acknowledge('sprite:click')
-    
+
     // Navigate to insights if there was a badge
     if (hasBadge && onNavigate) {
       setTimeout(() => onNavigate('insights'), 500)
+    } else {
+      // Otherwise, open the chat popup
+      setChatPopupOpen(true)
     }
   }
 
@@ -293,11 +298,14 @@ const Sprite = forwardRef<SpriteHandle, SpriteProps>(({ className = '', onNaviga
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
+          // Don't handle if chat popup is open
+          if (chatPopupOpen) return
           e.preventDefault()
           handleSpriteClick()
         }
         if (e.key === 'Escape') {
           setHudOpen(false)
+          setChatPopupOpen(false)
         }
       }}
       onMouseEnter={() => {
@@ -352,6 +360,8 @@ const Sprite = forwardRef<SpriteHandle, SpriteProps>(({ className = '', onNaviga
       </span>
       {/* Mini HUD anchored near the sprite */}
       <SpriteHUD open={hudOpen} onClose={() => setHudOpen(false)} onNavigate={onNavigate} />
+      {/* Chat popup */}
+      <SpriteChatPopup open={chatPopupOpen} onClose={() => setChatPopupOpen(false)} />
     </div>
   )
 })

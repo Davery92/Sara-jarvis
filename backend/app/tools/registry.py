@@ -13,7 +13,9 @@ from app.tools.knowledge_graph import (
     KnowledgeGapAnalysisTool
 )
 from app.tools.web_search import WebSearchTool
+from app.tools.get_web_search_details import GetWebSearchDetailsTool
 from app.tools.open_page import OpenPageTool
+from app.tools.get_page_details import GetPageDetailsTool
 from app.tools.fitness.fitness_notes import (
     FitnessNoteCreateTool,
     FitnessNoteSearchTool,
@@ -85,7 +87,9 @@ class ToolRegistry:
 
             # Web Search
             WebSearchTool(),
+            GetWebSearchDetailsTool(),
             OpenPageTool(),
+            GetPageDetailsTool(),
 
             # Fitness Tools
             FitnessNoteCreateTool(),

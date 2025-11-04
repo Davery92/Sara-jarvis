@@ -24,28 +24,36 @@ Custom variables can be passed as kwargs and accessed as {{CUSTOM_VAR}}
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, Dict, Any
 import re
+import os
 
 
 class PromptTemplateRenderer:
     """Renders prompt templates with system and custom variables"""
 
+    @staticmethod
+    def _get_tz_aware_datetime():
+        """Get timezone-aware datetime using TZ environment variable"""
+        tz = os.getenv("TZ", "America/New_York")
+        return datetime.now(ZoneInfo(tz))
+
     # System variables are computed functions that don't require user context
     SYSTEM_VARIABLES = {
-        "SYSTEM_DATE": lambda: datetime.now().strftime("%Y-%m-%d"),
-        "SYSTEM_TIME": lambda: datetime.now().strftime("%H:%M:%S"),
-        "SYSTEM_DATETIME": lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "SYSTEM_DAY_OF_WEEK": lambda: datetime.now().strftime("%A"),
-        "SYSTEM_DAY_SHORT": lambda: datetime.now().strftime("%a"),
-        "SYSTEM_MONTH": lambda: datetime.now().strftime("%B"),
-        "SYSTEM_MONTH_SHORT": lambda: datetime.now().strftime("%b"),
-        "SYSTEM_YEAR": lambda: datetime.now().strftime("%Y"),
-        "SYSTEM_HOUR": lambda: datetime.now().strftime("%H"),
-        "SYSTEM_MINUTE": lambda: datetime.now().strftime("%M"),
-        "SYSTEM_SECOND": lambda: datetime.now().strftime("%S"),
-        "SYSTEM_TIMEZONE": lambda: datetime.now().strftime("%Z"),
-        "SYSTEM_TIMESTAMP": lambda: str(int(datetime.now().timestamp())),
+        "SYSTEM_DATE": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%Y-%m-%d"),
+        "SYSTEM_TIME": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%H:%M:%S"),
+        "SYSTEM_DATETIME": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        "SYSTEM_DAY_OF_WEEK": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%A"),
+        "SYSTEM_DAY_SHORT": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%a"),
+        "SYSTEM_MONTH": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%B"),
+        "SYSTEM_MONTH_SHORT": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%b"),
+        "SYSTEM_YEAR": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%Y"),
+        "SYSTEM_HOUR": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%H"),
+        "SYSTEM_MINUTE": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%M"),
+        "SYSTEM_SECOND": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%S"),
+        "SYSTEM_TIMEZONE": lambda: PromptTemplateRenderer._get_tz_aware_datetime().strftime("%Z"),
+        "SYSTEM_TIMESTAMP": lambda: str(int(PromptTemplateRenderer._get_tz_aware_datetime().timestamp())),
     }
 
     @classmethod

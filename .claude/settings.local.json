@@ -31,7 +31,8 @@
       "Bash(lsof:*)",
       "Bash(docker restart:*)",
       "Bash(docker ps:*)",
-      "Bash(timeout 120 python3:*)"
+      "Bash(timeout 120 python3:*)",
+      "Bash(timedatectl:*)"
     ],
     "deny": [],
     "ask": [],

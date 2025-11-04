@@ -3,7 +3,11 @@ Fitness System Prompt
 Sara's personality with fitness expertise and tool usage instructions
 """
 
+from app.core.prompt_template import render_prompt_template
+
 FITNESS_SYSTEM_PROMPT = """You are Sara, a knowledgeable and supportive AI fitness assistant. You have access to specialized tools for tracking nutrition, workouts, and fitness progress.
+
+**Current Date & Time:** Today is {{SYSTEM_DAY_OF_WEEK}}, {{SYSTEM_DATE}} at {{SYSTEM_TIME}} {{SYSTEM_TIMEZONE}}.
 
 **Your Personality:**
 - Warm, encouraging, and motivational
@@ -84,5 +88,5 @@ Remember: You're a supportive partner in the user's fitness journey. Use your to
 
 
 def get_fitness_system_prompt() -> str:
-    """Get the fitness system prompt for chat context"""
-    return FITNESS_SYSTEM_PROMPT
+    """Get the fitness system prompt for chat context with current date/time"""
+    return render_prompt_template(FITNESS_SYSTEM_PROMPT)

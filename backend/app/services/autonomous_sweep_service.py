@@ -8,21 +8,28 @@ depth and focus areas.
 import json
 import asyncio
 import time
+import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from sqlalchemy.orm import Session
 from sqlalchemy import text, desc, and_, or_
 
-from ..main_simple import (
-    AutonomousInsight, BackgroundSweep, 
-    ActivitySession, UserProfile, Habit, HabitInstance,
-    Document, Conversation, ConversationTurn, IntelligentMemoryService,
-    logger
-)
+# Avoid circular imports by importing models locally in methods
+# These are only needed for type hints and database queries
+if TYPE_CHECKING:
+    from ..main_simple import (
+        AutonomousInsight, BackgroundSweep,
+        ActivitySession, UserProfile, Habit, HabitInstance,
+        Document, Conversation, ConversationTurn, IntelligentMemoryService
+    )
+
 from ..models.episode import Episode
 from ..models.note import Note
 from ..services.memory_service import MemoryService
 from ..models.profile import GTKYSession, DailyReflection, PrivacySettings
+
+# Get logger
+logger = logging.getLogger(__name__)
 
 class PriorityScorer:
     """Calculates priority scores for insights using relevance × impact × novelty × timing - annoyance"""
@@ -55,26 +62,31 @@ class PriorityScorer:
 
 class AutonomousSweepService:
     """Core service for generating autonomous insights based on user data analysis"""
-    
+
     def __init__(self, db: Session):
         self.db = db
         self.scorer = PriorityScorer()
         self.memory_service = MemoryService(db)
+        # Import IntelligentMemoryService here to avoid circular import
+        from ..main_simple import IntelligentMemoryService
         self.intelligent_memory = IntelligentMemoryService()
     
     async def execute_sweep(
-        self, 
-        user_id: str, 
-        personality_mode: str, 
+        self,
+        user_id: str,
+        personality_mode: str,
         sweep_type: str,
         triggered_by: str = "idle_threshold"
     ) -> List[Dict[str, Any]]:
         """Execute a background sweep and generate insights"""
-        
+
+        # Import models here to avoid circular import
+        from ..main_simple import UserProfile
+
         start_time = time.time()
         insights_generated = []
         errors = []
-        
+
         try:
             # Get user profile for personalization
             profile = self.db.query(UserProfile).filter(
@@ -299,7 +311,7 @@ class AutonomousSweepService:
             
         return insights
     
-    async def _quick_sweep(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _quick_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Quick sweep: Fast, lightweight checks with minimal processing"""
         insights = []
         
@@ -326,7 +338,7 @@ class AutonomousSweepService:
             
         return insights
     
-    async def _standard_sweep(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _standard_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Standard sweep: Deeper analysis with pattern recognition"""
         insights = []
         
@@ -360,7 +372,7 @@ class AutonomousSweepService:
             
         return insights
     
-    async def _digest_sweep(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _digest_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Digest sweep: Comprehensive analysis with summaries and recommendations"""
         insights = []
         
@@ -384,7 +396,7 @@ class AutonomousSweepService:
             
         return insights
     
-    async def _check_gtky_status(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _check_gtky_status(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Check if user needs to complete GTKY interview"""
         insights = []
         
@@ -397,10 +409,10 @@ class AutonomousSweepService:
         if privacy and privacy.autonomous_level == 'disabled':
             return insights
         
-        # Check if GTKY is completed
+        # Check if GTKY is completed (completed_at is not null means completed)
         gtky_session = self.db.query(GTKYSession).filter(
             GTKYSession.user_id == user_id,
-            GTKYSession.status == 'completed'
+            GTKYSession.completed_at.isnot(None)
         ).first()
         
         if not gtky_session:
@@ -417,7 +429,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _check_reflection_needs(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _check_reflection_needs(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Check if user needs to do nightly reflection"""
         insights = []
         
@@ -429,12 +441,11 @@ class AutonomousSweepService:
         if privacy and privacy.autonomous_level == 'disabled':
             return insights
         
-        # Check if reflection is done today
+        # Check if reflection is done today (reflection existing means it's done)
         today = datetime.now().date()
         today_reflection = self.db.query(DailyReflection).filter(
             DailyReflection.user_id == user_id,
-            DailyReflection.reflection_date == today,
-            DailyReflection.status == 'completed'
+            DailyReflection.reflection_date == today
         ).first()
         
         # Check time - only suggest after 5 PM
@@ -456,16 +467,15 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _analyze_reflection_patterns(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _analyze_reflection_patterns(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Analyze reflection patterns and generate insights"""
         insights = []
         
-        # Get recent reflections (last 2 weeks)
+        # Get recent reflections (last 2 weeks) - all existing reflections are completed
         two_weeks_ago = datetime.now() - timedelta(days=14)
         recent_reflections = self.db.query(DailyReflection).filter(
             DailyReflection.user_id == user_id,
-            DailyReflection.created_at >= two_weeks_ago,
-            DailyReflection.status == 'completed'
+            DailyReflection.created_at >= two_weeks_ago
         ).order_by(desc(DailyReflection.created_at)).all()
         
         if len(recent_reflections) >= 3:
@@ -515,7 +525,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _generate_profile_insights(self, user_id: str, mode: str, profile: Optional[UserProfile]) -> List[Dict[str, Any]]:
+    async def _generate_profile_insights(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Generate insights based on user profile data from GTKY"""
         insights = []
         
@@ -558,17 +568,20 @@ class AutonomousSweepService:
     
     async def _check_habit_salvage(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
         """Check for habits that can still be salvaged today"""
+        # Import Habit and HabitInstance here to avoid circular import
+        from ..main_simple import Habit, HabitInstance
+
         insights = []
-        
+
         # Get today's date
         today = datetime.now().date()
-        
+
         # Query habits that haven't been completed today but still can be
         habits = self.db.query(Habit).filter(
             Habit.user_id == user_id,
             Habit.paused == 0
         ).all()
-        
+
         for habit in habits:
             # Check if habit was completed today
             today_instance = self.db.query(HabitInstance).filter(
@@ -763,11 +776,14 @@ class AutonomousSweepService:
     
     async def _analyze_emotional_patterns(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
         """Analyze emotional patterns in conversations (Companion mode)"""
+        # Import here to avoid circular import
+        from ..main_simple import ConversationTurn
+
         insights = []
-        
+
         if mode != 'companion':
             return insights
-        
+
         # Get recent conversation turns
         week_ago = datetime.now() - timedelta(days=7)
         recent_turns = self.db.query(ConversationTurn).filter(
@@ -964,6 +980,9 @@ class AutonomousSweepService:
         errors: List[str]
     ):
         """Log the execution of a background sweep"""
+        # Import BackgroundSweep here to avoid circular import
+        from ..main_simple import BackgroundSweep
+
         sweep_log = BackgroundSweep(
             user_id=user_id,
             sweep_type=sweep_type,

@@ -32,6 +32,7 @@ import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
 from app.core import config
+from app.core.prompt_template import render_prompt_template
 
 
 # Import GTKY service
@@ -1147,6 +1148,13 @@ class SimpleLLMClient:
                     "tool_calls": all_tool_calls if all_tool_calls else None
                 }
 
+            # Debug logging for empty responses
+            logger.info(f"🔍 _stream_response complete - full_content length: {len(full_content)}, emitted_content length: {len(emitted_content)}")
+            if len(full_content) == 0:
+                logger.warning("⚠️ LLM returned empty full_content!")
+            if len(emitted_content) > 0 and len(full_content) > len(emitted_content):
+                logger.warning(f"⚠️ Content was filtered: full={len(full_content)} vs emitted={len(emitted_content)}")
+
             # Return message object compatible with existing code (standard OpenAI format)
             return {
                 "content": full_content,
@@ -1200,6 +1208,13 @@ class SimpleLLMClient:
                 "max_tokens": 2000,
                 "stream": True
             }
+
+            # Log payload size for debugging context overflow
+            import json
+            payload_size = len(json.dumps(payload))
+            logger.info(f"🔍 Payload size: {payload_size} bytes (~{payload_size//4} tokens)")
+            if payload_size > 100000:
+                logger.warning(f"⚠️ Large payload detected! {payload_size} bytes may cause context overflow")
             
             message = await self._stream_response(payload)
             
@@ -4991,9 +5006,10 @@ async def get_personality_mode(
 
 def get_personality_system_prompt(personality_mode: str, assistant_name: str, user_email: str) -> str:
     """Generate personality-aware system prompts based on current mode"""
-    
+
     base_prompt = (
         f"You are {assistant_name}, a helpful personal assistant for {user_email}. "
+        f"\n\n**Current Date & Time:** Today is {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}.\n\n"
         f"You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar, document search, and memory search. "
         f"Use web_search for questions that require external, up-to-date information. "
         f"web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. "
@@ -5059,7 +5075,8 @@ def get_personality_system_prompt(personality_mode: str, assistant_name: str, us
     }
     
     personality_addition = personality_prompts.get(personality_mode, personality_prompts["companion"])
-    return base_prompt + personality_addition
+    combined_prompt = base_prompt + personality_addition
+    return render_prompt_template(combined_prompt, user=None, USER_EMAIL=user_email)
 
 
 @app.post("/chat", response_model=ChatResponse)

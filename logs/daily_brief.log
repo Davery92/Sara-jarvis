@@ -1133,3 +1133,23 @@ WHERE reminder.user_id = %(user_id_1)s::UUID AND reminder.due_at <= %(due_at_1)s
 2025-11-03 06:30:08,004 - __main__ - INFO -    Priority: 8
 2025-11-03 06:30:08,039 - __main__ - INFO - 🎉 Daily brief generation completed successfully
 2025-11-03 06:30:08,039 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-04 06:30:01,731 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-04 06:30:01,731 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-04 06:30:04,165 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-04 06:30:04,165 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-04 06:30:04,166 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-04 06:30:04,166 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-04 06:30:04,166 - __main__ - INFO - Generating daily brief for November 04, 2025
+2025-11-04 06:30:04,166 - __main__ - INFO - Generating daily brief for November 04, 2025
+2025-11-04 06:30:04,697 - app.services.jarvis_inbox_service - INFO - Created inbox item: 81752c8f-33f1-4f54-8541-46bcba6dceb4 - 🌅 Daily Brief - November 04
+2025-11-04 06:30:04,697 - app.services.jarvis_inbox_service - INFO - Created inbox item: 81752c8f-33f1-4f54-8541-46bcba6dceb4 - 🌅 Daily Brief - November 04
+2025-11-04 06:30:04,698 - __main__ - INFO - ✅ Created daily brief inbox item: 81752c8f-33f1-4f54-8541-46bcba6dceb4
+2025-11-04 06:30:04,698 - __main__ - INFO - ✅ Created daily brief inbox item: 81752c8f-33f1-4f54-8541-46bcba6dceb4
+2025-11-04 06:30:04,698 - __main__ - INFO -    Title: 🌅 Daily Brief - November 04
+2025-11-04 06:30:04,698 - __main__ - INFO -    Title: 🌅 Daily Brief - November 04
+2025-11-04 06:30:04,698 - __main__ - INFO -    Priority: 8
+2025-11-04 06:30:04,698 - __main__ - INFO -    Priority: 8
+2025-11-04 06:30:04,721 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-04 06:30:04,721 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-04 06:30:04,722 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-04 06:30:04,722 - __main__ - INFO - 🎉 Daily brief generation completed successfully
