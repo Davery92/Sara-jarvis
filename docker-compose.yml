@@ -38,7 +38,7 @@ services:
       - AI_PROVIDER=${AI_PROVIDER-gemini}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-https://generativelanguage.googleapis.com/v1beta/openai}
       - OPENAI_MODEL=gemini-2.5-flash
-      - OPENAI_API_KEY=AIzaSyAAytk2O7otjelqwrhXddEMzYrA-8m3bTo
+      - OPENAI_API_KEY=${GEMINI_API_KEY}
       - FAST_MODEL_URL=http://10.185.1.8:11434/v1
       - FAST_MODEL=granite4
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
