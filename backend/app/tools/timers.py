@@ -31,7 +31,7 @@ class TimersStartTool(BaseTool):
     
     @property
     def description(self) -> str:
-        return "Start a new timer with optional label and duration in minutes. If no duration is provided, creates an open-ended timer."
+        return "Start a new timer with optional label and duration. Use duration_seconds for precise durations (e.g., 30 seconds, 90 seconds). For longer timers, can use duration in minutes. If no duration is provided, defaults to 25 minutes."
     
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -44,48 +44,61 @@ class TimersStartTool(BaseTool):
                 },
                 "duration": {
                     "type": "integer",
-                    "description": "Duration in minutes. If not provided, creates an open-ended timer."
+                    "description": "Duration in minutes. Deprecated - use duration_seconds for more precision."
+                },
+                "duration_seconds": {
+                    "type": "integer",
+                    "description": "Duration in seconds. Takes priority over duration if both provided."
                 }
             }
         }
     
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Start a new timer"""
-        
+
         title = kwargs.get("label", "Timer")
-        duration = kwargs.get("duration", 25)  # Default 25 minutes if not specified
-        
+        duration_seconds = kwargs.get("duration_seconds")
+        duration_minutes = kwargs.get("duration", 25)  # Default 25 minutes if not specified
+
+        # Prefer duration_seconds if provided, otherwise use duration in minutes
+        if duration_seconds is not None:
+            total_seconds = duration_seconds
+            duration_display = f"{duration_seconds} seconds" if duration_seconds < 60 else f"{duration_seconds // 60}m {duration_seconds % 60}s"
+        else:
+            total_seconds = duration_minutes * 60
+            duration_display = f"{duration_minutes} minutes"
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
             # Validate duration
-            if duration <= 0:
+            if total_seconds <= 0:
                 return ToolResult(
                     success=False,
-                    message="Duration must be a positive number of minutes"
+                    message="Duration must be a positive number"
                 )
-            
+
             # Calculate times
             now = datetime.now(timezone.utc)
-            end_time = now + timedelta(minutes=duration)
-            
+            end_time = now + timedelta(seconds=total_seconds)
+
             # Create timer using correct field names
             timer = Timer(
                 user_id=user_id,
                 title=title,
-                duration_minutes=duration,
+                duration_minutes=int(total_seconds / 60),  # Store as minutes for legacy compatibility
                 start_time=now,
                 end_time=end_time,
                 is_active=True,
                 is_completed=False
             )
-            
+
             db.add(timer)
             db.commit()
             db.refresh(timer)
-            
-            message = f"Started timer '{title}' for {duration} minutes"
+
+            message = f"Started timer '{title}' for {duration_display}"
             
             return ToolResult(
                 success=True,

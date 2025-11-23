@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react'
 import { APP_CONFIG } from '../config'
-import KnowledgeGraph from './KnowledgeGraph'
 import MemoryManager from './MemoryManager'
 
 interface DreamInsight {
@@ -35,7 +34,7 @@ export default function MemoryGarden({
   editingNote,
   setEditingNote
 }: MemoryGardenProps) {
-  const [currentView, setCurrentView] = useState<'graph' | 'insights' | 'memory'>('graph')
+  const [currentView, setCurrentView] = useState<'insights' | 'memory'>('insights')
   const [dreamInsights, setDreamInsights] = useState<DreamInsight[]>([])
   const [loadingInsights, setLoadingInsights] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
@@ -116,17 +115,6 @@ export default function MemoryGarden({
 
         <nav className="flex flex-col gap-1">
           <button
-            onClick={() => setCurrentView('graph')}
-            className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
-              currentView === 'graph'
-                ? 'bg-[#3f3f46] text-[#f8fafc]'
-                : 'text-[#a1a1aa] hover:bg-[#3f3f46] hover:text-[#f8fafc]'
-            }`}
-          >
-            Knowledge Graph
-          </button>
-
-          <button
             onClick={() => setCurrentView('insights')}
             className={`flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ${
               currentView === 'insights' 
@@ -172,7 +160,6 @@ export default function MemoryGarden({
           )}
 
           <h2 className="text-lg font-medium">
-            {currentView === 'graph' && 'Knowledge Graph'}
             {currentView === 'insights' && 'Dream Insights'}
             {currentView === 'memory' && 'Memory Management'}
           </h2>
@@ -188,21 +175,6 @@ export default function MemoryGarden({
         </header>
 
         <div className="flex-1 p-6">
-          {currentView === 'graph' && (
-            <div className="h-full">
-              <KnowledgeGraph
-                notes={notes}
-                onNodeClick={(nodeId, nodeType) => {
-                  if (nodeType === 'note') {
-                    const noteId = parseInt(nodeId)
-                    setEditingNote(noteId)
-                  }
-                }}
-                useApiData={true}
-              />
-            </div>
-          )}
-
           {currentView === 'insights' && (
             <div className="space-y-4">
               {loadingInsights ? (
@@ -262,7 +234,7 @@ export default function MemoryGarden({
           )}
 
           {currentView === 'memory' && (
-            <MemoryManager onClose={() => setCurrentView('graph')} />
+            <MemoryManager onClose={() => setCurrentView('insights')} />
           )}
         </div>
       </main>

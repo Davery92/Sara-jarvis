@@ -12,6 +12,8 @@ interface WorkoutSet {
   reps: number
   rpe?: number
   notes?: string
+  session_date?: string  // YYYY-MM-DD format
+  session_time?: string  // Full ISO timestamp
   created_at: string
 }
 
@@ -85,11 +87,20 @@ export default function WorkoutLog() {
       if (response.ok) {
         const data = await response.json()
         const grouped: { [key: string]: WorkoutSet[] } = {}
-        data.workouts?.forEach((set: WorkoutSet) => {
-          const date = new Date(set.created_at).toLocaleDateString()
-          if (!grouped[date]) grouped[date] = []
-          grouped[date].push(set)
+
+        // Handle nested workout structure: workouts contain exercises array
+        data.workouts?.forEach((workout: any) => {
+          // Flatten exercises from each workout
+          const exerciseSets = workout.exercises || []
+          exerciseSets.forEach((set: WorkoutSet) => {
+            // Use session_time if available, otherwise fall back to created_at
+            const dateString = set.session_time || set.created_at || workout.created_at
+            const date = new Date(dateString).toLocaleDateString()
+            if (!grouped[date]) grouped[date] = []
+            grouped[date].push(set)
+          })
         })
+
         const sessions = Object.entries(grouped).map(([date, sets]) => ({
           date,
           sets: sets.sort((a, b) => a.set_index - b.set_index)
@@ -513,7 +524,7 @@ export default function WorkoutLog() {
                 <div className="px-4 pb-4 space-y-4">
                   {Object.entries(
                     session.sets.reduce((acc, set) => {
-                      const name = set.exercise_id || `Exercise ${set.exercise_id}`
+                      const name = set.exercise_name || `Exercise ${set.exercise_id}`
                       if (!acc[name]) acc[name] = []
                       acc[name].push(set)
                       return acc

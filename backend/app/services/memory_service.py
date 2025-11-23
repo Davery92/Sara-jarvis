@@ -36,11 +36,19 @@ class MemoryService:
         Initialize memory service with Redis and database connections.
 
         Args:
-            redis_client: Redis client for working set cache
+            redis_client: Redis client for working set cache, OR a db session directly
             db_session_factory: SQLAlchemy SessionLocal factory
         """
-        self.redis = redis_client
-        self.SessionLocal = db_session_factory
+        # Support passing a db session directly (for tool compatibility)
+        if redis_client is not None and hasattr(redis_client, 'query'):
+            # It's a SQLAlchemy session, not a redis client
+            self.db = redis_client
+            self.redis = None
+            self.SessionLocal = None
+        else:
+            self.redis = redis_client
+            self.SessionLocal = db_session_factory
+            self.db = None
         self._embedding_service = None
         self._redis_focus_ttl = int(os.getenv("REDIS_FOCUS_TTL_SECONDS", "172800"))  # 48 hours
         self._redis_max_recent = 1000
@@ -574,6 +582,122 @@ class MemoryService:
             raise
         finally:
             db.close()
+
+    async def search_memory(
+        self,
+        user_id: str,
+        query: str,
+        scopes: List[str] = None,
+        limit: int = 6
+    ) -> List[Dict[str, Any]]:
+        """
+        Search memory across episodes, notes, documents using semantic similarity.
+
+        Args:
+            user_id: User identifier
+            query: Search query
+            scopes: List of scopes to search (episodes, notes, docs, summaries)
+            limit: Maximum results per scope
+
+        Returns:
+            List of search results with type, text, score, etc.
+        """
+        if scopes is None:
+            scopes = ["episodes", "notes", "docs", "summaries"]
+
+        results = []
+
+        # Get embedding for query
+        embedding_fn = self._get_embedding_service()
+        if not embedding_fn:
+            logger.error("Embedding service not available")
+            return results
+
+        query_embedding = await embedding_fn(query)
+        if not query_embedding:
+            logger.error("Failed to generate query embedding")
+            return results
+
+        # Get db session - support both init patterns
+        if hasattr(self, 'db'):
+            db = self.db
+            should_close = False
+        elif self.SessionLocal:
+            db = self.SessionLocal()
+            should_close = True
+        else:
+            logger.error("No database session available")
+            return results
+
+        try:
+            # Search episodes if in scope
+            if "episodes" in scopes:
+                from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
+
+                if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
+                    # Use vector similarity search
+                    embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
+
+                    episode_results = db.execute(sql_text(f"""
+                        SELECT
+                            id, content, role, source, created_at,
+                            1 - (embedding <=> '{embedding_str}'::vector) as score
+                        FROM episode
+                        WHERE user_id = :user_id
+                          AND embedding IS NOT NULL
+                        ORDER BY embedding <=> '{embedding_str}'::vector
+                        LIMIT :limit
+                    """), {"user_id": user_id, "limit": limit}).fetchall()
+
+                    for row in episode_results:
+                        results.append({
+                            "type": "episode",
+                            "episode_id": row[0],
+                            "text": row[1],
+                            "role": row[2],
+                            "source": row[3] or "chat",
+                            "created_at": row[4].isoformat() if row[4] else "",
+                            "score": float(row[5])
+                        })
+
+            # Search notes if in scope
+            if "notes" in scopes:
+                from app.main_simple import Note
+
+                # For now, basic text search on notes
+                notes = db.query(Note).filter(
+                    Note.user_id == user_id
+                ).order_by(Note.updated_at.desc()).limit(limit).all()
+
+                for note in notes:
+                    # Simple relevance scoring based on query terms
+                    score = 0.5
+                    query_lower = query.lower()
+                    if query_lower in note.title.lower():
+                        score = 0.8
+                    elif query_lower in note.content.lower():
+                        score = 0.7
+
+                    results.append({
+                        "type": "note",
+                        "note_id": note.id,
+                        "title": note.title,
+                        "text": note.content[:500],
+                        "created_at": note.created_at.isoformat() if note.created_at else "",
+                        "score": score
+                    })
+
+            # Sort all results by score
+            results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+            return results[:limit * 2]  # Return top results across all scopes
+
+        except Exception as e:
+            logger.error(f"Memory search failed: {e}")
+            raise
+        finally:
+            if should_close:
+                db.close()
 
     def _auto_calculate_salience(self, content: str, role: str) -> float:
         """

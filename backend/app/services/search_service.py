@@ -36,13 +36,16 @@ def _hash_key(parts: List[str]) -> str:
 
 class SearchService:
     def __init__(self):
-        self.http = httpx.AsyncClient(timeout=settings.searxng_timeout_s)
+        self.http = httpx.AsyncClient(timeout=10.0)  # Increased timeout for Tavily
         self.redis: Optional[Redis] = None
         try:
             self.redis = Redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
         except Exception as e:
             logger.warning(f"Redis not available ({e}); falling back to no-cache mode")
 
+        # Search provider config
+        self.search_provider = settings.search_provider
+        self.tavily_api_key = settings.tavily_api_key
         self.searx_base = settings.searxng_base_url.rstrip('/')
         self.lang = settings.searxng_language
         self.query_ttl = settings.search_cache_ttl_s
@@ -61,6 +64,8 @@ class SearchService:
             self.domain_deny = {d.lower() for d in (settings.domain_denylist or [])}
         except Exception:
             self.domain_deny = set()
+
+        logger.info(f"🔍 Search service initialized with provider: {self.search_provider}")
 
     async def close(self):
         try:
@@ -81,6 +86,59 @@ class SearchService:
         if r in ("month", "30d"):
             return "month"
         return None
+
+    async def _tavily_search(self, query: str, recency: Optional[str], sites: Optional[List[str]], limit: int = 12) -> List[Dict[str, Any]]:
+        """Search using Tavily API"""
+        payload = {
+            "api_key": self.tavily_api_key,
+            "query": query,
+            "max_results": min(limit, 20),  # Tavily max is 20
+            "include_raw_content": False,
+            "include_images": False
+        }
+
+        # Add include_domains if sites specified
+        if sites:
+            payload["include_domains"] = sites
+
+        # Add recency (Tavily uses days parameter)
+        if recency:
+            recency_map = {
+                "day": 1,
+                "week": 7,
+                "month": 30
+            }
+            if recency in recency_map:
+                payload["days"] = recency_map[recency]
+
+        logger.debug(f"Tavily query: {query} (max_results={limit})")
+
+        try:
+            r = await self.http.post("https://api.tavily.com/search", json=payload)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("results", [])
+
+            normalized: List[Dict[str, Any]] = []
+            for item in results:
+                url_i = item.get("url")
+                if not url_i:
+                    continue
+                normalized.append({
+                    "title": item.get("title") or "",
+                    "url": _strip_tracking_params(url_i),
+                    "snippet": (item.get("content") or "").strip()[:400],  # Tavily content can be long
+                    "source": "tavily",
+                    "score": item.get("score", 0),  # Tavily provides relevance score
+                    "published": None,  # Tavily doesn't provide publish date
+                })
+
+            logger.info(f"✅ Tavily returned {len(normalized)} results for '{query}'")
+            return normalized
+
+        except Exception as e:
+            logger.error(f"❌ Tavily search failed: {e}")
+            raise
 
     async def _searx_search(self, query: str, recency: Optional[str], sites: Optional[List[str]], limit: int = 12) -> List[Dict[str, Any]]:
         terms = query
@@ -270,8 +328,11 @@ class SearchService:
                 except Exception:
                     pass
 
-        # Fetch results from SearXNG
-        raw_results = await self._searx_search(query, recency, sites, limit=max(12, max_results))
+        # Fetch results from configured search provider
+        if self.search_provider == "tavily":
+            raw_results = await self._tavily_search(query, recency, sites, limit=max(12, max_results))
+        else:
+            raw_results = await self._searx_search(query, recency, sites, limit=max(12, max_results))
 
         # Dedupe by canonical URL
         seen = set()

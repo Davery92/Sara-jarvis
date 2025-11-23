@@ -11,10 +11,11 @@ class LocalSettings(BaseSettings):
     backend_url: str = "https://sara.avery.cloud/api"
     
     # LLM Configuration
+    ai_provider: str = "local"  # Options: local, gemini, openai, custom
     openai_base_url: str = "http://100.104.68.115:11434/v1"
     openai_model: str = "gpt-oss:120b"
     openai_api_key: str = "dummy"
-    embedding_base_url: str = "http://100.104.68.115:11434"
+    embedding_base_url: str = "http://10.185.1.8:11434"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
     

@@ -4,11 +4,8 @@ import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
-import { spriteBus } from './state/spriteBus'
 import MermaidDiagram from './components/MermaidDiagram'
-import MemoryGarden from './components/MemoryGarden'
-import SimplifiedNotes from './components/SimplifiedNotes'
-import KnowledgeGraph from './components/KnowledgeGraph'
+import Notes from './components/Notes'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
 import ShadowHistory from './components/ShadowHistory'
@@ -16,8 +13,6 @@ import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
-import Sprite, { SpriteHandle } from './components/Sprite'
-import SpriteDevPanel from './components/SpriteDevPanel'
 import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
 import FitnessSection from './components/fitness/FitnessSection'
@@ -27,6 +22,9 @@ import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
 import { getCalmMode } from './utils/prefs'
 import { CommandPalette } from './components/CommandPalette'
+import DailyBriefings from './components/DailyBriefings'
+import ContextModeSwitcher from './components/ContextModeSwitcher'
+import SmartInsightsDashboard from './components/SmartInsightsDashboard'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -71,7 +69,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, shadow-history, fitness, recipes, settings
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, shadow-history, fitness, recipes, settings, briefings, context-mode, smart-insights
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -105,16 +103,12 @@ function App() {
   const [analytics, setAnalytics] = useState(null)
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
-  const [currentSpriteMode, setCurrentSpriteMode] = useState('companion')
-  
+
   // Ref for auto-scrolling chat messages
   const chatMessagesEndRef = useRef(null)
-  
+
   // Ref to track and cancel ongoing chat requests
   const abortControllerRef = useRef(null)
-  
-  // Sprite ref for controlling the assistant avatar
-  const spriteRef = useRef<SpriteHandle>(null)
 
   // Activity monitoring for autonomous behaviors
   const { activityState, getIdleMinutes } = useActivityMonitor({
@@ -126,23 +120,20 @@ function App() {
     onThresholdReached: async (threshold, duration) => {
       console.log(`🤖 Sara: ${threshold} triggered after ${Math.round(duration / 60000)} minutes idle`)
       
-      // Get current mode and trigger autonomous sweep
-      const mode = spriteRef.current?.getMode() || 'companion'
-      
       try {
         // Call backend autonomous sweep
-        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/${threshold}?personality_mode=${mode}`, {
+        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/${threshold}?personality_mode=companion`, {
           method: 'POST',
           credentials: 'include'
         })
-        
+
         if (response.ok) {
           const result = await response.json()
           console.log(`🤖 Autonomous sweep result:`, result)
-          
+
           // Only notify if meaningful insights were generated
           if (result.insights_stored > 0 && result.new_insights > 0) {
-            await fetchAndDisplayLatestInsight(threshold, mode)
+            await fetchAndDisplayLatestInsight(threshold, 'companion')
           } else {
             console.log(`🤖 Sara: No new insights to share (${result.insights_stored} stored, ${result.new_insights || 0} new)`)
             // Don't show notifications or fallback behaviors when there's nothing new
@@ -153,74 +144,15 @@ function App() {
         }
       } catch (error) {
         console.log(`🤖 Sara: Unable to generate insights at this time`)
-        // Don't notify on errors - just log quietly  
+        // Don't notify on errors - just log quietly
       }
     },
     onActivityResume: () => {
       console.log('🤖 Sara: Activity resumed, returning to idle')
-      spriteRef.current?.setState('idle')
-      if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'activity:resume')
     },
     enableLogging: true
   })
 
-  // Adjust sprite visuals based on activity state (feature-flagged)
-  useEffect(() => {
-    if (!APP_CONFIG.flags?.spriteBus) return
-    // Compute visuals based on current idle threshold and Calm Mode
-    // Defaults: normal energy and tempo
-    let energyScale = 1.0
-    let tempoBreatheSec = 3.6
-    let tempoShimmerSec = 11
-    let brightnessScale = 1.0
-    let saturationScale = 1.0
-    if (activityState.isIdle) {
-      switch (activityState.currentThreshold) {
-        case 'quickSweep':
-          energyScale = 0.99
-          tempoBreatheSec = 4.2
-          tempoShimmerSec = 12
-          brightnessScale = 0.99
-          saturationScale = 0.98
-          break
-        case 'standardSweep':
-          energyScale = 0.985
-          tempoBreatheSec = 4.8
-          tempoShimmerSec = 13
-          brightnessScale = 0.985
-          saturationScale = 0.96
-          break
-        case 'digestSweep':
-          energyScale = 0.98
-          tempoBreatheSec = 5.6
-          tempoShimmerSec = 14
-          brightnessScale = 0.98
-          saturationScale = 0.94
-          break
-        default:
-          break
-      }
-    }
-    // Calm Mode enforces calmer visuals regardless of activity
-    const calm = APP_CONFIG.flags?.calmMode || getCalmMode()
-    if (calm) {
-      energyScale = Math.min(energyScale, 0.985)
-      tempoBreatheSec = Math.max(tempoBreatheSec, 5.2)
-      tempoShimmerSec = Math.max(tempoShimmerSec, 13)
-      brightnessScale = Math.min(brightnessScale, 0.975)
-      saturationScale = Math.min(saturationScale, 0.94)
-    }
-    spriteBus.setVisuals({ energyScale, tempoBreatheSec, tempoShimmerSec, brightnessScale, saturationScale }, calm ? 'calm:visuals' : 'activity:visuals')
-  }, [activityState.isIdle, activityState.currentThreshold])
-
-  // On mount, apply Calm Mode once if enabled (ensures visuals are calm before first idle tick)
-  useEffect(() => {
-    if (!APP_CONFIG.flags?.spriteBus) return
-    const calm = APP_CONFIG.flags?.calmMode || getCalmMode()
-    if (calm) {
-      spriteBus.setVisuals({ energyScale: 0.985, tempoBreatheSec: 5.2, tempoShimmerSec: 13 }, 'calm:init')
-    }
-  }, [])
 
   // Check authentication on load
   useEffect(() => {
@@ -455,13 +387,6 @@ function App() {
         
         // Welcome notification via sprite
         setTimeout(() => {
-          spriteRef.current?.notify(`Welcome back! I'm here to assist you.`, {
-            showToast: true,
-            keepBadge: false,
-            autoHide: 4000,
-            onReply: () => setView('chat'),
-            onOpen: () => setView('dashboard')
-          })
         }, 2000)
       } else {
         const error = await response.json()
@@ -549,11 +474,6 @@ function App() {
                   case 'tool_calls_start':
                     isUsingTools = true
                     toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
-                    spriteRef.current?.setState('listening')
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setBase('listening', 'chat:tools_start')
-                      spriteBus.setTone('focused', 'chat:tools_start')
-                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -561,12 +481,6 @@ function App() {
                     
                   case 'tool_executing':
                     toolActivity = `🔧 Using ${eventData.data.tool}...`
-                    spriteRef.current?.setState('thinking')
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setBase('thinking', 'chat:tool_executing')
-                      spriteBus.setTone('focused', 'chat:tool_executing')
-                      spriteBus.setVisuals({ energyScale: 1.02 }, 'chat:tool_executing')
-                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -574,12 +488,6 @@ function App() {
                     
                   case 'thinking':
                     toolActivity = '💭 Processing results...'
-                    spriteRef.current?.setState('thinking')
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setBase('thinking', 'chat:thinking')
-                      spriteBus.setTone('focused', 'chat:thinking')
-                      spriteBus.setVisuals({ energyScale: 1.015 }, 'chat:thinking')
-                    }
                     if (isQuickChat) {
                       setQuickChatResponse(toolActivity)
                     }
@@ -587,16 +495,9 @@ function App() {
                     
                   case 'text_chunk':
                     streamingContent = eventData.data.full_content
-                    spriteRef.current?.setState('speaking')
                     if (isFirstStreamChunk) {
                       // Brief "breath to talk" surge on first streamed token
-                      spriteRef.current?.pulse('strong')
                       isFirstStreamChunk = false
-                    }
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setOverlay('speaking', { source: 'chat:text_chunk', autoClearMs: 900 })
-                      spriteBus.setTone('playful', 'chat:text_chunk')
-                      spriteBus.setVisuals({ energyScale: 1.03, tempoBreatheSec: 3.2 }, 'chat:text_chunk')
                     }
                     if (isQuickChat) {
                       setQuickChatResponse(streamingContent)
@@ -645,23 +546,11 @@ function App() {
                   case 'response_ready':
                     setLoading(false)
                     isUsingTools = false
-                    spriteRef.current?.setState('idle')
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setBase('idle', 'chat:response_ready')
-                      spriteBus.setTone(undefined, 'chat:response_ready')
-                      spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chat:response_ready')
-                    }
                     break
                     
                   case 'error':
                     console.error('Streaming error:', eventData.message)
                     setLoading(false)
-                    spriteRef.current?.setState('idle')
-                    if (APP_CONFIG.flags?.spriteBus) {
-                      spriteBus.setBase('idle', 'chat:error')
-                      spriteBus.setTone(undefined, 'chat:error')
-                      spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chat:error')
-                    }
                     break
                 }
               } catch (e) {
@@ -695,8 +584,6 @@ function App() {
       }
     } finally {
       setLoading(false)
-      spriteRef.current?.setState('idle')
-      if (APP_CONFIG.flags?.spriteBus) spriteBus.setBase('idle', 'chat:finally')
       // Clear the abort controller when done
       if (abortControllerRef.current) {
         abortControllerRef.current = null
@@ -982,44 +869,11 @@ function App() {
     }])
   }
 
-  // Close Sprite HUD when route/view changes
-  useEffect(() => {
-    try { spriteRef.current?.closeHUD?.() } catch {}
-  }, [view])
-  
-  const showToast = (message, type = 'info', persistent = false, showSprite = false) => {
+  const showToast = (message, type = 'info', persistent = false) => {
     const id = Date.now()
     const toast = { id, message, type, persistent }
     setToasts(prev => [...prev, toast])
-    
-    // Show sprite notification for important messages
-    if (showSprite) {
-      spriteRef.current?.notify(message, {
-        showToast: true,
-        keepBadge: true,
-        autoHide: persistent ? 0 : 6500,
-        onReply: () => {
-          // Open chat and pre-fill with a relevant response
-          setView('chat')
-          setMessage(`About the notification: "${message}"`)
-        },
-        onOpen: () => {
-          // Navigate to most relevant view based on notification type
-          if (message.toLowerCase().includes('timer')) {
-            setView('dashboard')
-          } else if (message.toLowerCase().includes('reminder')) {
-            setView('dashboard')
-          } else {
-            setView('chat')
-          }
-        }
-      })
-      if (APP_CONFIG.flags?.spriteBus) {
-        // Emit a medium-importance alert overlay through the bus
-        spriteBus.alert({ source: 'toast', importance: 'medium', autoClearMs: 1000 })
-      }
-    }
-    
+
     // Auto-remove toast after 5 seconds (unless persistent)
     if (!persistent) {
       setTimeout(() => {
@@ -1045,17 +899,8 @@ function App() {
       librarian: "I noticed some documents that might interest you"
     }
 
-    spriteRef.current?.setState('thinking')
-    spriteRef.current?.pulse('subtle')
     
     setTimeout(() => {
-      spriteRef.current?.notify(messages[mode] || messages.companion, {
-        showToast: true,
-        keepBadge: true,
-        autoHide: 6000,
-        onReply: () => setView('chat'),
-        onOpen: () => setView('dashboard')
-      })
     }, 2000)
   }, [])
 
@@ -1071,26 +916,8 @@ function App() {
       librarian: "I've organized your knowledge graph - take a look?"
     }
 
-    spriteRef.current?.setState('listening')
-    spriteRef.current?.pulse('normal')
     
     setTimeout(() => {
-      spriteRef.current?.notify(messages[mode] || messages.companion, {
-        showToast: true, 
-        keepBadge: true,
-        autoHide: 8000,
-        onReply: () => setView('chat'),
-        onOpen: () => {
-          // Navigate to relevant view based on mode
-          const views = {
-            coach: 'habits',
-            analyst: 'memory-garden',
-            companion: 'chat',            concierge: 'calendar',
-            librarian: 'notes'
-          }
-          setView(views[mode] || 'dashboard')
-        }
-      })
     }, 1500)
   }, [])
 
@@ -1106,17 +933,8 @@ function App() {
       librarian: "Weekly knowledge summary and reading recommendations"
     }
 
-    spriteRef.current?.setState('notifying')
-    spriteRef.current?.pulse('strong')
     
     setTimeout(() => {
-      spriteRef.current?.notify(messages[mode] || messages.companion, {
-        showToast: true,
-        keepBadge: true,
-        autoHide: 10000,
-        onReply: () => setView('chat'),
-        onOpen: () => setView('dashboard')
-      })
     }, 1000)
   }, [])
 
@@ -1136,33 +954,9 @@ function App() {
           const spriteState = threshold === 'quickSweep' ? 'thinking' : 
                              threshold === 'standardSweep' ? 'listening' : 'notifying'
           
-          spriteRef.current?.setState(spriteState)
-          spriteRef.current?.pulse(threshold === 'digestSweep' ? 'strong' : 'normal')
           
           // Display insight via sprite notification
           setTimeout(() => {
-            spriteRef.current?.notify(insight.message, {
-              showToast: true,
-              keepBadge: true,
-              autoHide: threshold === 'digestSweep' ? 10000 : threshold === 'standardSweep' ? 8000 : 6000,
-              onReply: () => setView('chat'),
-              onOpen: () => {
-                // Navigate to relevant view based on insight type
-                const viewMap: Record<string, string> = {
-                  'habit_salvage': 'habits',
-                  'content_pattern': 'notes',
-                  'knowledge_connection': 'notes',                  'calendar_prep': 'calendar',
-                  'weekly_summary': 'dashboard',
-                  'gtky_prompt': 'settings',
-                  'reflection_prompt': 'dashboard',
-                  'reflection_streak': 'dashboard',
-                  'mood_improvement': 'dashboard',
-                  'goal_check': 'settings',
-                  'style_adjustment': 'privacy-dashboard'
-                }
-                setView(viewMap[insight.insight_type] || 'dashboard')
-              }
-            })
           }, 1500)
         }
       }
@@ -1321,13 +1115,6 @@ function App() {
                   <span>Notes</span>
                 </button>
                 <button
-                  onClick={() => { setView('memory-garden'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">psychology</span>
-                  <span>Memory Garden</span>
-                </button>
-                <button
                   onClick={() => { setView('habits'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1377,6 +1164,27 @@ function App() {
                   <span>Sara's Insights</span>
                 </button>
                 <button
+                  onClick={() => { setView('briefings'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'briefings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">event_note</span>
+                  <span>Daily Briefings</span>
+                </button>
+                <button
+                  onClick={() => { setView('context-mode'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'context-mode' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">tune</span>
+                  <span>Context Mode</span>
+                </button>
+                <button
+                  onClick={() => { setView('smart-insights'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'smart-insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">auto_awesome</span>
+                  <span>Smart Insights</span>
+                </button>
+                <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1419,13 +1227,6 @@ function App() {
             >
               <span className="material-icons">notes</span>
               <span className="text-xs">Notes</span>
-            </button>
-            <button
-              onClick={() => { setView('memory-garden'); loadNotes(); }}
-              className={`flex flex-col items-center ${view === 'memory-garden' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">psychology</span>
-              <span className="text-xs">Memory</span>
             </button>
             <button
               onClick={() => setView('habits')}
@@ -1475,6 +1276,27 @@ function App() {
             >
               <span className="material-icons">psychology</span>
               <span className="text-xs">Insights</span>
+            </button>
+            <button
+              onClick={() => setView('briefings')}
+              className={`flex flex-col items-center ${view === 'briefings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">event_note</span>
+              <span className="text-xs">Briefings</span>
+            </button>
+            <button
+              onClick={() => setView('context-mode')}
+              className={`flex flex-col items-center ${view === 'context-mode' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">tune</span>
+              <span className="text-xs">Context</span>
+            </button>
+            <button
+              onClick={() => setView('smart-insights')}
+              className={`flex flex-col items-center ${view === 'smart-insights' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">auto_awesome</span>
+              <span className="text-xs">Smart</span>
             </button>
             {/* GTKY moved to Settings; Reflect removed */}
             <button
@@ -1845,7 +1667,7 @@ function App() {
           )}
 
           {view === 'notes' && (
-            <SimplifiedNotes
+            <Notes
               notes={notes}
               setNotes={setNotes}
               editingNote={editingNote}
@@ -1855,32 +1677,6 @@ function App() {
               editNoteTitle={editNoteTitle}
               setEditNoteTitle={setEditNoteTitle}
             />
-          )}
-
-          {view === 'memory-garden' && (
-            <MemoryGarden
-              notes={notes}
-              setNotes={setNotes}
-              editingNote={editingNote}
-              setEditingNote={setEditingNote}
-            />
-          )}
-
-          {view === 'graph' && (
-            <div className="bg-card border border-card rounded-xl p-6 h-[calc(100vh-8rem)] md:h-[calc(100vh-12rem)]">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold">KNOWLEDGE GRAPH</h2>
-                <p className="text-sm text-gray-400">Interactive visualization of your knowledge network</p>
-              </div>
-              <div className="h-[calc(100%-3rem)]">
-                <KnowledgeGraph
-                  notes={notes}
-                  selectedNoteId={editingNote}
-                  useApiData={true}
-                  onNodeClick={handleGraphNodeClick}
-                />
-              </div>
-            </div>
           )}
 
           {view === 'documents' && (
@@ -2150,247 +1946,20 @@ function App() {
           {view === 'settings' && (
             <div className="space-y-6">
               <Settings />
-              
-              {/* Sprite Mode Testing */}
-              <div className="bg-card border border-card rounded-xl p-6">
-                <h2 className="text-lg font-semibold mb-4">SPRITE PERSONALITY MODES</h2>
-                <p className="text-gray-400 text-sm mb-4">Test different personality modes for Sara's sprite. Each mode has unique colors, breathing rhythms, and energy levels.</p>
-                
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  {[
-                    { mode: 'coach', label: 'Coach', desc: 'Bright & Energetic' },
-                    { mode: 'analyst', label: 'Analyst', desc: 'Focused & Sharp' },
-                    { mode: 'companion', label: 'Companion', desc: 'Warm & Gentle' },
-                    { mode: 'guardian', label: 'Guardian', desc: 'Calm & Steady' },
-                    { mode: 'concierge', label: 'Concierge', desc: 'Practical & Efficient' },
-                    { mode: 'librarian', label: 'Librarian', desc: 'Quiet & Thoughtful' }
-                  ].map(({ mode, label, desc }) => (
-                    <button
-                      key={mode}
-                      onClick={async () => {
-                        try {
-                          // Update backend
-                          const response = await fetch(`${APP_CONFIG.apiUrl}/user/personality-mode`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify({ mode })
-                          })
-                          
-                          if (response.ok) {
-                            // Update frontend
-                            spriteRef.current?.setMode(mode as any)
-                            setCurrentSpriteMode(mode)
-                            showToast(`Switched to ${label} mode`, 'success', false, true)
-                            
-                            // Also notify the sprite for tooltip support
-                            setTimeout(() => {
-                              spriteRef.current?.notify(`Now in ${label} mode: ${desc}`, {
-                                showToast: false,
-                                keepBadge: true,
-                                importance: 'medium'
-                              })
-                            }, 500)
-                          } else {
-                            showToast('Failed to update personality mode', 'error')
-                          }
-                        } catch (error) {
-                          console.error('Error updating personality mode:', error)
-                          showToast('Failed to update personality mode', 'error')
-                        }
-                      }}
-                      className={`p-3 rounded-lg border transition-colors text-left ${
-                        currentSpriteMode === mode
-                          ? 'border-teal-500 bg-teal-500/10 text-teal-300'
-                          : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-600 hover:bg-gray-700'
-                      }`}
-                    >
-                      <div className="font-medium">{label}</div>
-                      <div className="text-xs text-gray-400 mt-1">{desc}</div>
-                    </button>
-                  ))}
-                </div>
-                
-                <div className="mt-4 flex gap-2">
-                  <button
-                    onClick={() => spriteRef.current?.pulse('subtle')}
-                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
-                  >
-                    Subtle Pulse
-                  </button>
-                  <button
-                    onClick={() => spriteRef.current?.pulse('normal')}
-                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
-                  >
-                    Normal Pulse
-                  </button>
-                  <button
-                    onClick={() => spriteRef.current?.pulse('strong')}
-                    className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
-                  >
-                    Strong Pulse
-                  </button>
-                </div>
-              </div>
 
-              {/* Activity Monitor Status */}
-              <div className="bg-card border border-card rounded-xl p-6">
-                <h2 className="text-lg font-semibold mb-4">ACTIVITY MONITORING</h2>
-                <p className="text-gray-400 text-sm mb-4">Sara monitors your activity to provide timely autonomous assistance.</p>
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-gray-800 p-4 rounded-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-gray-300 font-medium">Status</span>
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${
-                        activityState.isIdle 
-                          ? 'bg-yellow-900 text-yellow-300' 
-                          : 'bg-green-900 text-green-300'
-                      }`}>
-                        {activityState.isIdle ? 'Idle' : 'Active'}
-                      </span>
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      {activityState.isIdle 
-                        ? `Idle for ${getIdleMinutes()} minutes`
-                        : 'Currently active'
-                      }
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-800 p-4 rounded-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-gray-300 font-medium">Threshold</span>
-                      <span className="text-xs text-gray-500 capitalize">
-                        {activityState.currentThreshold.replace('Sweep', ' Sweep')}
-                      </span>
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      Next: {
-                        activityState.currentThreshold === 'active' ? 'Quick Sweep (30s)' :
-                        activityState.currentThreshold === 'quickSweep' ? 'Standard Sweep (2min)' :
-                        activityState.currentThreshold === 'standardSweep' ? 'Digest Sweep (5min)' :
-                        'All triggered'
-                      }
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-800 p-4 rounded-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-gray-300 font-medium">Last Activity</span>
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      {activityState.lastActivity.toLocaleTimeString()}
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-800 p-4 rounded-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-gray-300 font-medium">Mode</span>
-                      <span className="text-xs text-teal-400 capitalize">
-                        {currentSpriteMode}
-                      </span>
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      Autonomous behavior style
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 text-xs text-gray-500">
-                  <strong>Testing Thresholds:</strong> Quick (30s), Standard (2min), Digest (5min)
-                  <br />
-                  <strong>Tip:</strong> Stop interacting to see autonomous notifications appear!
-                </div>
-              </div>
-
-              {/* Manual Sweep Testing */}
-              <div className="bg-card border border-card rounded-xl p-6">
-                <h2 className="text-lg font-semibold mb-4">AUTONOMOUS SWEEP TESTING</h2>
-                <p className="text-gray-400 text-sm mb-4">Manually trigger Sara's background analysis to test autonomous insights generation.</p>
-                
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <button
-                    onClick={async () => {
-                      const mode = spriteRef.current?.getMode() || 'companion'
-                      try {
-                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/quick_sweep?personality_mode=${mode}`, {
-                          method: 'POST',
-                          credentials: 'include'
-                        })
-                        if (response.ok) {
-                          const result = await response.json()
-                          showToast(`Quick sweep completed: ${result.insights_stored} insights generated`, 'success')
-                          if (result.insights_stored > 0) {
-                            fetchAndDisplayLatestInsight('quick_sweep', mode)
-                          }
-                        }
-                      } catch (error) {
-                        showToast('Sweep failed', 'error')
-                      }
-                    }}
-                    className="p-3 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 transition-colors"
-                  >
-                    <div className="font-medium">Quick Sweep</div>
-                    <div className="text-xs text-gray-400 mt-1">Fast checks & alerts</div>
-                  </button>
-
-                  <button
-                    onClick={async () => {
-                      const mode = spriteRef.current?.getMode() || 'companion'
-                      try {
-                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/standard_sweep?personality_mode=${mode}`, {
-                          method: 'POST',
-                          credentials: 'include'
-                        })
-                        if (response.ok) {
-                          const result = await response.json()
-                          showToast(`Standard sweep completed: ${result.insights_stored} insights generated`, 'success')
-                          if (result.insights_stored > 0) {
-                            fetchAndDisplayLatestInsight('standard_sweep', mode)
-                          }
-                        }
-                      } catch (error) {
-                        showToast('Sweep failed', 'error')
-                      }
-                    }}
-                    className="p-3 bg-purple-600/20 text-purple-400 rounded-lg hover:bg-purple-600/30 transition-colors"
-                  >
-                    <div className="font-medium">Standard Sweep</div>
-                    <div className="text-xs text-gray-400 mt-1">Pattern analysis</div>
-                  </button>
-
-                  <button
-                    onClick={async () => {
-                      const mode = spriteRef.current?.getMode() || 'companion'
-                      try {
-                        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/digest_sweep?personality_mode=${mode}`, {
-                          method: 'POST',
-                          credentials: 'include'
-                        })
-                        if (response.ok) {
-                          const result = await response.json()
-                          showToast(`Digest sweep completed: ${result.insights_stored} insights generated`, 'success')
-                          if (result.insights_stored > 0) {
-                            fetchAndDisplayLatestInsight('digest_sweep', mode)
-                          }
-                        }
-                      } catch (error) {
-                        showToast('Sweep failed', 'error')
-                      }
-                    }}
-                    className="p-3 bg-green-600/20 text-green-400 rounded-lg hover:bg-green-600/30 transition-colors"
-                  >
-                    <div className="font-medium">Digest Sweep</div>
-                    <div className="text-xs text-gray-400 mt-1">Deep insights</div>
-                  </button>
-                </div>
-
-                <div className="mt-4 text-xs text-gray-500">
-                  <strong>Note:</strong> Sweeps analyze your notes, conversations, habits, and patterns to generate contextual insights. Results depend on available data.
-                </div>
-              </div>
             </div>
+          )}
+
+          {view === 'briefings' && (
+            <DailyBriefings />
+          )}
+
+          {view === 'context-mode' && (
+            <ContextModeSwitcher />
+          )}
+
+          {view === 'smart-insights' && (
+            <SmartInsightsDashboard />
           )}
         </main>
       </div>
@@ -2432,13 +2001,6 @@ function App() {
           >
             <span className="text-xl">💪</span>
             <span className="text-xs whitespace-nowrap">Fitness</span>
-          </button>
-          <button
-            onClick={() => { setView('memory-garden'); loadNotes(); }}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'memory-garden' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">psychology</span>
-            <span className="text-xs whitespace-nowrap">Memory</span>
           </button>
           <button
             onClick={() => setIsMobileMenuOpen(true)}
@@ -2494,13 +2056,6 @@ function App() {
           </div>
         ))}
       </div>
-      
-      {/* Sara Sprite Assistant */}
-      <Sprite 
-        ref={spriteRef}
-        onNavigate={setView}
-      />
-      <SpriteDevPanel />
     </div>
   )
 }

@@ -22,7 +22,8 @@ import io
 from app.tools.fitness import (
     FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
     FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
-    WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool
+    WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
+    RecoveryLogCreateTool, RecoveryLogGetTool, RecoveryLogRecentTool
 )
 from app.prompts.fitness_system_prompt import get_fitness_system_prompt
 from app.main_simple import SimpleLLMClient
@@ -78,6 +79,18 @@ class WorkoutSetLog(BaseModel):
     reps: Optional[int] = None
     rpe: Optional[int] = None
     notes: Optional[str] = ""
+    session_date: Optional[str] = None  # YYYY-MM-DD format
+    session_time: Optional[str] = None  # Full ISO timestamp
+
+
+class WorkoutSetUpdate(BaseModel):
+    """Model for PATCH updates - all fields optional"""
+    weight: Optional[int] = None
+    reps: Optional[int] = None
+    rpe: Optional[int] = None
+    notes: Optional[str] = None
+    session_date: Optional[str] = None
+    session_time: Optional[str] = None
 
 
 class FitnessChatRequest(BaseModel):
@@ -445,6 +458,17 @@ async def create_food_log(
             RETURNING id
         """)
 
+        # Use provided logged_at or current time in Eastern timezone
+        # This prevents meals logged at night from appearing as next day
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+
+        if log.logged_at:
+            logged_at_time = log.logged_at
+        else:
+            # Get current time in Eastern timezone, then remove timezone info for storage
+            logged_at_time = datetime.now(eastern).replace(tzinfo=None)
+
         result = db.execute(query, {
             "id": log_id,
             "user_id": user_id,
@@ -456,7 +480,7 @@ async def create_food_log(
             "carbs": log.carbs,
             "fats": log.fats,
             "notes": log.notes or "",
-            "logged_at": log.logged_at or datetime.now()
+            "logged_at": logged_at_time
         })
 
         db.commit()
@@ -639,51 +663,81 @@ async def list_workouts(
     db: Session = Depends(get_db)
 ):
     """
-    List workout logs (individual sets) for workout history
+    List workout sessions with their sets grouped together
 
-    This endpoint returns workout_log entries (individual sets) rather than
-    workout plans. It's used by the frontend to display workout history.
+    Returns workout sessions with all their exercise sets properly grouped.
     """
     from sqlalchemy import text
+    from collections import defaultdict
 
     try:
-        # Query workout_log table joined with workout table to get exercise names
+        # Query workouts with their sets
         query = text("""
             SELECT
-                wl.id,
-                wl.workout_id,
+                w.id as workout_id,
+                w.title,
+                w.phase,
+                w.week,
+                w.day_of_week,
+                w.duration_min,
+                w.status,
+                w.created_at as workout_created_at,
+                wl.id as set_id,
                 wl.exercise_id,
-                COALESCE(wl.exercise_id, w.title) as exercise_name,
                 wl.set_index,
                 wl.weight,
                 wl.reps,
                 wl.rpe,
                 wl.notes,
-                wl.created_at
-            FROM workout_log wl
-            LEFT JOIN workout w ON wl.workout_id = w.id
-            WHERE wl.user_id = :user_id
-            ORDER BY wl.created_at DESC
+                wl.session_date,
+                wl.session_time,
+                wl.created_at as set_created_at
+            FROM workout w
+            LEFT JOIN workout_log wl ON w.id = wl.workout_id
+            WHERE w.user_id = :user_id
+            ORDER BY w.created_at DESC, wl.set_index ASC
             LIMIT :limit
         """)
 
         result = db.execute(query, {"user_id": user_id, "limit": limit})
 
-        workouts = []
+        # Group sets by workout_id
+        workouts_dict = {}
         for row in result.fetchall():
-            workouts.append({
-                "id": row.id,
-                "workout_id": row.workout_id,
-                "exercise_id": row.exercise_id,
-                "exercise_name": row.exercise_name,
-                "set_index": row.set_index,
-                "weight": row.weight,
-                "reps": row.reps,
-                "rpe": row.rpe,
-                "notes": row.notes,
-                "created_at": row.created_at.isoformat() if row.created_at else None
-            })
+            workout_id = row.workout_id
 
+            # Initialize workout entry if not exists
+            if workout_id not in workouts_dict:
+                workouts_dict[workout_id] = {
+                    "id": workout_id,
+                    "title": row.title,
+                    "phase": row.phase,
+                    "week": row.week,
+                    "day_of_week": row.day_of_week,
+                    "duration_min": row.duration_min,
+                    "status": row.status,
+                    "session_date": row.session_date.isoformat() if row.session_date else None,
+                    "created_at": row.workout_created_at.isoformat() if row.workout_created_at else None,
+                    "exercises": []
+                }
+
+            # Add set to workout if set data exists
+            if row.set_id:
+                workouts_dict[workout_id]["exercises"].append({
+                    "id": row.set_id,
+                    "exercise_id": row.exercise_id,
+                    "exercise_name": row.exercise_id,  # exercise_id actually stores the name
+                    "set_index": row.set_index,
+                    "weight": row.weight,
+                    "reps": row.reps,
+                    "rpe": row.rpe,
+                    "notes": row.notes,
+                    "session_date": row.session_date.isoformat() if row.session_date else None,
+                    "session_time": row.session_time.isoformat() if row.session_time else None,
+                    "created_at": row.set_created_at.isoformat() if row.set_created_at else None
+                })
+
+        workouts = list(workouts_dict.values())
         return {"workouts": workouts, "total": len(workouts)}
 
     except Exception as e:
@@ -707,76 +761,25 @@ async def log_workout_set(
     import uuid
     from sqlalchemy import text
 
-    # If no workout_id but exercise_name provided, create a quick workout entry
-    workout_id = log.workout_id
-    if not workout_id and log.exercise_name:
-        # Create or find today's quick workout for this exercise
-        today_str = date.today().isoformat()
-        quick_workout_id = str(uuid.uuid4())
+    # Let the WorkoutLogCreateTool handle workout creation
+    # It will auto-create or reuse today's workout with consistent title format
+    # Don't create workout here to avoid conflicts
 
-        # Create a quick workout entry
-        create_workout_sql = text("""
-            INSERT INTO workout (id, user_id, title, phase, week, day_of_week, duration_min, status, prescription, created_at)
-            VALUES (:id, :user_id, :title, :phase, :week, :day_of_week, :duration_min, :status, :prescription, NOW())
-            ON CONFLICT DO NOTHING
-            RETURNING id
-        """)
+    # Now log the set using the tool - it will auto-create/reuse today's workout
+    # DEBUG: Log what we're receiving
+    logger.info(f"📥 Received workout log request - session_date: {log.session_date}, session_time: {log.session_time}")
 
-        import json
-        prescription = json.dumps({"exercises": [{"name": log.exercise_name}]})
-
-        try:
-            result = db.execute(create_workout_sql, {
-                "id": quick_workout_id,
-                "user_id": user_id,
-                "title": f"{log.exercise_name} ({today_str})",
-                "phase": "quick-log",
-                "week": 0,
-                "day_of_week": 0,  # 0 for quick/adhoc workouts
-                "duration_min": 0,
-                "status": "completed",
-                "prescription": prescription
-            })
-            db.commit()
-            workout_id = quick_workout_id
-            logger.info(f"Created quick workout: {workout_id} for exercise: {log.exercise_name}")
-        except Exception as e:
-            logger.warning(f"Failed to create quick workout, trying to find existing: {e}")
-            # Try to find existing quick workout for this exercise today
-            find_sql = text("""
-                SELECT id FROM workout
-                WHERE user_id = :user_id
-                AND title = :title
-                AND DATE(created_at) = DATE(NOW())
-                LIMIT 1
-            """)
-            existing = db.execute(find_sql, {
-                "user_id": user_id,
-                "title": f"{log.exercise_name} ({today_str})"
-            }).fetchone()
-
-            if existing:
-                workout_id = existing.id
-            else:
-                raise HTTPException(status_code=500, detail="Failed to create or find workout entry")
-
-    if not workout_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Must provide either workout_id or exercise_name"
-        )
-
-    # Now log the set using the workout_id
     tool = WorkoutLogCreateTool()
     result = await tool.execute(
         user_id=user_id,
-        workout_id=workout_id,
         exercise_id=log.exercise_id or log.exercise_name,  # Use exercise_name as exercise_id if not provided
         set_index=log.set_index,
         weight=log.weight,
         reps=log.reps,
         rpe=log.rpe,
-        notes=log.notes
+        notes=log.notes,
+        session_date=log.session_date,
+        session_time=log.session_time
     )
 
     if not result.success:
@@ -802,28 +805,146 @@ async def log_workout_set(
     return result.data
 
 
+@router.patch("/workout-log/{set_id}")
+async def update_workout_set(
+    set_id: str,
+    updates: WorkoutSetUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update an existing workout set"""
+    from sqlalchemy import text
+
+    try:
+        # Build UPDATE SQL dynamically for fields that are provided
+        update_fields = []
+        params = {"set_id": set_id, "user_id": user_id}
+
+        if updates.weight is not None:
+            update_fields.append("weight = :weight")
+            params["weight"] = updates.weight
+
+        if updates.reps is not None:
+            update_fields.append("reps = :reps")
+            params["reps"] = updates.reps
+
+        if updates.rpe is not None:
+            update_fields.append("rpe = :rpe")
+            params["rpe"] = updates.rpe
+
+        if updates.notes is not None:
+            update_fields.append("notes = :notes")
+            params["notes"] = updates.notes
+
+        # Handle session_date if provided
+        if updates.session_date:
+            update_fields.append("session_date = :session_date")
+            params["session_date"] = updates.session_date
+
+        # Handle session_time if provided
+        if updates.session_time:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            try:
+                # Parse as naive datetime (no timezone), then localize to Eastern
+                if 'Z' in updates.session_time or '+' in updates.session_time:
+                    # Has timezone info, parse directly
+                    session_time = datetime.fromisoformat(updates.session_time.replace('Z', '+00:00'))
+                else:
+                    # No timezone info - treat as Eastern time
+                    naive_dt = datetime.fromisoformat(updates.session_time)
+                    eastern = ZoneInfo("America/New_York")
+                    session_time = naive_dt.replace(tzinfo=eastern)
+
+                update_fields.append("session_time = :session_time")
+                params["session_time"] = session_time
+                logger.info(f"🕐 PATCH session_time: {updates.session_time} → {session_time}")
+            except (ValueError, AttributeError) as e:
+                # If parsing fails, skip updating session_time
+                logger.warning(f"⚠️  Failed to parse session_time in PATCH: {e}")
+                pass
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        update_sql = text(f"""
+            UPDATE workout_log
+            SET {', '.join(update_fields)}
+            WHERE id = :set_id AND user_id = :user_id
+            RETURNING id, exercise_id, set_index, weight, reps, rpe, session_date, session_time
+        """)
+
+        result = db.execute(update_sql, params)
+        row = result.fetchone()
+        db.commit()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Workout set not found")
+
+        return {
+            "id": row.id,
+            "exercise_id": row.exercise_id,
+            "set_index": row.set_index,
+            "weight": row.weight,
+            "reps": row.reps,
+            "rpe": row.rpe,
+            "session_date": row.session_date.isoformat() if row.session_date else None,
+            "session_time": row.session_time.isoformat() if row.session_time else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update workout set: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/workouts/{workout_set_id}")
 async def delete_workout_set(
     workout_set_id: str,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
-    """Delete a workout set"""
+    """Delete a workout set or entire workout session
+
+    If workout_set_id is a workout ID, deletes the entire workout and all associated sets.
+    If workout_set_id is a workout_log ID, deletes just that individual set.
+    """
     from sqlalchemy import text
 
     try:
-        # Delete the workout set
-        delete_sql = text("""
+        # First try to delete as a workout (will cascade delete all workout_log entries)
+        delete_workout_sql = text("""
+            DELETE FROM workout
+            WHERE id = :workout_id AND user_id = :user_id
+        """)
+        result = db.execute(delete_workout_sql, {"workout_id": workout_set_id, "user_id": user_id})
+
+        if result.rowcount > 0:
+            # Also delete associated workout_log entries
+            delete_logs_sql = text("""
+                DELETE FROM workout_log
+                WHERE workout_id = :workout_id AND user_id = :user_id
+            """)
+            db.execute(delete_logs_sql, {"workout_id": workout_set_id, "user_id": user_id})
+            db.commit()
+            return {"success": True, "message": "Workout session deleted"}
+
+        # If not a workout, try to delete as a workout_log entry
+        delete_set_sql = text("""
             DELETE FROM workout_log
             WHERE id = :set_id AND user_id = :user_id
         """)
-        result = db.execute(delete_sql, {"set_id": workout_set_id, "user_id": user_id})
+        result = db.execute(delete_set_sql, {"set_id": workout_set_id, "user_id": user_id})
         db.commit()
 
         if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Workout set not found")
+            raise HTTPException(status_code=404, detail="Workout or set not found")
 
         return {"success": True, "message": "Workout set deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to delete workout set: {e}")
@@ -1241,6 +1362,7 @@ async def fitness_chat(
             FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
             FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
             WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
+            RecoveryLogCreateTool, RecoveryLogGetTool, RecoveryLogRecentTool,
             TemplateListTool, TemplateGetTool
         )
         from app.tools.fitness.food_search_log import FoodSearchAndLogTool
@@ -1251,6 +1373,7 @@ async def fitness_chat(
             FoodSearchAndLogTool(),  # Natural language food logging with USDA search
             FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
             WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
+            RecoveryLogCreateTool(), RecoveryLogGetTool(), RecoveryLogRecentTool(),
             TemplateListTool(), TemplateGetTool()
         ]
 
@@ -1323,6 +1446,10 @@ async def fitness_chat_stream(
     try:
         from app.tools.fitness.template_tools import TemplateListTool, TemplateGetTool
         from app.core.config import settings
+        import logging
+
+        logger = logging.getLogger("app.main_simple")
+        logger.info(f"🏋️ Fitness chat: user_id={user_id}, type={type(user_id)}")
 
         OPENAI_MODEL = settings.openai_model
         ASSISTANT_NAME = settings.assistant_name
@@ -1369,6 +1496,7 @@ async def fitness_chat_stream(
             FitnessNoteCreateTool, FitnessNoteSearchTool, FitnessNoteEditTool,
             FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
             WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
+            RecoveryLogCreateTool, RecoveryLogGetTool, RecoveryLogRecentTool,
             TemplateListTool, TemplateGetTool
         )
         from app.tools.fitness.food_search_log import FoodSearchAndLogTool
@@ -1378,6 +1506,7 @@ async def fitness_chat_stream(
             FoodSearchAndLogTool(),
             FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
             WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
+            RecoveryLogCreateTool(), RecoveryLogGetTool(), RecoveryLogRecentTool(),
             TemplateListTool(), TemplateGetTool()
         ]
 

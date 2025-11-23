@@ -150,17 +150,16 @@ class EnhancedNeo4jService:
         """Store content chunks as separate nodes"""
         chunk_query = """
         MATCH (parent:Content {id: $parent_id})
-        CREATE (chunk:Chunk {
-            id: $chunk_id,
-            content: $content,
-            chunk_type: $chunk_type,
-            order: $order,
-            parent_content_id: $parent_id,
-            parent_section: $parent_section,
-            metadata_json: $metadata_json,
-            created_at: datetime()
-        })
-        CREATE (parent)-[:HAS_CHUNK {order: $order}]->(chunk)
+        MERGE (chunk:Chunk {id: $chunk_id})
+        ON CREATE SET chunk.created_at = datetime()
+        SET chunk.content = $content,
+            chunk.chunk_type = $chunk_type,
+            chunk.order = $order,
+            chunk.parent_content_id = $parent_id,
+            chunk.parent_section = $parent_section,
+            chunk.metadata_json = $metadata_json,
+            chunk.updated_at = datetime()
+        MERGE (parent)-[:HAS_CHUNK {order: $order}]->(chunk)
         """
 
         for chunk in chunks:

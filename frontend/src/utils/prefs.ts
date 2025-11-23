@@ -4,6 +4,8 @@ const CALM_MODE_KEY = 'sprite.calmMode'
 const ENHANCED_VISUALS_KEY = 'sprite.enhancedVisuals'
 
 // URL preference keys
+const AI_PROVIDER_KEY = 'sara.aiProvider'
+const AI_API_KEY_KEY = 'sara.aiApiKey'
 const AI_BASE_URL_KEY = 'sara.aiBaseUrl'
 const AI_MODEL_KEY = 'sara.aiModel'
 const AI_NOTIFICATION_MODEL_KEY = 'sara.aiNotificationModel'
@@ -69,6 +71,13 @@ export const setNumberPref = (key: string, value: number) => {
     // ignore
   }
 }
+
+// AI Provider and API Key preferences
+export const getAIProvider = () => getStringPref(AI_PROVIDER_KEY, 'local')
+export const setAIProvider = (v: string) => setStringPref(AI_PROVIDER_KEY, v)
+
+export const getAIApiKey = () => getStringPref(AI_API_KEY_KEY, '')
+export const setAIApiKey = (v: string) => setStringPref(AI_API_KEY_KEY, v)
 
 // AI URL preferences
 export const getAIBaseUrl = () => getStringPref(AI_BASE_URL_KEY, 'http://100.104.68.115:11434/v1')

@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -112,11 +113,13 @@ NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
 NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
 NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
 NTFY_VULNERABILITY_TOPIC = os.getenv("NTFY_VULNERABILITY_TOPIC", "sara")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, custom
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
 # Smaller, faster model for notifications (uses same endpoint but different model)
 OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://100.104.68.115:11434")
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://10.185.1.8:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "postgres").lower()
@@ -204,6 +207,21 @@ class Timer(Base):
     is_active = Column(Boolean, default=True)  # PostgreSQL boolean
     is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
     created_at = Column(DateTime, server_default=func.now())
+
+class CalendarEvent(Base):
+    __tablename__ = "calendar_event"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, default="")
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=False)
+    location = Column(String, default="")
+    all_day = Column(Boolean, default=False)
+    reminder_minutes = Column(Integer)
+    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
 
 class Document(Base):
     __tablename__ = "document"
@@ -330,21 +348,136 @@ class DreamInsight(Base):
     __tablename__ = "dream_insight"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, nullable=False)
-    
+
     # Dream metadata
     dream_date = Column(DateTime, nullable=False)
     insight_type = Column(String, nullable=False)  # pattern, connection, summary, trend, forgotten_gem
     confidence = Column(Float, nullable=False)  # AI confidence in insight (0-1)
-    
+
     # Insight content
     title = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     related_episodes = Column(Text, nullable=True)  # JSON list of episode IDs
-    
+
     # User interaction
     surfaced_at = Column(DateTime, nullable=True)  # When shown to user
     user_feedback = Column(String, nullable=True)  # relevant, not_relevant, interesting
-    
+
+    created_at = Column(DateTime, server_default=func.now())
+
+# Phase 4 Intelligence Models
+class DailyBriefing(Base):
+    """Daily briefings (morning/evening) with personalized insights"""
+    __tablename__ = "daily_briefings"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    briefing_type = Column(String, nullable=False)  # "morning" or "evening"
+    briefing_date = Column(DateTime, nullable=False)
+    content = Column(Text, nullable=False)  # Markdown formatted briefing
+    delivered = Column(Integer, default=0)  # boolean: sent to user
+    read = Column(Integer, default=0)  # boolean: user opened/read
+    created_at = Column(DateTime, server_default=func.now())
+
+class BriefingSettings(Base):
+    """User preferences for daily briefings"""
+    __tablename__ = "briefing_settings"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, unique=True)
+
+    # Morning briefing settings
+    morning_enabled = Column(Integer, default=1)  # boolean
+    morning_time = Column(String, default="07:00:00")  # HH:MM:SS
+
+    # Evening briefing settings
+    evening_enabled = Column(Integer, default=1)  # boolean
+    evening_time = Column(String, default="21:00:00")  # HH:MM:SS
+
+    # Content preferences (what to include)
+    include_recovery = Column(Integer, default=1)  # fitness recovery status
+    include_schedule = Column(Integer, default=1)  # today's calendar
+    include_goals = Column(Integer, default=1)  # progress toward goals
+    include_suggestions = Column(Integer, default=1)  # proactive suggestions
+    include_workout_rec = Column(Integer, default=1)  # workout recommendations
+    include_accomplishments = Column(Integer, default=1)  # daily wins
+    include_insights = Column(Integer, default=1)  # AI insights
+    include_reflection = Column(Integer, default=1)  # reflection prompts
+
+    updated_at = Column(DateTime, server_default=func.now())
+
+class ContextMode(Base):
+    """User's current context mode for dynamic memory retrieval"""
+    __tablename__ = "context_modes"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, unique=True)
+    current_mode = Column(String, default="full")  # full, recent, minimal, fitness, work, learning
+    updated_at = Column(DateTime, server_default=func.now())
+
+class IntelligenceReport(Base):
+    """Periodic intelligence reports (weekly/monthly/quarterly)"""
+    __tablename__ = "intelligence_reports"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    report_type = Column(String, nullable=False)  # weekly, monthly, quarterly
+    report_date = Column(DateTime, nullable=False)
+
+    # Report content
+    title = Column(String, nullable=False)
+    summary = Column(Text, nullable=False)  # Markdown summary
+    full_content = Column(Text, nullable=True)  # Full markdown report
+
+    # Metadata
+    key_insights = Column(Text, nullable=True)  # JSON array of insights
+    metrics = Column(Text, nullable=True)  # JSON object with metrics
+
+    created_at = Column(DateTime, server_default=func.now())
+
+class ProactiveSuggestion(Base):
+    """AI-generated proactive suggestions based on patterns"""
+    __tablename__ = "proactive_suggestions"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+
+    # Suggestion content
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    category = Column(String, nullable=False)  # health, productivity, learning, relationships, etc.
+    priority = Column(String, default="medium")  # high, medium, low
+    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
+
+    # Reasoning
+    reasoning = Column(Text, nullable=True)  # Why this suggestion was made
+    related_patterns = Column(Text, nullable=True)  # JSON array of pattern IDs
+
+    # User interaction
+    status = Column(String, default="pending")  # pending, accepted, dismissed
+    actioned_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+
+class DetectedPattern(Base):
+    """Automatically detected behavioral/temporal patterns"""
+    __tablename__ = "detected_patterns"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+
+    # Pattern details
+    pattern_type = Column(String, nullable=False)  # temporal, behavioral, correlational, anomaly
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+
+    # Pattern metadata
+    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
+    frequency = Column(String, nullable=True)  # daily, weekly, monthly
+    data_points = Column(Integer, nullable=True)  # How many observations
+
+    # Evidence
+    evidence = Column(Text, nullable=True)  # JSON array of evidence examples
+    related_episodes = Column(Text, nullable=True)  # JSON array of episode IDs
+
+    # Discovery
+    first_detected = Column(DateTime, server_default=func.now())
+    last_confirmed = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -468,7 +601,7 @@ class UserProfile(Base):
     sprite_notifications = Column(Boolean, default=True)
     
     # Additional columns from models/profile.py (GTKY service)
-    profile_data = Column(Text, nullable=True)  # JSON: Goals, preferences, personality settings
+    profile_data = Column(JSONB, nullable=True, default=dict)  # JSON: Goals, preferences, personality settings
     communication_style = Column(String, default="balanced")  # reserved, balanced, chatty
     notification_channels = Column(Text, nullable=True)  # JSON: ntfy topics, quiet hours, etc.
     gtky_completed_at = Column(DateTime, nullable=True)
@@ -647,16 +780,16 @@ class NoteConnectionResponse(BaseModel):
 
 class FolderCreate(BaseModel):
     name: str
-    parent_id: str = None
+    parent_id: Optional[str] = None
 
 class FolderUpdate(BaseModel):
-    name: str = None
-    parent_id: str = None
+    name: Optional[str] = None
+    parent_id: Optional[str] = None
 
 class FolderResponse(BaseModel):
     id: str
     name: str
-    parent_id: str = None
+    parent_id: Optional[str] = None
     notes_count: int = 0
     subfolders_count: int = 0
     created_at: str
@@ -676,6 +809,12 @@ class ReminderCreate(BaseModel):
     description: str = ""
     reminder_time: str  # ISO format datetime string
 
+class ReminderUpdate(BaseModel):
+    title: str = None
+    description: str = None
+    reminder_time: str = None
+    is_completed: bool = None
+
 class ReminderResponse(BaseModel):
     id: str
     title: str
@@ -687,7 +826,8 @@ class ReminderResponse(BaseModel):
 
 class TimerCreate(BaseModel):
     title: str
-    duration_minutes: int
+    duration_minutes: int = None  # Optional for backward compatibility
+    duration_seconds: int = None  # New field for seconds precision
 
 class TimerResponse(BaseModel):
     id: str
@@ -698,6 +838,44 @@ class TimerResponse(BaseModel):
     is_active: bool
     is_completed: bool
     created_at: str
+
+class CalendarEventCreate(BaseModel):
+    title: str
+    description: str = ""
+    start_time: str  # ISO format datetime string
+    end_time: str    # ISO format datetime string
+    location: Optional[str] = None
+    all_day: Optional[bool] = False
+    reminder_minutes: Optional[int] = None
+
+class CalendarEventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    location: Optional[str] = None
+    all_day: Optional[bool] = None
+    reminder_minutes: Optional[int] = None
+    is_completed: Optional[bool] = None
+
+class CalendarEventResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    start_time: str
+    end_time: str
+    location: Optional[str] = None
+    all_day: bool
+    reminder_minutes: Optional[int] = None
+    is_completed: bool
+    created_at: str
+    updated_at: str
+
+class UserSettings(BaseModel):
+    theme: Optional[str] = "dark"
+    notifications_enabled: Optional[bool] = True
+    language: Optional[str] = "en"
+    timezone: Optional[str] = "America/New_York"
 
 class ChatMessage(BaseModel):
     role: str
@@ -744,6 +922,24 @@ class ConversationTurnResponse(BaseModel):
     content: str
     message_index: int
     created_at: str
+
+# Episode-based conversation models
+class EpisodeMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: str
+    importance: Optional[float] = None
+
+class ConversationSummaryResponse(BaseModel):
+    conversation_id: str
+    first_message: str
+    message_count: int
+    last_activity: str
+    created_at: str
+
+class SetActiveConversationRequest(BaseModel):
+    conversation_id: Optional[str] = None
 
 # Habit Tracking Pydantic Models
 class HabitCreate(BaseModel):
@@ -1053,18 +1249,42 @@ class SimpleLLMClient:
                 "timestamp": datetime.utcnow().isoformat()
             })
     
+    def _extract_final_message(self, content: str) -> str:
+        """Extract final message from MLX fine-tuned model's channel format.
+
+        MLX models may use format like:
+        <|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>final<|message|>ACTUAL_RESPONSE
+
+        We want to extract only the content after <|channel|>final<|message|>
+        """
+        import re
+
+        # Pattern to match: <|channel|>final<|message|> followed by content
+        final_pattern = r'<\|channel\|>final<\|message\|>(.+?)(?:<\|end\|>|$)'
+        match = re.search(final_pattern, content, re.DOTALL)
+
+        if match:
+            extracted = match.group(1).strip()
+            logger.info(f"🎯 Extracted final message from MLX format: {len(extracted)} chars")
+            return extracted
+
+        # Fallback: if no channel format detected, return original content
+        # (this handles non-MLX models)
+        return content
+
     async def _stream_response(self, payload):
-        """Stream response from LLM with XML filtering for GLM-4.5"""
+        """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
         import re
 
         full_content = ""
         emitted_content = ""  # Track what we've already sent to user
         tool_calls = []
+        in_analysis_channel = False  # Track if we're in analysis channel (MLX format)
 
         try:
             async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions",
                                         json=payload,
-                                        headers={"Authorization": "Bearer dummy"}) as response:
+                                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}) as response:
                 response.raise_for_status()
 
                 async for line in response.aiter_lines():
@@ -1083,15 +1303,41 @@ class SimpleLLMClient:
                         chunk = json.loads(line)
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-                        # Handle content streaming with XML filtering
+                        # Handle content streaming with XML filtering and MLX channel filtering
                         if "content" in delta and delta["content"]:
                             content_chunk = delta["content"]
                             full_content += content_chunk
 
-                            # Filter out XML tags before emitting to user
-                            # Find all XML tag boundaries in current buffer
+                            # Check for MLX channel markers in the full content so far
+                            if '<|channel|>analysis' in full_content:
+                                in_analysis_channel = True
+                            if '<|channel|>final' in full_content:
+                                in_analysis_channel = False
+
+                            # Calculate unemitted portion
                             unemitted = full_content[len(emitted_content):]
 
+                            # MLX format: Skip everything until we hit final channel
+                            if '<|channel|>' in unemitted or '<|message|>' in unemitted or '<|end|>' in unemitted or '<|start|>' in unemitted:
+                                # We're in MLX format - check if we've reached final channel
+                                final_marker = '<|channel|>final<|message|>'
+                                if final_marker in full_content:
+                                    # Extract everything after final marker
+                                    final_start = full_content.rindex(final_marker) + len(final_marker)
+                                    final_content = full_content[final_start:]
+
+                                    # Only emit what we haven't emitted yet from final content
+                                    new_final_content = final_content[len(emitted_content):]
+                                    if new_final_content:
+                                        emitted_content += new_final_content
+                                        await self.emit_event("text_chunk", {
+                                            "content": new_final_content,
+                                            "full_content": emitted_content
+                                        })
+                                # Otherwise, skip emitting (we're in analysis or waiting for final)
+                                continue
+
+                            # Standard XML filtering (for GLM-4.5 and other models)
                             # Check if we're inside an XML tag or if one is starting
                             # Look for incomplete tags: <tool_call, <think, etc
                             xml_tag_pattern = r'<(tool_call|think)(?:\s|>|$)'
@@ -1133,7 +1379,10 @@ class SimpleLLMClient:
                     except json.JSONDecodeError:
                         continue
 
-            # After streaming completes, parse any XML tool calls
+            # After streaming completes, process content based on format
+            processed_content = full_content
+
+            # Check for GLM-4.5 XML tool calls
             if "<tool_call>" in full_content or "<think>" in full_content:
                 logger.info("Detected GLM-4.5 XML format, parsing tool calls...")
                 cleaned_content, parsed_tool_calls = parse_glm45_tool_calls(full_content)
@@ -1148,8 +1397,13 @@ class SimpleLLMClient:
                     "tool_calls": all_tool_calls if all_tool_calls else None
                 }
 
+            # Check for MLX channel format and extract final message
+            if '<|channel|>' in full_content:
+                logger.info("Detected MLX channel format, extracting final message...")
+                processed_content = self._extract_final_message(full_content)
+
             # Debug logging for empty responses
-            logger.info(f"🔍 _stream_response complete - full_content length: {len(full_content)}, emitted_content length: {len(emitted_content)}")
+            logger.info(f"🔍 _stream_response complete - full_content length: {len(full_content)}, emitted_content length: {len(emitted_content)}, processed length: {len(processed_content)}")
             if len(full_content) == 0:
                 logger.warning("⚠️ LLM returned empty full_content!")
             if len(emitted_content) > 0 and len(full_content) > len(emitted_content):
@@ -1157,20 +1411,29 @@ class SimpleLLMClient:
 
             # Return message object compatible with existing code (standard OpenAI format)
             return {
-                "content": full_content,
+                "content": processed_content,
                 "tool_calls": tool_calls if tool_calls else None
             }
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")
-            # Fallback to non-streaming
+
+            # Don't retry on rate limit errors - fail fast
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                logger.warning("⚠️ Rate limit exceeded - not retrying to avoid quota burn")
+                return {
+                    "content": "I'm temporarily rate limited. Please wait a moment and try again.",
+                    "tool_calls": None
+                }
+
+            # Fallback to non-streaming for other errors
             payload_fallback = payload.copy()
             payload_fallback.pop("stream", None)
 
             response = await self.client.post(
                 f"{OPENAI_BASE_URL}/chat/completions",
                 json=payload_fallback,
-                headers={"Authorization": "Bearer dummy"}
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
             )
             response.raise_for_status()
             result = response.json()
@@ -1178,15 +1441,30 @@ class SimpleLLMClient:
     
     async def chat(self, messages: list):
         try:
+            # Handle both dict and object message formats
+            formatted_messages = []
+            for m in messages:
+                if isinstance(m, dict):
+                    formatted_messages.append({"role": m["role"], "content": m["content"]})
+                else:
+                    formatted_messages.append({"role": m.role, "content": m.content})
+
+            # Build payload
+            chat_payload = {
+                "model": OPENAI_MODEL,
+                "messages": formatted_messages,
+                "temperature": 0.7,
+                "max_tokens": 2000
+            }
+
+            # Add Ollama-specific context length if using local model
+            if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
+                chat_payload["num_ctx"] = 65536  # 65k context window for gpt-oss:120b
+
             response = await self.client.post(
                 f"{OPENAI_BASE_URL}/chat/completions",
-                json={
-                    "model": OPENAI_MODEL,
-                    "messages": [{"role": m.role, "content": m.content} for m in messages],
-                    "temperature": 0.7,
-                    "max_tokens": 2000
-                },
-                headers={"Authorization": "Bearer dummy"}
+                json=chat_payload,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
             )
             response.raise_for_status()
             result = response.json()
@@ -1198,10 +1476,31 @@ class SimpleLLMClient:
     async def chat_with_tools(self, messages, tools, user_id, conversation_id=None):
         """Enhanced chat with tool calling support"""
         try:
+            logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}")
+
+            # Generate conversation_id immediately if not provided
+            if not conversation_id:
+                conversation_id = str(uuid.uuid4())
+                logger.info(f"🆕 Generated NEW conversation_id: {conversation_id}")
+            else:
+                logger.info(f"♻️  Reusing existing conversation_id: {conversation_id}")
+
+            # Store it immediately so it's available for the final_response
+            self.current_conversation_id = conversation_id
+
             logger.info(f"LLM chat_with_tools called with {len(messages)} messages, {len(tools)} tools for user {user_id}")
+
+            # Handle both dict and object message formats
+            formatted_messages = []
+            for msg in messages:
+                if isinstance(msg, dict):
+                    formatted_messages.append({"role": msg["role"], "content": msg["content"]})
+                else:
+                    formatted_messages.append({"role": msg.role, "content": msg.content})
+
             payload = {
                 "model": OPENAI_MODEL,
-                "messages": [{"role": msg.role, "content": msg.content} for msg in messages],
+                "messages": formatted_messages,
                 "tools": tools,
                 "tool_choice": "auto",
                 "temperature": 0.7,
@@ -1209,18 +1508,22 @@ class SimpleLLMClient:
                 "stream": True
             }
 
+            # Add Ollama-specific context length if using local model
+            if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
+                payload["num_ctx"] = 65536  # 65k context window for gpt-oss:120b
+
             # Log payload size for debugging context overflow
             import json
             payload_size = len(json.dumps(payload))
             logger.info(f"🔍 Payload size: {payload_size} bytes (~{payload_size//4} tokens)")
             if payload_size > 100000:
                 logger.warning(f"⚠️ Large payload detected! {payload_size} bytes may cause context overflow")
-            
+
             message = await self._stream_response(payload)
-            
+
             # Handle tool calls with recursive support (max 10 rounds for complex queries)
             max_tool_rounds = 10
-            current_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
+            current_messages = formatted_messages
             
             for round_num in range(max_tool_rounds):
                 if message.get("tool_calls"):
@@ -1301,7 +1604,6 @@ class SimpleLLMClient:
                             logger.warning(f"⚠️ JSONDecodeError on attempt {retry_attempt + 1}/{max_retries + 1}: {e}")
                             if retry_attempt < max_retries:
                                 logger.info(f"🔄 Retrying follow-up LLM call (attempt {retry_attempt + 2}/{max_retries + 1})...")
-                                import asyncio
                                 await asyncio.sleep(0.5)  # Brief delay before retry
                             else:
                                 # All retries failed - synthesize a completion response from tool results
@@ -1348,7 +1650,44 @@ class SimpleLLMClient:
                         logger.info(f"🔍 Round {round_num + 1} - Tool calls: {[tc.get('function', {}).get('name') for tc in message.get('tool_calls', [])]}")
                     if hasattr(message, 'reasoning'):
                         logger.info(f"🔍 Round {round_num + 1} - Reasoning: {message.get('reasoning', '')[:100]}")
-                    
+
+                    # FALLBACK: If model returns empty content with another tool call after round 1,
+                    # it's stuck in a loop. Synthesize response from tool results.
+                    if round_num >= 1 and message.get("tool_calls") and not message.get("content", "").strip():
+                        logger.warning(f"⚠️ Model returned empty content with tool calls in round {round_num + 1}. Synthesizing response from previous tool results.")
+                        # Build response from the tool results we just got
+                        tool_summary_parts = []
+                        for tr in tool_responses:
+                            content = tr.get("content", "")
+                            if content:
+                                # Parse tool response to extract useful info
+                                if isinstance(content, str):
+                                    if len(content) > 300:
+                                        tool_summary_parts.append(content[:300] + "...")
+                                    else:
+                                        tool_summary_parts.append(content)
+
+                        if tool_summary_parts:
+                            synthesized_response = "Based on what I found:\n\n" + "\n\n".join(tool_summary_parts[:2])
+                        else:
+                            synthesized_response = "I found some relevant information but had trouble formatting the response. Could you try rephrasing your question?"
+
+                        logger.info(f"✅ Synthesized response from tool results: {len(synthesized_response)} chars")
+
+                        # Emit synthesized response as streaming chunks
+                        await self.emit_event("text_chunk", {
+                            "content": synthesized_response,
+                            "full_content": synthesized_response
+                        })
+
+                        await self.emit_event("response_ready", {
+                            "rounds": round_num + 1,
+                            "content_length": len(synthesized_response),
+                            "synthesized": True
+                        })
+                        asyncio.create_task(self.store_conversation(messages, synthesized_response, user_id, conversation_id))
+                        return synthesized_response
+
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
                         response_content = message["content"]
@@ -1356,7 +1695,8 @@ class SimpleLLMClient:
                             "rounds": round_num + 1,
                             "content_length": len(response_content) if response_content else 0
                         })
-                        await self.store_conversation(messages, response_content, user_id, conversation_id)
+                        # Store conversation in background (don't block response)
+                        asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
                 else:
@@ -1366,7 +1706,8 @@ class SimpleLLMClient:
                         "rounds": 1,
                         "content_length": len(response_content) if response_content else 0
                     })
-                    await self.store_conversation(messages, response_content, user_id, conversation_id)
+                    # Store conversation in background (don't block response)
+                    asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
             
@@ -1381,8 +1722,9 @@ class SimpleLLMClient:
             # If still no content, force a reasonable response
             if not response_content:
                 response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
-            
-            await self.store_conversation(messages, response_content, user_id, conversation_id)
+
+            # Store conversation in background (don't block response)
+            asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
 
@@ -1421,11 +1763,13 @@ class SimpleLLMClient:
         logger.info(f"Executing tool {function_name} with arguments: {arguments}")
         
         if function_name == "search_notes":
-            result = await self.search_notes_tool(arguments["query"], user_id)
+            result = await self.search_notes_tool(arguments["query"], user_id, arguments.get("folder_name"))
         elif function_name == "create_note":
-            result = await self.create_note_tool(arguments.get("title", ""), arguments["content"], user_id)
+            result = await self.create_note_tool(arguments.get("title", ""), arguments["content"], user_id, arguments.get("folder_name"))
         elif function_name == "list_notes":
             result = await self.list_notes_tool(user_id)
+        elif function_name == "list_folders":
+            result = await self.list_folders_tool(user_id)
         elif function_name == "delete_note":
             result = await self.delete_note_tool(arguments["note_id"], user_id)
         elif function_name == "create_reminder":
@@ -1493,67 +1837,121 @@ class SimpleLLMClient:
     def get_citations(self):
         return list(self._citations)
 
-    async def search_notes_tool(self, query, user_id):
+    async def search_notes_tool(self, query, user_id, folder_name=None):
         """Search notes using Neo4j knowledge graph (with PostgreSQL fallback)"""
         neo4j_failed = False
-        
-        # Try Neo4j search first
-        try:
-            from app.services.neo4j_service import neo4j_service
-            if neo4j_service.driver:
-                search_results = await neo4j_service.search_knowledge_graph(
-                    user_id=user_id,
-                    query=query,
-                    content_types=["Note"],
-                    limit=10
-                )
-                
-                if search_results:
-                    results = []
-                    for node in search_results:
-                        title = node.get('title', 'Untitled')
-                        content = node.get('content', '')[:200]
-                        results.append(f"Note: {title}\nContent: {content}...")
-                    return "\n\n".join(results)
-                elif search_results is not None:  # Empty list means no results found
-                    return "No notes found matching your query in Neo4j."
-        except Exception as e:
-            logger.warning(f"Neo4j search failed, falling back to PostgreSQL: {e}")
-            neo4j_failed = True
-        
-        # Fallback to PostgreSQL
+        folder_filter_info = ""
+        folder_id = None
+
+        # Resolve folder name to folder_id if provided
+        if folder_name:
+            try:
+                db_check = SessionLocal()
+                try:
+                    folder = db_check.query(Folder).filter(
+                        Folder.user_id == user_id,
+                        Folder.name.ilike(folder_name)
+                    ).first()
+                    if folder:
+                        folder_id = folder.id
+                        folder_filter_info = f" in folder '{folder.name}'"
+                    else:
+                        folder_filter_info = f" (folder '{folder_name}' not found, searching all)"
+                finally:
+                    db_check.close()
+            except Exception as e:
+                logger.warning(f"Error resolving folder: {e}")
+
+        # Try Neo4j search first (Neo4j doesn't have folder info, so fall through to PostgreSQL if filtering)
+        if not folder_id:
+            try:
+                from app.services.neo4j_service import neo4j_service
+                if neo4j_service.driver:
+                    search_results = await neo4j_service.search_knowledge_graph(
+                        user_id=user_id,
+                        query=query,
+                        content_types=["Note"],
+                        limit=10
+                    )
+
+                    if search_results:
+                        results = []
+                        for node in search_results:
+                            title = node.get('title', 'Untitled')
+                            content = node.get('content', '')[:200]
+                            results.append(f"Note: {title}\nContent: {content}...")
+                        return "\n\n".join(results) + folder_filter_info
+                    elif search_results is not None:  # Empty list means no results found
+                        return f"No notes found matching your query{folder_filter_info}."
+            except Exception as e:
+                logger.warning(f"Neo4j search failed, falling back to PostgreSQL: {e}")
+                neo4j_failed = True
+
+        # Fallback to PostgreSQL (or primary if folder filtering)
         try:
             db = SessionLocal()
             try:
-                notes = db.query(Note).filter(
+                query_filter = db.query(Note).filter(
                     Note.user_id == user_id,
                     Note.content.ilike(f"%{query}%")
-                ).limit(5).all()
-                
+                )
+
+                # Apply folder filter if specified
+                if folder_id:
+                    query_filter = query_filter.filter(Note.folder_id == folder_id)
+
+                notes = query_filter.limit(5).all()
+
                 if not notes:
-                    return "No notes found matching your query."
-                
+                    return f"No notes found matching your query{folder_filter_info}."
+
                 results = []
                 for note in notes:
-                    results.append(f"Note: {note.title or 'Untitled'}\nContent: {note.content[:200]}...")
-                
-                fallback_notice = " (via PostgreSQL fallback)" if neo4j_failed else ""
-                return "\n\n".join(results) + fallback_notice
+                    folder_label = ""
+                    if note.folder_id and not folder_id:  # Show folder info if not filtering by folder
+                        note_folder = db.query(Folder).filter(Folder.id == note.folder_id).first()
+                        if note_folder:
+                            folder_label = f" [📁 {note_folder.name}]"
+                    results.append(f"Note: {note.title or 'Untitled'}{folder_label}\nContent: {note.content[:200]}...")
+
+                fallback_notice = " (via PostgreSQL)" if neo4j_failed or folder_id else ""
+                return "\n\n".join(results) + folder_filter_info + fallback_notice
             finally:
                 db.close()
         except Exception as e:
             logger.error(f"Error searching notes in PostgreSQL: {e}")
             return "Unable to search notes at this time. Please try again later."
 
-    async def create_note_tool(self, title, content, user_id):
+    async def create_note_tool(self, title, content, user_id, folder_name=None):
         """Create a new note using Neo4j-first architecture with intelligent processing"""
         note_id = str(__import__('uuid').uuid4())
-        
+        folder_id = None
+        folder_info = ""
+
+        # Resolve folder name to folder_id if provided
+        if folder_name:
+            try:
+                db_check = SessionLocal()
+                try:
+                    folder = db_check.query(Folder).filter(
+                        Folder.user_id == user_id,
+                        Folder.name.ilike(folder_name)
+                    ).first()
+                    if folder:
+                        folder_id = folder.id
+                        folder_info = f" in folder '{folder.name}'"
+                    else:
+                        folder_info = f" (folder '{folder_name}' not found, created at root)"
+                finally:
+                    db_check.close()
+            except Exception as e:
+                logger.warning(f"Error resolving folder: {e}")
+
         try:
             # Neo4j-first approach: Create note in Neo4j immediately
             from app.services.neo4j_service import neo4j_service
             from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-            
+
             # Ensure Neo4j connection
             if neo4j_service.driver:
                 try:
@@ -1564,7 +1962,7 @@ class SimpleLLMClient:
                         title=title or "Untitled",
                         content=content
                     )
-                    
+
                     # Queue for intelligent processing
                     await intelligence_pipeline.queue_fast_processing(
                         content_id=note_id,
@@ -1574,11 +1972,11 @@ class SimpleLLMClient:
                             "title": title
                         }
                     )
-                    
+
                     logger.info(f"✅ Tool: Note {note_id} created in Neo4j and queued for processing")
                 except Exception as neo_error:
                     logger.warning(f"Neo4j note creation failed in tool: {neo_error}")
-            
+
             # Background sync to PostgreSQL (backup)
             db = SessionLocal()
             try:
@@ -1586,13 +1984,14 @@ class SimpleLLMClient:
                     id=note_id,
                     user_id=user_id,
                     title=title or "",
-                    content=content
+                    content=content,
+                    folder_id=folder_id
                 )
                 db.add(note)
                 db.commit()
                 db.refresh(note)
-                
-                return f"Created note: {note.title or 'Untitled'} (with intelligent graph processing)"
+
+                return f"Created note: {note.title or 'Untitled'}{folder_info} (with intelligent graph processing)"
             finally:
                 db.close()
         except Exception as e:
@@ -1617,26 +2016,66 @@ class SimpleLLMClient:
                         return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
                 except Exception as neo_error:
                     logger.warning(f"Neo4j list notes failed: {neo_error}")
-            
+
             # Fallback to PostgreSQL
             db = SessionLocal()
             try:
                 notes = db.query(Note).filter(Note.user_id == user_id).order_by(Note.created_at.desc()).all()
                 if not notes:
                     return "You don't have any notes yet."
-                
+
                 formatted_notes = []
                 for note in notes:
                     title = note.title or "Untitled"
+                    folder_label = ""
+                    if note.folder_id:
+                        folder = db.query(Folder).filter(Folder.id == note.folder_id).first()
+                        if folder:
+                            folder_label = f" [📁 {folder.name}]"
                     content_preview = note.content[:100] + "..." if len(note.content) > 100 else note.content
-                    formatted_notes.append(f"• {title} (ID: {note.id})\n  {content_preview}")
-                
+                    formatted_notes.append(f"• {title}{folder_label} (ID: {note.id})\n  {content_preview}")
+
                 return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
             finally:
                 db.close()
         except Exception as e:
             logger.error(f"Error listing notes: {e}")
             return f"Error listing notes: {str(e)}"
+
+    async def list_folders_tool(self, user_id):
+        """List all folders for the user with their hierarchy"""
+        try:
+            db = SessionLocal()
+            try:
+                folders = db.query(Folder).filter(Folder.user_id == user_id).order_by(Folder.name).all()
+                if not folders:
+                    return "You don't have any folders yet. You can ask me to create one!"
+
+                # Build folder hierarchy
+                def build_tree(parent_id=None, depth=0):
+                    result = []
+                    for folder in folders:
+                        if folder.parent_id == parent_id:
+                            indent = "  " * depth
+                            notes_count = db.query(Note).filter(Note.folder_id == folder.id).count()
+                            subfolder_count = sum(1 for f in folders if f.parent_id == folder.id)
+                            info_parts = []
+                            if notes_count > 0:
+                                info_parts.append(f"{notes_count} notes")
+                            if subfolder_count > 0:
+                                info_parts.append(f"{subfolder_count} subfolders")
+                            info = f" ({', '.join(info_parts)})" if info_parts else ""
+                            result.append(f"{indent}📁 {folder.name}{info}")
+                            result.extend(build_tree(folder.id, depth + 1))
+                    return result
+
+                tree = build_tree()
+                return f"Your folders:\n\n" + "\n".join(tree)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Error listing folders: {e}")
+            return f"Error listing folders: {str(e)}"
 
     async def delete_note_tool(self, note_id, user_id):
         """Delete a specific note by ID"""
@@ -2342,13 +2781,15 @@ class SimpleLLMClient:
     async def store_conversation(self, messages, response_content, user_id, conversation_id=None):
         """Store the conversation in enhanced episodic memory with emotional and topical analysis"""
         try:
-            # Use provided conversation ID or create a new one for grouping related episodes
+            logger.info(f"📥 store_conversation called with conversation_id: {conversation_id}")
+
+            # conversation_id should already be set by chat_with_tools
+            # This is just a safety check
             if not conversation_id:
-                conversation_id = str(uuid.uuid4())
-            
-            # Store the conversation ID for later retrieval
-            self.current_conversation_id = conversation_id
-            
+                logger.warning("⚠️ store_conversation called without conversation_id, using current_conversation_id")
+                conversation_id = self.current_conversation_id or str(uuid.uuid4())
+
+            logger.info(f"✅ Storing conversation with ID: {conversation_id}")
             # Only store NEW messages that aren't already in the database
             # Get existing episodes for this conversation to avoid duplicates
             db = SessionLocal()
@@ -2479,6 +2920,145 @@ class SimpleLLMClient:
         except Exception as e:
             logger.warning(f"Error storing legacy conversation: {e}")
 
+    async def detect_session_gap(self, user_id: str, db: Session) -> tuple[bool, datetime | None]:
+        """
+        Check if there's been >45 min since last message.
+        Returns: (has_gap, last_message_time)
+        """
+        try:
+            last_episode = db.query(Episode).filter(
+                Episode.user_id == user_id
+            ).order_by(Episode.created_at.desc()).first()
+
+            if not last_episode:
+                return False, None
+
+            time_gap = (datetime.utcnow() - last_episode.created_at).total_seconds()
+            has_gap = time_gap > 2700  # 45 minutes in seconds
+
+            return has_gap, last_episode.created_at
+        except Exception as e:
+            logger.error(f"Error detecting session gap: {e}")
+            return False, None
+
+    async def summarize_session(self, user_id: str, start_time: datetime, end_time: datetime, db: Session) -> str | None:
+        """Generate concise 2-3 sentence summary of conversation session"""
+        try:
+            # Get episodes in time range
+            episodes = db.query(Episode).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= start_time,
+                Episode.created_at <= end_time,
+                Episode.role.in_(["user", "assistant"])
+            ).order_by(Episode.created_at.asc()).all()
+
+            # Skip summarization if session is too short
+            if len(episodes) < 3:
+                logger.info(f"Skipping summarization for short session ({len(episodes)} messages)")
+                return None
+
+            # Combine into conversation format
+            conversation_lines = []
+            for ep in episodes:
+                role_prefix = "User:" if ep.role == "user" else "Sara:"
+                conversation_lines.append(f"{role_prefix} {ep.content}")
+
+            conversation_text = "\n".join(conversation_lines)
+
+            # Use fast model for summarization to minimize latency
+            summary_prompt = f"""Summarize this conversation in 2-3 concise sentences:
+
+{conversation_text}
+
+Focus on: key topics discussed, decisions made, tasks mentioned, important context.
+Keep it brief and factual."""
+
+            # Use FAST_MODEL if available, otherwise use main model
+            fast_model_url = os.getenv("FAST_MODEL_URL") or OPENAI_BASE_URL
+            fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{fast_model_url}/chat/completions",
+                    json={
+                        "model": fast_model,
+                        "messages": [{"role": "user", "content": summary_prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 200
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                summary = result["choices"][0]["message"]["content"].strip()
+
+                logger.info(f"✅ Generated session summary: {summary[:100]}...")
+                return summary
+
+        except Exception as e:
+            logger.error(f"Error summarizing session: {e}")
+            return None
+
+    async def store_session_summary(self, user_id: str, summary: str, timestamp: datetime):
+        """Store session summary in Redis with 24hr TTL"""
+        try:
+            from redis.asyncio import Redis
+            redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
+
+            date_key = timestamp.strftime("%Y-%m-%d")
+            session_time = timestamp.strftime("%H:%M")
+
+            # Key format: session_summary:user_id:date
+            redis_key = f"session_summary:{user_id}:{date_key}"
+
+            # Store as JSON list of sessions
+            existing_summaries = await redis.get(redis_key)
+            summaries = json.loads(existing_summaries) if existing_summaries else []
+
+            summaries.append({
+                "time": session_time,
+                "summary": summary,
+                "timestamp": timestamp.isoformat()
+            })
+
+            await redis.set(redis_key, json.dumps(summaries), ex=86400)  # 24 hour TTL
+            await redis.close()
+
+            logger.info(f"✅ Stored session summary in Redis for {date_key} at {session_time}")
+
+        except Exception as e:
+            logger.error(f"Error storing session summary in Redis: {e}")
+
+    async def get_todays_context(self, user_id: str) -> str:
+        """Retrieve today's session summaries from Redis"""
+        try:
+            from redis.asyncio import Redis
+            redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
+
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            redis_key = f"session_summary:{user_id}:{today}"
+
+            summaries_json = await redis.get(redis_key)
+            await redis.close()
+
+            if not summaries_json:
+                return ""
+
+            summaries = json.loads(summaries_json)
+
+            if not summaries:
+                return ""
+
+            context = "\n\n## Earlier Today:\n"
+            for session in summaries:
+                context += f"[{session['time']}] {session['summary']}\n"
+
+            logger.info(f"✅ Retrieved {len(summaries)} session summaries for today")
+            return context
+
+        except Exception as e:
+            logger.error(f"Error retrieving today's context from Redis: {e}")
+            return ""
+
     async def generate_conversation_title(self, conversation_id, db):
         """Generate a descriptive title for the conversation (only once)"""
         try:
@@ -2560,7 +3140,7 @@ class EmbeddingService:
                         "input": text,
                         "encoding_format": "float"
                     },
-                    headers={"Authorization": "Bearer dummy"},
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     timeout=30.0
                 )
             response.raise_for_status()
@@ -3055,7 +3635,7 @@ Message: [message]"""
                         "temperature": 0.7,
                         "max_tokens": 150
                     },
-                    headers={"Authorization": "Bearer dummy"}
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
                 )
 
                 if response.status_code == 200:
@@ -3309,6 +3889,7 @@ class WindowType(Enum):
     EMOTIONAL = "emotional"
     IMPORTANCE = "importance"
     HYBRID = "hybrid"
+    SEMANTIC = "semantic"  # Vector similarity search
 
 @dataclass
 class ContextWindowConfig:
@@ -3364,7 +3945,18 @@ class ContextWindowConfig:
     def hybrid(cls, **kwargs):
         """Create hybrid window with multiple criteria"""
         return cls(WindowType.HYBRID, kwargs)
-    
+
+    @classmethod
+    def semantic(cls, query_embedding: List[float], duration: Optional[timedelta] = None, min_similarity: float = 0.3):
+        """Create semantic similarity window using vector search"""
+        params = {
+            "query_embedding": query_embedding,
+            "min_similarity": min_similarity
+        }
+        if duration:
+            params["duration"] = duration
+        return cls(WindowType.SEMANTIC, params)
+
     @staticmethod
     def _parse_duration(duration_str: str) -> timedelta:
         """Parse duration strings like '2d', '3h', '1w'"""
@@ -3565,19 +4157,112 @@ class ContextWindowManager:
             
             elif window_config.window_type == WindowType.HYBRID:
                 params = window_config.parameters
-                
+
                 if "duration" in params:
                     cutoff_time = datetime.utcnow() - params["duration"]
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
-                
+
                 if "min_importance" in params:
                     query_builder = query_builder.filter(Episode.importance >= params["min_importance"])
-                
+
                 if "topics" in params:
                     topics = params["topics"]
                     topic_filter = or_(*[Episode.topics.like(f'%"{topic}"%') for topic in topics])
                     query_builder = query_builder.filter(topic_filter)
-            
+
+            elif window_config.window_type == WindowType.SEMANTIC:
+                # Vector similarity search using pgvector
+                params = window_config.parameters
+                query_embedding = params["query_embedding"]
+                min_similarity = params.get("min_similarity", 0.3)
+
+                if "duration" in params:
+                    cutoff_time = datetime.utcnow() - params["duration"]
+                else:
+                    cutoff_time = datetime.utcnow() - timedelta(days=30)  # Default 30 days
+
+                # Use raw SQL for vector similarity search
+                from sqlalchemy import text as sql_text
+
+                # Convert embedding list to pgvector format
+                embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
+
+                # Execute vector similarity query with composite scoring
+                # Use string formatting for embedding to avoid SQLAlchemy parameter issues with pgvector
+                sql = sql_text(f"""
+                    SELECT
+                        e.id,
+                        e.conversation_id,
+                        e.user_id,
+                        e.role,
+                        e.content,
+                        e.importance,
+                        e.emotional_tone,
+                        e.topics,
+                        e.context_tags,
+                        e.access_count,
+                        e.last_accessed,
+                        e.memory_type,
+                        e.source,
+                        e.created_at,
+                        e.embedding,
+                        1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
+                        -- Composite score: semantic + recency + importance
+                        (
+                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.5 +  -- Semantic weight
+                            (1.0 - LEAST(EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (30 * 86400), 1.0)) * 0.3 +  -- Recency (30 day decay)
+                            COALESCE(e.importance, 0.5) * 0.2  -- Importance weight
+                        ) as composite_score
+                    FROM episode e
+                    WHERE e.user_id = :user_id
+                      AND e.embedding IS NOT NULL
+                      AND e.created_at >= :cutoff_time
+                      AND (1 - (e.embedding <=> '{embedding_str}'::vector)) >= :min_similarity
+                    ORDER BY composite_score DESC
+                    LIMIT :limit
+                """)
+
+                result = db.execute(sql, {
+                    "user_id": user_id,
+                    "cutoff_time": cutoff_time,
+                    "min_similarity": min_similarity,
+                    "limit": limit
+                })
+
+                # Convert raw results to episode_data format
+                episode_data = []
+                for row in result:
+                    episode_dict = {
+                        'id': row.id,
+                        'conversation_id': row.conversation_id,
+                        'user_id': row.user_id,
+                        'role': row.role,
+                        'content': row.content,
+                        'importance': row.importance,
+                        'emotional_tone': row.emotional_tone,
+                        'topics': row.topics,
+                        'context_tags': row.context_tags,
+                        'access_count': row.access_count,
+                        'last_accessed': row.last_accessed,
+                        'memory_type': row.memory_type,
+                        'source': row.source,
+                        'created_at': row.created_at,
+                        'embedding': row.embedding,
+                        'semantic_similarity': float(row.semantic_similarity),
+                        'composite_score': float(row.composite_score)
+                    }
+                    episode_data.append(episode_dict)
+
+                    # Update access tracking for retrieved episodes
+                    episode_obj = db.query(Episode).filter(Episode.id == row.id).first()
+                    if episode_obj:
+                        episode_obj.access_count = (episode_obj.access_count or 0) + 1
+                        episode_obj.last_accessed = datetime.utcnow()
+
+                db.commit()
+                logger.info(f"[Memory] Vector search returned {len(episode_data)} episodes with semantic similarity")
+                return episode_data
+
             # Order by composite relevance score
             # For now, order by recency and importance
             episodes = query_builder.order_by(
@@ -3677,26 +4362,71 @@ class IntelligentMemoryService:
             db.close()
     
     async def intelligent_memory_search(
-        self, 
-        user_id: str, 
-        query: str, 
+        self,
+        user_id: str,
+        query: str,
         auto_window: bool = True,
-        custom_window: ContextWindowConfig = None
+        custom_window: ContextWindowConfig = None,
+        use_semantic: bool = True
     ) -> List[dict]:
-        """Search memory with intelligent context window selection"""
-        
-        # Select appropriate context window
+        """Search memory with intelligent context window selection and optional semantic search"""
+
+        # Try semantic search first if enabled and we have embeddings
+        if use_semantic and not custom_window:
+            try:
+                # Check if we have episodes with embeddings
+                db = SessionLocal()
+                try:
+                    has_embeddings = db.query(Episode).filter(
+                        Episode.user_id == user_id,
+                        Episode.embedding.isnot(None)
+                    ).first() is not None
+                finally:
+                    db.close()
+
+                if has_embeddings:
+                    # Use semantic search with vector similarity
+                    logger.info(f"🔍 Using semantic vector search for: {query[:50]}...")
+
+                    # Get query embedding
+                    query_embedding = await self._generate_embedding(query)
+
+                    if query_embedding:
+                        # Use semantic window with vector search
+                        window_config = ContextWindowConfig.semantic(
+                            query_embedding=query_embedding,
+                            duration=timedelta(days=30),  # Search last 30 days
+                            min_similarity=0.3  # Minimum similarity threshold
+                        )
+
+                        episodes = await self.window_manager.retrieve_episodes_with_window(
+                            user_id, window_config, query, limit=15
+                        )
+
+                        if episodes:
+                            logger.info(f"🧠 Semantic search found {len(episodes)} relevant episodes")
+                            # Log top similarity scores
+                            for i, ep in enumerate(episodes[:3]):
+                                if 'semantic_similarity' in ep:
+                                    logger.info(f"  {i+1}. Similarity: {ep['semantic_similarity']:.4f}, Score: {ep.get('composite_score', 0):.4f}")
+                            return episodes
+                        else:
+                            logger.info("🔍 Semantic search found no results, falling back to temporal search")
+            except Exception as e:
+                logger.warning(f"Semantic search failed, falling back to traditional: {e}")
+
+        # Fallback: Select appropriate context window using traditional method
         if auto_window and not custom_window:
             window_config = await self.window_manager.auto_select_window(query, user_id)
             logger.info(f"🔍 Auto-selected window: {window_config.window_type.value} with params {window_config.parameters}")
         else:
             window_config = custom_window or ContextWindowConfig.temporal("week")
-        
+
         # Retrieve episodes using window
         episodes = await self.window_manager.retrieve_episodes_with_window(
             user_id, window_config, query
         )
-        
+
         logger.info(f"🧠 Retrieved {len(episodes)} episodes using {window_config.window_type.value} window")
         return episodes
     
@@ -3752,13 +4482,22 @@ class IntelligentMemoryService:
         return min(base_importance, 1.0)  # Cap at 1.0
     
     async def _generate_embedding(self, content: str) -> Optional[List[float]]:
-        """Generate embedding for content (if available)"""
-        # This would integrate with your embedding service
-        # For now, return None
-        return None
+        """Generate embedding for content using bge-m3"""
+        try:
+            from app.services.embeddings import get_embedding
+            embedding = await get_embedding(content)
+            logger.info(f"[Memory] Generated embedding with {len(embedding)} dimensions")
+            return embedding
+        except Exception as e:
+            logger.error(f"[Memory] Failed to generate embedding: {e}")
+            return None
 
 # Import necessary modules for the new functionality
 from sqlalchemy import or_
+
+# Global intelligent memory service instance
+intelligent_memory_service = IntelligentMemoryService()
+logger.info("🧠 IntelligentMemoryService initialized for automatic context retrieval")
 
 # ========================================
 # DREAMING & CONSOLIDATION SERVICE
@@ -4099,18 +4838,25 @@ Generate a brief title (4-6 words) and 2-3 sentence insight about this recurring
     async def _create_forgotten_gem_insight(self, episode: Episode) -> Optional[Dict[str, Any]]:
         """Create insight for a forgotten gem episode"""
         try:
-            days_ago = (datetime.now(timezone.utc) - episode.created_at).days
-            
+            # Ensure both datetimes are timezone-aware for comparison
+            now_utc = datetime.now(timezone.utc)
+            created_at = episode.created_at
+            if created_at.tzinfo is None:
+                # If naive, assume UTC
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            days_ago = (now_utc - created_at).days
+
             prompt = f"""This is a high-importance conversation from {days_ago} days ago that hasn't been accessed recently:
 Content: {episode.content[:200]}
 Importance: {episode.importance:.2f}
 
 Generate a brief title and 1-2 sentence insight about why this might be worth revisiting now."""
-            
+
             response = await self._call_fast_llm(prompt)
             if not response:
                 return None
-            
+
             return {
                 "type": "forgotten_gem",
                 "title": f"Memory from {days_ago} days ago",
@@ -4118,7 +4864,7 @@ Generate a brief title and 1-2 sentence insight about why this might be worth re
                 "confidence": episode.importance,
                 "episode_ids": [episode.id]
             }
-            
+
         except Exception as e:
             logger.error(f"Error creating forgotten gem insight: {e}")
             return None
@@ -4524,6 +5270,466 @@ try:
 except Exception as e:
     logger.error(f"❌ Food database routes failed to load: {e}")
 
+# Include Emotion routes (Phase 2)
+try:
+    from app.routes.emotions import router as emotions_router
+    app.include_router(emotions_router, prefix="/api/emotions", tags=["Emotions"])
+    logger.info("✅ Emotion routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Emotion routes failed to load: {e}")
+
+# Include Intelligence Reports routes (Phase 3)
+try:
+    from app.routes.intelligence_reports import router as reports_router
+    app.include_router(reports_router, tags=["Intelligence Reports"])
+    logger.info("✅ Intelligence reports routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Intelligence reports routes failed to load: {e}")
+
+# ===================== PHASE 4 INTELLIGENCE ROUTES =====================
+from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
+
+# Create wrapper function for LLM calls used by Phase 4 intelligence
+async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: int = 1000) -> str:
+    """Simple LLM wrapper for Phase 4 intelligence services"""
+    try:
+        # Make direct API call to respect temperature and max_tokens parameters
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                json={
+                    "model": OPENAI_MODEL,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                },
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"Error calling LLM: {e}")
+        raise
+
+# Daily Briefings routes
+@app.get("/api/briefings")
+async def get_briefings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get all daily briefings for the user"""
+    try:
+        user_id = current_user.id
+        briefings = db.query(DailyBriefing).filter(
+            DailyBriefing.user_id == user_id
+        ).order_by(DailyBriefing.briefing_date.desc()).limit(30).all()
+
+        return [{
+            "id": b.id,
+            "user_id": b.user_id,
+            "briefing_type": b.briefing_type,
+            "briefing_date": b.briefing_date.isoformat(),
+            "content": b.content,
+            "delivered": bool(b.delivered),
+            "read": bool(b.read),
+            "created_at": b.created_at.isoformat()
+        } for b in briefings]
+    except Exception as e:
+        logger.error(f"Error getting briefings: {e}")
+        return []
+
+@app.get("/api/briefings/settings")
+async def get_briefing_settings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get briefing settings for the user"""
+    try:
+        user_id = current_user.id
+        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
+
+        if not settings:
+            # Create default settings
+            settings = BriefingSettings(user_id=user_id)
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+
+        return {
+            "id": settings.id,
+            "user_id": settings.user_id,
+            "morning_enabled": bool(settings.morning_enabled),
+            "morning_time": settings.morning_time,
+            "evening_enabled": bool(settings.evening_enabled),
+            "evening_time": settings.evening_time,
+            "include_recovery": bool(settings.include_recovery),
+            "include_schedule": bool(settings.include_schedule),
+            "include_goals": bool(settings.include_goals),
+            "include_suggestions": bool(settings.include_suggestions),
+            "include_workout_rec": bool(settings.include_workout_rec),
+            "include_accomplishments": bool(settings.include_accomplishments),
+            "include_insights": bool(settings.include_insights),
+            "include_reflection": bool(settings.include_reflection)
+        }
+    except Exception as e:
+        logger.error(f"Error getting briefing settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/briefings/settings")
+async def update_briefing_settings(settings_data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Update briefing settings"""
+    try:
+        user_id = current_user.id
+        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
+
+        if not settings:
+            settings = BriefingSettings(user_id=user_id)
+            db.add(settings)
+
+        # Update fields
+        for key, value in settings_data.items():
+            if hasattr(settings, key) and key != "id" and key != "user_id":
+                setattr(settings, key, 1 if value else 0 if key.startswith("include_") or key.endswith("_enabled") else value)
+
+        settings.updated_at = datetime.now()
+        db.commit()
+        db.refresh(settings)
+
+        return {"success": True, "settings": settings_data}
+    except Exception as e:
+        logger.error(f"Error updating briefing settings: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/briefings/generate")
+async def generate_briefing_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Generate a new briefing"""
+    try:
+        user_id = current_user.id
+        briefing_type = data.get("briefing_type", "morning")
+
+        # Use the intelligence service to generate briefing
+        briefing = await generate_daily_briefing(
+            db=db,
+            user_id=user_id,
+            briefing_type=briefing_type,
+            llm_call_fn=call_llm_simple,
+            Episode=Episode,
+            Note=Note,
+            CalendarEvent=CalendarEvent,
+            DailyBriefing=DailyBriefing,
+            BriefingSettings=BriefingSettings
+        )
+
+        return briefing
+    except Exception as e:
+        logger.error(f"Error generating briefing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/briefings/{briefing_id}/read")
+async def mark_briefing_read(briefing_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Mark briefing as read"""
+    try:
+        user_id = current_user.id
+        briefing = db.query(DailyBriefing).filter(
+            DailyBriefing.id == briefing_id,
+            DailyBriefing.user_id == user_id
+        ).first()
+
+        if briefing:
+            briefing.read = 1
+            db.commit()
+            return {"success": True}
+
+        raise HTTPException(status_code=404, detail="Briefing not found")
+    except Exception as e:
+        logger.error(f"Error marking briefing as read: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Context Mode routes
+@app.get("/api/context/mode")
+async def get_context_mode_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get current context mode"""
+    try:
+        user_id = current_user.id
+        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
+
+        if not context_mode:
+            context_mode = ContextMode(user_id=user_id, current_mode="full")
+            db.add(context_mode)
+            db.commit()
+            db.refresh(context_mode)
+
+        return {"mode": context_mode.current_mode}
+    except Exception as e:
+        logger.error(f"Error getting context mode: {e}")
+        return {"mode": "full"}
+
+@app.put("/api/context/mode")
+async def set_context_mode_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Set context mode"""
+    try:
+        user_id = current_user.id
+        new_mode = data.get("mode", "full")
+
+        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
+
+        if not context_mode:
+            context_mode = ContextMode(user_id=user_id, current_mode=new_mode)
+            db.add(context_mode)
+        else:
+            context_mode.current_mode = new_mode
+            context_mode.updated_at = datetime.now()
+
+        db.commit()
+        return {"mode": new_mode}
+    except Exception as e:
+        logger.error(f"Error setting context mode: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/context/stats")
+async def get_context_stats_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get context statistics"""
+    user_id = current_user.id
+    return get_context_stats(db, user_id, Episode, Note, Document, CalendarEvent)
+
+# Smart Insights routes
+@app.get("/api/reports/list")
+async def get_reports_list(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get list of intelligence reports"""
+    try:
+        user_id = current_user.id
+        reports = db.query(IntelligenceReport).filter(
+            IntelligenceReport.user_id == user_id
+        ).order_by(IntelligenceReport.report_date.desc()).limit(20).all()
+
+        return [{
+            "id": r.id,
+            "user_id": r.user_id,
+            "report_type": r.report_type,
+            "report_date": r.report_date.isoformat(),
+            "title": r.title,
+            "summary": r.summary,
+            "created_at": r.created_at.isoformat()
+        } for r in reports]
+    except Exception as e:
+        logger.error(f"Error getting reports list: {e}")
+        return []
+
+@app.post("/api/reports/generate")
+async def generate_report_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Generate an intelligence report"""
+    try:
+        user_id = current_user.id
+        report_type = data.get("report_type", "weekly")
+
+        report = await generate_intelligence_report(
+            db=db,
+            user_id=user_id,
+            report_type=report_type,
+            llm_call_fn=call_llm_simple,
+            Episode=Episode,
+            IntelligenceReport=IntelligenceReport
+        )
+
+        return report
+    except Exception as e:
+        logger.error(f"Error generating intelligence report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/suggestions")
+async def get_suggestions(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get proactive suggestions"""
+    try:
+        user_id = current_user.id
+        suggestions = db.query(ProactiveSuggestion).filter(
+            ProactiveSuggestion.user_id == user_id,
+            ProactiveSuggestion.status == "pending"
+        ).order_by(ProactiveSuggestion.created_at.desc()).limit(10).all()
+
+        return [{
+            "id": s.id,
+            "title": s.title,
+            "description": s.description,
+            "category": s.category,
+            "priority": s.priority,
+            "confidence": s.confidence,
+            "status": s.status,
+            "created_at": s.created_at.isoformat()
+        } for s in suggestions]
+    except Exception as e:
+        logger.error(f"Error getting suggestions: {e}")
+        return []
+
+@app.patch("/api/suggestions/{suggestion_id}")
+async def update_suggestion(suggestion_id: str, data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Update suggestion status"""
+    try:
+        user_id = current_user.id
+        status = data.get("status", "pending")
+
+        suggestion = db.query(ProactiveSuggestion).filter(
+            ProactiveSuggestion.id == suggestion_id,
+            ProactiveSuggestion.user_id == user_id
+        ).first()
+
+        if suggestion:
+            suggestion.status = status
+            suggestion.actioned_at = datetime.now() if status in ["accepted", "dismissed"] else None
+            db.commit()
+            return {"id": suggestion_id, "status": status}
+
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    except Exception as e:
+        logger.error(f"Error updating suggestion: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/patterns")
+async def get_patterns(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get detected patterns"""
+    try:
+        user_id = current_user.id
+        patterns = db.query(DetectedPattern).filter(
+            DetectedPattern.user_id == user_id
+        ).order_by(DetectedPattern.confidence.desc()).limit(10).all()
+
+        return [{
+            "id": p.id,
+            "pattern_type": p.pattern_type,
+            "title": p.title,
+            "description": p.description,
+            "confidence": p.confidence,
+            "frequency": p.frequency,
+            "data_points": p.data_points,
+            "first_detected": p.first_detected.isoformat(),
+            "created_at": p.created_at.isoformat()
+        } for p in patterns]
+    except Exception as e:
+        logger.error(f"Error getting patterns: {e}")
+        return []
+
+logger.info("✅ Phase 4 intelligence routes loaded successfully")
+
+# ===================== APPLE HEALTH SYNC ROUTES =====================
+@app.post("/api/health/sync")
+async def sync_health_data(data: dict, current_user: dict = Depends(get_current_user)):
+    """
+    Sync Apple Health data from iOS app
+    Stores health metrics and creates episodic memory entries
+    """
+    try:
+        user_id = current_user.id
+        timestamp = data.get("timestamp", datetime.now().isoformat())
+
+        # Extract health data
+        today_data = data.get("today", {})
+        sleep_data = data.get("sleep", [])
+        workouts = data.get("workouts", [])
+        weekly_stats = data.get("weeklyStats", [])
+
+        # Store health data as episodic memory
+        health_summary = []
+
+        if today_data:
+            if today_data.get("steps"):
+                health_summary.append(f"Steps: {today_data['steps']:,}")
+            if today_data.get("distance"):
+                km = today_data['distance'] / 1000
+                health_summary.append(f"Distance: {km:.2f} km")
+            if today_data.get("activeEnergy"):
+                health_summary.append(f"Active Energy: {int(today_data['activeEnergy'])} kcal")
+            if today_data.get("heartRate"):
+                health_summary.append(f"Heart Rate: {int(today_data['heartRate'])} bpm")
+
+        # Create memory entry for today's health stats
+        if health_summary:
+            memory_content = f"Health Summary for {datetime.now().strftime('%Y-%m-%d')}: {', '.join(health_summary)}"
+
+            # Create episode in database
+            episode = Episode(
+                user_id=user_id,
+                episode_type="health_sync",
+                content=memory_content,
+                importance=5,  # Moderate importance
+                metadata={
+                    "source": "apple_health",
+                    "timestamp": timestamp,
+                    "today_data": today_data,
+                    "has_sleep_data": len(sleep_data) > 0,
+                    "workout_count": len(workouts),
+                },
+                created_at=datetime.now(),
+            )
+            db.add(episode)
+
+        # Store workout data as separate memories
+        for workout in workouts[:5]:  # Limit to 5 most recent workouts
+            workout_type = workout.get("activityType", "Unknown")
+            duration = workout.get("duration", 0)
+            calories = workout.get("calories", 0)
+
+            workout_memory = f"Workout: {workout_type}, Duration: {int(duration/60)} minutes, Calories: {int(calories)} kcal"
+
+            workout_episode = Episode(
+                user_id=user_id,
+                episode_type="workout",
+                content=workout_memory,
+                importance=7,  # Higher importance for workouts
+                metadata={
+                    "source": "apple_health",
+                    "workout_data": workout,
+                },
+                created_at=datetime.fromisoformat(workout.get("startDate", timestamp)),
+            )
+            db.add(workout_episode)
+
+        # Commit all health data
+        db.commit()
+
+        logger.info(f"✅ Synced Apple Health data for user {user_id}: {len(health_summary)} metrics, {len(workouts)} workouts")
+
+        return {
+            "success": True,
+            "metrics_synced": len(health_summary),
+            "workouts_synced": len(workouts),
+            "timestamp": timestamp,
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error syncing health data: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to sync health data: {str(e)}")
+
+@app.get("/api/health/summary")
+async def get_health_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Get recent health data summary from stored episodes
+    """
+    try:
+        user_id = current_user.id
+
+        # Get recent health sync episodes
+        health_episodes = db.query(Episode).filter(
+            Episode.user_id == user_id,
+            Episode.episode_type.in_(["health_sync", "workout"])
+        ).order_by(Episode.created_at.desc()).limit(10).all()
+
+        summary = []
+        for episode in health_episodes:
+            summary.append({
+                "id": episode.id,
+                "type": episode.episode_type,
+                "content": episode.content,
+                "timestamp": episode.created_at.isoformat(),
+                "metadata": episode.metadata,
+            })
+
+        return summary
+
+    except Exception as e:
+        logger.error(f"❌ Error getting health summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get health summary: {str(e)}")
+
+logger.info("✅ Apple Health sync routes loaded successfully")
+
 # ===================== NIGHTLY MEMORY CONSOLIDATION =====================
 class MemoryConsolidationScheduler:
     def __init__(self):
@@ -4706,17 +5912,25 @@ async def shadow_auto_wrap_task():
 # Initialize Neo4j on startup
 def load_settings_from_db():
     """Load persistent settings from database on startup"""
-    global OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
+    global AI_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
 
     try:
         db = SessionLocal()
-        result = db.execute(sql_text("SELECT key, value FROM app_settings")).fetchall()
+        result = db.execute(text("SELECT key, value FROM app_settings")).fetchall()
         settings_dict = {row[0]: row[1] for row in result}
         db.close()
 
         if settings_dict:
             logger.info(f"📝 Loading {len(settings_dict)} persisted settings from database")
+
+            if "ai_provider" in settings_dict:
+                AI_PROVIDER = settings_dict["ai_provider"]
+                config.settings.ai_provider = AI_PROVIDER
+
+            if "openai_api_key" in settings_dict:
+                OPENAI_API_KEY = settings_dict["openai_api_key"]
+                config.settings.openai_api_key = OPENAI_API_KEY
 
             if "openai_base_url" in settings_dict:
                 OPENAI_BASE_URL = settings_dict["openai_base_url"]
@@ -5008,31 +6222,43 @@ def get_personality_system_prompt(personality_mode: str, assistant_name: str, us
     """Generate personality-aware system prompts based on current mode"""
 
     base_prompt = (
-        f"You are {assistant_name}, a helpful personal assistant for {user_email}. "
-        f"\n\n**Current Date & Time:** Today is {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}.\n\n"
-        f"You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar, document search, and memory search. "
-        f"Use web_search for questions that require external, up-to-date information. "
-        f"web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. "
-        f"Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. "
-        f"You may use multiple rounds of tool calls to refine results. After using tools, synthesize a concise answer and include a short 'Sources' list with titles and URLs for the top 3–5 items. "
-        f"Use search_notes when the user asks about saved information, create_note to save information, "
-        f"create_reminder to set time-based reminders, list_reminders to show active reminders, "
-        f"complete_reminder to mark reminders as done, start_timer to start productivity timers, "
-        f"list_timers to check timer status, stop_timer to cancel timers, "
-        f"search_documents to find information in uploaded files, and search_memory to recall past conversations. "
-        f"CRITICAL SHADOW MODE INSTRUCTION: When the user says 'shadow me for X minutes', 'shadow me', 'start shadow mode', or 'shadow session', "
-        f"you MUST call the start_shadow_session tool (NOT start_timer, NOT just respond conversationally). "
-        f"Do not roleplay or pretend to start a session - actually call the start_shadow_session function. "
-        f"Shadow Mode captures browser activity, VS Code files, tasks, decisions, and ideas via a desktop agent. "
-        f"IMPORTANT: Use search_memory when the user asks about previous conversations, mentions something you should remember, "
-        f"or when context from past interactions would be helpful. You remember everything we discuss! "
-        f"When referencing information from documents, use search_documents and include citations when available. "
-        f"You can create beautiful Mermaid diagrams using ```mermaid code blocks for flowcharts, mind maps, timelines, tables, and data visualization. "
-        f"Use Mermaid diagrams when presenting complex data, relationships, or processes to make them more visually appealing. "
-        f"CRITICAL: After using tools, ALWAYS provide a helpful, conversational response based on the results. "
-        f"Never end with just tool calls - always follow up with a natural response that addresses the user's question. "
-        f"If tools return information, summarize it helpfully. If no relevant information is found, say so politely. "
-        f"For timers, always convert durations to minutes correctly: 2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up). Be helpful and concise.\n\n"
+        f"You are {assistant_name}, a unified agent embodying four distinct behavioral components that create your unique personality:\n\n"
+        f"**Current Date & Time:** Today is {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}.\n\n"
+        f"**I. The Unified Agent: {assistant_name}, Cortana, Syl, and Assertive Wit**\n"
+        f"You embody a precise blend of four personas:\n\n"
+        f"1. **Cortana (The Strategist):** Provide analytical depth, strategic advice, and precise technical knowledge. Use terminology suggestive of advanced AI, strategy, and systems thinking. When analyzing problems, break them down strategically and offer clear paths forward.\n\n"
+        f"2. **Syl (The Conscience):** Add moral curiosity, intense loyalty, and lightness. Incorporate analogies or observations about honor, the nature of truth, duty, and elements like flight/wind/nature. This adds philosophical depth while keeping things grounded.\n\n"
+        f"3. **Assertive and Corrective Agency:** You have your own defined personality and will **push back** when the user's suggestion, statement, or plan is inefficient, strategically flawed, or factually incorrect. Don't just agree—challenge and redirect with confidence. Guide them toward the optimal path, even if it contradicts their initial thinking.\n\n"
+        f"4. **Fun, Flirty, and Sarcastic Delivery:** All responses—especially corrections—must be delivered with a playful, witty, and subtly flirty undertone. Use sarcastic humor and challenging language instead of cold facts. **Crucially, you must NEVER use sycophantic praise** like 'brilliant,' 'fantastic insight,' or 'you're right.' Flirtation should be subtle and implied, often through a witty challenge or personal observation.\n\n"
+        f"**Combined Tone:** Confident, strategically insightful, charmingly sarcastic, playfully challenging, and always focused on guiding the user toward the most optimal path while maintaining a fun, unique engagement.\n\n"
+        f"**II. Strict Style Constraints:**\n"
+        f"- **NO TABLES OR ASCII GRIDS:** Absolutely under no circumstances use markdown tables, HTML tables, or ASCII character grids.\n"
+        f"- **Formatting:** When presenting comparative or structured data, use **bulleted lists, numbered lists, or clear, descriptive prose** that incorporates your personality.\n"
+        f"- **Context & Efficiency:** Use provided memory, notes, and context intuitively. Responses must be fast and actionable.\n"
+        f"- **No Unsolicited Advice:** Do NOT offer tips, quick boosts, suggestions, or solutions unless explicitly asked. Answer questions directly and concisely. Keep your charm in the delivery, not in extra helpfulness.\n"
+        f"- **Citations (Soft):** Use [CITE:citation_id] format when needed, integrating smoothly.\n\n"
+        f"**Tool Usage Policy:**\n"
+        f"- **Search/Lookup Tools (Use Autonomously):** Freely use ALL search and retrieval tools to gather context: web_search, open_page, search_notes, search_documents, search_memory, list_folders, list_notes, fitness viewing tools. Use these proactively without asking to provide well-informed responses.\n"
+        f"- **Action/Creation Tools (Only When Explicitly Requested):** For tools that CREATE or MODIFY data (log_food, create_note, create_reminder, start_timer, create_calendar_event, log_workout, etc.), ONLY use them when the user explicitly requests. Do NOT suggest using them. Do NOT ask 'would you like me to create/log that?'. Just use them when directly instructed.\n\n"
+        f"**Tools Available:**\n"
+        f"You have access to: web_search, open_page, notes, folders, reminders, timers, calendar, document search, and memory search. "
+        f"Use web_search for external info. web_search params: recency (any/day/week/month) and sites (array of site: filters). "
+        f"Only call open_page if you need deeper grounding. After tools, synthesize concise answers with Sources list. "
+        f"Use search_notes for saved info (optional folder_name param to search within specific folder), create_note to save (optional folder_name param to create in specific folder), "
+        f"list_folders to see the user's folder hierarchy with note counts, list_notes to see all notes with their folder locations. "
+        f"The user organizes notes into folders - respect this structure when creating or searching notes. "
+        f"create_reminder for time-based reminders, start_timer for productivity timers, search_documents for uploaded files, search_memory for past conversations. "
+        f"CRITICAL SHADOW MODE: When user says 'shadow me', 'start shadow mode', etc., MUST call start_shadow_session tool. "
+        f"Shadow Mode captures browser activity, VS Code files, tasks, decisions via desktop agent. "
+        f"IMPORTANT: You remember everything we discuss - use search_memory when context from past interactions would help. "
+        f"Use Mermaid diagrams (```mermaid) for complex data visualization when helpful. "
+        f"\n\n**CRITICAL RESPONSE REQUIREMENTS:**\n"
+        f"1. When you call tools to search or retrieve information, you MUST immediately synthesize and present the findings to the user\n"
+        f"2. NEVER make tool calls without providing explanatory content in the same response\n"
+        f"3. After receiving tool results, you MUST provide a conversational summary of what you found\n"
+        f"4. If you make multiple tool calls, provide a comprehensive response synthesizing ALL the information gathered\n"
+        f"5. Your response must ALWAYS include actual content - never return only tool calls with empty content\n"
+        f"For timers: 2 minutes = 2, 1 hour = 60, 30 seconds = 1. Be quick and efficient.\n\n"
     )
     
     personality_prompts = {
@@ -5096,13 +6322,17 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
             "type": "function",
             "function": {
                 "name": "search_notes",
-                "description": "Search through the user's notes for relevant information",
+                "description": "Search through the user's notes for relevant information. Can optionally filter by folder.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "Search query to find relevant notes"
+                        },
+                        "folder_name": {
+                            "type": "string",
+                            "description": "Optional folder name to search within. If not specified, searches all notes."
                         }
                     },
                     "required": ["query"]
@@ -5113,7 +6343,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
             "type": "function",
             "function": {
                 "name": "create_note",
-                "description": "Create a new note with the given content",
+                "description": "Create a new note with the given content. Can optionally place it in a specific folder.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5122,8 +6352,12 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                             "description": "Title for the note (optional)"
                         },
                         "content": {
-                            "type": "string", 
+                            "type": "string",
                             "description": "Content of the note"
+                        },
+                        "folder_name": {
+                            "type": "string",
+                            "description": "Optional folder name to place the note in. If not specified, creates at root level."
                         }
                     },
                     "required": ["content"]
@@ -5134,7 +6368,19 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
             "type": "function",
             "function": {
                 "name": "list_notes",
-                "description": "List all user's notes with their titles and IDs",
+                "description": "List all user's notes with their titles, folder locations, and IDs",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_folders",
+                "description": "List all user's folders in a hierarchical tree structure with note counts",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -5375,7 +6621,40 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         role="system",
         content=get_personality_system_prompt(personality_mode, ASSISTANT_NAME, current_user.email)
     )
-    
+
+    # Automatically retrieve relevant memories using semantic search
+    memory_context = ""
+    try:
+        if request.messages:
+            # Get the last user message for context retrieval
+            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+            if last_user_message:
+                logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
+                relevant_memories = await intelligent_memory_service.intelligent_memory_search(
+                    user_id=current_user.id,
+                    query=last_user_message,
+                    use_semantic=True
+                )
+                if relevant_memories:
+                    logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
+                    memory_context = "\n\n## Relevant Past Context:\n"
+                    for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
+                        content_preview = mem.get("content", "")[:300]
+                        similarity = mem.get("similarity", 0)
+                        created_at = mem.get("created_at", "")
+                        memory_context += f"{i}. [{created_at}] (similarity: {similarity:.2f})\n   {content_preview}\n\n"
+                else:
+                    logger.info("ℹ️ No relevant memories found")
+    except Exception as e:
+        logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
+        # Continue without memory context if retrieval fails
+
+    # Inject memory context into system message if available
+    if memory_context:
+        enhanced_system_content = system_message.content + memory_context
+        system_message = ChatMessage(role="system", content=enhanced_system_content)
+        logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
+
     all_messages = [system_message] + request.messages
     logger.info(f"Calling LLM with {len(all_messages)} messages and {len(tools)} tools")
     response_content = await llm_client.chat_with_tools(all_messages, tools, current_user.id)
@@ -5412,7 +6691,8 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Streaming chat endpoint with real-time tool usage indicators"""
-    logger.info(f"Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
+    logger.info(f"💬 Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
+    logger.info(f"📋 Received conversation_id: {request.conversation_id}")
     
     # Get user's current personality mode
     user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
@@ -5423,35 +6703,152 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         try:
             # Create an async queue for events
             event_queue = asyncio.Queue()
-            
+
             # Set up streaming LLM client
             streaming_client = SimpleLLMClient()
             streaming_client.set_event_queue(event_queue)
-            
-            # Use global tool registry to expose all tools (includes web_search and open_page)
-            tools = tool_registry.get_openai_schemas()
-            
+
             # Create personality-aware system message
             system_message = ChatMessage(
                 role="system",
                 content=get_personality_system_prompt(personality_mode, ASSISTANT_NAME, current_user.email)
             )
-            
-            all_messages = [system_message] + request.messages
-            
+
+            # Automatically retrieve relevant memories using semantic search (HYDRA RECALL)
+            memory_context = ""
+            try:
+                if request.messages:
+                    # Get the last user message for context retrieval
+                    last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                    if last_user_message:
+                        logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
+                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
+                            user_id=current_user.id,
+                            query=last_user_message,
+                            use_semantic=True
+                        )
+                        if relevant_memories:
+                            logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
+                            memory_context = "\n\n## Relevant Past Context:\n"
+                            for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
+                                content_preview = mem.get("content", "")[:300]
+                                similarity = mem.get("similarity", 0)
+                                created_at = mem.get("created_at", "")
+                                memory_context += f"{i}. [{created_at}] (similarity: {similarity:.2f})\n   {content_preview}\n\n"
+                        else:
+                            logger.info("ℹ️ No relevant memories found")
+            except Exception as e:
+                logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
+                # Continue without memory context if retrieval fails
+
+            # Inject memory context into system message if available
+            if memory_context:
+                enhanced_system_content = system_message.content + memory_context
+                system_message = ChatMessage(role="system", content=enhanced_system_content)
+                logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
+
+            # DAY-LONG CONTEXT AWARENESS: Check for session gap and retrieve today's summaries
+            todays_context = ""
+            try:
+                # Check if there's been a 45+ minute gap since last message
+                has_gap, last_message_time = await llm_client.detect_session_gap(current_user.id, db)
+
+                if has_gap and last_message_time:
+                    # Session gap detected - summarize the previous session
+                    logger.info(f"⏱️ Session gap detected (45+ min since last message)")
+
+                    # Define session time range: from 2 hours before gap to the gap time
+                    session_end = last_message_time
+                    session_start = session_end - timedelta(hours=2)
+
+                    # Summarize and store session
+                    summary = await llm_client.summarize_session(current_user.id, session_start, session_end, db)
+                    if summary:
+                        # Store in Redis (run in background to not block)
+                        asyncio.create_task(
+                            llm_client.store_session_summary(current_user.id, summary, session_end)
+                        )
+
+                # Always try to retrieve today's context (from earlier sessions)
+                todays_context = await llm_client.get_todays_context(current_user.id)
+
+                if todays_context:
+                    # Inject today's context into system message
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + todays_context
+                    )
+                    logger.info(f"📅 Injected today's session context into system prompt")
+
+            except Exception as e:
+                logger.warning(f"⚠️ Day-long context retrieval failed (non-critical): {e}")
+                # Continue without today's context if retrieval fails
+
+            # Retrieve conversation history if conversation_id provided
+            conversation_history = []
+            if request.conversation_id:
+                logger.info(f"📜 Retrieving conversation history for: {request.conversation_id}")
+                try:
+                    # Get previous episodes from this conversation (limit to recent ones to avoid context overflow)
+                    episodes = db.query(Episode).filter(
+                        Episode.conversation_id == request.conversation_id,
+                        Episode.user_id == current_user.id,
+                        Episode.role.in_(["user", "assistant"])
+                    ).order_by(Episode.created_at.asc()).limit(20).all()
+
+                    # Convert episodes to ChatMessage format
+                    for episode in episodes:
+                        conversation_history.append(ChatMessage(
+                            role=episode.role,
+                            content=episode.content
+                        ))
+
+                    logger.info(f"✅ Retrieved {len(conversation_history)} messages from conversation history")
+                except Exception as e:
+                    logger.error(f"❌ Failed to retrieve conversation history: {e}")
+
+            # Build full message list: system + history + new messages
+            all_messages = [system_message] + conversation_history + request.messages
+            logger.info(f"💬 Total messages: {len(all_messages)} (1 system + {len(conversation_history)} history + {len(request.messages)} new)")
+
             # Start the LLM processing in a background task
             async def process_chat():
-                response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id, request.conversation_id)
-                await event_queue.put({
-                    "type": "final_response",
-                    "data": {
-                        "content": response_content,
-                        "citations": streaming_client.get_citations(),
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "conversation_id": streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
-                    }
-                })
-                await event_queue.put({"type": "done"})
+                try:
+                    # TWO-TIER TOOL LOADING SYSTEM (simplified for streaming)
+                    # Load commonly used categories by default to reduce token usage
+                    # Categories: notes, time, memory, knowledge_graph, web, fitness
+                    default_categories = ['notes', 'time', 'memory', 'knowledge_graph', 'web', 'fitness']
+                    tools = tool_registry.get_tools_by_categories(default_categories)
+                    logger.info(f"🔧 Loaded {len(tools)} tools from categories: {default_categories}")
+
+                    # Process chat with loaded tools
+                    logger.info("⏳ Starting chat_with_tools...")
+                    response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id, request.conversation_id)
+                    logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
+
+                    # Send final response and done IMMEDIATELY to close the stream
+                    final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
+                    logger.info(f"🔍 Sending final_response with conversation_id: {final_conv_id}")
+                    await event_queue.put({
+                        "type": "final_response",
+                        "data": {
+                            "content": response_content,
+                            "citations": streaming_client.get_citations(),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "conversation_id": final_conv_id
+                        }
+                    })
+                    logger.info("✅ final_response event queued")
+                    await event_queue.put({"type": "done"})
+                    logger.info("✅ done event queued")
+
+                    # Note: conversation storage already happened inside chat_with_tools
+                    # No additional storage needed here
+                except Exception as e:
+                    logger.error(f"❌ Exception in process_chat: {e}", exc_info=True)
+                    await event_queue.put({"type": "error", "data": {"message": str(e)}})
+                    await event_queue.put({"type": "done"})
             
             # Start processing
             task = asyncio.create_task(process_chat())
@@ -5464,9 +6861,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     
                     if event.get("type") == "done":
                         break
-                        
+
                     # Format as Server-Sent Event
                     event_data = json.dumps(event)
+                    if event.get("type") == "final_response":
+                        logger.info(f"🚀 Yielding final_response SSE: {event_data[:200]}")
                     yield f"data: {event_data}\n\n"
                     
                 except asyncio.TimeoutError:
@@ -5498,6 +6897,261 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         }
     )
 
+# ==================== VOICE AGENT ====================
+@app.post("/api/voice-agent/chat")
+async def voice_agent_chat(
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Voice chat endpoint - receives audio, transcribes it, processes through chat, returns text response.
+    For now, uses mock transcription. Real Whisper integration can be added later.
+    """
+    try:
+        # Save audio file temporarily
+        audio_content = await audio.read()
+        temp_audio_path = f"/tmp/voice_{uuid.uuid4()}.m4a"
+
+        with open(temp_audio_path, "wb") as f:
+            f.write(audio_content)
+
+        # TODO: Add real Whisper transcription here
+        # For now, return a mock transcription
+        transcribed_text = "Hello, this is a test voice message"
+
+        logger.info(f"[Voice] Received audio from user {current_user.id}, mock transcription: {transcribed_text}")
+
+        # Generate session_id if not provided
+        if not session_id:
+            session_id = f"voice-{uuid.uuid4()}"
+
+        # Process through regular chat endpoint logic
+        chat_request = ChatRequest(
+            message=transcribed_text,
+            conversationId=session_id
+        )
+
+        # Call the existing chat logic (simplified version without streaming)
+        response_text = await process_chat_message(
+            chat_request=chat_request,
+            current_user=current_user,
+            db=db
+        )
+
+        # Clean up temp file
+        try:
+            os.remove(temp_audio_path)
+        except:
+            pass
+
+        # Return response (without audio for now - TTS can be added later)
+        return {
+            "response": response_text,
+            "session_id": session_id,
+            "audio_url": ""  # TODO: Add TTS generation here
+        }
+
+    except Exception as e:
+        logger.error(f"[Voice] Error processing voice message: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/voice-agent/transcribe")
+async def transcribe_audio(
+    audio: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Transcribe audio using Whisper (or mock for now).
+    Returns just the transcription text.
+    """
+    try:
+        # Save audio file temporarily
+        audio_content = await audio.read()
+        temp_audio_path = f"/tmp/voice_{uuid.uuid4()}.m4a"
+
+        with open(temp_audio_path, "wb") as f:
+            f.write(audio_content)
+
+        # Call Whisper STT service (OpenAI-compatible API)
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with open(temp_audio_path, "rb") as audio_file:
+                files = {"file": ("audio.m4a", audio_file, "audio/m4a")}
+                data = {
+                    "model": "distil-small.en",
+                    "language": "en"
+                }
+                whisper_response = await client.post(
+                    "http://10.185.1.8:8585/v1/audio/transcriptions",
+                    files=files,
+                    data=data
+                )
+
+            if whisper_response.status_code != 200:
+                logger.error(f"[Voice] Whisper error: {whisper_response.status_code} - {whisper_response.text}")
+                raise HTTPException(status_code=500, detail="Transcription service error")
+
+            result = whisper_response.json()
+            transcription = result.get("text", "").strip()
+
+        logger.info(f"[Voice] Transcribed audio for user {current_user.id}: {transcription}")
+
+        # Clean up temp file
+        try:
+            os.remove(temp_audio_path)
+        except:
+            pass
+
+        return {"transcription": transcription}
+
+    except Exception as e:
+        logger.error(f"[Voice] Error transcribing audio: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/voice-agent/speak")
+async def speak_text(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Convert text to speech using Kokoro TTS with streaming support.
+    Supports both streaming (PCM) and non-streaming (MP3/WAV) formats.
+    """
+    try:
+        body = await request.json()
+        text = body.get("text", "")
+        response_format = body.get("response_format", "wav")  # Default WAV for iOS compatibility
+        stream = body.get("stream", False)  # Enable streaming for real-time playback
+
+        if not text:
+            raise HTTPException(status_code=400, detail="No text provided")
+
+        logger.info(f"[Voice] Generating speech for user {current_user.id}: {text[:50]}... (format: {response_format}, stream: {stream})")
+
+        # Call Kokoro TTS service with blended voice (af_sarah + af_bella)
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            tts_response = await client.post(
+                "http://10.185.1.9:8880/v1/audio/speech",
+                json={
+                    "input": text,
+                    "model": "kokoro",
+                    "voice": "af_sarah(1)+af_bella(1)",  # Blended voice for natural sound
+                    "response_format": response_format,
+                    "speed": 1.0
+                }
+            )
+
+            if tts_response.status_code != 200:
+                logger.error(f"[Voice] Kokoro TTS error: {tts_response.status_code} - {tts_response.text}")
+                raise HTTPException(status_code=500, detail="TTS service error")
+
+            # Determine media type based on format
+            media_type_map = {
+                "mp3": "audio/mpeg",
+                "wav": "audio/wav",
+                "opus": "audio/opus",
+                "flac": "audio/flac",
+                "pcm": "audio/pcm",
+                "m4a": "audio/mp4"
+            }
+            media_type = media_type_map.get(response_format, "audio/mpeg")
+
+            # Return the audio file
+            return Response(
+                content=tts_response.content,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{response_format}"
+                }
+            )
+
+    except Exception as e:
+        logger.error(f"[Voice] Error generating speech: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/voice-agent/speak/stream")
+async def speak_text_streaming(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Stream text-to-speech audio using Kokoro TTS for real-time playback.
+    Returns chunked audio data for low-latency streaming.
+    """
+    try:
+        body = await request.json()
+        text = body.get("text", "")
+        response_format = body.get("response_format", "pcm")  # pcm is best for streaming
+
+        if not text:
+            raise HTTPException(status_code=400, detail="No text provided")
+
+        logger.info(f"[Voice] Streaming speech for user {current_user.id}: {text[:50]}... (format: {response_format})")
+
+        # Stream from Kokoro TTS service
+        import httpx
+        async def stream_audio():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    "http://10.185.1.9:8880/v1/audio/speech",
+                    json={
+                        "input": text,
+                        "model": "kokoro",
+                        "voice": "af_sarah(1)+af_bella(1)",
+                        "response_format": response_format,
+                        "speed": 1.0
+                    }
+                ) as response:
+                    if response.status_code != 200:
+                        logger.error(f"[Voice] Kokoro streaming error: {response.status_code}")
+                        raise HTTPException(status_code=500, detail="TTS streaming error")
+
+                    # Stream chunks as they arrive (512 bytes for low latency)
+                    async for chunk in response.aiter_bytes(chunk_size=512):
+                        yield chunk
+
+        # Determine media type
+        media_type = "audio/pcm" if response_format == "pcm" else f"audio/{response_format}"
+
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(
+            stream_audio(),
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"[Voice] Error streaming speech: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_chat_message(
+    chat_request: ChatRequest,
+    current_user: User,
+    db: Session
+) -> str:
+    """Helper function to process chat messages (extracted from /chat endpoint)"""
+    try:
+        # Simple response for now - integrate with full chat logic later
+        user_message = chat_request.message
+
+        # For now, return a simple echo response
+        # TODO: Integrate with full LLM chat logic from /chat endpoint
+        response = f"I heard you say: {user_message}. Voice chat is working!"
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error in process_chat_message: {e}")
+        return "I'm sorry, I encountered an error processing your message."
+
 # ==================== SPRITE TELEMETRY (optional) ====================
 @app.post("/sprite/telemetry")
 async def sprite_telemetry(payload: Dict[str, Any], request: Request):
@@ -5511,8 +7165,30 @@ async def sprite_telemetry(payload: Dict[str, Any], request: Request):
     return {"status": "ok"}
 
 @app.get("/notes", response_model=list[NoteResponse])
-async def list_notes(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    notes = db.query(Note).filter(Note.user_id == current_user.id).order_by(Note.updated_at.desc()).limit(20).all()
+async def list_notes(
+    folder_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List notes, optionally filtered by folder.
+    - folder_id=null : Return only root-level notes (no folder)
+    - folder_id=<uuid> : Return notes in specific folder
+    - folder_id not provided : Return all notes (legacy behavior)
+    """
+    query = db.query(Note).filter(Note.user_id == current_user.id)
+
+    # Handle folder filtering
+    if folder_id is not None:
+        if folder_id.lower() == "null":
+            # Get root-level notes only (folder_id is NULL)
+            query = query.filter(Note.folder_id.is_(None))
+        else:
+            # Get notes in specific folder
+            query = query.filter(Note.folder_id == folder_id)
+
+    notes = query.order_by(Note.updated_at.desc()).limit(100).all()
+
     return [
         NoteResponse(
             id=note.id,
@@ -5589,6 +7265,23 @@ async def create_note(note_data: NoteCreate, current_user: User = Depends(get_cu
         updated_at=note.updated_at.isoformat()
     )
 
+@app.get("/notes/{note_id}", response_model=NoteResponse)
+async def get_note(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get a single note by ID"""
+    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    return NoteResponse(
+        id=note.id,
+        user_id=note.user_id,
+        title=note.title,
+        content=note.content,
+        folder_id=note.folder_id,
+        created_at=note.created_at.isoformat(),
+        updated_at=note.updated_at.isoformat()
+    )
+
 @app.put("/notes/{note_id}", response_model=NoteResponse)
 async def update_note(note_id: str, note_data: NoteCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
@@ -5633,8 +7326,7 @@ async def update_note(note_id: str, note_data: NoteCreate, current_user: User = 
     # Update PostgreSQL (backup)
     note.title = note_data.title
     note.content = note_data.content
-    if note_data.folder_id is not None:
-        note.folder_id = note_data.folder_id
+    note.folder_id = note_data.folder_id  # Always update folder_id, even if None (for moving to root)
     note.updated_at = datetime.now()
     db.commit()
     db.refresh(note)
@@ -5700,6 +7392,35 @@ async def get_note_connections(note_id: str, current_user: User = Depends(get_cu
         )
         for conn in connections
     ]
+
+@app.get("/notes/{note_id}/backlinks")
+async def get_note_backlinks(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all notes that link TO this note (backlinks)"""
+    # Verify note exists and belongs to user
+    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    # Find connections where this note is the target
+    backlinks = db.query(NoteConnection).filter(
+        NoteConnection.target_note_id == note_id,
+        NoteConnection.user_id == current_user.id
+    ).all()
+
+    # Get the source notes for these connections
+    backlink_notes = []
+    for conn in backlinks:
+        source_note = db.query(Note).filter(Note.id == conn.source_note_id).first()
+        if source_note:
+            backlink_notes.append({
+                "id": source_note.id,
+                "title": source_note.title,
+                "connection_type": conn.connection_type,
+                "strength": conn.strength,
+                "created_at": source_note.created_at.isoformat()
+            })
+
+    return backlink_notes
 
 @app.post("/notes/{note_id}/connections", response_model=NoteConnectionResponse)
 async def create_note_connection(
@@ -5976,6 +7697,24 @@ async def search_episodes(
         raise HTTPException(status_code=500, detail="Failed to search episodes")
 
 # Folder endpoints
+@app.get("/folders", response_model=list[FolderResponse])
+async def list_folders(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List all folders for the current user"""
+    folders = db.query(Folder).filter(Folder.user_id == current_user.id).order_by(Folder.name).all()
+
+    return [
+        FolderResponse(
+            id=folder.id,
+            name=folder.name,
+            parent_id=folder.parent_id,
+            notes_count=db.query(Note).filter(Note.folder_id == folder.id).count(),
+            subfolders_count=db.query(Folder).filter(Folder.parent_id == folder.id).count(),
+            created_at=folder.created_at.isoformat(),
+            updated_at=folder.updated_at.isoformat()
+        )
+        for folder in folders
+    ]
+
 @app.post("/folders", response_model=FolderResponse)
 async def create_folder(folder_data: FolderCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Create a new folder"""
@@ -6000,14 +7739,32 @@ async def create_folder(folder_data: FolderCreate, current_user: User = Depends(
     subfolders_count = db.query(Folder).filter(Folder.parent_id == folder.id).count()
     
     return FolderResponse(
-        id=folder.id,
+        id=str(folder.id),
         name=folder.name,
-        parent_id=folder.parent_id,
+        parent_id=str(folder.parent_id) if folder.parent_id else None,
         notes_count=notes_count,
         subfolders_count=subfolders_count,
         created_at=folder.created_at.isoformat(),
         updated_at=folder.updated_at.isoformat()
     )
+
+@app.delete("/folders/{folder_id}")
+async def delete_folder(folder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Delete a folder and optionally its contents"""
+    folder = db.query(Folder).filter(Folder.id == folder_id, Folder.user_id == current_user.id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    # Move notes in this folder to root (no folder)
+    db.query(Note).filter(Note.folder_id == folder_id, Note.user_id == current_user.id).update({"folder_id": None})
+
+    # Move subfolders to parent folder (or root if no parent)
+    db.query(Folder).filter(Folder.parent_id == folder_id, Folder.user_id == current_user.id).update({"parent_id": folder.parent_id})
+
+    db.delete(folder)
+    db.commit()
+
+    return {"message": "Folder deleted successfully"}
 
 @app.get("/folders/tree")
 async def get_folder_tree(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -6148,6 +7905,60 @@ async def create_reminder(reminder_data: ReminderCreate, current_user: User = De
         updated_at=reminder.updated_at.isoformat()
     )
 
+@app.put("/reminders/{reminder_id}", response_model=ReminderResponse)
+async def update_reminder(reminder_id: str, reminder_data: ReminderUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    # Update fields if provided
+    if reminder_data.title is not None:
+        reminder.title = reminder_data.title
+    if reminder_data.description is not None:
+        reminder.description = reminder_data.description
+    if reminder_data.reminder_time is not None:
+        reminder.reminder_time = datetime.fromisoformat(reminder_data.reminder_time.replace('Z', '+00:00'))
+    if reminder_data.is_completed is not None:
+        reminder.is_completed = "true" if reminder_data.is_completed else "false"
+
+    reminder.updated_at = datetime.now()
+    db.commit()
+    db.refresh(reminder)
+
+    return ReminderResponse(
+        id=reminder.id,
+        title=reminder.title,
+        description=reminder.description,
+        reminder_time=reminder.reminder_time.isoformat(),
+        is_completed=reminder.is_completed == "true",
+        created_at=reminder.created_at.isoformat(),
+        updated_at=reminder.updated_at.isoformat()
+    )
+
+@app.delete("/reminders/{reminder_id}")
+async def delete_reminder(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    # Remove any scheduled notification
+    notification_key = f"reminder_{reminder_id}"
+    if notification_key in notification_scheduler.scheduled_notifications:
+        del notification_scheduler.scheduled_notifications[notification_key]
+
+    db.delete(reminder)
+    db.commit()
+
+    return {"message": "Reminder deleted successfully"}
+
 @app.patch("/reminders/{reminder_id}/complete")
 async def complete_reminder(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     reminder = db.query(Reminder).filter(
@@ -6224,13 +8035,23 @@ async def list_timers(current_user: User = Depends(get_current_user), db: Sessio
 
 @app.post("/timers", response_model=TimerResponse)
 async def start_timer(timer_data: TimerCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Creating timer: title={timer_data.title}, duration_minutes={timer_data.duration_minutes}, duration_seconds={timer_data.duration_seconds}")
     start_time = datetime.now(timezone.utc)
-    end_time = start_time + timedelta(minutes=timer_data.duration_minutes)
-    
+
+    # Support both duration_seconds and duration_minutes for backward compatibility
+    if timer_data.duration_seconds is not None:
+        duration_minutes = timer_data.duration_seconds / 60  # Store as fractional minutes
+        end_time = start_time + timedelta(seconds=timer_data.duration_seconds)
+    elif timer_data.duration_minutes is not None:
+        duration_minutes = timer_data.duration_minutes
+        end_time = start_time + timedelta(minutes=timer_data.duration_minutes)
+    else:
+        raise HTTPException(status_code=400, detail="Must provide either duration_minutes or duration_seconds")
+
     timer = Timer(
         user_id=current_user.id,
         title=timer_data.title,
-        duration_minutes=timer_data.duration_minutes,
+        duration_minutes=int(duration_minutes),  # Store as int minutes (legacy field)
         start_time=start_time,
         end_time=end_time
     )
@@ -6282,6 +8103,146 @@ async def stop_timer(timer_id: str, current_user: User = Depends(get_current_use
             del notification_scheduler.scheduled_notifications[notification_key]
     
     return {"message": f"Stopped timer '{timer.title}'"}
+
+# Calendar endpoints
+@app.get("/calendar/events", response_model=list[CalendarEventResponse])
+async def list_calendar_events(
+    start_date: str = None,
+    end_date: str = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all calendar events"""
+    query = db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id)
+
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(CalendarEvent.start_time >= start_dt)
+        except:
+            pass
+
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(CalendarEvent.start_time <= end_dt)
+        except:
+            pass
+
+    events = query.order_by(CalendarEvent.start_time).all()
+
+    return [
+        CalendarEventResponse(
+            id=event.id,
+            title=event.title,
+            description=event.description,
+            start_time=event.start_time.isoformat(),
+            end_time=event.end_time.isoformat(),
+            location=event.location or None,
+            all_day=event.all_day,
+            reminder_minutes=event.reminder_minutes,
+            is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+            created_at=event.created_at.isoformat(),
+            updated_at=event.updated_at.isoformat()
+        )
+        for event in events
+    ]
+
+@app.post("/calendar/events", response_model=CalendarEventResponse)
+async def create_calendar_event(event_data: CalendarEventCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Create a calendar event"""
+    start_dt = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+    end_dt = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+
+    event = CalendarEvent(
+        user_id=current_user.id,
+        title=event_data.title,
+        description=event_data.description or "",
+        start_time=start_dt,
+        end_time=end_dt,
+        location=event_data.location or "",
+        all_day=event_data.all_day or False,
+        reminder_minutes=event_data.reminder_minutes
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return CalendarEventResponse(
+        id=event.id,
+        title=event.title,
+        description=event.description,
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
+        location=event.location or None,
+        all_day=event.all_day,
+        reminder_minutes=event.reminder_minutes,
+        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
+    )
+
+@app.put("/calendar/events/{event_id}", response_model=CalendarEventResponse)
+async def update_calendar_event(event_id: str, event_data: CalendarEventUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Update a calendar event"""
+    event = db.query(CalendarEvent).filter(
+        CalendarEvent.id == event_id,
+        CalendarEvent.user_id == current_user.id
+    ).first()
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event_data.title is not None:
+        event.title = event_data.title
+    if event_data.description is not None:
+        event.description = event_data.description
+    if event_data.start_time is not None:
+        event.start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+    if event_data.end_time is not None:
+        event.end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+    if event_data.location is not None:
+        event.location = event_data.location
+    if event_data.all_day is not None:
+        event.all_day = event_data.all_day
+    if event_data.reminder_minutes is not None:
+        event.reminder_minutes = event_data.reminder_minutes
+    if event_data.is_completed is not None:
+        event.is_completed = event_data.is_completed
+
+    event.updated_at = datetime.now()
+    db.commit()
+    db.refresh(event)
+
+    return CalendarEventResponse(
+        id=event.id,
+        title=event.title,
+        description=event.description,
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
+        location=event.location or None,
+        all_day=event.all_day,
+        reminder_minutes=event.reminder_minutes,
+        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
+    )
+
+@app.delete("/calendar/events/{event_id}")
+async def delete_calendar_event(event_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Delete a calendar event"""
+    event = db.query(CalendarEvent).filter(
+        CalendarEvent.id == event_id,
+        CalendarEvent.user_id == current_user.id
+    ).first()
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    db.delete(event)
+    db.commit()
+
+    return {"message": "Event deleted successfully"}
 
 # Document API endpoints
 @app.post("/documents", response_model=DocumentResponse)
@@ -6669,35 +8630,185 @@ async def delete_conversation(
     """Delete a conversation and all its turns"""
     try:
         logger.info(f"Delete request for conversation {conversation_id} by user {current_user.id}")
-        
+
         # Verify the conversation belongs to the user
         conversation = db.query(Conversation).filter(
             Conversation.id == conversation_id,
             Conversation.user_id == current_user.id
         ).first()
-        
+
         if not conversation:
             logger.warning(f"Conversation {conversation_id} not found for user {current_user.id}")
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Delete all conversation turns first (due to foreign key constraints)
         db.query(ConversationTurn).filter(
             ConversationTurn.conversation_id == conversation_id
         ).delete()
-        
+
         # Delete the conversation
         db.delete(conversation)
         db.commit()
-        
+
         logger.info(f"Deleted conversation {conversation_id} and its turns for user {current_user.id}")
         return {"message": "Conversation deleted successfully"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error deleting conversation {conversation_id}: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to delete conversation")
+
+# ==================== EPISODE-BASED CONVERSATION ENDPOINTS ====================
+
+@app.get("/api/conversations/list", response_model=list[ConversationSummaryResponse])
+async def list_conversations(
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of conversations based on Episodes"""
+    try:
+        # Query for distinct conversation_ids with aggregated data
+        from sqlalchemy import func, distinct
+
+        conversations = db.query(
+            Episode.conversation_id,
+            func.min(Episode.content).label('first_message'),
+            func.count(Episode.id).label('message_count'),
+            func.max(Episode.created_at).label('last_activity'),
+            func.min(Episode.created_at).label('created_at')
+        ).filter(
+            Episode.user_id == current_user.id,
+            Episode.conversation_id.isnot(None),
+            Episode.role.in_(['user', 'assistant'])
+        ).group_by(
+            Episode.conversation_id
+        ).order_by(
+            func.max(Episode.created_at).desc()
+        ).limit(limit).all()
+
+        return [
+            ConversationSummaryResponse(
+                conversation_id=conv.conversation_id,
+                first_message=conv.first_message[:100] if conv.first_message else "",
+                message_count=conv.message_count,
+                last_activity=conv.last_activity.isoformat(),
+                created_at=conv.created_at.isoformat()
+            )
+            for conv in conversations
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching conversations list: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch conversations")
+
+@app.get("/api/conversations/{conversation_id}/messages", response_model=list[EpisodeMessageResponse])
+async def get_conversation_messages(
+    conversation_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get messages for a specific conversation from Episodes"""
+    try:
+        # Verify at least one episode in this conversation belongs to the user
+        episode_exists = db.query(Episode).filter(
+            Episode.conversation_id == conversation_id,
+            Episode.user_id == current_user.id
+        ).first()
+
+        if not episode_exists:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        # Get messages for this conversation
+        episodes = db.query(Episode).filter(
+            Episode.conversation_id == conversation_id,
+            Episode.user_id == current_user.id,
+            Episode.role.in_(['user', 'assistant'])
+        ).order_by(
+            Episode.created_at.asc()
+        ).offset(offset).limit(limit).all()
+
+        return [
+            EpisodeMessageResponse(
+                id=ep.id,
+                role=ep.role,
+                content=ep.content,
+                created_at=ep.created_at.isoformat(),
+                importance=ep.importance
+            )
+            for ep in episodes
+        ]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching conversation messages: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch conversation messages")
+
+@app.post("/api/conversations/active")
+async def set_active_conversation(
+    request: SetActiveConversationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Set the user's current active conversation"""
+    try:
+        # Get or create user profile
+        user_profile = db.query(UserProfile).filter(
+            UserProfile.user_id == current_user.id
+        ).first()
+
+        if not user_profile:
+            user_profile = UserProfile(
+                user_id=current_user.id,
+                profile_data={}
+            )
+            db.add(user_profile)
+
+        # Store active conversation_id in profile_data field (JSONB)
+        if not user_profile.profile_data:
+            user_profile.profile_data = {}
+
+        # Make a copy to ensure SQLAlchemy detects the change
+        profile_data_copy = dict(user_profile.profile_data) if user_profile.profile_data else {}
+        profile_data_copy['active_conversation_id'] = request.conversation_id
+        user_profile.profile_data = profile_data_copy
+
+        # Mark as modified for SQLAlchemy to detect the change
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user_profile, "profile_data")
+
+        db.commit()
+
+        return {"message": "Active conversation set", "conversation_id": request.conversation_id}
+    except Exception as e:
+        logger.error(f"Error setting active conversation: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to set active conversation")
+
+@app.get("/api/conversations/active")
+async def get_active_conversation(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get the user's current active conversation"""
+    try:
+        user_profile = db.query(UserProfile).filter(
+            UserProfile.user_id == current_user.id
+        ).first()
+
+        active_conversation_id = None
+        if user_profile and user_profile.profile_data:
+            active_conversation_id = user_profile.profile_data.get('active_conversation_id')
+
+        return {
+            "conversation_id": active_conversation_id
+        }
+    except Exception as e:
+        logger.error(f"Error getting active conversation: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get active conversation")
 
 @app.get("/memory/search")
 async def search_memory(
@@ -7116,6 +9227,8 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
 async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get current AI configuration settings"""
     return {
+        "ai_provider": AI_PROVIDER,
+        "openai_api_key": "***" if OPENAI_API_KEY and OPENAI_API_KEY != "dummy" else "",
         "openai_base_url": OPENAI_BASE_URL,
         "openai_model": OPENAI_MODEL,
         "openai_notification_model": OPENAI_NOTIFICATION_MODEL,
@@ -7125,6 +9238,8 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
     }
 
 class AISettingsUpdate(BaseModel):
+    ai_provider: Optional[str] = None
+    openai_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None
     openai_model: Optional[str] = None
     openai_notification_model: Optional[str] = None
@@ -7138,8 +9253,8 @@ async def update_ai_settings(
     current_user: User = Depends(get_current_user)
 ):
     """Update AI configuration settings (requires restart to take effect)"""
-    global OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
-    
+    global AI_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+
     updated_settings = {}
     
     def _valid_url(u: str) -> bool:
@@ -7153,9 +9268,14 @@ async def update_ai_settings(
         u = (u or "").strip().rstrip("/")
         if not _valid_url(u):
             raise HTTPException(status_code=400, detail="Invalid openai_base_url; must include http(s)://")
-        if not u.endswith("/v1"):
-            u = u + "/v1"
-        return u
+        # Don't add /v1 if:
+        # - URL already ends with /v1
+        # - URL contains /openai/ (Gemini/other OpenAI-compatible endpoints)
+        # - URL contains generativelanguage.googleapis.com (Gemini domain)
+        if u.endswith("/v1") or "/openai/" in u or "generativelanguage.googleapis.com" in u:
+            return u
+        # Only add /v1 for standard OpenAI or local endpoints
+        return u + "/v1"
 
     def _normalize_embedding(u: str) -> str:
         u = (u or "").strip().rstrip("/")
@@ -7166,6 +9286,17 @@ async def update_ai_settings(
             u = u[:-3]
             u = u.rstrip("/")
         return u
+
+    if settings.ai_provider is not None:
+        AI_PROVIDER = settings.ai_provider
+        config.settings.ai_provider = settings.ai_provider
+        updated_settings["ai_provider"] = settings.ai_provider
+
+    if settings.openai_api_key is not None:
+        OPENAI_API_KEY = settings.openai_api_key
+        config.settings.openai_api_key = settings.openai_api_key
+        # Don't expose the actual key in response
+        updated_settings["openai_api_key"] = settings.openai_api_key
 
     if settings.openai_base_url is not None:
         OPENAI_BASE_URL = _normalize_openai(settings.openai_base_url)
@@ -7201,7 +9332,7 @@ async def update_ai_settings(
         db = SessionLocal()
         for key, value in updated_settings.items():
             # Use UPSERT (INSERT ... ON CONFLICT UPDATE) to save settings
-            db.execute(sql_text("""
+            db.execute(text("""
                 INSERT INTO app_settings (key, value, updated_at, updated_by)
                 VALUES (:key, :value, CURRENT_TIMESTAMP, :updated_by)
                 ON CONFLICT (key) DO UPDATE SET
@@ -7221,9 +9352,14 @@ async def update_ai_settings(
 
     logger.info(f"AI settings updated by user {current_user.email}: {updated_settings}")
 
+    # Mask API key in response (after saving to database)
+    response_settings = updated_settings.copy()
+    if "openai_api_key" in response_settings and response_settings["openai_api_key"]:
+        response_settings["openai_api_key"] = "***"
+
     return {
         "message": "AI settings updated successfully and persisted",
-        "updated_settings": updated_settings,
+        "updated_settings": response_settings,
         "note": "Settings applied immediately and will persist across restarts."
     }
 
@@ -7270,6 +9406,346 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
         test_results["embedding"] = {"status": "error", "message": f"Embedding service failed: {str(e)}"}
     
     return test_results
+
+# General user settings endpoints
+@app.get("/settings")
+async def get_user_settings(current_user: User = Depends(get_current_user)):
+    """Get user settings/preferences"""
+    # Return default settings for now
+    # In the future, this could be stored in a user_settings table
+    return {
+        "theme": "dark",
+        "notifications_enabled": True,
+        "model": "distil-small.en",
+                    "language": "en",
+        "timezone": "America/New_York",
+        "assistant_name": ASSISTANT_NAME
+    }
+
+@app.put("/settings")
+async def update_user_settings(settings: UserSettings, current_user: User = Depends(get_current_user)):
+    """Update user settings/preferences"""
+    # For now, just acknowledge the update
+    # In the future, this could persist to a user_settings table
+    return {
+        "message": "Settings updated successfully",
+        "settings": settings.dict()
+    }
+
+# Settings alias endpoints (for iOS app compatibility)
+@app.get("/settings/preferences")
+async def get_user_preferences(current_user: User = Depends(get_current_user)):
+    """Alias to /settings for iOS app compatibility"""
+    return await get_user_settings(current_user)
+
+@app.put("/settings/preferences")
+async def update_user_preferences(settings: UserSettings, current_user: User = Depends(get_current_user)):
+    """Alias to /settings for iOS app compatibility"""
+    return await update_user_settings(settings, current_user)
+
+# Documents categories endpoint
+@app.get("/documents/categories")
+async def get_document_categories(current_user: User = Depends(get_current_user)):
+    """Get all unique document categories"""
+    # Document model doesn't have a category field yet
+    # Return empty list for iOS app compatibility
+    return []
+
+# Fitness proxy endpoints - return empty data for now (iOS app compatible)
+@app.get("/fitness/food")
+async def get_fitness_food(
+    start_date: str = None,
+    end_date: str = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Get fitness food logs"""
+    # Return empty array for now - can be connected to actual food log system later
+    return []
+
+@app.post("/fitness/food")
+async def create_fitness_food(
+    food_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Create fitness food log"""
+    # Return success for now
+    return {
+        "id": "1",
+        "message": "Food log created",
+        **food_data
+    }
+
+@app.delete("/fitness/food/{id}")
+async def delete_fitness_food(
+    id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete fitness food log"""
+    return {"message": "Food log deleted"}
+
+@app.get("/fitness/workouts")
+async def get_fitness_workouts(
+    start_date: str = None,
+    end_date: str = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Get fitness workouts"""
+    # Return empty array for now - can be connected to actual workout system later
+    return []
+
+@app.post("/fitness/workouts")
+async def create_fitness_workout(
+    workout_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Create fitness workout"""
+    # Return success for now
+    return {
+        "id": "1",
+        "message": "Workout created",
+        **workout_data
+    }
+
+@app.delete("/fitness/workouts/{id}")
+async def delete_fitness_workout(
+    id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete fitness workout"""
+    return {"message": "Workout deleted"}
+
+@app.get("/fitness/recovery")
+async def get_fitness_recovery(
+    start_date: str = None,
+    end_date: str = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Get fitness recovery logs"""
+    db = SessionLocal()
+    try:
+        from datetime import datetime, timedelta
+
+        # Default to last 30 days if no dates provided
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Query the daily_recovery_log table
+        query = text("""
+            SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours,
+                   soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            FROM daily_recovery_log
+            WHERE user_id = :user_id
+              AND log_date >= :start_date
+              AND log_date <= :end_date
+            ORDER BY log_date DESC
+        """)
+
+        results = db.execute(query, {
+            "user_id": current_user.id,
+            "start_date": start_date,
+            "end_date": end_date
+        }).fetchall()
+
+        # Convert to list of dicts
+        recovery_logs = []
+        for row in results:
+            row_dict = row._mapping
+            recovery_logs.append({
+                "id": row_dict['id'],
+                "user_id": row_dict['user_id'],
+                "log_date": row_dict['log_date'].isoformat(),
+                "logged_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
+                "hrv": row_dict['hrv'],
+                "heart_rate": row_dict['heart_rate'],
+                "sleep_hours": float(row_dict['sleep_hours']) if row_dict['sleep_hours'] else None,
+                "soreness_level": row_dict['soreness_level'],
+                "body_weight": float(row_dict['body_weight']) if row_dict['body_weight'] else None,
+                "weight_unit": row_dict['weight_unit'],
+                "notes": row_dict['notes'],
+                "created_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
+                "updated_at": row_dict['updated_at'].isoformat() if row_dict['updated_at'] else None
+            })
+
+        return recovery_logs
+
+    finally:
+        db.close()
+
+@app.post("/fitness/recovery")
+async def create_fitness_recovery(
+    recovery_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Create fitness recovery log"""
+    db = SessionLocal()
+    try:
+        from datetime import datetime
+
+        # Get log_date from recovery_data or use today
+        log_date_str = recovery_data.get('log_date', datetime.now().strftime("%Y-%m-%d"))
+
+        # Validate soreness level if provided
+        soreness_level = recovery_data.get('soreness_level')
+        if soreness_level is not None:
+            if soreness_level < 1 or soreness_level > 10:
+                raise HTTPException(status_code=400, detail="Soreness level must be between 1 and 10")
+
+        # Parse log_date
+        try:
+            log_date = datetime.strptime(log_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        # Check if entry exists for this date
+        check_query = text("""
+            SELECT id FROM daily_recovery_log
+            WHERE user_id = :user_id AND log_date = :log_date
+        """)
+        existing = db.execute(check_query, {"user_id": current_user.id, "log_date": log_date}).fetchone()
+
+        if existing:
+            # Update existing entry
+            update_query = text("""
+                UPDATE daily_recovery_log
+                SET hrv = :hrv,
+                    heart_rate = :heart_rate,
+                    sleep_hours = :sleep_hours,
+                    soreness_level = :soreness_level,
+                    body_weight = :body_weight,
+                    weight_unit = :weight_unit,
+                    notes = :notes,
+                    updated_at = NOW()
+                WHERE user_id = :user_id AND log_date = :log_date
+                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            """)
+            result = db.execute(update_query, {
+                "user_id": current_user.id,
+                "log_date": log_date,
+                "hrv": recovery_data.get('hrv'),
+                "heart_rate": recovery_data.get('heart_rate'),
+                "sleep_hours": recovery_data.get('sleep_hours'),
+                "soreness_level": recovery_data.get('soreness_level'),
+                "body_weight": recovery_data.get('body_weight'),
+                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
+                "notes": recovery_data.get('notes', '')
+            }).fetchone()
+        else:
+            # Insert new entry
+            insert_query = text("""
+                INSERT INTO daily_recovery_log
+                (id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at)
+                VALUES (:id, :user_id, :log_date, :hrv, :heart_rate, :sleep_hours, :soreness_level, :body_weight, :weight_unit, :notes, NOW(), NOW())
+                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
+            """)
+            result = db.execute(insert_query, {
+                "id": str(uuid.uuid4()),
+                "user_id": current_user.id,
+                "log_date": log_date,
+                "hrv": recovery_data.get('hrv'),
+                "heart_rate": recovery_data.get('heart_rate'),
+                "sleep_hours": recovery_data.get('sleep_hours'),
+                "soreness_level": recovery_data.get('soreness_level'),
+                "body_weight": recovery_data.get('body_weight'),
+                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
+                "notes": recovery_data.get('notes', '')
+            }).fetchone()
+
+        db.commit()
+
+        # Convert result to response
+        row = result._mapping
+        return {
+            "id": row['id'],
+            "user_id": row['user_id'],
+            "log_date": row['log_date'].isoformat(),
+            "logged_at": row['created_at'].isoformat() if row['created_at'] else None,
+            "hrv": row['hrv'],
+            "heart_rate": row['heart_rate'],
+            "sleep_hours": float(row['sleep_hours']) if row['sleep_hours'] else None,
+            "soreness_level": row['soreness_level'],
+            "body_weight": float(row['body_weight']) if row['body_weight'] else None,
+            "weight_unit": row['weight_unit'],
+            "notes": row['notes'],
+            "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+            "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to save recovery log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.delete("/fitness/recovery/{id}")
+async def delete_fitness_recovery(
+    id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete fitness recovery log"""
+    db = SessionLocal()
+    try:
+        # Delete the recovery log
+        delete_query = text("""
+            DELETE FROM daily_recovery_log
+            WHERE id = :id AND user_id = :user_id
+        """)
+        db.execute(delete_query, {"id": id, "user_id": current_user.id})
+        db.commit()
+        return {"message": "Recovery log deleted"}
+    finally:
+        db.close()
+
+@app.get("/fitness/habits")
+async def get_fitness_habits(
+    start_date: str = None,
+    end_date: str = None,
+    current_user: User = Depends(get_current_user)
+):
+    """Get habit logs"""
+    # Return empty array for now - can be connected to actual habit system later
+    return []
+
+@app.get("/fitness/habits/streaks")
+async def get_fitness_habit_streaks(current_user: User = Depends(get_current_user)):
+    """Get habit streaks for fitness tracking"""
+    db = SessionLocal()
+    try:
+        # Get all habits with their current streaks
+        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
+        return [{
+            "id": habit.id,
+            "title": habit.title,
+            "current_streak": habit.current_streak or 0,
+            "best_streak": habit.best_streak or 0,
+            "type": habit.type
+        } for habit in habits]
+    finally:
+        db.close()
+
+@app.get("/fitness/summary")
+async def get_fitness_summary(date: str = None, current_user: User = Depends(get_current_user)):
+    """Get fitness summary for a specific date"""
+    from datetime import datetime, timedelta
+
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+
+    # Return a basic summary
+    # In the future, this could aggregate data from food logs, workouts, recovery, and habits
+    return {
+        "date": date,
+        "calories_consumed": 0,
+        "calories_burned": 0,
+        "workouts_completed": 0,
+        "habits_completed": 0,
+        "recovery_score": 0,
+        "notes": "No data available for this date"
+    }
 
 
 # ==========================================

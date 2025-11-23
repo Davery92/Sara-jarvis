@@ -57,16 +57,18 @@ class NightlyDreamService:
         """Check if we should run the dream sequence (Eastern time)"""
         current_time = eastern_now.time()
         current_date = eastern_now.date()
-        
-        # Must be after 2:00 AM Eastern and we haven't dreamed today
-        is_dream_time = current_time >= self.dream_time
+
+        # Dream window: 2:00 AM - 3:00 AM Eastern only
+        dream_start = time(2, 0)
+        dream_end = time(3, 0)
+        is_dream_time = dream_start <= current_time < dream_end
         havent_dreamed_today = (self.last_dream_date is None or self.last_dream_date < current_date)
         not_currently_dreaming = not self.is_dreaming
-        
+
         if is_dream_time and havent_dreamed_today and not_currently_dreaming:
             logger.info(f"🌙 Dream conditions met: {eastern_now.strftime('%I:%M %p')} Eastern on {current_date}")
             return True
-            
+
         return False
     
     async def _run_nightly_dream_cycle(self):

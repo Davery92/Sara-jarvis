@@ -8,6 +8,9 @@ from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
 import uuid
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_fitness_db():
@@ -164,11 +167,11 @@ class WorkoutLogCreateTool(BaseTool):
             "properties": {
                 "workout_id": {
                     "type": "string",
-                    "description": "ID of the workout being logged"
+                    "description": "ID of the workout being logged (optional - will auto-create today's workout if not provided)"
                 },
                 "exercise_id": {
                     "type": "string",
-                    "description": "Exercise identifier (optional)"
+                    "description": "Exercise name or identifier"
                 },
                 "set_index": {
                     "type": "integer",
@@ -189,45 +192,114 @@ class WorkoutLogCreateTool(BaseTool):
                 "notes": {
                     "type": "string",
                     "description": "Additional notes about the set"
+                },
+                "session_date": {
+                    "type": "string",
+                    "description": "Optional custom workout date in YYYY-MM-DD format (defaults to today)"
+                },
+                "session_time": {
+                    "type": "string",
+                    "description": "Optional full ISO timestamp for exact workout time"
                 }
             },
-            "required": ["workout_id", "set_index"]
+            "required": ["exercise_id", "set_index"]
         }
 
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Log a workout set"""
-        workout_id = kwargs.get("workout_id")
         exercise_id = kwargs.get("exercise_id")
         set_index = kwargs.get("set_index")
         weight = kwargs.get("weight")
         reps = kwargs.get("reps")
         rpe = kwargs.get("rpe")
         notes = kwargs.get("notes", "")
+        session_date_str = kwargs.get("session_date")  # NEW: Optional custom date
+        session_time_str = kwargs.get("session_time")  # NEW: Optional full timestamp
 
         db = get_fitness_db()
 
         try:
-            # Verify workout belongs to user
-            check_sql = text("""
+            # Use provided date or default to today
+            if session_date_str:
+                try:
+                    today = datetime.fromisoformat(session_date_str.replace('Z', '+00:00')).date()
+                except (ValueError, AttributeError):
+                    today = datetime.now(timezone.utc).date()
+            else:
+                today = datetime.now(timezone.utc).date()
+
+            workout_title = f"Workout - {today.strftime('%Y-%m-%d')}"
+
+            # Check if workout already exists for today using session_date
+            # This prevents race conditions when logging multiple sets
+            check_today_sql = text("""
                 SELECT id, title FROM workout
-                WHERE id = :workout_id AND user_id = :user_id
+                WHERE user_id = :user_id
+                AND title = :title
+                ORDER BY created_at DESC
+                LIMIT 1
             """)
-            result = db.execute(check_sql, {"workout_id": workout_id, "user_id": user_id})
+            result = db.execute(check_today_sql, {"user_id": user_id, "title": workout_title})
             workout = result.fetchone()
 
             if not workout:
-                return ToolResult(
-                    success=False,
-                    message="Workout not found or doesn't belong to user"
-                )
+                # Create new workout for today
+                workout_id = str(uuid.uuid4())
+                create_workout_sql = text("""
+                    INSERT INTO workout
+                    (id, user_id, title, phase, week, day_of_week, status, prescription, created_at)
+                    VALUES
+                    (:id, :user_id, :title, 'Ad-hoc', 1, :day, 'completed', '{}', NOW())
+                    RETURNING id, title
+                """)
+                # day_of_week column is INTEGER (0=Mon, 6=Sun)
+                day_of_week_int = today.weekday()  # 0=Monday, 6=Sunday
+                result = db.execute(create_workout_sql, {
+                    "id": workout_id,
+                    "user_id": user_id,
+                    "title": workout_title,
+                    "day": day_of_week_int
+                })
+                workout = result.fetchone()
+                db.commit()
+            else:
+                workout_id = workout.id
 
             # Insert workout log entry
             log_id = str(uuid.uuid4())
+            # Use the provided session_date and session_time
+            # Parse session_time to datetime if provided, otherwise use noon
+            if session_time_str:
+                try:
+                    from zoneinfo import ZoneInfo
+                    # Parse as naive datetime (no timezone), then localize to Eastern
+                    if 'Z' in session_time_str or '+' in session_time_str:
+                        # Has timezone info, parse directly
+                        session_time = datetime.fromisoformat(session_time_str.replace('Z', '+00:00'))
+                    else:
+                        # No timezone info - treat as Eastern time
+                        naive_dt = datetime.fromisoformat(session_time_str)
+                        eastern = ZoneInfo("America/New_York")
+                        session_time = naive_dt.replace(tzinfo=eastern)
+                    logger.info(f"✅ Parsed session_time: {session_time_str} → {session_time}")
+                except (ValueError, AttributeError) as e:
+                    # Default to noon if parsing fails
+                    from zoneinfo import ZoneInfo
+                    eastern = ZoneInfo("America/New_York")
+                    session_time = datetime.combine(today, datetime.min.time().replace(hour=12)).replace(tzinfo=eastern)
+                    logger.warning(f"⚠️  Failed to parse session_time '{session_time_str}': {e}, using noon default")
+            else:
+                # Default to noon on the session date in Eastern time
+                from zoneinfo import ZoneInfo
+                eastern = ZoneInfo("America/New_York")
+                session_time = datetime.combine(today, datetime.min.time().replace(hour=12)).replace(tzinfo=eastern)
+                logger.info(f"ℹ️  No session_time provided, using noon default: {session_time}")
+
             insert_sql = text("""
                 INSERT INTO workout_log
-                (id, workout_id, user_id, exercise_id, set_index, weight, reps, rpe, notes, created_at)
+                (id, workout_id, user_id, exercise_id, set_index, weight, reps, rpe, notes, session_date, session_time, created_at)
                 VALUES
-                (:id, :workout_id, :user_id, :exercise_id, :set_index, :weight, :reps, :rpe, :notes, NOW())
+                (:id, :workout_id, :user_id, :exercise_id, :set_index, :weight, :reps, :rpe, :notes, :session_date, :session_time, NOW())
                 RETURNING id, created_at
             """)
 
@@ -240,7 +312,9 @@ class WorkoutLogCreateTool(BaseTool):
                 "weight": weight,
                 "reps": reps,
                 "rpe": rpe,
-                "notes": notes
+                "notes": notes,
+                "session_date": today,  # Use the 'today' variable which respects session_date_str
+                "session_time": session_time  # Save the actual workout time
             })
             db.commit()
 
@@ -266,6 +340,154 @@ class WorkoutLogCreateTool(BaseTool):
             return ToolResult(
                 success=False,
                 message=f"Failed to log workout set: {str(e)}"
+            )
+        finally:
+            db.close()
+
+
+class WorkoutDetailsTool(BaseTool):
+    """Get detailed workout logs with all sets"""
+
+    @property
+    def name(self) -> str:
+        return "workout_details"
+
+    @property
+    def description(self) -> str:
+        return "Get detailed workout logs showing all logged sets (weight, reps, RPE) for a specific date or workout session. Use this to see what exercises were performed and how much weight was lifted."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date to get workout details for (YYYY-MM-DD format). Defaults to today."
+                },
+                "workout_id": {
+                    "type": "string",
+                    "description": "Optional specific workout ID to get details for"
+                },
+                "exercise_name": {
+                    "type": "string",
+                    "description": "Optional filter by specific exercise name"
+                }
+            }
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """Get detailed workout logs"""
+        date_str = kwargs.get("date")
+        workout_id = kwargs.get("workout_id")
+        exercise_name = kwargs.get("exercise_name")
+
+        db = get_fitness_db()
+
+        try:
+            # Default to today if no date provided
+            if date_str:
+                try:
+                    target_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
+                except (ValueError, AttributeError):
+                    target_date = datetime.now(timezone.utc).date()
+            else:
+                target_date = datetime.now(timezone.utc).date()
+
+            # Build query based on filters
+            filters = ["wl.user_id = :user_id"]
+            params = {"user_id": user_id}
+
+            if workout_id:
+                filters.append("wl.workout_id = :workout_id")
+                params["workout_id"] = workout_id
+            else:
+                # Filter by date if no specific workout_id
+                filters.append("wl.session_date = :session_date")
+                params["session_date"] = target_date
+
+            if exercise_name:
+                filters.append("wl.exercise_id ILIKE :exercise_name")
+                params["exercise_name"] = f"%{exercise_name}%"
+
+            filter_clause = " AND ".join(filters)
+
+            # Query workout_log with workout details
+            query_sql = text(f"""
+                SELECT
+                    wl.id as log_id,
+                    wl.workout_id,
+                    wl.exercise_id,
+                    wl.set_index,
+                    wl.weight,
+                    wl.reps,
+                    wl.rpe,
+                    wl.notes,
+                    wl.session_date,
+                    wl.created_at,
+                    w.title as workout_title,
+                    w.phase,
+                    w.status
+                FROM workout_log wl
+                LEFT JOIN workout w ON wl.workout_id = w.id
+                WHERE {filter_clause}
+                ORDER BY wl.exercise_id, wl.set_index
+            """)
+
+            result = db.execute(query_sql, params)
+            rows = result.fetchall()
+
+            if not rows:
+                return ToolResult(
+                    success=True,
+                    data={"exercises": [], "total_sets": 0, "date": target_date.isoformat()},
+                    message=f"No workout logs found for {target_date}"
+                )
+
+            # Group sets by exercise
+            exercises = {}
+            workout_title = None
+            workout_phase = None
+
+            for row in rows:
+                if workout_title is None:
+                    workout_title = row.workout_title
+                    workout_phase = row.phase
+
+                exercise_id = row.exercise_id
+                if exercise_id not in exercises:
+                    exercises[exercise_id] = {
+                        "exercise_name": exercise_id,
+                        "sets": []
+                    }
+
+                exercises[exercise_id]["sets"].append({
+                    "set_index": row.set_index,
+                    "weight": row.weight,
+                    "reps": row.reps,
+                    "rpe": row.rpe,
+                    "notes": row.notes
+                })
+
+            exercise_list = list(exercises.values())
+
+            return ToolResult(
+                success=True,
+                data={
+                    "date": target_date.isoformat(),
+                    "workout_title": workout_title,
+                    "workout_phase": workout_phase,
+                    "exercises": exercise_list,
+                    "total_sets": len(rows),
+                    "total_exercises": len(exercises)
+                },
+                message=f"Found {len(exercises)} exercise(s) with {len(rows)} total set(s) for {target_date}"
+            )
+
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                message=f"Failed to get workout details: {str(e)}"
             )
         finally:
             db.close()

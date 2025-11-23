@@ -1153,3 +1153,373 @@ WHERE reminder.user_id = %(user_id_1)s::UUID AND reminder.due_at <= %(due_at_1)s
 2025-11-04 06:30:04,721 - __main__ - INFO - 📁 Archived 1 old daily brief items
 2025-11-04 06:30:04,722 - __main__ - INFO - 🎉 Daily brief generation completed successfully
 2025-11-04 06:30:04,722 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-05 06:30:02,004 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-05 06:30:02,004 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-05 06:30:07,764 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-05 06:30:07,764 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-05 06:30:07,764 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-05 06:30:07,764 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-05 06:30:07,765 - __main__ - INFO - Generating daily brief for November 05, 2025
+2025-11-05 06:30:07,765 - __main__ - INFO - Generating daily brief for November 05, 2025
+2025-11-05 06:30:08,488 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3cd8ecf5-f37b-4baf-a884-d9b8835bddc8 - 🌅 Daily Brief - November 05
+2025-11-05 06:30:08,488 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3cd8ecf5-f37b-4baf-a884-d9b8835bddc8 - 🌅 Daily Brief - November 05
+2025-11-05 06:30:08,489 - __main__ - INFO - ✅ Created daily brief inbox item: 3cd8ecf5-f37b-4baf-a884-d9b8835bddc8
+2025-11-05 06:30:08,489 - __main__ - INFO - ✅ Created daily brief inbox item: 3cd8ecf5-f37b-4baf-a884-d9b8835bddc8
+2025-11-05 06:30:08,489 - __main__ - INFO -    Title: 🌅 Daily Brief - November 05
+2025-11-05 06:30:08,489 - __main__ - INFO -    Title: 🌅 Daily Brief - November 05
+2025-11-05 06:30:08,489 - __main__ - INFO -    Priority: 8
+2025-11-05 06:30:08,489 - __main__ - INFO -    Priority: 8
+2025-11-05 06:30:08,548 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-05 06:30:08,548 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-05 06:30:08,549 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-05 06:30:08,549 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-06 06:30:01,824 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-06 06:30:01,824 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-06 06:30:04,544 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-06 06:30:04,544 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-06 06:30:04,544 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-06 06:30:04,544 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-06 06:30:04,545 - __main__ - INFO - Generating daily brief for November 06, 2025
+2025-11-06 06:30:04,545 - __main__ - INFO - Generating daily brief for November 06, 2025
+2025-11-06 06:30:04,949 - app.services.jarvis_inbox_service - INFO - Created inbox item: f23ec5fb-a36d-4b91-a065-8921f6b90023 - 🌅 Daily Brief - November 06
+2025-11-06 06:30:04,949 - app.services.jarvis_inbox_service - INFO - Created inbox item: f23ec5fb-a36d-4b91-a065-8921f6b90023 - 🌅 Daily Brief - November 06
+2025-11-06 06:30:04,949 - __main__ - INFO - ✅ Created daily brief inbox item: f23ec5fb-a36d-4b91-a065-8921f6b90023
+2025-11-06 06:30:04,949 - __main__ - INFO - ✅ Created daily brief inbox item: f23ec5fb-a36d-4b91-a065-8921f6b90023
+2025-11-06 06:30:04,950 - __main__ - INFO -    Title: 🌅 Daily Brief - November 06
+2025-11-06 06:30:04,950 - __main__ - INFO -    Title: 🌅 Daily Brief - November 06
+2025-11-06 06:30:04,950 - __main__ - INFO -    Priority: 8
+2025-11-06 06:30:04,950 - __main__ - INFO -    Priority: 8
+2025-11-06 06:30:04,962 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-06 06:30:04,962 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-07 06:30:01,725 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-07 06:30:01,725 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-07 06:30:03,530 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-07 06:30:03,530 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-07 06:30:03,530 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-07 06:30:03,530 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-07 06:30:03,530 - __main__ - INFO - Generating daily brief for November 07, 2025
+2025-11-07 06:30:03,530 - __main__ - INFO - Generating daily brief for November 07, 2025
+2025-11-07 06:30:03,737 - app.services.jarvis_inbox_service - INFO - Created inbox item: 8ce9bde2-eb5e-46e6-bd9b-8d5793ec7b5a - 🌅 Daily Brief - November 07
+2025-11-07 06:30:03,737 - app.services.jarvis_inbox_service - INFO - Created inbox item: 8ce9bde2-eb5e-46e6-bd9b-8d5793ec7b5a - 🌅 Daily Brief - November 07
+2025-11-07 06:30:03,737 - __main__ - INFO - ✅ Created daily brief inbox item: 8ce9bde2-eb5e-46e6-bd9b-8d5793ec7b5a
+2025-11-07 06:30:03,737 - __main__ - INFO - ✅ Created daily brief inbox item: 8ce9bde2-eb5e-46e6-bd9b-8d5793ec7b5a
+2025-11-07 06:30:03,737 - __main__ - INFO -    Title: 🌅 Daily Brief - November 07
+2025-11-07 06:30:03,737 - __main__ - INFO -    Title: 🌅 Daily Brief - November 07
+2025-11-07 06:30:03,737 - __main__ - INFO -    Priority: 8
+2025-11-07 06:30:03,737 - __main__ - INFO -    Priority: 8
+2025-11-07 06:30:03,753 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-07 06:30:03,753 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-07 06:30:03,753 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-07 06:30:03,753 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-08 06:30:02,346 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-08 06:30:02,346 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-08 06:30:08,045 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-08 06:30:08,045 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-08 06:30:08,045 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-08 06:30:08,045 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-08 06:30:08,046 - __main__ - INFO - Generating daily brief for November 08, 2025
+2025-11-08 06:30:08,046 - __main__ - INFO - Generating daily brief for November 08, 2025
+2025-11-08 06:30:08,669 - app.services.jarvis_inbox_service - INFO - Created inbox item: 7d593abb-262f-43ab-9daa-39f0fb299f2c - 🌅 Daily Brief - November 08
+2025-11-08 06:30:08,669 - app.services.jarvis_inbox_service - INFO - Created inbox item: 7d593abb-262f-43ab-9daa-39f0fb299f2c - 🌅 Daily Brief - November 08
+2025-11-08 06:30:08,670 - __main__ - INFO - ✅ Created daily brief inbox item: 7d593abb-262f-43ab-9daa-39f0fb299f2c
+2025-11-08 06:30:08,670 - __main__ - INFO - ✅ Created daily brief inbox item: 7d593abb-262f-43ab-9daa-39f0fb299f2c
+2025-11-08 06:30:08,670 - __main__ - INFO -    Title: 🌅 Daily Brief - November 08
+2025-11-08 06:30:08,670 - __main__ - INFO -    Title: 🌅 Daily Brief - November 08
+2025-11-08 06:30:08,670 - __main__ - INFO -    Priority: 8
+2025-11-08 06:30:08,670 - __main__ - INFO -    Priority: 8
+2025-11-08 06:30:08,742 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-08 06:30:08,742 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-08 06:30:08,742 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-08 06:30:08,742 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-09 06:30:01,747 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-09 06:30:01,747 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-09 06:30:03,707 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-09 06:30:03,707 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-09 06:30:03,707 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-09 06:30:03,707 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-09 06:30:03,708 - __main__ - INFO - Generating daily brief for November 09, 2025
+2025-11-09 06:30:03,708 - __main__ - INFO - Generating daily brief for November 09, 2025
+2025-11-09 06:30:03,959 - app.services.jarvis_inbox_service - INFO - Created inbox item: aa82535f-2341-4405-93e5-df57e228dac5 - 🌅 Daily Brief - November 09
+2025-11-09 06:30:03,959 - app.services.jarvis_inbox_service - INFO - Created inbox item: aa82535f-2341-4405-93e5-df57e228dac5 - 🌅 Daily Brief - November 09
+2025-11-09 06:30:03,960 - __main__ - INFO - ✅ Created daily brief inbox item: aa82535f-2341-4405-93e5-df57e228dac5
+2025-11-09 06:30:03,960 - __main__ - INFO - ✅ Created daily brief inbox item: aa82535f-2341-4405-93e5-df57e228dac5
+2025-11-09 06:30:03,960 - __main__ - INFO -    Title: 🌅 Daily Brief - November 09
+2025-11-09 06:30:03,960 - __main__ - INFO -    Title: 🌅 Daily Brief - November 09
+2025-11-09 06:30:03,960 - __main__ - INFO -    Priority: 8
+2025-11-09 06:30:03,960 - __main__ - INFO -    Priority: 8
+2025-11-09 06:30:03,973 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-09 06:30:03,973 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-10 06:30:01,886 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-10 06:30:01,886 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-10 06:30:07,717 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-10 06:30:07,717 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-10 06:30:07,718 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-10 06:30:07,718 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-10 06:30:07,719 - __main__ - INFO - Generating daily brief for November 10, 2025
+2025-11-10 06:30:07,719 - __main__ - INFO - Generating daily brief for November 10, 2025
+2025-11-10 06:30:08,320 - app.services.jarvis_inbox_service - INFO - Created inbox item: 230de4de-6c0e-43b1-985b-b8e09a523d47 - 🌅 Daily Brief - November 10
+2025-11-10 06:30:08,320 - app.services.jarvis_inbox_service - INFO - Created inbox item: 230de4de-6c0e-43b1-985b-b8e09a523d47 - 🌅 Daily Brief - November 10
+2025-11-10 06:30:08,320 - __main__ - INFO - ✅ Created daily brief inbox item: 230de4de-6c0e-43b1-985b-b8e09a523d47
+2025-11-10 06:30:08,320 - __main__ - INFO - ✅ Created daily brief inbox item: 230de4de-6c0e-43b1-985b-b8e09a523d47
+2025-11-10 06:30:08,320 - __main__ - INFO -    Title: 🌅 Daily Brief - November 10
+2025-11-10 06:30:08,320 - __main__ - INFO -    Title: 🌅 Daily Brief - November 10
+2025-11-10 06:30:08,320 - __main__ - INFO -    Priority: 8
+2025-11-10 06:30:08,320 - __main__ - INFO -    Priority: 8
+2025-11-10 06:30:08,461 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-10 06:30:08,461 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-10 06:30:08,462 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-10 06:30:08,462 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-11 06:30:02,207 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-11 06:30:02,207 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-11 06:30:08,111 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-11 06:30:08,111 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-11 06:30:08,111 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-11 06:30:08,111 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-11 06:30:08,112 - __main__ - INFO - Generating daily brief for November 11, 2025
+2025-11-11 06:30:08,112 - __main__ - INFO - Generating daily brief for November 11, 2025
+2025-11-11 06:30:08,781 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3b1c07aa-f57b-4a9f-b549-13673b5460ed - 🌅 Daily Brief - November 11
+2025-11-11 06:30:08,781 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3b1c07aa-f57b-4a9f-b549-13673b5460ed - 🌅 Daily Brief - November 11
+2025-11-11 06:30:08,781 - __main__ - INFO - ✅ Created daily brief inbox item: 3b1c07aa-f57b-4a9f-b549-13673b5460ed
+2025-11-11 06:30:08,781 - __main__ - INFO - ✅ Created daily brief inbox item: 3b1c07aa-f57b-4a9f-b549-13673b5460ed
+2025-11-11 06:30:08,782 - __main__ - INFO -    Title: 🌅 Daily Brief - November 11
+2025-11-11 06:30:08,782 - __main__ - INFO -    Title: 🌅 Daily Brief - November 11
+2025-11-11 06:30:08,782 - __main__ - INFO -    Priority: 8
+2025-11-11 06:30:08,782 - __main__ - INFO -    Priority: 8
+2025-11-11 06:30:08,861 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-11 06:30:08,861 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-11 06:30:08,862 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-11 06:30:08,862 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-12 06:30:02,206 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-12 06:30:02,206 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-12 06:30:06,922 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-12 06:30:06,922 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-12 06:30:06,923 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-12 06:30:06,923 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-12 06:30:06,923 - __main__ - INFO - Generating daily brief for November 12, 2025
+2025-11-12 06:30:06,923 - __main__ - INFO - Generating daily brief for November 12, 2025
+2025-11-12 06:30:07,399 - app.services.jarvis_inbox_service - INFO - Created inbox item: fa1e7d29-463a-4713-81d3-0c24defaaa69 - 🌅 Daily Brief - November 12
+2025-11-12 06:30:07,399 - app.services.jarvis_inbox_service - INFO - Created inbox item: fa1e7d29-463a-4713-81d3-0c24defaaa69 - 🌅 Daily Brief - November 12
+2025-11-12 06:30:07,399 - __main__ - INFO - ✅ Created daily brief inbox item: fa1e7d29-463a-4713-81d3-0c24defaaa69
+2025-11-12 06:30:07,399 - __main__ - INFO - ✅ Created daily brief inbox item: fa1e7d29-463a-4713-81d3-0c24defaaa69
+2025-11-12 06:30:07,400 - __main__ - INFO -    Title: 🌅 Daily Brief - November 12
+2025-11-12 06:30:07,400 - __main__ - INFO -    Title: 🌅 Daily Brief - November 12
+2025-11-12 06:30:07,400 - __main__ - INFO -    Priority: 8
+2025-11-12 06:30:07,400 - __main__ - INFO -    Priority: 8
+2025-11-12 06:30:07,421 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-12 06:30:07,421 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-13 06:30:01,834 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-13 06:30:01,834 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-13 06:30:06,414 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-13 06:30:06,414 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-13 06:30:06,415 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-13 06:30:06,415 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-13 06:30:06,416 - __main__ - INFO - Generating daily brief for November 13, 2025
+2025-11-13 06:30:06,416 - __main__ - INFO - Generating daily brief for November 13, 2025
+2025-11-13 06:30:06,981 - app.services.jarvis_inbox_service - INFO - Created inbox item: c115b550-2eac-43b4-9637-b0184476b166 - 🌅 Daily Brief - November 13
+2025-11-13 06:30:06,981 - app.services.jarvis_inbox_service - INFO - Created inbox item: c115b550-2eac-43b4-9637-b0184476b166 - 🌅 Daily Brief - November 13
+2025-11-13 06:30:06,981 - __main__ - INFO - ✅ Created daily brief inbox item: c115b550-2eac-43b4-9637-b0184476b166
+2025-11-13 06:30:06,981 - __main__ - INFO - ✅ Created daily brief inbox item: c115b550-2eac-43b4-9637-b0184476b166
+2025-11-13 06:30:06,981 - __main__ - INFO -    Title: 🌅 Daily Brief - November 13
+2025-11-13 06:30:06,981 - __main__ - INFO -    Title: 🌅 Daily Brief - November 13
+2025-11-13 06:30:06,982 - __main__ - INFO -    Priority: 8
+2025-11-13 06:30:06,982 - __main__ - INFO -    Priority: 8
+2025-11-13 06:30:07,066 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-13 06:30:07,066 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-13 06:30:07,066 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-13 06:30:07,066 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-14 06:30:01,930 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-14 06:30:01,930 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-14 06:30:08,000 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-14 06:30:08,000 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-14 06:30:08,001 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-14 06:30:08,001 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-14 06:30:08,001 - __main__ - INFO - Generating daily brief for November 14, 2025
+2025-11-14 06:30:08,001 - __main__ - INFO - Generating daily brief for November 14, 2025
+2025-11-14 06:30:08,641 - app.services.jarvis_inbox_service - INFO - Created inbox item: 207d3e58-78c5-4585-ad7e-d4943494fe68 - 🌅 Daily Brief - November 14
+2025-11-14 06:30:08,641 - app.services.jarvis_inbox_service - INFO - Created inbox item: 207d3e58-78c5-4585-ad7e-d4943494fe68 - 🌅 Daily Brief - November 14
+2025-11-14 06:30:08,641 - __main__ - INFO - ✅ Created daily brief inbox item: 207d3e58-78c5-4585-ad7e-d4943494fe68
+2025-11-14 06:30:08,641 - __main__ - INFO - ✅ Created daily brief inbox item: 207d3e58-78c5-4585-ad7e-d4943494fe68
+2025-11-14 06:30:08,642 - __main__ - INFO -    Title: 🌅 Daily Brief - November 14
+2025-11-14 06:30:08,642 - __main__ - INFO -    Title: 🌅 Daily Brief - November 14
+2025-11-14 06:30:08,642 - __main__ - INFO -    Priority: 8
+2025-11-14 06:30:08,642 - __main__ - INFO -    Priority: 8
+2025-11-14 06:30:08,742 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-14 06:30:08,742 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-14 06:30:08,742 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-14 06:30:08,742 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-15 06:30:02,313 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-15 06:30:02,313 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-15 06:30:07,431 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-15 06:30:07,431 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-15 06:30:07,432 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-15 06:30:07,432 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-15 06:30:07,432 - __main__ - INFO - Generating daily brief for November 15, 2025
+2025-11-15 06:30:07,432 - __main__ - INFO - Generating daily brief for November 15, 2025
+2025-11-15 06:30:08,121 - app.services.jarvis_inbox_service - INFO - Created inbox item: de4488fe-d43c-470e-92a2-93831c5b6f67 - 🌅 Daily Brief - November 15
+2025-11-15 06:30:08,121 - app.services.jarvis_inbox_service - INFO - Created inbox item: de4488fe-d43c-470e-92a2-93831c5b6f67 - 🌅 Daily Brief - November 15
+2025-11-15 06:30:08,121 - __main__ - INFO - ✅ Created daily brief inbox item: de4488fe-d43c-470e-92a2-93831c5b6f67
+2025-11-15 06:30:08,121 - __main__ - INFO - ✅ Created daily brief inbox item: de4488fe-d43c-470e-92a2-93831c5b6f67
+2025-11-15 06:30:08,121 - __main__ - INFO -    Title: 🌅 Daily Brief - November 15
+2025-11-15 06:30:08,121 - __main__ - INFO -    Title: 🌅 Daily Brief - November 15
+2025-11-15 06:30:08,122 - __main__ - INFO -    Priority: 8
+2025-11-15 06:30:08,122 - __main__ - INFO -    Priority: 8
+2025-11-15 06:30:08,157 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-15 06:30:08,157 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-16 06:30:01,831 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-16 06:30:01,831 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-16 06:30:04,205 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-16 06:30:04,205 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-16 06:30:04,205 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-16 06:30:04,205 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-16 06:30:04,205 - __main__ - INFO - Generating daily brief for November 16, 2025
+2025-11-16 06:30:04,205 - __main__ - INFO - Generating daily brief for November 16, 2025
+2025-11-16 06:30:04,518 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3c37b8fa-eb63-497f-a88f-f5d18b65a3e5 - 🌅 Daily Brief - November 16
+2025-11-16 06:30:04,518 - app.services.jarvis_inbox_service - INFO - Created inbox item: 3c37b8fa-eb63-497f-a88f-f5d18b65a3e5 - 🌅 Daily Brief - November 16
+2025-11-16 06:30:04,518 - __main__ - INFO - ✅ Created daily brief inbox item: 3c37b8fa-eb63-497f-a88f-f5d18b65a3e5
+2025-11-16 06:30:04,518 - __main__ - INFO - ✅ Created daily brief inbox item: 3c37b8fa-eb63-497f-a88f-f5d18b65a3e5
+2025-11-16 06:30:04,519 - __main__ - INFO -    Title: 🌅 Daily Brief - November 16
+2025-11-16 06:30:04,519 - __main__ - INFO -    Title: 🌅 Daily Brief - November 16
+2025-11-16 06:30:04,519 - __main__ - INFO -    Priority: 8
+2025-11-16 06:30:04,519 - __main__ - INFO -    Priority: 8
+2025-11-16 06:30:04,601 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-16 06:30:04,601 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-16 06:30:04,602 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-16 06:30:04,602 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-17 06:30:01,760 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-17 06:30:01,760 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-17 06:30:06,576 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-17 06:30:06,576 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-17 06:30:06,577 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-17 06:30:06,577 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-17 06:30:06,577 - __main__ - INFO - Generating daily brief for November 17, 2025
+2025-11-17 06:30:06,577 - __main__ - INFO - Generating daily brief for November 17, 2025
+2025-11-17 06:30:07,219 - app.services.jarvis_inbox_service - INFO - Created inbox item: ed5e620a-661b-488c-b831-cb1095851993 - 🌅 Daily Brief - November 17
+2025-11-17 06:30:07,219 - app.services.jarvis_inbox_service - INFO - Created inbox item: ed5e620a-661b-488c-b831-cb1095851993 - 🌅 Daily Brief - November 17
+2025-11-17 06:30:07,220 - __main__ - INFO - ✅ Created daily brief inbox item: ed5e620a-661b-488c-b831-cb1095851993
+2025-11-17 06:30:07,220 - __main__ - INFO - ✅ Created daily brief inbox item: ed5e620a-661b-488c-b831-cb1095851993
+2025-11-17 06:30:07,220 - __main__ - INFO -    Title: 🌅 Daily Brief - November 17
+2025-11-17 06:30:07,220 - __main__ - INFO -    Title: 🌅 Daily Brief - November 17
+2025-11-17 06:30:07,220 - __main__ - INFO -    Priority: 8
+2025-11-17 06:30:07,220 - __main__ - INFO -    Priority: 8
+2025-11-17 06:30:07,284 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-17 06:30:07,284 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-18 06:30:01,292 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-18 06:30:01,292 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-18 06:30:05,982 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-18 06:30:05,982 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-18 06:30:05,983 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-18 06:30:05,983 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-18 06:30:05,983 - __main__ - INFO - Generating daily brief for November 18, 2025
+2025-11-18 06:30:05,983 - __main__ - INFO - Generating daily brief for November 18, 2025
+2025-11-18 06:30:06,524 - app.services.jarvis_inbox_service - INFO - Created inbox item: 8df7cde1-4844-4c52-97e6-30705bf68541 - 🌅 Daily Brief - November 18
+2025-11-18 06:30:06,524 - app.services.jarvis_inbox_service - INFO - Created inbox item: 8df7cde1-4844-4c52-97e6-30705bf68541 - 🌅 Daily Brief - November 18
+2025-11-18 06:30:06,525 - __main__ - INFO - ✅ Created daily brief inbox item: 8df7cde1-4844-4c52-97e6-30705bf68541
+2025-11-18 06:30:06,525 - __main__ - INFO - ✅ Created daily brief inbox item: 8df7cde1-4844-4c52-97e6-30705bf68541
+2025-11-18 06:30:06,525 - __main__ - INFO -    Title: 🌅 Daily Brief - November 18
+2025-11-18 06:30:06,525 - __main__ - INFO -    Title: 🌅 Daily Brief - November 18
+2025-11-18 06:30:06,525 - __main__ - INFO -    Priority: 8
+2025-11-18 06:30:06,525 - __main__ - INFO -    Priority: 8
+2025-11-18 06:30:06,587 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-18 06:30:06,587 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-18 06:30:06,588 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-18 06:30:06,588 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-19 06:30:02,091 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-19 06:30:02,091 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-19 06:30:03,611 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-19 06:30:03,611 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-19 06:30:03,611 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-19 06:30:03,611 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-19 06:30:03,611 - __main__ - INFO - Generating daily brief for November 19, 2025
+2025-11-19 06:30:03,611 - __main__ - INFO - Generating daily brief for November 19, 2025
+2025-11-19 06:30:03,795 - app.services.jarvis_inbox_service - INFO - Created inbox item: cfdebe1b-74ea-44c5-abd9-d07adcff58e6 - 🌅 Daily Brief - November 19
+2025-11-19 06:30:03,795 - app.services.jarvis_inbox_service - INFO - Created inbox item: cfdebe1b-74ea-44c5-abd9-d07adcff58e6 - 🌅 Daily Brief - November 19
+2025-11-19 06:30:03,795 - __main__ - INFO - ✅ Created daily brief inbox item: cfdebe1b-74ea-44c5-abd9-d07adcff58e6
+2025-11-19 06:30:03,795 - __main__ - INFO - ✅ Created daily brief inbox item: cfdebe1b-74ea-44c5-abd9-d07adcff58e6
+2025-11-19 06:30:03,795 - __main__ - INFO -    Title: 🌅 Daily Brief - November 19
+2025-11-19 06:30:03,795 - __main__ - INFO -    Title: 🌅 Daily Brief - November 19
+2025-11-19 06:30:03,795 - __main__ - INFO -    Priority: 8
+2025-11-19 06:30:03,795 - __main__ - INFO -    Priority: 8
+2025-11-19 06:30:03,810 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-19 06:30:03,810 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-19 06:30:03,811 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-19 06:30:03,811 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-20 06:30:01,852 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-20 06:30:01,852 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-20 06:30:05,027 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-20 06:30:05,027 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-20 06:30:05,027 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-20 06:30:05,027 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-20 06:30:05,028 - __main__ - INFO - Generating daily brief for November 20, 2025
+2025-11-20 06:30:05,028 - __main__ - INFO - Generating daily brief for November 20, 2025
+2025-11-20 06:30:05,263 - app.services.jarvis_inbox_service - INFO - Created inbox item: 249ae277-1613-4f76-bb19-a08f93827a78 - 🌅 Daily Brief - November 20
+2025-11-20 06:30:05,263 - app.services.jarvis_inbox_service - INFO - Created inbox item: 249ae277-1613-4f76-bb19-a08f93827a78 - 🌅 Daily Brief - November 20
+2025-11-20 06:30:05,264 - __main__ - INFO - ✅ Created daily brief inbox item: 249ae277-1613-4f76-bb19-a08f93827a78
+2025-11-20 06:30:05,264 - __main__ - INFO - ✅ Created daily brief inbox item: 249ae277-1613-4f76-bb19-a08f93827a78
+2025-11-20 06:30:05,264 - __main__ - INFO -    Title: 🌅 Daily Brief - November 20
+2025-11-20 06:30:05,264 - __main__ - INFO -    Title: 🌅 Daily Brief - November 20
+2025-11-20 06:30:05,264 - __main__ - INFO -    Priority: 8
+2025-11-20 06:30:05,264 - __main__ - INFO -    Priority: 8
+2025-11-20 06:30:05,277 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-20 06:30:05,277 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-20 06:30:05,277 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-20 06:30:05,277 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-21 06:30:01,465 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-21 06:30:01,465 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-21 06:30:03,236 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-21 06:30:03,236 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-21 06:30:03,237 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-21 06:30:03,237 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-21 06:30:03,237 - __main__ - INFO - Generating daily brief for November 21, 2025
+2025-11-21 06:30:03,237 - __main__ - INFO - Generating daily brief for November 21, 2025
+2025-11-21 06:30:03,418 - app.services.jarvis_inbox_service - INFO - Created inbox item: efc651c5-feb0-4a6b-a259-821cf520f5b5 - 🌅 Daily Brief - November 21
+2025-11-21 06:30:03,418 - app.services.jarvis_inbox_service - INFO - Created inbox item: efc651c5-feb0-4a6b-a259-821cf520f5b5 - 🌅 Daily Brief - November 21
+2025-11-21 06:30:03,419 - __main__ - INFO - ✅ Created daily brief inbox item: efc651c5-feb0-4a6b-a259-821cf520f5b5
+2025-11-21 06:30:03,419 - __main__ - INFO - ✅ Created daily brief inbox item: efc651c5-feb0-4a6b-a259-821cf520f5b5
+2025-11-21 06:30:03,419 - __main__ - INFO -    Title: 🌅 Daily Brief - November 21
+2025-11-21 06:30:03,419 - __main__ - INFO -    Title: 🌅 Daily Brief - November 21
+2025-11-21 06:30:03,419 - __main__ - INFO -    Priority: 8
+2025-11-21 06:30:03,419 - __main__ - INFO -    Priority: 8
+2025-11-21 06:30:03,434 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-21 06:30:03,434 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-21 06:30:03,435 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-21 06:30:03,435 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-22 06:30:01,600 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-22 06:30:01,600 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-22 06:30:04,097 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-22 06:30:04,097 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-22 06:30:04,098 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-22 06:30:04,098 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-22 06:30:04,098 - __main__ - INFO - Generating daily brief for November 22, 2025
+2025-11-22 06:30:04,098 - __main__ - INFO - Generating daily brief for November 22, 2025
+2025-11-22 06:30:04,335 - app.services.jarvis_inbox_service - INFO - Created inbox item: 0ad69695-7e9e-47bf-a04e-770dc3fe46dd - 🌅 Daily Brief - November 22
+2025-11-22 06:30:04,335 - app.services.jarvis_inbox_service - INFO - Created inbox item: 0ad69695-7e9e-47bf-a04e-770dc3fe46dd - 🌅 Daily Brief - November 22
+2025-11-22 06:30:04,336 - __main__ - INFO - ✅ Created daily brief inbox item: 0ad69695-7e9e-47bf-a04e-770dc3fe46dd
+2025-11-22 06:30:04,336 - __main__ - INFO - ✅ Created daily brief inbox item: 0ad69695-7e9e-47bf-a04e-770dc3fe46dd
+2025-11-22 06:30:04,336 - __main__ - INFO -    Title: 🌅 Daily Brief - November 22
+2025-11-22 06:30:04,336 - __main__ - INFO -    Title: 🌅 Daily Brief - November 22
+2025-11-22 06:30:04,336 - __main__ - INFO -    Priority: 8
+2025-11-22 06:30:04,336 - __main__ - INFO -    Priority: 8
+2025-11-22 06:30:04,361 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-22 06:30:04,361 - __main__ - INFO - 📁 Archived 1 old daily brief items
+2025-11-22 06:30:04,361 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-22 06:30:04,361 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-23 06:30:02,141 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-23 06:30:02,141 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-23 06:30:06,741 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-23 06:30:06,741 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-23 06:30:06,742 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-23 06:30:06,742 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-23 06:30:06,742 - __main__ - INFO - Generating daily brief for November 23, 2025
+2025-11-23 06:30:06,742 - __main__ - INFO - Generating daily brief for November 23, 2025
+2025-11-23 06:30:07,059 - app.services.jarvis_inbox_service - INFO - Created inbox item: 45793699-b566-4908-8efe-b85406bc38f2 - 🌅 Daily Brief - November 23
+2025-11-23 06:30:07,059 - app.services.jarvis_inbox_service - INFO - Created inbox item: 45793699-b566-4908-8efe-b85406bc38f2 - 🌅 Daily Brief - November 23
+2025-11-23 06:30:07,060 - __main__ - INFO - ✅ Created daily brief inbox item: 45793699-b566-4908-8efe-b85406bc38f2
+2025-11-23 06:30:07,060 - __main__ - INFO - ✅ Created daily brief inbox item: 45793699-b566-4908-8efe-b85406bc38f2
+2025-11-23 06:30:07,060 - __main__ - INFO -    Title: 🌅 Daily Brief - November 23
+2025-11-23 06:30:07,060 - __main__ - INFO -    Title: 🌅 Daily Brief - November 23
+2025-11-23 06:30:07,060 - __main__ - INFO -    Priority: 8
+2025-11-23 06:30:07,060 - __main__ - INFO -    Priority: 8
+2025-11-23 06:30:07,098 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-23 06:30:07,098 - __main__ - INFO - 📁 Archived 2 old daily brief items
+2025-11-23 06:30:07,098 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-23 06:30:07,098 - __main__ - INFO - 🎉 Daily brief generation completed successfully

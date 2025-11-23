@@ -4,10 +4,10 @@ import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from '../config'
-import { spriteBus } from '../state/spriteBus'
 import { apiClient } from '../api/client'
 import type { Document } from '../api/client'
 import MermaidDiagram from './MermaidDiagram'
+import { ttsService } from '../services/tts'
 
 interface Conversation {
   id: string
@@ -46,37 +46,113 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   setMessage,
   abortControllerRef
 }) => {
-  const [conversations, setConversations] = useState<Conversation[]>([])
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [loadingConversations, setLoadingConversations] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [toolActivity, setToolActivity] = useState('')
   const [isUsingTools, setIsUsingTools] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [uploadedDocuments, setUploadedDocuments] = useState<Document[]>([])
   const [isUploading, setIsUploading] = useState(false)
+  const [speakingMessageIndex, setSpeakingMessageIndex] = useState<number | null>(null)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
+  const hasLoadedHistory = useRef(false)
+
+  // Load conversation history on mount
+  useEffect(() => {
+    const loadConversationHistory = async () => {
+      if (hasLoadedHistory.current) return
+      hasLoadedHistory.current = true
+
+      try {
+        setIsLoadingHistory(true)
+
+        // Get active conversation from backend
+        const activeResponse = await fetch(`${APP_CONFIG.apiUrl}/api/conversations/active`, {
+          credentials: 'include'
+        })
+
+        if (!activeResponse.ok) {
+          console.log('No active conversation found')
+          return
+        }
+
+        const activeData = await activeResponse.json()
+        const savedConversationId = activeData.conversation_id
+
+        if (!savedConversationId) {
+          console.log('No active conversation ID')
+          return
+        }
+
+        console.log('Loading conversation history for:', savedConversationId)
+
+        // Load conversation messages
+        const messagesResponse = await fetch(
+          `${APP_CONFIG.apiUrl}/api/conversations/${savedConversationId}/messages?limit=100`,
+          { credentials: 'include' }
+        )
+
+        if (!messagesResponse.ok) {
+          console.error('Failed to load conversation messages')
+          return
+        }
+
+        const messagesData = await messagesResponse.json()
+
+        if (messagesData && messagesData.length > 0) {
+          // Convert Episode format to ChatMessage format
+          const loadedMessages: ChatMessage[] = messagesData.map((ep: any) => ({
+            role: ep.role,
+            content: ep.content,
+            timestamp: new Date(ep.created_at)
+          }))
+
+          setMessages(loadedMessages)
+          setCurrentConversationId(savedConversationId)
+          console.log(`Loaded ${loadedMessages.length} messages from conversation ${savedConversationId}`)
+        }
+      } catch (error) {
+        console.error('Error loading conversation history:', error)
+      } finally {
+        setIsLoadingHistory(false)
+      }
+    }
+
+    loadConversationHistory()
+  }, [setMessages])
+
+  // Save active conversation when conversation_id changes
+  useEffect(() => {
+    const saveActiveConversation = async () => {
+      if (!currentConversationId) return
+
+      try {
+        await fetch(`${APP_CONFIG.apiUrl}/api/conversations/active`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ conversation_id: currentConversationId })
+        })
+        console.log('Saved active conversation:', currentConversationId)
+      } catch (error) {
+        console.error('Error saving active conversation:', error)
+      }
+    }
+
+    saveActiveConversation()
+  }, [currentConversationId])
 
   // Check if mobile on mount and window resize
   useEffect(() => {
     const checkMobile = () => {
       setIsMobile(window.innerWidth < 768)
-      // Auto-collapse sidebar on mobile
-      if (window.innerWidth < 768) {
-        setSidebarCollapsed(true)
-      }
     }
-    
+
     checkMobile()
     window.addEventListener('resize', checkMobile)
     return () => window.removeEventListener('resize', checkMobile)
-  }, [])
-
-  // Load conversations on component mount
-  useEffect(() => {
-    loadConversations()
   }, [])
 
   // Auto-scroll to bottom when messages change
@@ -158,8 +234,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setUploadedDocuments([])
     setIsLoading(true)
     // Sprite: indicate listening state when sending
-    spriteBus.setBase('listening', 'chatInterface:send')
-    spriteBus.setTone('focused', 'chatInterface:send')
     setIsUsingTools(false)
     setToolActivity('')
     
@@ -208,6 +282,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         })
       })
 
+      console.log('📤 Sending request with conversation_id:', currentConversationId)
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
@@ -243,25 +319,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     console.log('🔧 TOOL_CALLS_START event received:', eventData)
                     setIsUsingTools(true)
                     setToolActivity(`🔧 Using Tools (Round ${eventData.data.round})`)
-                    spriteBus.setBase('listening', 'chatInterface:tools_start')
-                    spriteBus.setTone('focused', 'chatInterface:tools_start')
                     break
                     
                   case 'tool_executing':
                     console.log('🔧 TOOL_EXECUTING event received:', eventData)
                     setToolActivity(`🔧 Using ${eventData.data.tool}...`)
-                    spriteBus.setBase('thinking', 'chatInterface:tool_executing')
-                    spriteBus.setTone('focused', 'chatInterface:tool_executing')
-                    spriteBus.setVisuals({ energyScale: 1.02 }, 'chatInterface:tool_executing')
                     break
                     
                   case 'thinking':
                     console.log('💭 THINKING event received:', eventData)
                     setIsUsingTools(true)
                     setToolActivity('💭 Processing results...')
-                    spriteBus.setBase('thinking', 'chatInterface:thinking')
-                    spriteBus.setTone('focused', 'chatInterface:thinking')
-                    spriteBus.setVisuals({ energyScale: 1.015 }, 'chatInterface:thinking')
                     break
                     
                   case 'text_chunk':
@@ -269,11 +337,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsUsingTools(false)
                     setToolActivity('')
                     if (firstStreamChunk) {
-                      spriteBus.setVisuals({ energyScale: 1.04, tempoBreatheSec: 3.2 }, 'chatInterface:first_chunk')
                       firstStreamChunk = false
                     }
-                    spriteBus.setOverlay('speaking', { source: 'chatInterface:text_chunk', autoClearMs: 900 })
-                    spriteBus.setTone('playful', 'chatInterface:text_chunk')
                     // Update the last message with streaming content
                     setMessages(prev => {
                       const newMessages = [...prev]
@@ -294,10 +359,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     const finalContent = eventData.data.content
                     const finalCitations = eventData.data.citations || []
                     const responseConversationId = eventData.data.conversation_id
-                    
+
+                    console.log('📨 Received final_response with conversation_id:', responseConversationId)
+                    console.log('📊 Current conversation_id:', currentConversationId)
+
                     // Update conversation ID if we got one back
-                    if (responseConversationId && responseConversationId !== currentConversationId) {
-                      setCurrentConversationId(responseConversationId)
+                    if (responseConversationId) {
+                      if (responseConversationId !== currentConversationId) {
+                        console.log('🔄 Updating conversation_id from', currentConversationId, 'to', responseConversationId)
+                        setCurrentConversationId(responseConversationId)
+                      } else {
+                        console.log('✅ conversation_id already matches:', responseConversationId)
+                      }
+                    } else {
+                      console.warn('⚠️ No conversation_id in final_response!')
                     }
                     
                     setIsUsingTools(false)
@@ -325,9 +400,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsUsingTools(false)
                     setToolActivity('')
                     setIsLoading(false)
-                    spriteBus.setBase('idle', 'chatInterface:response_ready')
-                    spriteBus.setTone(undefined, 'chatInterface:response_ready')
-                    spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chatInterface:response_ready')
                     break
                     
                   case 'error':
@@ -335,9 +407,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsUsingTools(false)
                     setToolActivity('')
                     setIsLoading(false)
-                    spriteBus.setBase('idle', 'chatInterface:error')
-                    spriteBus.setTone(undefined, 'chatInterface:error')
-                    spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6 }, 'chatInterface:error')
                     break
                 }
               } catch (e) {
@@ -372,241 +441,64 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         abortControllerRef.current = null
       }
     }
-    
-    // Refresh conversations after sending a message (in case a new conversation was created)
-    setTimeout(() => {
-      loadConversations()
-    }, 1000)
   }
 
-  const loadConversations = async () => {
-    setLoadingConversations(true)
+  // Handle text-to-speech for messages
+  const handleSpeak = async (text: string, messageIndex: number) => {
     try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/conversations`, {
-        credentials: 'include'
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setConversations(data)
+      // If already speaking this message, stop it
+      if (speakingMessageIndex === messageIndex) {
+        ttsService.stop()
+        setSpeakingMessageIndex(null)
+        return
       }
-    } catch (error) {
-      console.error('Failed to load conversations:', error)
-    }
-    setLoadingConversations(false)
-  }
 
-  const loadConversation = async (conversationId: string) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/conversations/${conversationId}/turns`, {
-        credentials: 'include'
-      })
-      if (response.ok) {
-        const turns = await response.json()
-        const chatMessages = turns.map((turn: any) => ({
-          role: turn.role,
-          content: turn.content,
-          timestamp: new Date(turn.created_at)
-        }))
-        setMessages(chatMessages)
-        setCurrentConversationId(conversationId)
-        
-        // Auto-collapse sidebar on mobile after selecting a conversation
-        if (isMobile) {
-          setSidebarCollapsed(true)
-        }
-      }
+      // Stop any currently playing audio
+      ttsService.stop()
+
+      // Start speaking
+      setSpeakingMessageIndex(messageIndex)
+      await ttsService.speak(text)
+      setSpeakingMessageIndex(null)
     } catch (error) {
-      console.error('Failed to load conversation:', error)
+      console.error('[TTS] Error:', error)
+      setSpeakingMessageIndex(null)
     }
   }
 
-  const startNewConversation = () => {
-    setMessages([{
-      role: 'assistant',
-      content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
-      timestamp: new Date()
-    }])
+  // Handle new chat - clear conversation and start fresh
+  const handleNewChat = async () => {
+    onClearChat()
     setCurrentConversationId(null)
-    
-    // Auto-collapse sidebar on mobile after starting new conversation
-    if (isMobile) {
-      setSidebarCollapsed(true)
-    }
-  }
 
-  const deleteConversation = async (conversationId: string, event: React.MouseEvent) => {
-    event.stopPropagation() // Prevent triggering the conversation click
-    
-    if (!confirm('Are you sure you want to delete this conversation? This action cannot be undone.')) {
-      return
-    }
-
+    // Clear active conversation on backend
     try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/conversations/${conversationId}`, {
-        method: 'DELETE',
-        credentials: 'include'
+      await fetch(`${APP_CONFIG.apiUrl}/api/conversations/active`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ conversation_id: null })
       })
-
-      if (response.ok) {
-        // If we're deleting the current conversation, clear the chat
-        if (currentConversationId === conversationId) {
-          setCurrentConversationId(null)
-          messages.splice(0, messages.length) // Clear current messages
-        }
-        
-        // Reload conversations list
-        loadConversations()
-        console.log('✅ Conversation deleted successfully')
-      } else {
-        console.error('Failed to delete conversation')
-        alert('Failed to delete conversation. Please try again.')
-      }
+      console.log('Started new conversation')
     } catch (error) {
-      console.error('Error deleting conversation:', error)
-      alert('Error deleting conversation. Please try again.')
-    }
-  }
-
-  const formatConversationTime = (dateString: string) => {
-    const date = new Date(dateString)
-    const now = new Date()
-    const diffInHours = (now.getTime() - date.getTime()) / (1000 * 60 * 60)
-    
-    if (diffInHours < 1) {
-      return 'Just now'
-    } else if (diffInHours < 24) {
-      return `${Math.floor(diffInHours)}h ago`
-    } else if (diffInHours < 24 * 7) {
-      return `${Math.floor(diffInHours / 24)}d ago`
-    } else {
-      return date.toLocaleDateString()
+      console.error('Error clearing active conversation:', error)
     }
   }
 
   return (
     <div className="relative flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden">
-      {/* Mobile Sidebar Overlay */}
-      {isMobile && !sidebarCollapsed && (
-        <div 
-          className="absolute inset-0 bg-black bg-opacity-50 z-40"
-          onClick={() => setSidebarCollapsed(true)}
-        />
-      )}
-      
-      {/* Sidebar */}
-      <div className={`${
-        sidebarCollapsed ? 'w-0' : isMobile ? 'absolute left-0 top-0 h-full w-full max-w-xs z-50' : 'w-80'
-      } transition-all duration-300 bg-gray-800 border-r border-gray-700 flex flex-col overflow-hidden`}>
-        {!sidebarCollapsed && (
-          <>
-            {/* Sidebar Header */}
-            <div className="p-4 border-b border-gray-700">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-white">Chat History</h3>
-                {isMobile && (
-                  <button
-                    onClick={() => setSidebarCollapsed(true)}
-                    className="text-gray-400 hover:text-white p-1"
-                  >
-                    <span className="material-icons">close</span>
-                  </button>
-                )}
-              </div>
-              <button
-                onClick={startNewConversation}
-                className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-              >
-                <span className="material-icons text-sm">add</span>
-                <span>New Chat</span>
-              </button>
-            </div>
-
-            {/* Conversations List */}
-            <div className="flex-1 overflow-y-auto">
-              <div className="p-2">
-                <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2 px-2">Recent Conversations</h3>
-                {loadingConversations ? (
-                  <div className="flex items-center justify-center py-8">
-                    <div className="animate-spin w-5 h-5 border-2 border-gray-400 border-t-transparent rounded-full"></div>
-                  </div>
-                ) : conversations.length === 0 ? (
-                  <p className="text-gray-500 text-sm px-2 py-4">No conversations yet</p>
-                ) : (
-                  <div className="space-y-1">
-                    {conversations.map((conv) => (
-                      <button
-                        key={conv.id}
-                        onClick={() => loadConversation(conv.id)}
-                        className={`w-full text-left p-3 rounded-lg transition-colors hover:bg-gray-700 ${
-                          currentConversationId === conv.id ? 'bg-gray-700 border border-teal-500/50' : 'border border-transparent'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-gray-200 truncate">
-                              {conv.title || 'New Conversation'}
-                            </p>
-                            <p className="text-xs text-gray-400 mt-1">
-                              {formatConversationTime(conv.updated_at)}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-1 ml-2">
-                            <span className="material-icons text-xs text-gray-500">
-                              chat_bubble_outline
-                            </span>
-                            <button
-                              onClick={(e) => deleteConversation(conv.id, e)}
-                              className="p-1 rounded hover:bg-gray-600 text-gray-400 hover:text-red-400 transition-colors"
-                              title="Delete conversation"
-                            >
-                              <span className="material-icons text-sm">delete</span>
-                            </button>
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <div className="p-4 border-b border-gray-700 flex items-center justify-between bg-gray-800">
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="text-gray-400 hover:text-white transition-colors p-1"
-            >
-              <span className="material-icons text-lg">
-                {sidebarCollapsed ? 'menu' : 'menu_open'}
-              </span>
-            </button>
-            <h2 className="text-lg font-semibold">
-              {currentConversationId ? 
-                conversations.find(c => c.id === currentConversationId)?.title || 'Chat' :
-                'New Chat'
-              }
-            </h2>
-          </div>
+          <h2 className="text-lg font-semibold">Chat with Sara</h2>
           <div className="flex items-center space-x-2">
             <button
-              onClick={() => loadConversations()}
-              className="text-gray-400 hover:text-white transition-colors p-2"
-              title="Refresh conversations"
+              onClick={handleNewChat}
+              className="text-gray-400 hover:text-white transition-colors px-3 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-sm"
+              title="Start a new conversation"
             >
-              <span className="material-icons text-sm">refresh</span>
-            </button>
-            <button
-              onClick={onClearChat}
-              className="text-gray-400 hover:text-white transition-colors p-2"
-              title="Clear current chat"
-            >
-              <span className="material-icons text-sm">clear</span>
+              + New Chat
             </button>
           </div>
         </div>
@@ -750,11 +642,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     </div>
                   )}
                 </div>
-                
-                <div className={`text-xs text-gray-500 mt-1 ${
-                  msg.role === 'user' ? 'text-right' : 'text-left'
+
+                <div className={`flex items-center justify-between text-xs text-gray-500 mt-1 ${
+                  msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'
                 }`}>
-                  {msg.timestamp.toLocaleTimeString()}
+                  <span>{msg.timestamp.toLocaleTimeString()}</span>
+
+                  {/* TTS button for assistant messages */}
+                  {msg.role === 'assistant' && (
+                    <button
+                      onClick={() => handleSpeak(msg.content, index)}
+                      className={`ml-2 p-1 rounded-md transition-colors ${
+                        speakingMessageIndex === index
+                          ? 'bg-teal-600 text-white'
+                          : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                      }`}
+                      title={speakingMessageIndex === index ? 'Stop speaking' : 'Read aloud'}
+                    >
+                      {speakingMessageIndex === index ? (
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

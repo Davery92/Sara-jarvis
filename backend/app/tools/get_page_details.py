@@ -57,13 +57,21 @@ class GetPageDetailsTool(BaseTool):
                             "Page content is stored for 5 minutes after the original fetch."
                 )
 
-            # Parse and return full page data
+            # Parse and normalize full page data
             full_page_data = json.loads(cached_data)
+
+            # Normalize: ensure 'content' key exists for Sara to use
+            if "plain_text" in full_page_data and "content" not in full_page_data:
+                full_page_data["content"] = full_page_data["plain_text"]
+
+            # Also ensure text key exists for backwards compat
+            if "plain_text" in full_page_data and "text" not in full_page_data:
+                full_page_data["text"] = full_page_data["plain_text"]
 
             return ToolResult(
                 success=True,
                 data=full_page_data,
-                message=f"Retrieved full page content for reference_id: {reference_id}"
+                message=f"Retrieved full page content for reference_id: {reference_id} ({len(full_page_data.get('plain_text', ''))} chars)"
             )
 
         except json.JSONDecodeError as e:

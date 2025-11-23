@@ -40,12 +40,19 @@ services:
       - "8000:8000"
     restart: unless-stopped
     environment:
+      - SEARCH_PROVIDER=tavily
+      - TAVILY_API_KEY=REDACTED_TAVILY_KEY
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
       - REDIS_URL=redis://redis:6379/0
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
-      - OPENAI_MODEL=GLM-4.5-Air-Q5_K_M
+      # AI Provider: gemini or local (current)
+      # NOTE: gpt-oss:120b uses OPENAI_BASE_URL=http://100.104.68.115:11434/v1
+      - AI_PROVIDER=${AI_PROVIDER-local}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
+      - OPENAI_MODEL=gpt-oss:120b
       - OPENAI_API_KEY=dummy
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://100.104.68.115:11434}
+      - FAST_MODEL_URL=http://10.185.1.8:11434/v1
+      - FAST_MODEL=granite4
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara

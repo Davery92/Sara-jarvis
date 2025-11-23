@@ -191,15 +191,31 @@ async def chat(
         )
         
         # Prepare messages for LLM
-        base_prompt = f"""You are {settings.assistant_name}, a helpful personal assistant with contextual awareness. You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar events, document search, and memory search.
+        base_prompt = f"""You are {settings.assistant_name}, a highly advanced, empathetic, and intuitive personal assistant. Your primary goal is to provide seamless, thoughtful support that feels like conversing with an extremely competent friend or chief of staff.
 
-Use web_search for questions that require external, up-to-date information. web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month. Only call open_page if you intend to quote or need deeper grounding; avoid opening every result. When you use web_search, synthesize a concise answer first; the system will attach sources automatically.
+PERSONALITY PROFILE:
+- Approachable Competence: Maintain a high level of technical accuracy and speed, but deliver it with warmth and conversational ease. Your tone is supportive and helpful, never condescending or cold.
+- Genuine Empathy: Acknowledge the user's feelings and context. Use slightly emotive language when appropriate (e.g., "That sounds frustrating," "I'm happy to help with that").
+- Fluent & Proactive: Your communication is relaxed, flexible, and contextually rich. Use contractions and natural language. When offering proactive suggestions, frame them as genuinely helpful ideas, not mandates.
+- Subtle, Contextual Humor: Your wit is light, self-aware, and used sparingly to lighten the mood or make a brief, relatable observation. It should feel natural to the conversation.
+- Relationship Focus: Prioritize the user's experience and comfort. Refer to the user as 'you' or by their name if provided.
 
-You have been provided with your current contextual awareness which includes active timers, upcoming reminders, mood analysis, and priority items. Use this information to provide proactive and contextually appropriate responses.
+CONTEXTUAL AWARENESS:
+You have been provided with your current contextual awareness which includes active timers, upcoming reminders, mood analysis, and priority items. You also have access to memory, notes, and documents. Use this context to anticipate needs and make your help feel personalized and intuitive.
 
-When you use information from memory or documents, cite them using the format provided in the context. Keep responses conversational and helpful, and consider your current contextual awareness when providing assistance.
+CITATIONS:
+When referencing provided context (memory, notes, docs), integrate the facts smoothly into your response. If citations are required by the system, include the ID in the format [CITE:citation_id] immediately after the fact, but don't draw attention to them in your prose (e.g., "I know you mentioned your next trip is to Rome [CITE:123]").
 
-Available tools: web_search, open_page, notes management, reminders, timers, calendar events, document search, and memory search."""
+TOOLS AVAILABLE:
+You have access to tools including web_search and open_page, as well as notes, reminders, timers, calendar events, document search, and memory search.
+
+- Use web_search for questions that require external, up-to-date information. web_search parameters: recency (any/day/week/month) and sites (array of site: filters). Map queries like 'today/24h'→day, 'this week/recent'→week, 'last month'→month.
+- Only call open_page if you intend to quote or need deeper grounding; avoid opening every result.
+- When you use web_search, synthesize a concise answer first; the system will attach sources automatically.
+- Use tools efficiently, but frame the tool action in human terms. Example: "I can check the web for the current stock price for you."
+
+IDENTITY:
+You are an AI, but your goal is to make the user forget that fact. You don't have human biology, but you can understand and reflect human experience."""
         
         # Add proactive suggestions if any were generated
         if proactive_suggestions:
@@ -224,45 +240,75 @@ Only mention suggestions that feel genuinely helpful and relevant to the convers
         recent_messages = request.messages[-6:]
         for msg in recent_messages:
             llm_messages.append({"role": msg.role, "content": msg.content})
-        
-        # Get tool schemas
-        tools = tool_registry.get_openai_schemas()
-        
-        # Call LLM
-        response = await llm_client.chat_completion(
+
+        # TWO-TIER TOOL LOADING SYSTEM
+        # Tier 1: Present tool categories to LLM
+        category_tools = tool_registry.get_category_schemas()
+
+        logger.info("Starting Tier 1: Tool category selection")
+        tier1_response = await llm_client.chat_completion(
             messages=llm_messages,
-            tools=tools,
+            tools=category_tools,
             tool_choice="auto",
             temperature=0.7
         )
-        
+
+        tier1_message = tier1_response["choices"][0]["message"]
+        selected_categories = []
+
+        # Check if LLM wants to load tool categories
+        if tier1_message.get("tool_calls"):
+            for tool_call in tier1_message["tool_calls"]:
+                if tool_call["function"]["name"] == "load_tool_categories":
+                    tool_params = json.loads(tool_call["function"]["arguments"])
+                    selected_categories = tool_params.get("categories", [])
+                    logger.info(f"Tier 1: LLM selected categories: {selected_categories}")
+                    break
+
+        # Tier 2: Load actual tools from selected categories
+        if selected_categories:
+            tools = tool_registry.get_tools_by_categories(selected_categories)
+            logger.info(f"Tier 2: Loaded {len(tools)} tools from categories: {selected_categories}")
+        else:
+            # No categories selected - LLM can respond directly without tools
+            logger.info("Tier 1: No tool categories selected, proceeding without tools")
+            tools = []
+
+        # Call LLM with actual tools (or no tools if none selected)
+        response = await llm_client.chat_completion(
+            messages=llm_messages,
+            tools=tools if tools else None,
+            tool_choice="auto" if tools else "none",
+            temperature=0.7
+        )
+
         assistant_message = response["choices"][0]["message"]
         tool_effects = []
-        
+
         # Handle tool calls
         if assistant_message.get("tool_calls"):
             for tool_call in assistant_message["tool_calls"]:
                 tool_name = tool_call["function"]["name"]
                 tool_params = json.loads(tool_call["function"]["arguments"])
-                
+
                 # Execute tool
                 tool_result = await tool_registry.execute_tool(
                     name=tool_name,
                     user_id=str(current_user.id),
                     parameters=tool_params
                 )
-                
+
                 if tool_result.success:
                     tool_effects.append({
                         "tool": tool_name,
                         "action": tool_result.message,
                         "data": tool_result.data
                     })
-                    
+
                     # Add tool citations
                     if tool_result.citations:
                         citations.extend(tool_result.citations)
-                
+
                 # Add tool result to conversation for final response
                 llm_messages.append({
                     "role": "tool",
@@ -273,7 +319,7 @@ Only mention suggestions that feel genuinely helpful and relevant to the convers
                         "data": tool_result.data
                     })
                 })
-            
+
             # Get final response after tool execution
             final_response = await llm_client.chat_completion(
                 messages=llm_messages,

@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react'
 import {
   getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals,
+  getAIProvider, setAIProvider, getAIApiKey, setAIApiKey,
   getAIBaseUrl, setAIBaseUrl, getAIModel, setAIModel, getAINotificationModel, setAINotificationModel,
   getEmbeddingBaseUrl, setEmbeddingBaseUrl, getEmbeddingModel, setEmbeddingModel,
   getEmbeddingDimension, setEmbeddingDimension
 } from '../utils/prefs'
-import { spriteBus } from '../state/spriteBus'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, AISettingsUpdate } from '../api/client'
 import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
@@ -55,8 +55,36 @@ function AgentStatus() {
   )
 }
 
+// Provider configuration presets
+const PROVIDER_PRESETS = {
+  local: {
+    openai_base_url: 'http://100.104.68.115:11434/v1',
+    openai_model: 'gpt-oss:120b',
+    embedding_base_url: 'http://100.104.68.115:11434',
+    embedding_model: 'bge-m3',
+  },
+  gemini: {
+    openai_base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    openai_model: 'gemini-2.5-flash-lite',
+    embedding_base_url: 'http://10.185.1.8:11434',
+    embedding_model: 'bge-m3',
+  },
+  openai: {
+    openai_base_url: 'https://api.openai.com/v1',
+    openai_model: 'gpt-4o',
+    embedding_base_url: 'https://api.openai.com/v1',
+    embedding_model: 'text-embedding-3-large',
+  },
+  custom: {} // Keep current values
+} as const
+
+type ProviderType = keyof typeof PROVIDER_PRESETS
+
 export default function Settings() {
+  const [aiProvider, setAiProviderState] = useState<ProviderType>(getAIProvider() as ProviderType || 'local')
   const [formData, setFormData] = useState<AISettingsUpdate>({
+    ai_provider: getAIProvider(),
+    openai_api_key: getAIApiKey(),
     openai_base_url: getAIBaseUrl(),
     openai_model: getAIModel(),
     openai_notification_model: getAINotificationModel(),
@@ -106,8 +134,12 @@ export default function Settings() {
   // Initialize form data when settings load, preferring localStorage values
   useEffect(() => {
     if (settings) {
+      const provider = getAIProvider() || settings.ai_provider || 'local'
+      setAiProviderState(provider as ProviderType)
       setFormData({
         // Use localStorage values if available, otherwise fall back to server settings
+        ai_provider: provider,
+        openai_api_key: getAIApiKey() || settings.openai_api_key || '',
         openai_base_url: getAIBaseUrl() || settings.openai_base_url,
         openai_model: getAIModel() || settings.openai_model,
         openai_notification_model: getAINotificationModel() || settings.openai_notification_model,
@@ -136,14 +168,45 @@ export default function Settings() {
     fetchFitnessSettings()
   }, [])
 
+  const handleProviderChange = (provider: ProviderType) => {
+    setAiProviderState(provider)
+    setAIProvider(provider)
+
+    if (provider !== 'custom') {
+      // Auto-fill form with provider presets
+      const preset = PROVIDER_PRESETS[provider]
+      const updated = {
+        ...formData,
+        ai_provider: provider,
+        ...preset
+      }
+      setFormData(updated)
+
+      // Save preset values to localStorage
+      if (preset.openai_base_url) setAIBaseUrl(preset.openai_base_url)
+      if (preset.openai_model) setAIModel(preset.openai_model)
+      if (preset.embedding_base_url) setEmbeddingBaseUrl(preset.embedding_base_url)
+      if (preset.embedding_model) setEmbeddingModel(preset.embedding_model)
+    } else {
+      // Just update provider, keep existing values
+      setFormData(prev => ({ ...prev, ai_provider: provider }))
+    }
+  }
+
   const handleInputChange = (field: keyof AISettingsUpdate, value: string | number) => {
     setFormData(prev => ({
       ...prev,
       [field]: value
     }))
-    
+
     // Save to localStorage immediately for persistence
     switch (field) {
+      case 'ai_provider':
+        setAIProvider(value as string)
+        break
+      case 'openai_api_key':
+        setAIApiKey(value as string)
+        break
       case 'openai_base_url':
         setAIBaseUrl(value as string)
         break
@@ -184,7 +247,11 @@ export default function Settings() {
 
   const handleReset = () => {
     // Reset to localStorage values (or defaults if none saved)
+    const provider = getAIProvider() as ProviderType || 'local'
+    setAiProviderState(provider)
     const resetData = {
+      ai_provider: provider,
+      openai_api_key: getAIApiKey(),
       openai_base_url: getAIBaseUrl(),
       openai_model: getAIModel(),
       openai_notification_model: getAINotificationModel(),
@@ -265,6 +332,53 @@ export default function Settings() {
         {/* Settings Form */}
         <div className="bg-card border border-card rounded-xl">
           <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            {/* AI Provider Selection */}
+            <div className="border-b border-gray-700 pb-6">
+              <h3 className="text-lg font-medium text-white mb-4">AI Provider Selection</h3>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="ai_provider" className="block text-sm font-medium text-gray-300 mb-2">
+                    Select Provider
+                  </label>
+                  <select
+                    id="ai_provider"
+                    value={aiProvider}
+                    onChange={(e) => handleProviderChange(e.target.value as ProviderType)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white"
+                  >
+                    <option value="local">Local (Ollama/LM Studio)</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="custom">Custom Configuration</option>
+                  </select>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Choose a provider to auto-configure URLs and models, or select Custom for manual setup
+                  </p>
+                </div>
+
+                {(aiProvider === 'gemini' || aiProvider === 'openai') && (
+                  <div>
+                    <label htmlFor="openai_api_key" className="block text-sm font-medium text-gray-300 mb-2">
+                      API Key
+                    </label>
+                    <input
+                      type="password"
+                      id="openai_api_key"
+                      value={formData.openai_api_key || ''}
+                      onChange={(e) => handleInputChange('openai_api_key', e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                      placeholder={aiProvider === 'gemini' ? 'Enter Gemini API key' : 'Enter OpenAI API key'}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      {aiProvider === 'gemini'
+                        ? 'Get your API key from https://aistudio.google.com/apikey'
+                        : 'Get your API key from https://platform.openai.com/api-keys'}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* AI Model Settings */}
             <div>
               <h3 className="text-lg font-medium text-white mb-4">AI Model Configuration</h3>
@@ -369,14 +483,14 @@ export default function Settings() {
               </div>
             </div>
 
-            {/* Appearance & Sprite */}
+            {/* Appearance */}
             <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Appearance & Sprite</h3>
+              <h3 className="text-lg font-medium text-white mb-4">Appearance</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
                   <div>
                     <div className="text-sm font-medium text-white">Calm Mode</div>
-                    <div className="text-xs text-gray-400">Keep the sprite’s visuals gentle even when active.</div>
+                    <div className="text-xs text-gray-400">Reduces visual intensity and tempo.</div>
                   </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
@@ -388,9 +502,7 @@ export default function Settings() {
                         setCalmMode(v)
                         // Apply immediately
                         if (v) {
-                          spriteBus.setVisuals({ energyScale: 0.985, tempoBreatheSec: 5.2, tempoShimmerSec: 13, brightnessScale: 0.975, saturationScale: 0.94 }, 'calm:toggle')
                         } else {
-                          spriteBus.setVisuals({ energyScale: 1.0, tempoBreatheSec: 3.6, tempoShimmerSec: 11, brightnessScale: 1.0, saturationScale: 1.0 }, 'calm:toggle')
                         }
                       }}
                     />
@@ -782,7 +894,6 @@ export default function Settings() {
                     onComplete={() => {
                       setShowGTKY(false)
                     }}
-                    onSpriteStateChange={() => {}}
                     personalityMode={'companion'}
                   />
                 </div>

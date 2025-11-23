@@ -50,7 +50,7 @@ class OpenPageTool(BaseTool):
 
             # Create compact summary
             title = data.get("title", "")
-            text = data.get("text", "")
+            text = data.get("plain_text", "") or data.get("text", "")
 
             # Truncate text to first 500 characters for summary
             text_preview = text[:500] + "..." if len(text) > 500 else text

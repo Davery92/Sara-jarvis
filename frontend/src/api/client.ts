@@ -83,6 +83,8 @@ export interface CalendarEvent {
 }
 
 export interface AISettings {
+  ai_provider?: string
+  openai_api_key?: string
   openai_base_url: string
   openai_model: string
   openai_notification_model: string
@@ -92,6 +94,8 @@ export interface AISettings {
 }
 
 export interface AISettingsUpdate {
+  ai_provider?: string
+  openai_api_key?: string
   openai_base_url?: string
   openai_model?: string
   openai_notification_model?: string
@@ -608,6 +612,85 @@ class ApiClient {
   async getRecipes(limit?: number): Promise<any[]> {
     const params = limit ? `?limit=${limit}` : ''
     const response = await this.client.get(`/api/fitness/recipes${params}`)
+    return response.data
+  }
+
+  // Daily Briefings endpoints
+  async getDailyBriefings(): Promise<any[]> {
+    const response = await this.client.get('/api/briefings')
+    return response.data
+  }
+
+  async getBriefingSettings(): Promise<any> {
+    const response = await this.client.get('/api/briefings/settings')
+    return response.data
+  }
+
+  async updateBriefingSettings(settings: any): Promise<any> {
+    const response = await this.client.put('/api/briefings/settings', settings)
+    return response.data
+  }
+
+  async generateBriefing(type: 'morning' | 'evening'): Promise<any> {
+    const response = await this.client.post('/api/briefings/generate', { briefing_type: type })
+    return response.data
+  }
+
+  async markBriefingRead(briefingId: string): Promise<void> {
+    await this.client.patch(`/api/briefings/${briefingId}/read`)
+  }
+
+  // Context Mode endpoints
+  async getContextMode(): Promise<any> {
+    const response = await this.client.get('/api/context/mode')
+    return response.data
+  }
+
+  async setContextMode(mode: string): Promise<any> {
+    const response = await this.client.put('/api/context/mode', { mode })
+    return response.data
+  }
+
+  async getContextStats(): Promise<any> {
+    const response = await this.client.get('/api/context/stats')
+    return response.data
+  }
+
+  // Intelligence Reports endpoints
+  async getIntelligenceReports(): Promise<any[]> {
+    const response = await this.client.get('/api/reports/list')
+    return response.data
+  }
+
+  async getIntelligenceReport(reportId: string): Promise<any> {
+    const response = await this.client.get(`/api/reports/${reportId}`)
+    return response.data
+  }
+
+  async generateIntelligenceReport(type: 'weekly' | 'monthly' | 'quarterly'): Promise<any> {
+    const response = await this.client.post('/api/reports/generate', { report_type: type })
+    return response.data
+  }
+
+  // Proactive Suggestions endpoints
+  async getProactiveSuggestions(): Promise<any[]> {
+    const response = await this.client.get('/api/suggestions')
+    return response.data
+  }
+
+  async updateSuggestionStatus(suggestionId: string, status: 'accepted' | 'dismissed'): Promise<any> {
+    const response = await this.client.patch(`/api/suggestions/${suggestionId}`, { status })
+    return response.data
+  }
+
+  // Detected Patterns endpoints
+  async getDetectedPatterns(): Promise<any[]> {
+    const response = await this.client.get('/api/patterns')
+    return response.data
+  }
+
+  async getPattern(patternId: string): Promise<any> {
+    const response = await this.client.get(`/api/patterns/${patternId}`)
     return response.data
   }
 }

@@ -3,15 +3,13 @@ import { Dumbbell, Apple, FileText, Mic, Activity, Settings, X, MessageCircle, C
 import FoodLog from './FoodLog'
 import WorkoutLog from './WorkoutLogEnhanced'
 import FitnessNotes from './FitnessNotes'
-import FitnessVoice from './FitnessVoice'
-import FitnessChat from './FitnessChat'
 import PhaseManager from './PhaseManager'
 import TemplateBuilder from './TemplateBuilder'
 import RecoveryLog from './RecoveryLog'
 import RecoveryTrendChart from './RecoveryTrendChart'
 import { APP_CONFIG } from '../../config'
 
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'voice' | 'chat' | 'templates' | 'recovery'
+type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
@@ -28,13 +26,11 @@ export default function FitnessSection() {
 
   const tabs = [
     { id: 'dashboard' as FitnessView, label: 'Dashboard', icon: Activity },
-    { id: 'chat' as FitnessView, label: 'Chat', icon: MessageCircle },
     { id: 'templates' as FitnessView, label: 'Templates', icon: Calendar },
     { id: 'recovery' as FitnessView, label: 'Recovery', icon: Heart },
     { id: 'food' as FitnessView, label: 'Food Log', icon: Apple },
     { id: 'workout' as FitnessView, label: 'Workouts', icon: Dumbbell },
     { id: 'notes' as FitnessView, label: 'Notes', icon: FileText },
-    { id: 'voice' as FitnessView, label: 'Voice', icon: Mic },
   ]
 
   return (
@@ -88,7 +84,6 @@ export default function FitnessSection() {
       {/* Content */}
       <div className="flex-1 overflow-auto">
         {currentView === 'dashboard' && <FitnessDashboard key={dashboardKey} />}
-        {currentView === 'chat' && <FitnessChat />}
         {currentView === 'templates' && (
           <div className="h-full flex flex-col">
             <div className="flex gap-2 p-4 border-b border-gray-700 bg-gray-800">
@@ -127,7 +122,6 @@ export default function FitnessSection() {
         {currentView === 'food' && <FoodLog />}
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}
-        {currentView === 'voice' && <FitnessVoice />}
       </div>
     </div>
   )
