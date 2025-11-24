@@ -10,8 +10,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision = '009_migrate_episode_embedding_to_vector'
-down_revision = '008_create_daily_briefings_table'
+revision = '009_episode_vector'
+down_revision = '008_daily_briefings'
 branch_labels = None
 depends_on = None
 

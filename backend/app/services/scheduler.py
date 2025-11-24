@@ -55,7 +55,20 @@ class SchedulerService:
             name="Weekly Memory Compaction",
             replace_existing=True
         )
-        
+
+        # Rating consolidation at 2:30 AM daily (after memory compaction at 2:10 AM)
+        self.scheduler.add_job(
+            func=self.rating_consolidation,
+            trigger=CronTrigger(
+                hour=2,
+                minute=30,
+                timezone=settings.timezone
+            ),
+            id="rating_consolidation",
+            name="Rating Consolidation Job",
+            replace_existing=True
+        )
+
         # Check reminders and timers every minute
         self.scheduler.add_job(
             func=self.check_reminders_and_timers,
@@ -308,7 +321,33 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"Failed to create weekly summary for user {user_id}: {e}")
             db.rollback()
-    
+
+    async def rating_consolidation(self):
+        """Run nightly rating consolidation job"""
+        logger.info("Starting nightly rating consolidation")
+
+        db = SessionLocal()
+        try:
+            from app.services.rating_consolidation_job import run_rating_consolidation_job
+            from app.services.neo4j_service import Neo4jService
+
+            # Initialize Neo4j service (optional)
+            neo4j_service = None
+            try:
+                neo4j_service = Neo4jService()
+            except Exception as e:
+                logger.warning(f"Neo4j service not available for rating sync: {e}")
+
+            # Run consolidation
+            results = await run_rating_consolidation_job(db, neo4j_service)
+
+            logger.info(f"Rating consolidation completed: {results}")
+
+        except Exception as e:
+            logger.error(f"Rating consolidation job failed: {e}", exc_info=True)
+        finally:
+            db.close()
+
     async def check_reminders_and_timers(self):
         """Check for due reminders and expired timers"""
         

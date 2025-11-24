@@ -1523,3 +1523,21 @@ WHERE reminder.user_id = %(user_id_1)s::UUID AND reminder.due_at <= %(due_at_1)s
 2025-11-23 06:30:07,098 - __main__ - INFO - 📁 Archived 2 old daily brief items
 2025-11-23 06:30:07,098 - __main__ - INFO - 🎉 Daily brief generation completed successfully
 2025-11-23 06:30:07,098 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-24 06:30:01,540 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-24 06:30:01,540 - __main__ - INFO - === Starting Daily Brief Generation ===
+2025-11-24 06:30:03,063 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-24 06:30:03,063 - app.services.solo_mode_service - INFO - Solo mode: enabled
+2025-11-24 06:30:03,063 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-24 06:30:03,063 - app.services.solo_mode_service - INFO - Solo user ID: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2025-11-24 06:30:03,064 - __main__ - INFO - Generating daily brief for November 24, 2025
+2025-11-24 06:30:03,064 - __main__ - INFO - Generating daily brief for November 24, 2025
+2025-11-24 06:30:03,234 - app.services.jarvis_inbox_service - INFO - Created inbox item: 43032cba-6b9d-44e1-ac7f-b549018b3f06 - 🌅 Daily Brief - November 24
+2025-11-24 06:30:03,234 - app.services.jarvis_inbox_service - INFO - Created inbox item: 43032cba-6b9d-44e1-ac7f-b549018b3f06 - 🌅 Daily Brief - November 24
+2025-11-24 06:30:03,234 - __main__ - INFO - ✅ Created daily brief inbox item: 43032cba-6b9d-44e1-ac7f-b549018b3f06
+2025-11-24 06:30:03,234 - __main__ - INFO - ✅ Created daily brief inbox item: 43032cba-6b9d-44e1-ac7f-b549018b3f06
+2025-11-24 06:30:03,234 - __main__ - INFO -    Title: 🌅 Daily Brief - November 24
+2025-11-24 06:30:03,234 - __main__ - INFO -    Title: 🌅 Daily Brief - November 24
+2025-11-24 06:30:03,235 - __main__ - INFO -    Priority: 8
+2025-11-24 06:30:03,235 - __main__ - INFO -    Priority: 8
+2025-11-24 06:30:03,240 - __main__ - INFO - 🎉 Daily brief generation completed successfully
+2025-11-24 06:30:03,240 - __main__ - INFO - 🎉 Daily brief generation completed successfully

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -323,7 +323,23 @@ class Episode(Base):
     
     # Vector embedding for similarity search
     embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    
+
+    # Rating system columns (pre-computed for fast retrieval)
+    rating_boost = Column(Float, default=0.0)  # Pre-computed Wilson score + temporal decay
+    exploration_bonus = Column(Float, default=0.0)  # Thompson Sampling bonus for cold-start
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
+
+class EpisodeRating(Base):
+    """Episode rating system for user feedback and memory quality scoring"""
+    __tablename__ = "episode_rating"
+    episode_id = Column(String, ForeignKey('episode.id', ondelete='CASCADE'), primary_key=True)
+    user_rating = Column(Integer, nullable=True)  # 1-5 star rating from user
+    rating_count = Column(Integer, default=0)  # Number of ratings (for multi-user future)
+    average_rating = Column(Float, default=0.0)  # Average rating (for multi-user future)
+    rating_sum = Column(Integer, default=0)  # Sum of all ratings for Wilson score
+    last_rated = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
@@ -4206,12 +4222,16 @@ class ContextWindowManager:
                         e.source,
                         e.created_at,
                         e.embedding,
+                        e.rating_boost,
+                        e.exploration_bonus,
                         1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
-                        -- Composite score: semantic + recency + importance
+                        -- Enhanced composite score with rating boost and exploration bonus
                         (
-                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.5 +  -- Semantic weight
-                            (1.0 - LEAST(EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (30 * 86400), 1.0)) * 0.3 +  -- Recency (30 day decay)
-                            COALESCE(e.importance, 0.5) * 0.2  -- Importance weight
+                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.40 +  -- Semantic similarity (40%)
+                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (7 * 86400)) * 0.20 +  -- Recency with exponential decay (20%)
+                            COALESCE(e.importance, 0.5) * 0.20 +  -- AI-scored importance (20%)
+                            COALESCE(e.rating_boost, 0.0) * 0.15 +  -- Rating boost (Wilson + decay) (15%)
+                            COALESCE(e.exploration_bonus, 0.0) * 0.05  -- Thompson Sampling exploration (5%)
                         ) as composite_score
                     FROM episode e
                     WHERE e.user_id = :user_id
@@ -7695,6 +7715,173 @@ async def search_episodes(
     except Exception as e:
         logger.error(f"Error searching episodes: {e}")
         raise HTTPException(status_code=500, detail="Failed to search episodes")
+
+# Episode Rating endpoints
+@app.post("/api/episodes/{episode_id}/rate")
+async def rate_episode(
+    episode_id: str,
+    rating_data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Rate an episode (1-5 stars)"""
+    try:
+        from app.services.rating_service import get_rating_service
+        from app.services.rating_events import get_rating_publisher
+
+        rating = rating_data.get("rating")
+        if not rating or not (1 <= rating <= 5):
+            raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+
+        # Get rating service
+        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
+
+        # Rate the episode
+        result = await rating_service.rate_episode(
+            episode_id=episode_id,
+            user_id=current_user.id,
+            rating=rating
+        )
+
+        # Publish event for real-time updates
+        publisher = get_rating_publisher(redis_url=config.settings.redis_url)
+        await publisher.publish_episode_rated(
+            episode_id=episode_id,
+            user_id=current_user.id,
+            rating=rating,
+            net_score=result["rating_sum"],
+            rating_count=result["rating_count"],
+            average_rating=result["average_rating"]
+        )
+
+        return {
+            "success": True,
+            "message": "Episode rated successfully",
+            "rating": result
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error rating episode {episode_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to rate episode")
+
+@app.get("/api/episodes/{episode_id}/rating")
+async def get_episode_rating(
+    episode_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get rating data for an episode"""
+    try:
+        from app.services.rating_service import get_rating_service
+
+        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
+        rating_data = await rating_service.get_episode_rating(episode_id)
+
+        if not rating_data:
+            return {"rated": False}
+
+        # Also get user's specific rating
+        user_rating = await rating_service.get_user_rating(current_user.id, episode_id)
+        rating_data["user_rating"] = user_rating
+        rating_data["rated"] = True
+
+        return rating_data
+
+    except Exception as e:
+        logger.error(f"Error getting rating for episode {episode_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get episode rating")
+
+@app.delete("/api/episodes/{episode_id}/rating")
+async def delete_episode_rating(
+    episode_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete user's rating for an episode"""
+    try:
+        from app.services.rating_service import get_rating_service
+
+        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
+        success = await rating_service.delete_rating(episode_id, current_user.id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Rating not found")
+
+        return {
+            "success": True,
+            "message": "Rating deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting rating for episode {episode_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete rating")
+
+@app.get("/api/rating/stats")
+async def get_rating_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get rating system statistics"""
+    try:
+        from app.services.rating_service import get_rating_service
+
+        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
+        stats = await rating_service.get_rating_stats()
+
+        return stats
+
+    except Exception as e:
+        logger.error(f"Error getting rating stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get rating stats")
+
+@app.post("/api/episodes/find-by-content")
+async def find_episodes_by_content(
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Find episode IDs by conversation_id and content (for rating UI)"""
+    try:
+        conversation_id = request.get("conversation_id")
+        messages = request.get("messages", [])  # [{role, content}]
+
+        if not conversation_id or not messages:
+            return {"episodes": []}
+
+        # Find episodes matching the conversation and content
+        result_episodes = []
+        for msg in messages:
+            episode = db.query(Episode).filter(
+                Episode.conversation_id == conversation_id,
+                Episode.user_id == current_user.id,
+                Episode.role == msg["role"],
+                Episode.content == msg["content"]
+            ).first()
+
+            if episode:
+                result_episodes.append({
+                    "role": episode.role,
+                    "content": episode.content[:100],  # Preview
+                    "episode_id": episode.id
+                })
+            else:
+                result_episodes.append({
+                    "role": msg["role"],
+                    "content": msg["content"][:100],
+                    "episode_id": None
+                })
+
+        return {"episodes": result_episodes}
+
+    except Exception as e:
+        logger.error(f"Error finding episodes by content: {e}")
+        raise HTTPException(status_code=500, detail="Failed to find episodes")
 
 # Folder endpoints
 @app.get("/folders", response_model=list[FolderResponse])

@@ -201,7 +201,37 @@ class Neo4jService:
             )
             record = result.single()
             return dict(record["e"]) if record else None
-    
+
+    async def update_episode_rating(
+        self,
+        episode_id: str,
+        user_rating: Optional[int] = None,
+        rating_count: int = 0,
+        average_rating: float = 0.0,
+        rating_sum: int = 0
+    ) -> bool:
+        """Update rating properties on an Episode node"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (e:Episode {id: $episode_id})
+            SET e.user_rating = $user_rating,
+                e.rating_count = $rating_count,
+                e.average_rating = $average_rating,
+                e.rating_sum = $rating_sum,
+                e.rating_updated_at = datetime()
+            RETURN e
+            """
+            result = session.run(
+                query,
+                episode_id=episode_id,
+                user_rating=user_rating,
+                rating_count=rating_count,
+                average_rating=average_rating,
+                rating_sum=rating_sum
+            )
+            record = result.single()
+            return record is not None
+
     async def create_document(
         self,
         doc_id: str,
