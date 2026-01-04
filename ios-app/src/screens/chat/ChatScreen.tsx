@@ -273,18 +273,27 @@ export default function ChatScreen({ navigation, route }: Props) {
   useEffect(() => {
     if (isStreaming || isLoadingHistory) return;
 
-    // Process health alert
+    // Process health alert - show as Sara's message (she detected the issue)
     if (pendingHealthAlertRef.current) {
       const healthAlert = pendingHealthAlertRef.current;
       pendingHealthAlertRef.current = null;
 
       setTimeout(() => {
-        const alertMessage = healthAlert.body
-          ? `You just sent me a health alert: "${healthAlert.title}". ${healthAlert.body} - Can you explain what you noticed and what I should do about it?`
-          : `You just notified me about a health alert: "${healthAlert.title || 'health concern'}". Can you tell me more about what you noticed?`;
+        // Build Sara's alert message
+        const alertContent = healthAlert.body
+          ? `🏥 **Health Alert: ${healthAlert.title}**\n\n${healthAlert.body}\n\nLet me know if you'd like me to explain more or suggest what to do.`
+          : `🏥 **Health Alert: ${healthAlert.title || 'I noticed something'}**\n\nI detected some changes in your health metrics that I wanted to bring to your attention. Would you like me to explain what I noticed?`;
 
-        console.log('[Chat] Sending health alert message:', alertMessage);
-        handleSendMessage(alertMessage);
+        // Add as Sara's message (assistant role)
+        const saraMessage: Message = {
+          id: `sara-alert-${Date.now()}`,
+          role: 'assistant',
+          content: alertContent,
+          created_at: new Date().toISOString(),
+        };
+
+        console.log('[Chat] Adding health alert as Sara message');
+        setMessages((prev) => [...prev, saraMessage]);
       }, 300);
       return;
     }

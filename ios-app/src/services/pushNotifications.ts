@@ -114,19 +114,20 @@ class PushNotificationService {
       if (token) {
         this.expoPushToken = token;
 
-        // Send token to backend
-        await this.sendTokenToBackend(token);
-
-        // Set up notification listeners
-        this.setupNotificationListeners();
-
-        // Check if app was launched from a notification
+        // Check if app was launched from a notification BEFORE setting up listeners
+        // This prevents a race condition where the listener fires before we capture the pending response
         const lastResponse = await Notifications.getLastNotificationResponseAsync();
         if (lastResponse) {
           console.log('[PushNotifications] App launched from notification:', lastResponse);
           // Store it - will be processed when callbacks are ready
           this.pendingNotificationResponse = lastResponse;
         }
+
+        // Send token to backend
+        await this.sendTokenToBackend(token);
+
+        // Set up notification listeners (after capturing pending response)
+        this.setupNotificationListeners();
       }
 
       return token;
@@ -304,6 +305,15 @@ class PushNotificationService {
             data.title,
             data.body
           );
+        } else {
+          // Callback not ready yet - store for later processing
+          console.log('[PushNotifications] Health alert callback not ready, storing for later');
+          this.pendingHealthAlertData = {
+            severity: data.severity || 'warning',
+            insightId: data.insight_id,
+            title: data.title,
+            body: data.body,
+          };
         }
         break;
       case 'subconscious_nudge':
@@ -341,6 +351,8 @@ class PushNotificationService {
   private onBackgroundTaskComplete: ((taskId: string, noteId?: string) => void) | null = null;
   private onAgentClarificationNeeded: ((taskId: string) => void) | null = null;
   private onHealthAlertTapped: ((severity: string, insightId?: string, title?: string, body?: string) => void) | null = null;
+  // Pending health alert data (stored if callback wasn't ready when notification was tapped)
+  private pendingHealthAlertData: { severity: string; insightId?: string; title?: string; body?: string } | null = null;
   // Callback for subconscious nudges (meal reminders, morning check-ins, etc.)
   private onNudgeTapped: ((nudgeType: string, title: string, message: string, actionSuggestion?: string) => void) | null = null;
   // Callback for quick reply from notification
@@ -373,6 +385,17 @@ class PushNotificationService {
     callback: (severity: string, insightId?: string, title?: string, body?: string) => void
   ): void {
     this.onHealthAlertTapped = callback;
+
+    // Process any pending health alert that was stored before callback was ready
+    if (this.pendingHealthAlertData) {
+      console.log('[PushNotifications] Processing pending health alert data');
+      const { severity, insightId, title, body } = this.pendingHealthAlertData;
+      this.pendingHealthAlertData = null;
+      // Call asynchronously to avoid blocking
+      setTimeout(() => {
+        callback(severity, insightId, title, body);
+      }, 100);
+    }
   }
 
   /**

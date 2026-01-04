@@ -49,18 +49,21 @@ export function navigate(name: string, params?: object) {
  */
 export function navigateToTab(tabName: string, params?: object) {
   if (navigationRef.isReady()) {
-    navigationRef.dispatch(
-      CommonActions.navigate({
-        name: 'Main',
+    try {
+      // Navigate through the nested structure: Main -> MainTabs -> tabName
+      // @ts-ignore
+      navigationRef.navigate('Main', {
+        screen: 'MainTabs',
         params: {
           screen: tabName,
           params: params,
         },
-      })
-    );
+      });
+    } catch (error) {
+      console.error('[Navigation] Error navigating to', tabName, error);
+    }
   } else {
-    // Queue the navigation for when navigator is ready
-    console.log('[Navigation] Navigator not ready, queueing tab navigation to:', tabName);
+    console.log('[Navigation] Navigator not ready, queueing navigation to:', tabName);
     pendingNavigation = { tabName, params };
   }
 }

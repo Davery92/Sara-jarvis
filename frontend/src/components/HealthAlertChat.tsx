@@ -27,7 +27,7 @@ export const HealthAlertChat: React.FC<HealthAlertChatProps> = ({ alert, onClose
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingContent, setStreamingContent] = useState('')
   const [isMinimized, setIsMinimized] = useState(false)
-  const [hasStarted, setHasStarted] = useState(false)
+  const hasStartedRef = useRef(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -44,9 +44,10 @@ export const HealthAlertChat: React.FC<HealthAlertChatProps> = ({ alert, onClose
   }, [isMinimized])
 
   // Auto-start conversation when component mounts
+  // Using ref instead of state to prevent double-execution in React 18 StrictMode
   useEffect(() => {
-    if (!hasStarted) {
-      setHasStarted(true)
+    if (!hasStartedRef.current) {
+      hasStartedRef.current = true
       startConversation()
     }
   }, [])

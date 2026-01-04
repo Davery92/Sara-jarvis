@@ -126,7 +126,7 @@ class HealthWatchdog:
 
             # 7. Send push notification if warning/urgent
             if insight['severity'] in [SEVERITY_WARNING, SEVERITY_URGENT]:
-                await self._send_push_notification(db, user_id, insight)
+                await self._send_push_notification(db, user_id, insight, insight_id)
 
     async def _update_baselines(self, db: Session, user_id: str):
         """Update 7-day and 30-day rolling baselines for each metric type."""
@@ -626,7 +626,7 @@ Format your response as JSON:
             "insight_id": insight_id,
         })
 
-    async def _send_push_notification(self, db: Session, user_id: str, insight: Dict[str, Any]):
+    async def _send_push_notification(self, db: Session, user_id: str, insight: Dict[str, Any], insight_id: str):
         """Send iOS push notification via Expo Push Service."""
         # Get user's push tokens from push_token table
         tokens_result = db.execute(text("""
@@ -638,9 +638,12 @@ Format your response as JSON:
             logger.debug(f"No active push tokens for user {user_id}")
             return
 
-        # Build notification
+        # Build notification - clean content for mobile display
         title = f"⚠️ {insight['title']}" if insight['severity'] == SEVERITY_URGENT else f"📊 {insight['title']}"
-        body = insight['content'][:200]  # Truncate for notification
+        # Clean the body: remove emoji, strip excessive whitespace
+        body_text = insight['content'][:200]
+        body_text = body_text.replace('\n\n💡 ', '\n').replace('💡 ', '')  # Clean up recommendation prefix
+        body = body_text.strip()
 
         # Send to all active tokens
         messages = []
@@ -660,7 +663,7 @@ Format your response as JSON:
                 "data": {
                     "type": "health_alert",
                     "severity": insight['severity'],
-                    "insight_id": insight.get('id'),
+                    "insight_id": insight_id,
                     "title": insight['title'],
                     "body": insight['content'],
                 },

@@ -41,9 +41,13 @@ export const AuthenticatedOverlays: React.FC = () => {
           // Set up health alert tap handler - navigate to chat so Sara can explain
           pushNotificationService.setOnHealthAlertTapped((severity, insightId, title, body) => {
             console.log('[AuthenticatedOverlays] Health alert tapped, navigating to chat');
-            navigateToChat({
-              healthAlert: { severity, insightId, title, body }
-            });
+            // Delay navigation slightly to allow app initialization to complete
+            setTimeout(() => {
+              console.log('[AuthenticatedOverlays] Executing delayed navigation to chat');
+              navigateToChat({
+                healthAlert: { severity, insightId, title, body }
+              });
+            }, 500);
           });
 
           // Set up nudge tap handler - navigate to chat with Sara's message in context
