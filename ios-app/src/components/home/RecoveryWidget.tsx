@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { fitnessService, RecoveryLog } from '../../services/fitness';
+import { getLocalDateString, formatSleepHours } from '../../utils/dateUtils';
 
 export default function RecoveryWidget() {
   const [recovery, setRecovery] = useState<RecoveryLog | null>(null);
@@ -15,7 +16,7 @@ export default function RecoveryWidget() {
     try {
       setLoading(true);
       const logs = await fitnessService.getRecoveryLogs();
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       // Find today's log
       const todayLog = logs.find((log) => log.log_date === today);
       setRecovery(todayLog || null);
@@ -53,7 +54,7 @@ export default function RecoveryWidget() {
             {recovery.sleep_hours !== null && recovery.sleep_hours !== undefined && (
               <View style={styles.metric}>
                 <Text style={styles.metricLabel}>Sleep</Text>
-                <Text style={styles.metricValue}>{recovery.sleep_hours}h</Text>
+                <Text style={styles.metricValue}>{formatSleepHours(recovery.sleep_hours)}</Text>
               </View>
             )}
             {recovery.hrv !== null && recovery.hrv !== undefined && (

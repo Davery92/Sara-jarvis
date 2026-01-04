@@ -40,21 +40,18 @@ npm run preview    # Preview production build
 ```
 
 ### Backend (FastAPI + Python)
-```bash
-# Running locally (current setup)
-cd backend
-export DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-export OPENAI_BASE_URL=http://100.104.68.115:11434/v1
-export OPENAI_MODEL=gpt-oss:120b
-export OPENAI_API_KEY=dummy
-export EMBEDDING_BASE_URL=http://100.104.68.115:11434
-export EMBEDDING_MODEL=bge-m3
-export EMBEDDING_DIM=1024
-export ASSISTANT_NAME=Sara
-python3 app/main_simple.py
+**IMPORTANT: NEVER start the backend locally. Always use Docker Compose.**
 
-# Running in Docker (production)
-docker compose up -d backend       # Requires fixing large dependencies
+```bash
+# Start backend in Docker (ALWAYS use this method)
+docker compose -f docker-compose.dev.yml up -d backend
+
+# View backend logs
+docker compose -f docker-compose.dev.yml logs -f backend
+
+# Rebuild backend after code changes
+docker compose -f docker-compose.dev.yml build backend
+docker compose -f docker-compose.dev.yml up -d backend
 ```
 
 ### Database Operations
@@ -121,11 +118,11 @@ docker compose ps
   - Port: `0.0.0.0:3000`
   - Volume mounted: Live code reloading
   - Command: Vite dev server with hot module replacement
-  
-- **Backend**: Currently runs locally for development
+
+- **Backend (`jarvis-backend-1`)**: FastAPI server (ALWAYS run in Docker)
+  - Use `docker compose -f docker-compose.dev.yml up -d backend`
+  - Port: `0.0.0.0:8000`
   - Connects to containerized databases
-  - Access: `http://10.185.1.180:8000`
-  - Environment: Full Python dependencies available locally
 
 #### Container Networking
 - All containers use the `jarvis_default` Docker network
@@ -134,9 +131,9 @@ docker compose ps
 
 #### Development Workflow
 1. **Data services** run in Docker containers for consistency
-2. **Frontend** runs in Docker with live reloading for rapid development  
-3. **Backend** runs locally for easier debugging and dependency management
-4. **Hot reloading** enabled for both frontend and backend development
+2. **Frontend** runs in Docker with live reloading for rapid development
+3. **Backend** MUST run in Docker via `docker compose -f docker-compose.dev.yml up -d backend`
+4. **Hot reloading** enabled for frontend; rebuild backend container after code changes
 
 ### Key Components
 
@@ -262,37 +259,6 @@ Tools are registered in `app/tools/registry.py`:
 - `docker-compose.yml`: Complete service orchestration
 - `frontend/src/config.ts`: Dynamic API URL configuration
 
-### Vulnerability Watch System
-New defensive security monitoring feature for vulnerability intelligence:
-
-#### Features
-- **Daily Reports**: Automated 5am generation of vulnerability intelligence reports
-- **Multi-Source Intelligence**: MSRC, CISA KEV, NVD, Project Zero, Exploit-DB
-- **Priority Scoring**: Known exploited (KEV) and critical vulnerabilities highlighted
-- **NTFY Notifications**: Report ready alerts and critical vulnerability notifications
-- **Knowledge Integration**: Reports processed into Sara's Neo4j knowledge graph
-- **Mobile Responsive**: Clean UI with sidebar navigation and markdown rendering
-
-#### Database Tables
-- `vulnerability_report`: Daily reports with metadata and markdown content
-- `notification_log`: NTFY notification tracking for debugging
-
-#### API Endpoints
-- `GET /api/vulnerability-reports`: List all reports
-- `GET /api/vulnerability-reports/{id}`: Get specific report content
-- `POST /api/vulnerability-reports/generate`: Manual report generation
-- `POST /api/notifications/ntfy`: Send test notifications
-
-#### Daily Automation
-- **Cron Job**: `/home/david/jarvis/scripts/generate_daily_vulnerability_report.py`
-- **Schedule**: Daily at 5:00 AM via crontab
-- **Logs**: `/home/david/jarvis/logs/vulnerability_reports.log`
-
-#### Frontend Components
-- `frontend/src/components/VulnerabilityWatch.tsx`: Main vulnerability watch interface
-- **Navigation**: "Vulns" button in sidebar with security icon
-- **Layout**: Left sidebar (reports list) + right panel (markdown viewer)
-
 ### Environment Variables
 Key variables for development:
 - `DATABASE_URL`: PostgreSQL connection string
@@ -301,17 +267,11 @@ Key variables for development:
 - `EMBEDDING_MODEL`: Embedding model (bge-m3)
 - `ASSISTANT_NAME`: Branding (Sara)
 - `DOMAIN`: Target domain (sara.avery.cloud)
-- `NTFY_VULNERABILITY_TOPIC`: NTFY topic for vulnerability notifications
 
-### Sara's Autonomous Personality System
-Sara features a complete autonomous personality system with living sprite animations, contextual intelligence, and memory-enhanced insights. See detailed documentation:
-
-- **[Sara Autonomous System Documentation](docs/SARA_AUTONOMOUS_SYSTEM.md)**: Complete technical documentation
-- **[Sara User Guide](docs/SARA_USER_GUIDE.md)**: Quick reference for users
+### Sara's Autonomous Insight System
+Sara includes an autonomous insight system that analyzes conversation patterns and generates contextual suggestions:
 
 **Key Features:**
-- **Living Sprite**: Breathing animations with 6 distinct personality modes
-- **Contextual Intelligence**: Memory-enhanced insights from conversation patterns  
+- **Contextual Intelligence**: Memory-enhanced insights from conversation patterns
 - **Smart Notifications**: Respectful, duplicate-free notifications
-- **Activity Monitoring**: Idle detection triggers contextual assistance
-- **User Controls**: Comprehensive settings and feedback mechanisms
+- **Background Sweeps**: Periodic analysis of habits, calendar, and patterns

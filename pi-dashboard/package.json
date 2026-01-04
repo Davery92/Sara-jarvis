@@ -1,0 +1,21 @@
+{
+  "name": "pi-dashboard",
+  "version": "1.0.0",
+  "description": "Sara's Pi Dashboard - Voice-controlled brain dump interface",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "serve -s dist -l 3001"
+  },
+  "dependencies": {
+    "marked": "^17.0.1",
+    "preact": "^10.19.3"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.8.2",
+    "serve": "^14.2.1",
+    "vite": "^5.0.10"
+  }
+}

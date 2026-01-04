@@ -1,483 +1,333 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, or_
-from pydantic import BaseModel
-from typing import List, Optional
-from uuid import UUID
+"""Reminders and timers routes."""
+import logging
 from datetime import datetime, timezone
-from app.core.deps import get_current_user
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List
+
 from app.db.session import get_db
 from app.models.user import User
 from app.models.reminder import Reminder, Timer
-import logging
+from app.schemas.reminders import (
+    ReminderCreate, ReminderUpdate, ReminderResponse,
+    TimerCreate, TimerResponse
+)
+from app.core.deps import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Reminders"])
 
 
-class ReminderCreate(BaseModel):
-    text: str
-    due_at: datetime
-
-
-class ReminderUpdate(BaseModel):
-    text: Optional[str] = None
-    due_at: Optional[datetime] = None
-    status: Optional[str] = None
-
-
-class ReminderResponse(BaseModel):
-    id: str
-    text: str
-    due_at: str
-    status: str
-    created_at: str
-
-
-class TimerCreate(BaseModel):
-    label: Optional[str] = None
-    ends_at: datetime
-
-
-class TimerUpdate(BaseModel):
-    label: Optional[str] = None
-    status: Optional[str] = None
-
-
-class TimerResponse(BaseModel):
-    id: str
-    label: Optional[str]
-    ends_at: str
-    status: str
-    created_at: str
-
-
-class RemindersListResponse(BaseModel):
-    reminders: List[ReminderResponse]
-    total: int
-    page: int
-    per_page: int
-
-
-class TimersListResponse(BaseModel):
-    timers: List[TimerResponse]
-    total: int
-    page: int
-    per_page: int
-
-
-# Reminder endpoints
-@router.get("/", response_model=RemindersListResponse)
+@router.get("/reminders", response_model=List[ReminderResponse])
 async def list_reminders(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None),
-    upcoming: bool = Query(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List user's reminders with pagination and filtering"""
-    
-    try:
-        query = db.query(Reminder).filter(Reminder.user_id == current_user.id)
-        
-        # Apply status filter
-        if status:
-            query = query.filter(Reminder.status == status)
-        
-        # Apply upcoming filter (due within next 7 days)
-        if upcoming:
-            from datetime import timedelta
-            upcoming_threshold = datetime.now(timezone.utc) + timedelta(days=7)
-            query = query.filter(
-                and_(
-                    Reminder.due_at <= upcoming_threshold,
-                    Reminder.status == "scheduled"
-                )
-            )
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        offset = (page - 1) * per_page
-        reminders = query.order_by(Reminder.due_at).offset(offset).limit(per_page).all()
-        
-        reminder_responses = [
-            ReminderResponse(
-                id=str(reminder.id),
-                text=reminder.text,
-                due_at=reminder.due_at.isoformat(),
-                status=reminder.status,
-                created_at=reminder.created_at.isoformat()
-            )
-            for reminder in reminders
-        ]
-        
-        return RemindersListResponse(
-            reminders=reminder_responses,
-            total=total,
-            page=page,
-            per_page=per_page
+    """List all active reminders for the current user."""
+    reminders = db.query(Reminder).filter(
+        Reminder.user_id == current_user.id,
+        Reminder.is_completed == False
+    ).order_by(Reminder.reminder_time).limit(20).all()
+
+    return [
+        ReminderResponse(
+            id=reminder.id,
+            title=reminder.title,
+            description=reminder.description,
+            reminder_time=reminder.reminder_time.isoformat(),
+            is_completed=reminder.is_completed == "true" if isinstance(reminder.is_completed, str) else bool(reminder.is_completed),
+            created_at=reminder.created_at.isoformat(),
+            updated_at=reminder.updated_at.isoformat()
         )
-        
-    except Exception as e:
-        logger.error(f"Failed to list reminders: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve reminders")
+        for reminder in reminders
+    ]
 
 
-@router.post("/", response_model=ReminderResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/reminders", response_model=ReminderResponse)
 async def create_reminder(
     reminder_data: ReminderCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a new reminder"""
-    
-    try:
-        # Ensure due_at is timezone-aware
-        if reminder_data.due_at.tzinfo is None:
-            reminder_data.due_at = reminder_data.due_at.replace(tzinfo=timezone.utc)
-        
-        reminder = Reminder(
-            user_id=current_user.id,
-            text=reminder_data.text,
-            due_at=reminder_data.due_at,
-            status="scheduled"
-        )
-        
-        db.add(reminder)
-        db.commit()
-        db.refresh(reminder)
-        
-        return ReminderResponse(
-            id=str(reminder.id),
-            text=reminder.text,
-            due_at=reminder.due_at.isoformat(),
-            status=reminder.status,
-            created_at=reminder.created_at.isoformat()
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to create reminder: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to create reminder")
+    """Create a new reminder."""
+    reminder_dt = datetime.fromisoformat(reminder_data.reminder_time.replace('Z', '+00:00'))
+
+    reminder = Reminder(
+        user_id=current_user.id,
+        title=reminder_data.title,
+        description=reminder_data.description,
+        reminder_time=reminder_dt
+    )
+    db.add(reminder)
+    db.commit()
+    db.refresh(reminder)
+
+    return ReminderResponse(
+        id=reminder.id,
+        title=reminder.title,
+        description=reminder.description,
+        reminder_time=reminder.reminder_time.isoformat(),
+        is_completed=reminder.is_completed == "true" if isinstance(reminder.is_completed, str) else bool(reminder.is_completed),
+        created_at=reminder.created_at.isoformat(),
+        updated_at=reminder.updated_at.isoformat()
+    )
 
 
-@router.get("/{reminder_id}", response_model=ReminderResponse)
-async def get_reminder(
-    reminder_id: UUID,
+@router.put("/reminders/{reminder_id}", response_model=ReminderResponse)
+async def update_reminder(
+    reminder_id: str,
+    reminder_data: ReminderUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get a specific reminder"""
-    
+    """Update a reminder."""
     reminder = db.query(Reminder).filter(
         Reminder.id == reminder_id,
         Reminder.user_id == current_user.id
     ).first()
-    
+
     if not reminder:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Reminder not found"
-        )
-    
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    if reminder_data.title is not None:
+        reminder.title = reminder_data.title
+    if reminder_data.description is not None:
+        reminder.description = reminder_data.description
+    if reminder_data.reminder_time is not None:
+        reminder.reminder_time = datetime.fromisoformat(reminder_data.reminder_time.replace('Z', '+00:00'))
+    if reminder_data.is_completed is not None:
+        reminder.is_completed = reminder_data.is_completed
+
+    reminder.updated_at = datetime.now()
+    db.commit()
+    db.refresh(reminder)
+
     return ReminderResponse(
-        id=str(reminder.id),
-        text=reminder.text,
-        due_at=reminder.due_at.isoformat(),
-        status=reminder.status,
-        created_at=reminder.created_at.isoformat()
+        id=reminder.id,
+        title=reminder.title,
+        description=reminder.description,
+        reminder_time=reminder.reminder_time.isoformat(),
+        is_completed=reminder.is_completed == "true" if isinstance(reminder.is_completed, str) else bool(reminder.is_completed),
+        created_at=reminder.created_at.isoformat(),
+        updated_at=reminder.updated_at.isoformat()
     )
 
 
-@router.patch("/{reminder_id}", response_model=ReminderResponse)
-async def update_reminder(
-    reminder_id: UUID,
-    reminder_update: ReminderUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update a reminder"""
-    
-    try:
-        reminder = db.query(Reminder).filter(
-            Reminder.id == reminder_id,
-            Reminder.user_id == current_user.id
-        ).first()
-        
-        if not reminder:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Reminder not found"
-            )
-        
-        # Update fields
-        if reminder_update.text is not None:
-            reminder.text = reminder_update.text
-            
-        if reminder_update.due_at is not None:
-            # Ensure timezone-aware
-            if reminder_update.due_at.tzinfo is None:
-                reminder_update.due_at = reminder_update.due_at.replace(tzinfo=timezone.utc)
-            reminder.due_at = reminder_update.due_at
-            
-        if reminder_update.status is not None:
-            if reminder_update.status not in ["scheduled", "completed", "cancelled"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid status. Must be 'scheduled', 'completed', or 'cancelled'"
-                )
-            reminder.status = reminder_update.status
-        
-        db.commit()
-        db.refresh(reminder)
-        
-        return ReminderResponse(
-            id=str(reminder.id),
-            text=reminder.text,
-            due_at=reminder.due_at.isoformat(),
-            status=reminder.status,
-            created_at=reminder.created_at.isoformat()
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update reminder: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update reminder")
-
-
-@router.delete("/{reminder_id}")
+@router.delete("/reminders/{reminder_id}")
 async def delete_reminder(
-    reminder_id: UUID,
+    reminder_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a reminder"""
-    
+    """Delete a reminder."""
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    db.delete(reminder)
+    db.commit()
+
+    return {"message": "Reminder deleted successfully"}
+
+
+@router.patch("/reminders/{reminder_id}/complete")
+async def complete_reminder(
+    reminder_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Mark a reminder as completed."""
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    reminder.is_completed = True
+    reminder.updated_at = datetime.now()
+    db.commit()
+
+    return {"message": f"Marked reminder '{reminder.title}' as completed"}
+
+
+@router.post("/reminders/{reminder_id}/notify")
+async def send_reminder_notification(
+    reminder_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Send NTFY notification for a due reminder."""
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == current_user.id
+    ).first()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
     try:
-        reminder = db.query(Reminder).filter(
-            Reminder.id == reminder_id,
-            Reminder.user_id == current_user.id
-        ).first()
-        
-        if not reminder:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Reminder not found"
-            )
-        
-        db.delete(reminder)
-        db.commit()
-        
-        return {"message": "Reminder deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete reminder: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete reminder")
+        # Import ntfy_service from main_simple where it's instantiated
+        from app.main_simple import ntfy_service
+        reminder_time = reminder.reminder_time.strftime("%I:%M %p")
+        success = await ntfy_service.send_reminder_notification(
+            reminder.title,
+            reminder_time,
+            reminder_id,
+            reminder.description,
+            current_user.id
+        )
+
+        if success:
+            return {"message": f"Notification sent for reminder '{reminder.title}'"}
+        else:
+            return {"message": f"Failed to send notification for reminder '{reminder.title}'"}
+    except ImportError:
+        logger.warning("NTFY service not available")
+        return {"message": f"Notification service not available for reminder '{reminder.title}'"}
 
 
 # Timer endpoints
-@router.get("/timers/", response_model=TimersListResponse)
+
+@router.get("/timers", response_model=List[TimerResponse])
 async def list_timers(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List user's timers with pagination and filtering"""
-    
-    try:
-        query = db.query(Timer).filter(Timer.user_id == current_user.id)
-        
-        # Apply status filter
-        if status:
-            query = query.filter(Timer.status == status)
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        offset = (page - 1) * per_page
-        timers = query.order_by(desc(Timer.created_at)).offset(offset).limit(per_page).all()
-        
-        timer_responses = [
-            TimerResponse(
-                id=str(timer.id),
-                label=timer.label,
-                ends_at=timer.ends_at.isoformat(),
-                status=timer.status,
-                created_at=timer.created_at.isoformat()
-            )
-            for timer in timers
-        ]
-        
-        return TimersListResponse(
-            timers=timer_responses,
-            total=total,
-            page=page,
-            per_page=per_page
+    """List all active timers for the current user."""
+    timers = db.query(Timer).filter(
+        Timer.user_id == current_user.id,
+        Timer.is_active == True
+    ).order_by(Timer.created_at.desc()).limit(20).all()
+
+    results = [
+        TimerResponse(
+            id=timer.id,
+            title=timer.title,
+            duration_minutes=timer.duration_minutes,
+            start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
+            end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
+            is_active=timer.is_active,
+            is_completed=timer.is_completed == "true",
+            created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
         )
-        
-    except Exception as e:
-        logger.error(f"Failed to list timers: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve timers")
+        for timer in timers
+    ]
+
+    for timer_response in results:
+        logger.info(f"API returning timer: {timer_response.title} - Start: {timer_response.start_time}, End: {timer_response.end_time}, Duration: {timer_response.duration_minutes}m")
+
+    return results
 
 
-@router.post("/timers/", response_model=TimerResponse, status_code=status.HTTP_201_CREATED)
-async def create_timer(
+@router.post("/timers", response_model=TimerResponse)
+async def start_timer(
     timer_data: TimerCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a new timer"""
-    
-    try:
-        # Ensure ends_at is timezone-aware
-        if timer_data.ends_at.tzinfo is None:
-            timer_data.ends_at = timer_data.ends_at.replace(tzinfo=timezone.utc)
-        
-        timer = Timer(
-            user_id=current_user.id,
-            label=timer_data.label,
-            ends_at=timer_data.ends_at,
-            status="running"
-        )
-        
-        db.add(timer)
-        db.commit()
-        db.refresh(timer)
-        
-        return TimerResponse(
-            id=str(timer.id),
-            label=timer.label,
-            ends_at=timer.ends_at.isoformat(),
-            status=timer.status,
-            created_at=timer.created_at.isoformat()
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to create timer: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to create timer")
+    """Start a new timer."""
+    from datetime import timedelta
+
+    logger.info(f"Creating timer: title={timer_data.title}, duration_minutes={timer_data.duration_minutes}, duration_seconds={timer_data.duration_seconds}")
+    start_time = datetime.now(timezone.utc)
+
+    # Support both duration_seconds and duration_minutes for backward compatibility
+    if timer_data.duration_seconds is not None:
+        duration_minutes = timer_data.duration_seconds / 60  # Store as fractional minutes
+        end_time = start_time + timedelta(seconds=timer_data.duration_seconds)
+    elif timer_data.duration_minutes is not None:
+        duration_minutes = timer_data.duration_minutes
+        end_time = start_time + timedelta(minutes=timer_data.duration_minutes)
+    else:
+        raise HTTPException(status_code=400, detail="Must provide either duration_minutes or duration_seconds")
+
+    timer = Timer(
+        user_id=current_user.id,
+        title=timer_data.title,
+        duration_minutes=int(duration_minutes),  # Store as int minutes (legacy field)
+        start_time=start_time,
+        end_time=end_time,
+        is_active=True
+    )
+    db.add(timer)
+    db.commit()
+    db.refresh(timer)
+
+    logger.info(f"Timer created: {timer.id} - {timer.title}, Duration: {timer.duration_minutes}m, Start: {timer.start_time}, End: {timer.end_time}")
+
+    return TimerResponse(
+        id=timer.id,
+        title=timer.title,
+        duration_minutes=timer.duration_minutes,
+        start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
+        end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
+        is_active=timer.is_active,
+        is_completed=timer.is_completed == "true",
+        created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
+    )
 
 
-@router.get("/timers/{timer_id}", response_model=TimerResponse)
-async def get_timer(
-    timer_id: UUID,
+@router.delete("/timers/{timer_id}")
+async def cancel_timer(
+    timer_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get a specific timer"""
-    
+    """Cancel a timer."""
     timer = db.query(Timer).filter(
         Timer.id == timer_id,
         Timer.user_id == current_user.id
     ).first()
-    
+
     if not timer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Timer not found"
-        )
-    
-    return TimerResponse(
-        id=str(timer.id),
-        label=timer.label,
-        ends_at=timer.ends_at.isoformat(),
-        status=timer.status,
-        created_at=timer.created_at.isoformat()
-    )
+        raise HTTPException(status_code=404, detail="Timer not found")
+
+    timer.is_active = False
+    db.commit()
+
+    return {"message": f"Timer '{timer.title}' cancelled"}
 
 
-@router.patch("/timers/{timer_id}", response_model=TimerResponse)
-async def update_timer(
-    timer_id: UUID,
-    timer_update: TimerUpdate,
+@router.patch("/timers/{timer_id}/stop")
+async def stop_timer(
+    timer_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Update a timer"""
-    
-    try:
-        timer = db.query(Timer).filter(
-            Timer.id == timer_id,
-            Timer.user_id == current_user.id
-        ).first()
-        
-        if not timer:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timer not found"
-            )
-        
-        # Update fields
-        if timer_update.label is not None:
-            timer.label = timer_update.label
-            
-        if timer_update.status is not None:
-            if timer_update.status not in ["running", "completed", "cancelled"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid status. Must be 'running', 'completed', or 'cancelled'"
-                )
-            timer.status = timer_update.status
-        
-        db.commit()
-        db.refresh(timer)
-        
-        return TimerResponse(
-            id=str(timer.id),
-            label=timer.label,
-            ends_at=timer.ends_at.isoformat(),
-            status=timer.status,
-            created_at=timer.created_at.isoformat()
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update timer: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update timer")
+    """Stop an active timer."""
+    timer = db.query(Timer).filter(
+        Timer.id == timer_id,
+        Timer.user_id == current_user.id,
+        Timer.is_active == True
+    ).first()
 
+    if not timer:
+        raise HTTPException(status_code=404, detail="Active timer not found")
 
-@router.delete("/timers/{timer_id}")
-async def delete_timer(
-    timer_id: UUID,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a timer"""
-    
+    timer.is_active = False
+    timer.is_completed = True
+    db.commit()
+
+    # Send notification for stopped timer
     try:
-        timer = db.query(Timer).filter(
-            Timer.id == timer_id,
-            Timer.user_id == current_user.id
-        ).first()
-        
-        if not timer:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Timer not found"
-            )
-        
-        db.delete(timer)
-        db.commit()
-        
-        return {"message": "Timer deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete timer: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete timer")
+        from app.main_simple import ntfy_service
+        now = datetime.now(timezone.utc)
+        timer_end_time = timer.end_time
+        if timer_end_time.tzinfo is None:
+            timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
+
+        if timer_end_time > now:
+            # Timer was stopped early, send immediate notification
+            duration_str = f"{timer.duration_minutes}min"
+            await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
+    except ImportError:
+        logger.warning("NTFY service not available for timer notification")
+
+    return {"message": f"Stopped timer '{timer.title}'"}

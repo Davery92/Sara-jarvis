@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -13,9 +13,10 @@ except ImportError:
     PGVECTOR_AVAILABLE = False
     Vector = None
 from pydantic import BaseModel, EmailStr
-from typing import Optional, Dict, Any
-from passlib.context import CryptContext
+from typing import Optional, Dict, Any, List, Union
+# CryptContext imported via app.core.auth.pwd_context
 from datetime import datetime, timedelta, timezone, date
+from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc
 from jose import jwt, JWTError
 import uuid
 import httpx
@@ -32,8 +33,30 @@ from urllib.parse import urlparse
 import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
+from app.services.embedding_service import embedding_service
+from app.services.insight_injection import InsightInjectionService
+from app.services.intent_classifier import get_tool_intent_classifier
+from app.services.body_state_calibration import calibration_service
+from app.services.sara_journal_service import sara_journal
+from app.services.context_router import get_context_router
 from app.core import config
 from app.core.prompt_template import render_prompt_template
+from app.core.auth import (
+    pwd_context,
+    create_access_token,
+    verify_token,
+    get_cookie_domain,
+    verify_password,
+    get_password_hash
+)
+
+# Import Daily Brief system
+try:
+    from app.services.daily_brief import daily_brief_service
+    DAILY_BRIEF_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Daily Brief service not available: {e}")
+    DAILY_BRIEF_AVAILABLE = False
 
 
 # Import GTKY service
@@ -51,6 +74,19 @@ try:
 except ImportError as e:
     logging.warning(f"Reflection service not available: {e}")
     REFLECTION_SERVICE_AVAILABLE = False
+
+# Import chess command handler
+try:
+    from app.services.chess_command_handler import (
+        handle_chess_command,
+        get_chess_mode,
+        is_in_chess_game,
+        get_chess_context_prompt
+    )
+    CHESS_COMMANDS_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Chess command handler not available: {e}")
+    CHESS_COMMANDS_AVAILABLE = False
 
 # Configure logging first
 logging.basicConfig(level=logging.INFO)
@@ -75,8 +111,7 @@ except ImportError:
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
 # IMPORTANT: Always use PostgreSQL, never SQLite
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@db:5432/sara_hub")
-JWT_SECRET = os.getenv("JWT_SECRET", "sara-hub-jwt-secret-development")
-JWT_ALGORITHM = "HS256"
+# JWT settings now in app.core.config.settings
 # CORS configuration for frontend origins
 # Prefer CORS_ORIGINS from environment as a JSON array or comma-separated list
 _cors_env = os.getenv("CORS_ORIGINS", "")
@@ -95,8 +130,11 @@ CORS_ORIGINS = _parsed_env_origins or [
     "https://sara.avery.cloud",
     "http://sara.avery.cloud",
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
     "http://10.185.1.180:3000",
+    "http://10.185.1.180:3001",
     "http://10.185.1.188:3000",
     "http://10.185.1.180",
     "http://10.185.1.188",
@@ -112,13 +150,24 @@ NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
 NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
 NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
 NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
-NTFY_VULNERABILITY_TOPIC = os.getenv("NTFY_VULNERABILITY_TOPIC", "sara")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, custom
+AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, claude, custom
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Separate key for Anthropic Claude API
+
+def is_anthropic_provider() -> bool:
+    """Check if the current provider is Anthropic Claude"""
+    return "api.anthropic.com" in OPENAI_BASE_URL
+
 # Smaller, faster model for notifications (uses same endpoint but different model)
 OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
+
+# Fast model configuration (for Pi dashboard fast worker, etc.)
+# Uses Gemini by default for speed
+FAST_MODEL_URL = os.getenv("FAST_MODEL_URL", os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1"))
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
+FAST_MODEL_API_KEY = os.getenv("FAST_MODEL_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://10.185.1.8:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
@@ -185,6 +234,25 @@ class NoteConnection(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
+class BackgroundTask(Base):
+    """Tracks background agent tasks that run independently of user sessions"""
+    __tablename__ = "background_task"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending")  # pending, running, completed, failed, needs_clarification
+    task_type = Column(String, nullable=False, default="research")  # research, analysis, etc.
+    original_query = Column(Text, nullable=False)  # The user's original request
+    result_note_id = Column(String, nullable=True)  # Link to workspace note with results
+    workspace_folder_id = Column(String, nullable=True)  # Agent workspace folder
+    clarification_question = Column(Text, nullable=True)  # If status is needs_clarification
+    clarification_response = Column(Text, nullable=True)  # User's response to clarification
+    error_message = Column(Text, nullable=True)  # If status is failed
+    task_metadata = Column(JSONB, default={})  # orchestrator state, worker count, progress, etc.
+    created_at = Column(DateTime, server_default=func.now())
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
 class Reminder(Base):
     __tablename__ = "reminder"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -220,6 +288,12 @@ class CalendarEvent(Base):
     all_day = Column(Boolean, default=False)
     reminder_minutes = Column(Integer)
     is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
+    # iOS calendar sync fields
+    source = Column(String, default="sara")  # 'sara' or 'ios_calendar'
+    ios_event_id = Column(String, nullable=True)  # iOS event identifier for deduplication
+    ios_calendar_id = Column(String, nullable=True)  # iOS calendar identifier
+    ios_calendar_name = Column(String, nullable=True)  # Human-readable calendar name
+    read_only = Column(Boolean, default=False)  # iOS synced events are read-only
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
@@ -374,6 +448,7 @@ class DreamInsight(Base):
     title = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     related_episodes = Column(Text, nullable=True)  # JSON list of episode IDs
+    embedding = Column(Vector(1024), nullable=True) if PGVECTOR_AVAILABLE else Column(Text, nullable=True)  # Embedding for semantic search
 
     # User interaction
     surfaced_at = Column(DateTime, nullable=True)  # When shown to user
@@ -584,15 +659,37 @@ class HabitLink(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 class EventOutbox(Base):
-    """Outbox pattern for Neo4j sync"""
+    """Outbox pattern for Neo4j sync - guarantees eventual consistency between Postgres and Neo4j.
+
+    Event Types:
+    - episode_created: Sync episode to Neo4j, then queue for deep analysis
+    - note_created/note_updated: Sync note to Neo4j
+    - document_uploaded: Sync document to Neo4j
+    - episode_deep_analysis: Run LLM extraction for entities/topics
+    - insight_generated: Backpropagate importance to source episodes
+    """
     __tablename__ = "event_outbox"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    aggregate_type = Column(String, nullable=False)  # Habit, Instance, Log, Link
-    aggregate_id = Column(String, nullable=False)
-    op = Column(String, nullable=False)  # UPSERT, DELETE
-    payload = Column(Text, nullable=False)  # JSON
+
+    # Event identification
+    event_type = Column(String, nullable=False)  # episode_created, note_created, etc.
+    aggregate_type = Column(String, nullable=False)  # Episode, Note, Document
+    aggregate_id = Column(String, nullable=False)  # UUID of the source record
+
+    # Payload and operation
+    op = Column(String, nullable=False, default="UPSERT")  # UPSERT, DELETE
+    payload = Column(Text, nullable=False)  # JSON with full event data
+
+    # Processing status
+    status = Column(String, nullable=False, default="pending")  # pending, processing, completed, failed
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=5)
+    last_error = Column(Text, nullable=True)
+
+    # Timestamps
     created_at = Column(DateTime, server_default=func.now())
     processed_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True)  # For exponential backoff
 
 # Sara Autonomous System Models
 class UserProfile(Base):
@@ -633,7 +730,6 @@ class AutonomousInsight(Base):
     
     # Insight metadata
     insight_type = Column(String, nullable=False)  # pattern, suggestion, summary, reminder, connection, analysis
-    personality_mode = Column(String, nullable=False)  # Mode that generated this insight
     sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
     priority_score = Column(Float, nullable=False)  # 0-1, relevance × impact × novelty × timing - annoyance
     
@@ -696,23 +792,34 @@ class BackgroundSweep(Base):
     __tablename__ = "background_sweep"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, nullable=False)
-    
+
     # Sweep metadata
     sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
-    personality_mode = Column(String, nullable=False)
     triggered_by = Column(String, nullable=False)  # idle_threshold, manual, scheduled
-    
+
     # Execution results
     execution_time_ms = Column(Integer, nullable=False)
     insights_generated = Column(Integer, default=0)
     errors_encountered = Column(Text, nullable=True)  # JSON array of error messages
-    
+
     # Context data processed
     episodes_analyzed = Column(Integer, default=0)
     notes_analyzed = Column(Integer, default=0)
     patterns_found = Column(Text, nullable=True)  # JSON summary of patterns discovered
-    
+
     executed_at = Column(DateTime, server_default=func.now())
+
+class PushToken(Base):
+    """Store push notification tokens for iOS/Android devices"""
+    __tablename__ = "push_token"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    token = Column(String, nullable=False, unique=True)  # Expo push token
+    platform = Column(String, nullable=False)  # ios or android
+    device_name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 # Ensure pgvector extension exists on Postgres before creating tables
 try:
@@ -884,8 +991,33 @@ class CalendarEventResponse(BaseModel):
     all_day: bool
     reminder_minutes: Optional[int] = None
     is_completed: bool
+    # iOS calendar sync fields
+    source: str = "sara"
+    ios_event_id: Optional[str] = None
+    ios_calendar_id: Optional[str] = None
+    ios_calendar_name: Optional[str] = None
+    read_only: bool = False
     created_at: str
     updated_at: str
+
+# iOS Calendar Sync models
+class IOSCalendarEventSync(BaseModel):
+    ios_event_id: str
+    ios_calendar_id: str
+    ios_calendar_name: str
+    title: str
+    description: Optional[str] = None
+    start_time: str
+    end_time: str
+    location: Optional[str] = None
+    all_day: bool = False
+
+class IOSCalendarSyncRequest(BaseModel):
+    events: list[IOSCalendarEventSync]
+
+class IOSCalendarSyncResponse(BaseModel):
+    synced: int
+    errors: int
 
 class UserSettings(BaseModel):
     theme: Optional[str] = "dark"
@@ -893,9 +1025,20 @@ class UserSettings(BaseModel):
     language: Optional[str] = "en"
     timezone: Optional[str] = "America/New_York"
 
+class ImageContent(BaseModel):
+    """Image content for multimodal messages"""
+    type: str = "image"
+    data: str  # Base64 encoded image data
+    media_type: str = "image/jpeg"  # e.g., "image/jpeg", "image/png"
+
+class TextContent(BaseModel):
+    """Text content for multimodal messages"""
+    type: str = "text"
+    text: str
+
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Dict[str, Any]]]  # Support both text-only and multimodal
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
@@ -1140,7 +1283,6 @@ class AutonomousInsightResponse(BaseModel):
     id: str
     user_id: str
     insight_type: str
-    personality_mode: str
     sweep_type: str
     priority_score: float
     title: str
@@ -1175,7 +1317,6 @@ class BackgroundSweepResponse(BaseModel):
     id: str
     user_id: str
     sweep_type: str
-    personality_mode: str
     triggered_by: str
     execution_time_ms: int
     insights_generated: int
@@ -1185,31 +1326,8 @@ class BackgroundSweepResponse(BaseModel):
     patterns_found: Optional[Dict[str, Any]]
     executed_at: datetime
 
-# Auth utilities
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def get_cookie_domain(request: Request) -> str:
-    """Determine the appropriate cookie domain based on the request host."""
-    host = request.headers.get("host", "")
-    # Check if host is avery.cloud or any subdomain
-    if host.endswith("avery.cloud") or "avery.cloud:" in host:
-        return ".avery.cloud"
-    else:
-        # For local development, don't set a domain (defaults to current host)
-        return None
-
-def create_access_token(data: dict):
-    expire = datetime.now(timezone.utc) + timedelta(hours=24*7)
-    to_encode = data.copy()
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-def verify_token(token: str):
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
-    except JWTError:
-        return None
+# Auth utilities - imported from app.core.auth
+# pwd_context, create_access_token, verify_token, get_cookie_domain imported at top
 
 # Dependencies
 def get_db():
@@ -1246,9 +1364,277 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 # LLM Client
 class SimpleLLMClient:
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=60.0)
+        self.client = httpx.AsyncClient(timeout=120.0)
         self.event_queue = None
         self._citations = set()
+        self._token_usage_callback = None
+
+    def _get_anthropic_headers(self):
+        """Get headers for Anthropic API requests with prompt caching enabled"""
+        # Use ANTHROPIC_API_KEY if set, otherwise fall back to OPENAI_API_KEY
+        api_key = ANTHROPIC_API_KEY if ANTHROPIC_API_KEY else OPENAI_API_KEY
+        if not api_key or api_key == "dummy" or api_key.startswith("AIza"):
+            logger.error("❌ No valid Anthropic API key configured! Set ANTHROPIC_API_KEY environment variable.")
+        return {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
+            "content-type": "application/json"
+        }
+
+    def _convert_openai_messages_to_anthropic(self, messages: list) -> list:
+        """Convert OpenAI-format messages to Anthropic format, handling tool calls/results and vision"""
+        from app.core.vision_formatters import AnthropicVisionFormatter, has_vision_content
+
+        anthropic_messages = []
+        pending_tool_results = []
+        vision_formatter = AnthropicVisionFormatter()
+
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+
+            if role == "system":
+                # System messages are handled separately
+                continue
+            elif role == "tool":
+                # Tool result - collect for next user message
+                tool_content = content
+                # Handle multimodal content in tool results (extract text only)
+                if isinstance(content, list):
+                    tool_content = " ".join(
+                        c.get("text", "") for c in content if c.get("type") == "text"
+                    )
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id"),
+                    "content": tool_content or ""
+                })
+            elif role == "assistant":
+                # Check if this has tool_calls (OpenAI format)
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    # Convert to Anthropic format with tool_use blocks
+                    content_blocks = []
+                    if content:
+                        if isinstance(content, str):
+                            content_blocks.append({"type": "text", "text": content})
+                        elif isinstance(content, list):
+                            # Multimodal content - extract text only for assistant
+                            text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                            if text_parts:
+                                content_blocks.append({"type": "text", "text": " ".join(text_parts)})
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        try:
+                            args = json.loads(func.get("arguments", "{}"))
+                        except:
+                            args = {}
+                        content_blocks.append({
+                            "type": "tool_use",
+                            "id": tc.get("id"),
+                            "name": func.get("name"),
+                            "input": args
+                        })
+                    anthropic_messages.append({"role": "assistant", "content": content_blocks})
+                else:
+                    # Regular assistant message
+                    if isinstance(content, list):
+                        # Extract text only
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        anthropic_messages.append({"role": "assistant", "content": " ".join(text_parts) or ""})
+                    else:
+                        anthropic_messages.append({"role": "assistant", "content": content or ""})
+            elif role == "user":
+                # Handle multimodal content (images + text)
+                if isinstance(content, list) and has_vision_content(content):
+                    # Format images for Anthropic
+                    formatted_content = vision_formatter.format_message_content(content)
+                    if pending_tool_results:
+                        # Merge tool results with formatted content
+                        content_blocks = pending_tool_results.copy() + formatted_content
+                        anthropic_messages.append({"role": "user", "content": content_blocks})
+                        pending_tool_results = []
+                    else:
+                        anthropic_messages.append({"role": "user", "content": formatted_content})
+                elif pending_tool_results:
+                    # Standard text with pending tool results
+                    content_blocks = pending_tool_results.copy()
+                    if content:
+                        if isinstance(content, str):
+                            content_blocks.append({"type": "text", "text": content})
+                        elif isinstance(content, list):
+                            # Extract text from list format
+                            for c in content:
+                                if c.get("type") == "text":
+                                    content_blocks.append({"type": "text", "text": c.get("text", "")})
+                    anthropic_messages.append({"role": "user", "content": content_blocks})
+                    pending_tool_results = []
+                else:
+                    # Standard text content
+                    if isinstance(content, list):
+                        # No images, just extract text
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        anthropic_messages.append({"role": "user", "content": " ".join(text_parts) or ""})
+                    else:
+                        anthropic_messages.append({"role": "user", "content": content or ""})
+
+        # If there are leftover tool results, add them as a user message
+        if pending_tool_results:
+            anthropic_messages.append({"role": "user", "content": pending_tool_results})
+
+        return anthropic_messages
+
+    async def _anthropic_chat_request(self, messages: list, tools: list = None, max_tokens: int = 4096, temperature: float = 0.7):
+        """Make a chat request to Anthropic Claude API and convert response to OpenAI format"""
+        # Extract system message and convert messages to Anthropic format
+        system_content = None
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_content = msg.get("content", "")
+                break
+
+        filtered_messages = self._convert_openai_messages_to_anthropic(messages)
+
+        # Build Anthropic request payload with prompt caching
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": filtered_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        # Use system array format with cache_control for prompt caching
+        if system_content:
+            payload["system"] = [
+                {
+                    "type": "text",
+                    "text": system_content,
+                    "cache_control": {"type": "ephemeral"}  # Cache for 5 minutes
+                }
+            ]
+
+        # Convert OpenAI tools format to Anthropic format if tools are provided
+        if tools:
+            anthropic_tools = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    func = tool.get("function", {})
+                    anthropic_tools.append({
+                        "name": func.get("name"),
+                        "description": func.get("description", ""),
+                        "input_schema": func.get("parameters", {"type": "object", "properties": {}})
+                    })
+            if anthropic_tools:
+                # Add cache_control to the last tool to cache the entire tools array
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+                payload["tools"] = anthropic_tools
+                payload["tool_choice"] = {"type": "auto"}
+
+        try:
+            logger.info(f"Sending chat request to Anthropic API (tools={len(tools) if tools else 0}, messages={len(filtered_messages)})")
+            # Debug: log message structure
+            for i, msg in enumerate(filtered_messages[:3]):
+                content_type = type(msg.get("content")).__name__
+                logger.debug(f"  Message {i}: role={msg.get('role')}, content_type={content_type}")
+
+            response = await self.client.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload,
+                headers=self._get_anthropic_headers()
+            )
+            if response.status_code >= 400:
+                error_body = response.text
+                logger.error(f"Anthropic API error {response.status_code}: {error_body[:1000]}")
+                # Also log the message structure that caused the error
+                logger.error(f"Messages sent: {json.dumps(filtered_messages, indent=2)[:2000]}")
+            response.raise_for_status()
+            anthropic_result = response.json()
+
+            # Log cache performance
+            usage = anthropic_result.get("usage", {})
+            cache_created = usage.get("cache_creation_input_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+
+            if cache_read > 0:
+                logger.info(f"✅ Anthropic chat completed - Cache HIT: {cache_read} tokens cached, {input_tokens} input, {output_tokens} output")
+            elif cache_created > 0:
+                logger.info(f"📝 Anthropic chat completed - Cache CREATED: {cache_created} tokens, {input_tokens} input, {output_tokens} output")
+            else:
+                logger.info(f"Anthropic chat completed - {input_tokens} input, {output_tokens} output")
+
+            # Convert Anthropic response to OpenAI format
+            return self._convert_anthropic_to_openai(anthropic_result)
+
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error in Anthropic chat request: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in Anthropic chat request: {e}")
+            raise
+
+    def _convert_anthropic_to_openai(self, anthropic_response: dict) -> dict:
+        """Convert Anthropic API response to OpenAI-compatible format"""
+        # Extract text content from Anthropic response
+        content_blocks = anthropic_response.get("content", [])
+        text_content = ""
+        tool_calls = []
+
+        for i, block in enumerate(content_blocks):
+            if block.get("type") == "text":
+                text_content += block.get("text", "")
+            elif block.get("type") == "tool_use":
+                # Convert tool_use to OpenAI tool_calls format
+                tool_calls.append({
+                    "id": block.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name"),
+                        "arguments": json.dumps(block.get("input", {}))
+                    }
+                })
+
+        # Log token usage for Anthropic
+        usage = anthropic_response.get("usage", {})
+        if usage:
+            self._log_token_usage(
+                prompt_tokens=usage.get("input_tokens", 0),
+                completion_tokens=usage.get("output_tokens", 0),
+                total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                model=OPENAI_MODEL,
+                operation_type="chat"
+            )
+
+        # Return in OpenAI message format (used by chat_with_tools)
+        result = {
+            "content": text_content if text_content else None,
+            "tool_calls": tool_calls if tool_calls else None
+        }
+        return result
+
+    def set_token_usage_callback(self, callback):
+        """Set the callback function for logging token usage"""
+        self._token_usage_callback = callback
+
+    def _log_token_usage(self, prompt_tokens: int, completion_tokens: int, total_tokens: int, model: str, operation_type: str = "chat"):
+        """Log token usage via callback"""
+        logger.info(f"📊 _log_token_usage called: {total_tokens} tokens ({prompt_tokens} prompt, {completion_tokens} completion) for {model}/{operation_type}")
+        if self._token_usage_callback:
+            try:
+                self._token_usage_callback(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    model=model,
+                    operation_type=operation_type
+                )
+                logger.info(f"📊 Token usage callback executed successfully")
+            except Exception as e:
+                logger.warning(f"Failed to log token usage: {e}")
+        else:
+            logger.warning(f"📊 No token usage callback set!")
     
     def set_event_queue(self, queue):
         """Set event queue for streaming updates"""
@@ -1262,7 +1648,7 @@ class SimpleLLMClient:
             await self.event_queue.put({
                 "type": event_type,
                 "data": data,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat() + "Z"
             })
     
     def _extract_final_message(self, content: str) -> str:
@@ -1292,15 +1678,50 @@ class SimpleLLMClient:
         """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
         import re
 
+        # Route to Anthropic handler if using Claude API (non-streaming for now)
+        if is_anthropic_provider():
+            logger.info("Using Anthropic Claude API (non-streaming mode)")
+            messages = payload.get("messages", [])
+            tools = payload.get("tools", [])
+            max_tokens = payload.get("max_tokens", 4096)
+            temperature = payload.get("temperature", 0.7)
+
+            result = await self._anthropic_chat_request(
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+
+            # Emit content as a single chunk for streaming interface compatibility
+            if result.get("content"):
+                await self.emit_event("text_chunk", {
+                    "content": result["content"],
+                    "full_content": result["content"]
+                })
+
+            return result
+
         full_content = ""
         emitted_content = ""  # Track what we've already sent to user
         tool_calls = []
         in_analysis_channel = False  # Track if we're in analysis channel (MLX format)
+        usage_data = {}  # Track token usage from stream
+
+        # Estimate prompt tokens from payload (for providers that don't return usage)
+        payload_str = json.dumps(payload.get("messages", []))
+        estimated_prompt_tokens = len(payload_str) // 4  # Rough estimate: 4 chars per token
 
         try:
+            logger.info(f"🔍 Sending to {OPENAI_BASE_URL}/chat/completions with model={payload.get('model')}, keys={list(payload.keys())}")
+            if "generativelanguage.googleapis.com" in OPENAI_BASE_URL:
+                logger.debug(f"🔍 Gemini payload tools: {len(payload.get('tools', []))} tools")
             async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions",
                                         json=payload,
                                         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}) as response:
+                if response.status_code >= 400:
+                    error_body = await response.aread()
+                    logger.error(f"❌ API error {response.status_code}: {error_body.decode()}")
                 response.raise_for_status()
 
                 async for line in response.aiter_lines():
@@ -1317,6 +1738,11 @@ class SimpleLLMClient:
 
                     try:
                         chunk = json.loads(line)
+
+                        # Capture usage data if present (some providers send it in final chunk)
+                        if "usage" in chunk:
+                            usage_data = chunk["usage"]
+
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
 
                         # Handle content streaming with XML filtering and MLX channel filtering
@@ -1408,6 +1834,17 @@ class SimpleLLMClient:
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
 
+                # Log token usage for GLM-4.5 format
+                estimated_completion_tokens = len(full_content) // 4
+                estimated_total = estimated_prompt_tokens + estimated_completion_tokens
+                self._log_token_usage(
+                    prompt_tokens=estimated_prompt_tokens,
+                    completion_tokens=estimated_completion_tokens,
+                    total_tokens=estimated_total,
+                    model=payload.get("model", OPENAI_MODEL),
+                    operation_type="chat"
+                )
+
                 return {
                     "content": cleaned_content,
                     "tool_calls": all_tool_calls if all_tool_calls else None
@@ -1418,12 +1855,43 @@ class SimpleLLMClient:
                 logger.info("Detected MLX channel format, extracting final message...")
                 processed_content = self._extract_final_message(full_content)
 
+            # Check for JSON text tool calls (LLM outputting tool calls as text instead of proper format)
+            # This handles models that don't properly use the tool_calls field
+            if not tool_calls and processed_content:
+                json_cleaned, json_tool_calls = parse_json_text_tool_calls(processed_content)
+                if json_tool_calls:
+                    logger.info(f"📋 Parsed {len(json_tool_calls)} tool calls from JSON text content")
+                    processed_content = json_cleaned
+                    tool_calls = json_tool_calls
+
             # Debug logging for empty responses
             logger.info(f"🔍 _stream_response complete - full_content length: {len(full_content)}, emitted_content length: {len(emitted_content)}, processed length: {len(processed_content)}")
             if len(full_content) == 0:
                 logger.warning("⚠️ LLM returned empty full_content!")
             if len(emitted_content) > 0 and len(full_content) > len(emitted_content):
                 logger.warning(f"⚠️ Content was filtered: full={len(full_content)} vs emitted={len(emitted_content)}")
+
+            # Log token usage
+            if usage_data:
+                # Use actual usage data from provider
+                self._log_token_usage(
+                    prompt_tokens=usage_data.get("prompt_tokens", 0),
+                    completion_tokens=usage_data.get("completion_tokens", 0),
+                    total_tokens=usage_data.get("total_tokens", 0),
+                    model=payload.get("model", OPENAI_MODEL),
+                    operation_type="chat"
+                )
+            else:
+                # Estimate tokens from content length
+                estimated_completion_tokens = len(full_content) // 4
+                estimated_total = estimated_prompt_tokens + estimated_completion_tokens
+                self._log_token_usage(
+                    prompt_tokens=estimated_prompt_tokens,
+                    completion_tokens=estimated_completion_tokens,
+                    total_tokens=estimated_total,
+                    model=payload.get("model", OPENAI_MODEL),
+                    operation_type="chat"
+                )
 
             # Return message object compatible with existing code (standard OpenAI format)
             return {
@@ -1433,6 +1901,13 @@ class SimpleLLMClient:
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")
+            # Try to get response body for more details
+            if hasattr(e, 'response'):
+                try:
+                    error_body = e.response.read()
+                    logger.error(f"Error response body: {error_body}")
+                except:
+                    pass
 
             # Don't retry on rate limit errors - fail fast
             if "429" in str(e) or "Too Many Requests" in str(e):
@@ -1465,12 +1940,22 @@ class SimpleLLMClient:
                 else:
                     formatted_messages.append({"role": m.role, "content": m.content})
 
-            # Build payload
+            # Route to Anthropic handler if using Claude API
+            if is_anthropic_provider():
+                result = await self._anthropic_chat_request(
+                    messages=formatted_messages,
+                    tools=None,
+                    max_tokens=8000,
+                    temperature=0.7
+                )
+                return result.get("content", "")
+
+            # Build payload for OpenAI-compatible API
             chat_payload = {
                 "model": OPENAI_MODEL,
                 "messages": formatted_messages,
                 "temperature": 0.7,
-                "max_tokens": 2000
+                "max_tokens": 8000
             }
 
             # Add Ollama-specific context length if using local model
@@ -1506,6 +1991,14 @@ class SimpleLLMClient:
 
             logger.info(f"LLM chat_with_tools called with {len(messages)} messages, {len(tools)} tools for user {user_id}")
 
+            # Initialize session cache
+            from app.services.session_cache import SessionToolCache
+            from app.core.config import settings
+            import redis
+
+            redis_client = redis.from_url(settings.redis_url)
+            session_cache = SessionToolCache(redis_client, ttl_minutes=30)
+
             # Handle both dict and object message formats
             formatted_messages = []
             for msg in messages:
@@ -1514,15 +2007,39 @@ class SimpleLLMClient:
                 else:
                     formatted_messages.append({"role": msg.role, "content": msg.content})
 
+            # Build and inject session context reminder
+            session_summary = session_cache.get_session_context_summary(conversation_id)
+            context_reminder = ""
+            if any(session_summary.values()):
+                context_lines = ["\n## Session Context (already retrieved this conversation)"]
+                if session_summary.get("notes"):
+                    context_lines.append(f"**Notes in context:** {', '.join(session_summary['notes'])}")
+                if session_summary.get("documents"):
+                    context_lines.append(f"**Documents in context:** {', '.join(session_summary['documents'])}")
+                if session_summary.get("memories"):
+                    context_lines.append(f"**Memories in context:** {', '.join(session_summary['memories'])}")
+                if session_summary.get("web_pages"):
+                    context_lines.append(f"**Web pages in context:** {', '.join(session_summary['web_pages'])}")
+                context_lines.append("\n**Do not re-fetch any of the above. Reference the existing content in our conversation.**\n")
+                context_reminder = "\n".join(context_lines)
+
+            # Inject context reminder into first system message
+            if context_reminder and len(formatted_messages) > 0 and formatted_messages[0].get("role") == "system":
+                formatted_messages[0]["content"] = formatted_messages[0]["content"] + context_reminder
+
             payload = {
                 "model": OPENAI_MODEL,
                 "messages": formatted_messages,
-                "tools": tools,
-                "tool_choice": "auto",
                 "temperature": 0.7,
-                "max_tokens": 2000,
+                "max_tokens": 8000,
                 "stream": True
             }
+
+            # Only include tools and tool_choice if there are actual tools
+            # Some providers (e.g., Gemini) don't like empty tools arrays
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
 
             # Add Ollama-specific context length if using local model
             if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
@@ -1562,7 +2079,7 @@ class SimpleLLMClient:
                             "round": round_num + 1
                         })
                         
-                        tool_response = await self.execute_tool(tool_call, user_id)
+                        tool_response = await self.execute_tool(tool_call, user_id, conversation_id, session_cache)
                         tool_responses.append(tool_response)
                         
                         await self.emit_event("tool_completed", {
@@ -1583,9 +2100,28 @@ class SimpleLLMClient:
                     max_messages = 20  # Keep only recent context to prevent payload bloat
                     if len(current_messages) > max_messages:
                         # Keep system message (first) and recent messages
-                        truncated_messages = [current_messages[0]] + current_messages[-max_messages+1:]
-                        logger.info(f"⚠️ Truncated conversation from {len(current_messages)} to {len(truncated_messages)} messages")
-                        current_messages = truncated_messages
+                        # IMPORTANT: Don't truncate in the middle of tool_call/tool_result pairs
+                        system_msg = current_messages[0] if current_messages[0].get("role") == "system" else None
+                        start_idx = 1 if system_msg else 0
+
+                        # Find a safe truncation point - walk backwards to find a user message
+                        # (don't cut after an assistant with tool_calls or after tool responses)
+                        cut_point = len(current_messages) - max_messages + 1
+                        while cut_point < len(current_messages):
+                            msg_at_cut = current_messages[cut_point]
+                            # Safe to cut before a user message (but not a tool response)
+                            if msg_at_cut.get("role") == "user":
+                                break
+                            # Not safe to cut before assistant with tool_calls or tool responses
+                            cut_point += 1
+
+                        # If we couldn't find a safe cut point, just keep all messages
+                        if cut_point >= len(current_messages) - 2:
+                            logger.warning(f"⚠️ Could not find safe truncation point, keeping all {len(current_messages)} messages")
+                        else:
+                            truncated_messages = ([system_msg] if system_msg else []) + current_messages[cut_point:]
+                            logger.info(f"⚠️ Truncated conversation from {len(current_messages)} to {len(truncated_messages)} messages")
+                            current_messages = truncated_messages
                     
                     # Emit thinking event
                     await self.emit_event("thinking", {
@@ -1598,10 +2134,19 @@ class SimpleLLMClient:
                         "model": OPENAI_MODEL,
                         "messages": current_messages,
                         "temperature": 0.7,
-                        "max_tokens": 2000,
+                        "max_tokens": 8000,
                         "tools": tools,
                         "stream": True
                     }
+
+                    # Debug: Log the assistant message and tool responses being sent
+                    if current_messages:
+                        for i, msg in enumerate(current_messages[-5:]):  # Last 5 messages
+                            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                                for tc in msg["tool_calls"]:
+                                    logger.info(f"🔍 Follow-up msg[{i}] tool_call args: {repr(tc.get('function', {}).get('arguments', ''))[:100]}")
+                            elif msg.get("role") == "tool":
+                                logger.info(f"🔍 Follow-up msg[{i}] tool response: {repr(msg.get('content', ''))[:100]}")
 
                     # Retry logic for JSONDecodeError
                     max_retries = 2
@@ -1701,7 +2246,9 @@ class SimpleLLMClient:
                             "content_length": len(synthesized_response),
                             "synthesized": True
                         })
-                        asyncio.create_task(self.store_conversation(messages, synthesized_response, user_id, conversation_id))
+                        # Store conversation and get episode_id for rating
+                        episode_id = await self.store_conversation(messages, synthesized_response, user_id, conversation_id)
+                        self.current_episode_id = episode_id
                         return synthesized_response
 
                     # If no more tool calls, we're done
@@ -1711,8 +2258,9 @@ class SimpleLLMClient:
                             "rounds": round_num + 1,
                             "content_length": len(response_content) if response_content else 0
                         })
-                        # Store conversation in background (don't block response)
-                        asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
+                        # Store conversation and get episode_id for rating
+                        episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                        self.current_episode_id = episode_id
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
                 else:
@@ -1722,25 +2270,27 @@ class SimpleLLMClient:
                         "rounds": 1,
                         "content_length": len(response_content) if response_content else 0
                     })
-                    # Store conversation in background (don't block response)
-                    asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
+                    # Store conversation and get episode_id for rating
+                    episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                    self.current_episode_id = episode_id
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
-            
+
             # If we hit max rounds, force a proper response
             logger.warning(f"Hit max tool rounds with message: {message}")
-            
+
             # Try to get the reasoning or any available content
             response_content = message.get("content", "")
             if not response_content and message.get("reasoning"):
                 response_content = message.get("reasoning", "")
-            
+
             # If still no content, force a reasonable response
             if not response_content:
                 response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
 
-            # Store conversation in background (don't block response)
-            asyncio.create_task(self.store_conversation(messages, response_content, user_id, conversation_id))
+            # Store conversation and get episode_id for rating
+            episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+            self.current_episode_id = episode_id
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
 
@@ -1750,7 +2300,7 @@ class SimpleLLMClient:
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
-    async def execute_tool(self, tool_call, user_id):
+    async def execute_tool(self, tool_call, user_id, conversation_id=None, session_cache=None):
         """Execute a tool call and return the response"""
         function_name = tool_call["function"]["name"]
         args_str = tool_call["function"]["arguments"]
@@ -1764,19 +2314,78 @@ class SimpleLLMClient:
             try:
                 arguments = json.loads(args_str)
             except json.JSONDecodeError as e:
-                logger.error(f"❌ Failed to parse arguments for {function_name}: {e}")
-                logger.error(f"   Raw args: {repr(args_str)}")
+                # Gemini sometimes concatenates multiple JSON objects like: {"a":1}{"b":2}
+                # Try to extract just the first valid JSON object
+                logger.warning(f"⚠️ Failed to parse arguments for {function_name}: {e}")
+                logger.warning(f"   Raw args: {repr(args_str)}")
+
+                # Try to fix common Gemini malformed JSON issues
+                fixed = False
+
+                # Pattern 1: Multiple concatenated objects {"a":1}{"b":2} - take the first one
+                if args_str.count('{') > 1 and '}{' in args_str:
+                    try:
+                        # Find the first complete JSON object
+                        depth = 0
+                        end_idx = 0
+                        for i, c in enumerate(args_str):
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end_idx = i + 1
+                                    break
+                        if end_idx > 0:
+                            first_obj = args_str[:end_idx]
+                            arguments = json.loads(first_obj)
+                            # IMPORTANT: Also fix the tool_call object so follow-up requests have valid JSON
+                            tool_call["function"]["arguments"] = first_obj
+                            logger.info(f"✅ Fixed malformed JSON by extracting first object: {first_obj}")
+                            fixed = True
+                    except:
+                        pass
+
+                # Pattern 2: Trailing garbage after valid JSON
+                if not fixed:
+                    try:
+                        # Try parsing incrementally
+                        import re
+                        match = re.match(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', args_str)
+                        if match:
+                            fixed_json = match.group(1)
+                            arguments = json.loads(fixed_json)
+                            # IMPORTANT: Also fix the tool_call object so follow-up requests have valid JSON
+                            tool_call["function"]["arguments"] = fixed_json
+                            logger.info(f"✅ Fixed malformed JSON with regex extraction: {fixed_json}")
+                            fixed = True
+                    except:
+                        pass
+
+                if not fixed:
+                    logger.error(f"❌ Could not fix malformed arguments for {function_name}")
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps({
+                            "success": False,
+                            "message": f"Invalid tool arguments: {str(e)}",
+                            "data": None
+                        })
+                    }
+
+        logger.info(f"Executing tool {function_name} with arguments: {arguments}")
+
+        # CHECK CACHE FIRST
+        cached_result = None
+        if session_cache and conversation_id:
+            cached_result = session_cache.get(conversation_id, function_name, arguments)
+            if cached_result:
                 return {
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
-                    "content": json.dumps({
-                        "success": False,
-                        "message": f"Invalid tool arguments: {str(e)}",
-                        "data": None
-                    })
+                    "content": cached_result + "\n\n[Retrieved from session cache - already fetched this conversation]"
                 }
-        
-        logger.info(f"Executing tool {function_name} with arguments: {arguments}")
         
         if function_name == "search_notes":
             result = await self.search_notes_tool(arguments["query"], user_id, arguments.get("folder_name"))
@@ -1804,23 +2413,12 @@ class SimpleLLMClient:
             result = await self.search_documents_tool(arguments["query"], user_id)
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
-        elif function_name == "start_shadow_session":
-            result = await self.start_shadow_session_tool(
-                arguments.get("duration_minutes"),
-                arguments.get("context"),
+        elif function_name == "handoff_to_agents":
+            result = await self.handoff_to_agents_tool(
+                arguments["task_description"],
+                arguments.get("task_type", "research"),
                 user_id
             )
-        elif function_name == "add_shadow_note":
-            result = await self.add_shadow_note_tool(
-                arguments["note_type"],
-                arguments["content"],
-                arguments.get("due_date"),
-                user_id
-            )
-        elif function_name == "wrap_shadow_session":
-            result = await self.wrap_shadow_session_tool(user_id)
-        elif function_name == "get_shadow_status":
-            result = await self.get_shadow_status_tool(user_id)
         else:
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
@@ -1833,6 +2431,14 @@ class SimpleLLMClient:
                                 self._citations.add(c)
                 except Exception:
                     pass
+
+                # Emit canvas_command SSE event for immediate UI update
+                if reg_result.success and reg_result.data and isinstance(reg_result.data, dict):
+                    canvas_command = reg_result.data.get("canvas_command")
+                    if canvas_command:
+                        await self.emit_event("canvas_command", reg_result.data)
+                        logger.info(f"📐 Emitted canvas_command: {canvas_command}")
+
                 result = json.dumps({
                     "success": reg_result.success,
                     "message": reg_result.message,
@@ -1841,6 +2447,10 @@ class SimpleLLMClient:
             except Exception as e:
                 result = f"Unknown tool: {function_name} ({e})"
         
+        # STORE IN CACHE
+        if session_cache and conversation_id:
+            session_cache.set(conversation_id, function_name, arguments, str(result))
+
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
         if function_name == "search_documents":
             logger.info(f"Search result preview: {str(result)[:500]}...")
@@ -1907,9 +2517,18 @@ class SimpleLLMClient:
         try:
             db = SessionLocal()
             try:
+                # Normalize query - remove spaces for fuzzy matching
+                normalized_query = query.replace(" ", "")
+
+                # Search both title and content, with fuzzy matching on title
+                from sqlalchemy import or_, func
                 query_filter = db.query(Note).filter(
                     Note.user_id == user_id,
-                    Note.content.ilike(f"%{query}%")
+                    or_(
+                        Note.title.ilike(f"%{query}%"),  # Exact match
+                        func.replace(Note.title, ' ', '').ilike(f"%{normalized_query}%"),  # Without spaces
+                        Note.content.ilike(f"%{query}%")  # Content search
+                    )
                 )
 
                 # Apply folder filter if specified
@@ -2188,7 +2807,7 @@ class SimpleLLMClient:
                 if not reminder:
                     return "Reminder not found."
                 
-                reminder.is_completed = "true"
+                reminder.is_completed = True
                 reminder.updated_at = datetime.now()
                 db.commit()
                 
@@ -2283,8 +2902,8 @@ class SimpleLLMClient:
                 if not timer:
                     return "Active timer not found."
                 
-                timer.is_active = "false"
-                timer.is_completed = "true"
+                timer.is_active = False
+                timer.is_completed = True
                 db.commit()
                 
                 # Send AI-generated NTFY notification for timer completion
@@ -2636,166 +3255,60 @@ class SimpleLLMClient:
             logger.error(f"Error searching dream insights: {e}")
             return []
 
-    async def start_shadow_session_tool(self, duration_minutes, context, user_id):
-        """🕵️ Start a Shadow Mode work capture session"""
+    async def handoff_to_agents_tool(self, task_description: str, task_type: str, user_id: str):
+        """🔄 Hand off a task to background worker agents for research/analysis"""
         try:
-            from app.services.shadow_session_service import shadow_session_service
+            import asyncio
+            from app.services.background_task_service import background_task_service
 
-            session = await shadow_session_service.start_session(
-                user_id=str(user_id),
-                duration_minutes=duration_minutes if duration_minutes else None,
-                context=context if context else None
-            )
+            logger.info(f"🤖 Handing off task to agents: {task_description[:100]}...")
 
-            duration_str = f" for {duration_minutes} minutes" if duration_minutes else ""
-            context_str = f" (Context: {context})" if context else ""
+            # Create the background task
+            db = SessionLocal()
+            try:
+                task = await background_task_service.create_task(
+                    db=db,
+                    user_id=str(user_id),
+                    query=task_description,
+                    task_type=task_type
+                )
 
-            return f"🕵️ Shadow Mode session started{duration_str}! I'll help you capture tasks, decisions, questions, and ideas as we work{context_str}. Session ID: {session.id}"
+                # Start the task in background (fire and forget)
+                asyncio.create_task(self._run_background_task(task.id))
 
-        except ValueError as e:
-            # Handle case where session already exists
-            return f"⚠️ {str(e)}"
-        except Exception as e:
-            logger.error(f"Error starting shadow session: {e}")
-            return f"❌ Failed to start Shadow session: {str(e)}"
-
-    async def add_shadow_note_tool(self, note_type, content, due_date, user_id):
-        """📌 Add a note to the active Shadow session"""
-        try:
-            from app.services.shadow_session_service import shadow_session_service
-            from datetime import datetime
-
-            # Get active session
-            session = await shadow_session_service.get_active_session(str(user_id))
-            if not session:
-                return "⚠️ No active Shadow session found. Start one first with 'Shadow me' or 'start shadow session'."
-
-            # Parse due date if provided
-            due_date_obj = None
-            if due_date:
-                try:
-                    due_date_obj = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
-                except Exception as e:
-                    logger.warning(f"Failed to parse due date {due_date}: {e}")
-
-            # Add note
-            note = await shadow_session_service.add_note(
-                session_id=session.id,
-                note_type=note_type,
-                content=content,
-                due_date=due_date_obj
-            )
-
-            emoji_map = {
-                "task": "✅",
-                "decision": "🎯",
-                "question": "❓",
-                "idea": "💡",
-                "bookmark": "🔖"
-            }
-            emoji = emoji_map.get(note_type, "📝")
-
-            due_str = f" (due: {due_date_obj.strftime('%Y-%m-%d')})" if due_date_obj else ""
-            return f"{emoji} Added {note_type}: {content}{due_str}"
+                return json.dumps({
+                    "success": True,
+                    "message": f"Task handed off to agents successfully",
+                    "task_id": task.id,
+                    "status": "running",
+                    "note": "I'll notify you when the research is complete. Results will be saved to your Agent Workspace folder."
+                })
+            finally:
+                db.close()
 
         except Exception as e:
-            logger.error(f"Error adding shadow note: {e}")
-            return f"❌ Failed to add note: {str(e)}"
+            logger.error(f"Error handing off to agents: {e}")
+            return json.dumps({
+                "success": False,
+                "message": f"Failed to hand off task: {str(e)}"
+            })
 
-    async def wrap_shadow_session_tool(self, user_id):
-        """🎁 Wrap up the Shadow session and generate summary"""
+    async def _run_background_task(self, task_id: str):
+        """Run a background task in a new database session"""
         try:
-            from app.services.shadow_session_service import shadow_session_service
-            from app.services.shadow_summary_generator import shadow_summary_generator
-
-            # Get active session
-            session = await shadow_session_service.get_active_session(str(user_id))
-            if not session:
-                return "⚠️ No active Shadow session found."
-
-            # Wrap session
-            await shadow_session_service.wrap_session(session.id)
-
-            # Generate summary
-            summary = await shadow_summary_generator.generate_summary(session.id)
-
-            # Format summary for chat
-            response_parts = ["🎁 **Shadow Session Complete!**", ""]
-            response_parts.append(f"**Duration:** {int((session.ended_at - session.started_at).total_seconds() / 60)} minutes")
-
-            if summary.tasks:
-                response_parts.append(f"\n✅ **Tasks Captured:** {len(summary.tasks)}")
-                for task in summary.tasks[:5]:  # Show first 5
-                    response_parts.append(f"  • {task['content']}")
-
-            if summary.decisions:
-                response_parts.append(f"\n🎯 **Decisions Made:** {len(summary.decisions)}")
-                for decision in summary.decisions[:3]:
-                    response_parts.append(f"  • {decision['content']}")
-
-            if summary.questions:
-                response_parts.append(f"\n❓ **Questions Noted:** {len(summary.questions)}")
-                for question in summary.questions[:3]:
-                    response_parts.append(f"  • {question['content']}")
-
-            if summary.ideas:
-                response_parts.append(f"\n💡 **Ideas Generated:** {len(summary.ideas)}")
-                for idea in summary.ideas[:3]:
-                    response_parts.append(f"  • {idea['content']}")
-
-            if summary.changeset and summary.changeset.get('files'):
-                response_parts.append(f"\n📝 **Files Modified:** {len(summary.changeset['files'])}")
-
-            response_parts.append(f"\n💾 Full summary saved. Session ID: {session.id}")
-
-            return "\n".join(response_parts)
-
+            from app.services.background_task_service import background_task_service
+            db = SessionLocal()
+            try:
+                await background_task_service.run_task(db, task_id)
+            finally:
+                db.close()
         except Exception as e:
-            logger.error(f"Error wrapping shadow session: {e}")
-            return f"❌ Failed to wrap session: {str(e)}"
+            logger.error(f"Background task {task_id} failed: {e}")
 
-    async def get_shadow_status_tool(self, user_id):
-        """📊 Get status of active Shadow session"""
-        try:
-            from app.services.shadow_session_service import shadow_session_service
-            from datetime import datetime, timezone
-
-            # Get active session
-            session = await shadow_session_service.get_active_session(str(user_id))
-            if not session:
-                return "💤 No active Shadow session. Say 'Shadow me' to start capturing your work!"
-
-            # Get comprehensive status
-            status = await shadow_session_service.get_session_status(session.id)
-
-            # Format status
-            response_parts = ["🕵️ **Active Shadow Session**", ""]
-
-            if status['context']:
-                response_parts.append(f"**Context:** {status['context']}")
-
-            duration_mins = status['duration_seconds'] // 60
-            response_parts.append(f"**Duration:** {duration_mins} minutes")
-
-            if status['time_remaining_seconds'] and status['time_remaining_seconds'] > 0:
-                remaining_mins = status['time_remaining_seconds'] // 60
-                response_parts.append(f"**Time Remaining:** {remaining_mins} minutes")
-
-            response_parts.append(f"\n**Captured:**")
-            response_parts.append(f"  • Tasks: {status['note_counts']['task']}")
-            response_parts.append(f"  • Decisions: {status['note_counts']['decision']}")
-            response_parts.append(f"  • Questions: {status['note_counts']['question']}")
-            response_parts.append(f"  • Ideas: {status['note_counts']['idea']}")
-            response_parts.append(f"  • Events: {status['event_count']}")
-
-            return "\n".join(response_parts)
-
-        except Exception as e:
-            logger.error(f"Error getting shadow status: {e}")
-            return f"❌ Failed to get status: {str(e)}"
-
-    async def store_conversation(self, messages, response_content, user_id, conversation_id=None):
-        """Store the conversation in enhanced episodic memory with emotional and topical analysis"""
+    async def store_conversation(self, messages, response_content, user_id, conversation_id=None) -> str:
+        """Store the conversation in enhanced episodic memory with emotional and topical analysis.
+        Returns the episode_id of the assistant response for rating purposes."""
+        assistant_episode_id = None
         try:
             logger.info(f"📥 store_conversation called with conversation_id: {conversation_id}")
 
@@ -2815,7 +3328,7 @@ class SimpleLLMClient:
                     Episode.user_id == user_id
                 ).all()
                 existing_content = {ep.content for ep in existing_episodes}
-                
+
                 # Store only new messages that aren't already stored
                 for message in messages:
                     # Handle both ChatMessage objects and dict formats
@@ -2837,10 +3350,10 @@ class SimpleLLMClient:
                         )
             finally:
                 db.close()
-            
+
             # Store assistant response as an episode (only if not already stored)
             if response_content and response_content not in existing_content:
-                await intelligent_memory_service.store_episode(
+                episode = await intelligent_memory_service.store_episode(
                     user_id=user_id,
                     role="assistant",
                     content=response_content,
@@ -2848,14 +3361,18 @@ class SimpleLLMClient:
                     source="chat",
                     memory_type="conversation"
                 )
-            
+                assistant_episode_id = episode.id if episode else None
+                logger.info(f"🎯 Assistant episode stored with ID: {assistant_episode_id}")
+
             # Also maintain legacy conversation storage for compatibility
             await self._store_legacy_conversation(messages, response_content, user_id, conversation_id)
-            
+
             logger.info(f"🧠 Stored conversation {conversation_id} with intelligent episodic memory analysis")
-                
+
         except Exception as e:
             logger.error(f"Error storing conversation in enhanced memory: {e}")
+
+        return assistant_episode_id
     
     async def _store_legacy_conversation(self, messages, response_content, user_id, conversation_id):
         """Store conversation in legacy format for compatibility"""
@@ -3117,82 +3634,7 @@ Keep it brief and factual."""
         except Exception as e:
             logger.error(f"Error generating conversation title: {e}")
 
-class EmbeddingService:
-    def __init__(self):
-        # Don't cache settings at init time - read them dynamically
-        # This allows runtime settings updates to take effect
-        pass
-
-    def _get_current_settings(self):
-        """Get current settings dynamically so runtime updates work"""
-        # Read from config.settings which gets updated by settings endpoint
-        base = (config.settings.embedding_base_url or "").strip().rstrip("/")
-        try:
-            from urllib.parse import urlparse
-            p = urlparse(base)
-            if not p.scheme or not p.netloc:
-                logger.warning("Embedding base URL invalid or empty; falling back to OPENAI_BASE_URL root")
-                base = (config.settings.openai_base_url or "").rstrip("/")
-                if base.endswith("/v1"):
-                    base = base[:-3].rstrip("/")
-        except Exception:
-            base = (config.settings.openai_base_url or "").rstrip("/")
-            if base.endswith("/v1"):
-                base = base[:-3].rstrip("/")
-        return base, config.settings.embedding_model, config.settings.embedding_dim
-    
-    async def generate_embedding(self, text: str) -> list[float]:
-        """Generate embedding for text using BGE-M3 model"""
-        try:
-            # Get current settings dynamically for runtime updates to work
-            base_url, model, dimension = self._get_current_settings()
-
-            # Use the embeddings endpoint
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{base_url}/v1/embeddings",
-                    json={
-                        "model": model,
-                        "input": text,
-                        "encoding_format": "float"
-                    },
-                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                    timeout=30.0
-                )
-            response.raise_for_status()
-
-            result = response.json()
-            embedding = result["data"][0]["embedding"]
-
-            # Ensure the embedding has the correct dimension
-            if len(embedding) != dimension:
-                logger.warning(f"Expected embedding dimension {dimension}, got {len(embedding)}")
-                # Pad or truncate to match expected dimension
-                if len(embedding) < dimension:
-                    embedding.extend([0.0] * (dimension - len(embedding)))
-                else:
-                    embedding = embedding[:dimension]
-
-            return embedding
-
-        except Exception as e:
-            logger.error(f"Error generating embedding: {e}")
-            return None
-    
-    async def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts"""
-        try:
-            # Get current dimension for default fallback
-            _, _, dimension = self._get_current_settings()
-            # For now, process individually to avoid API limits
-            return [await self.generate_embedding(text) or ([0.0] * dimension) for text in texts]
-
-        except Exception as e:
-            # Get current dimension for error fallback
-            _, _, dimension = self._get_current_settings()
-            logger.error(f"Error generating batch embeddings: {e}")
-            return [[0.0] * dimension] * len(texts)
-
+# EmbeddingService imported from app.services.embedding_service
 
 # ============================================================================
 # GLM-4.5 XML Tool Call Parser
@@ -3282,8 +3724,120 @@ def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
     return cleaned_content, tool_calls
 
 
+def parse_json_text_tool_calls(content: str) -> tuple[str, list]:
+    """
+    Parse tool calls that are output as JSON text in the response content.
+
+    This handles the case where the LLM outputs tool calls as JSON objects
+    in the text content instead of using the proper tool_calls field.
+
+    Expected formats:
+        {"tool": "create_note", "title": "...", "content": "..."}
+        {"name": "create_note", "arguments": {...}}
+        {"function": "create_note", ...}
+
+    Also handles markdown code blocks:
+        ```json
+        {"tool": "create_note", ...}
+        ```
+
+    Returns:
+        (cleaned_content, tool_calls_list)
+    """
+    import re
+    import uuid
+
+    # Known tool names to look for
+    known_tools = {
+        'create_note', 'search_notes', 'edit_note', 'delete_note', 'list_notes',
+        'notes_create', 'notes_search', 'notes_edit', 'notes_delete', 'notes_list',
+        'create_reminder', 'list_reminders', 'cancel_reminder',
+        'reminders_create', 'reminders_list', 'reminders_cancel',
+        'start_timer', 'timer_status', 'cancel_timer',
+        'timers_start', 'timers_status', 'timers_cancel',
+        'memory_search', 'search_memory',
+        'web_search', 'open_page', 'get_page_details', 'get_web_search_details',
+        'calendar_list', 'calendar_create', 'create_calendar_event',
+        'food_log_create', 'food_log_search', 'food_log_summary', 'food_search_and_log',
+        'workout_log_create', 'workout_list', 'workout_details', 'workout_stats',
+        'fitness_note_create', 'fitness_note_search', 'fitness_note_edit', 'fitness_summary',
+        'load_tool_categories',
+        'knowledge_graph_search', 'find_connections', 'discover_knowledge_clusters', 'analyze_knowledge_gaps'
+    }
+
+    tool_calls = []
+    cleaned_content = content
+
+    # Try to extract JSON from the content
+    # First, try markdown code blocks
+    code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
+    matches = re.findall(code_block_pattern, content, re.DOTALL)
+
+    # Also try bare JSON objects at the start of content
+    if not matches:
+        # Look for JSON objects
+        json_pattern = r'^\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})'
+        match = re.match(json_pattern, content.strip(), re.DOTALL)
+        if match:
+            matches = [match.group(1)]
+
+    # Also try finding JSON anywhere in the content
+    if not matches:
+        # More permissive pattern for JSON objects
+        json_pattern = r'(\{["\'](?:tool|name|function)["\']:\s*["\'][^"\']+["\'][^}]*\})'
+        matches = re.findall(json_pattern, content, re.DOTALL)
+
+    for match in matches:
+        try:
+            json_obj = json.loads(match)
+
+            # Determine tool name from various possible keys
+            tool_name = None
+            arguments = {}
+
+            if 'tool' in json_obj:
+                tool_name = json_obj.pop('tool')
+                arguments = json_obj  # Rest of object is arguments
+            elif 'name' in json_obj:
+                tool_name = json_obj.pop('name')
+                if 'arguments' in json_obj:
+                    arguments = json_obj['arguments'] if isinstance(json_obj['arguments'], dict) else json.loads(json_obj['arguments'])
+                else:
+                    arguments = json_obj
+            elif 'function' in json_obj:
+                tool_name = json_obj.pop('function')
+                arguments = json_obj
+
+            # Validate it's a known tool
+            if tool_name and tool_name in known_tools:
+                tool_call = {
+                    "id": f"call_{str(uuid.uuid4())[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(arguments) if arguments else "{}"
+                    }
+                }
+                tool_calls.append(tool_call)
+                logger.info(f"Parsed JSON text tool call: {tool_name} with args: {arguments}")
+
+                # Remove the JSON from content
+                cleaned_content = cleaned_content.replace(match, '').strip()
+                # Also remove code block markers if present
+                cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
+
+        except json.JSONDecodeError as e:
+            logger.debug(f"Failed to parse potential JSON tool call: {e}")
+            continue
+
+    # Clean up any leftover empty code blocks or whitespace
+    cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
+
+    return cleaned_content, tool_calls
+
+
 llm_client = SimpleLLMClient()
-embedding_service = EmbeddingService()
+# embedding_service imported from app.services.embedding_service
 
 # Document Processing Service
 class DocumentProcessor:
@@ -3773,28 +4327,14 @@ Message: [message]"""
             return False
     
     async def send_timer_notification(self, title: str, duration: str, timer_id: str = None, user_id: str = None) -> bool:
-        """Send AI-generated timer completion notification"""
-        actions = [
-            {
-                "type": "view",
-                "label": "Open Sara",
-                "url": "https://sara.avery.cloud"
-            }
-        ]
-        
-        if timer_id:
-            actions.append({
-                "type": "http", 
-                "label": "Dismiss",
-                "url": f"https://sara.avery.cloud/api/timers/{timer_id}/complete",
-                "method": "PATCH"
-            })
-        
+        """Send AI-generated timer completion notification via iOS push"""
+        if not user_id:
+            logger.warning("⚠️ No user_id provided for timer notification, cannot send push")
+            return False
+
         # Get user context for personalization
-        user_context = None
-        if user_id:
-            user_context = await self.get_recent_user_context(user_id)
-        
+        user_context = await self.get_recent_user_context(user_id)
+
         # Generate AI-powered notification message
         ai_title, ai_message = await self.generate_ai_notification_message(
             notification_type="timer",
@@ -3805,14 +4345,17 @@ Message: [message]"""
             },
             user_context=user_context
         )
-        
-        return await self.send_notification(
-            topic=self.timers_topic,
+
+        # Send via iOS push notification instead of NTFY
+        return await send_push_to_user(
+            user_id=user_id,
             title=ai_title,
-            message=ai_message,
-            priority="high",
-            tags=["timer", "sara", "urgent"],
-            actions=actions
+            body=ai_message,
+            notification_data={
+                "type": "timer_complete",
+                "timer_id": timer_id,
+                "timer_name": title,
+            }
         )
     
     async def send_reminder_notification(self, title: str, reminder_time: str, reminder_id: str = None, description: str = None, user_id: str = None) -> bool:
@@ -4226,9 +4769,10 @@ class ContextWindowManager:
                         e.exploration_bonus,
                         1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
                         -- Enhanced composite score with rating boost and exploration bonus
+                        -- Uses 14-day half-life for recency decay (unified baseline across all retrieval paths)
                         (
                             (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.40 +  -- Semantic similarity (40%)
-                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (7 * 86400)) * 0.20 +  -- Recency with exponential decay (20%)
+                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.20 +  -- Recency with 14-day half-life (20%)
                             COALESCE(e.importance, 0.5) * 0.20 +  -- AI-scored importance (20%)
                             COALESCE(e.rating_boost, 0.0) * 0.15 +  -- Rating boost (Wilson + decay) (15%)
                             COALESCE(e.exploration_bonus, 0.0) * 0.05  -- Thompson Sampling exploration (5%)
@@ -4283,42 +4827,88 @@ class ContextWindowManager:
                 logger.info(f"[Memory] Vector search returned {len(episode_data)} episodes with semantic similarity")
                 return episode_data
 
-            # Order by composite relevance score
-            # For now, order by recency and importance
-            episodes = query_builder.order_by(
-                Episode.importance.desc(),
-                Episode.created_at.desc()
-            ).limit(limit).all()
-            
-            # Update access tracking
-            for episode in episodes:
-                episode.access_count += 1
-                episode.last_accessed = datetime.utcnow()
-            
-            db.commit()
-            
-            # Convert to detached objects to avoid session issues
+            # Use composite score with temporal decay for non-semantic retrieval
+            # This ensures temporal queries also properly weight recency
+            from sqlalchemy import text as sql_text
+
+            # Build WHERE clause from existing query filters
+            # We need to use raw SQL for the decay formula
+            time_filter = ""
+            if window_config.window_type == WindowType.TEMPORAL:
+                duration = window_config.parameters.get("duration", timedelta(days=7))
+                cutoff_time = datetime.utcnow() - duration
+                time_filter = f"AND e.created_at >= '{cutoff_time.isoformat()}'"
+
+            # 14-day half-life for recency decay (unified baseline)
+            # decay = exp(-t / (halflife * 86400)) where t is seconds
+            RECENCY_HALFLIFE_DAYS = 14
+
+            sql = sql_text(f"""
+                SELECT
+                    e.id,
+                    e.conversation_id,
+                    e.user_id,
+                    e.role,
+                    e.content,
+                    e.importance,
+                    e.emotional_tone,
+                    e.topics,
+                    e.context_tags,
+                    e.access_count,
+                    e.last_accessed,
+                    e.memory_type,
+                    e.source,
+                    e.created_at,
+                    e.embedding,
+                    -- Composite score: importance (50%) + recency decay (50%)
+                    (
+                        COALESCE(e.importance, 0.5) * 0.50 +
+                        EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / ({RECENCY_HALFLIFE_DAYS} * 86400)) * 0.50
+                    ) as composite_score
+                FROM episode e
+                WHERE e.user_id = :user_id
+                {time_filter}
+                ORDER BY composite_score DESC
+                LIMIT :limit
+            """)
+
+            result = db.execute(sql, {"user_id": user_id, "limit": limit})
+
             episode_data = []
-            for episode in episodes:
+            episode_ids = []
+            for row in result:
                 episode_dict = {
-                    'id': episode.id,
-                    'conversation_id': episode.conversation_id,
-                    'user_id': episode.user_id,
-                    'role': episode.role,
-                    'content': episode.content,
-                    'importance': episode.importance,
-                    'emotional_tone': episode.emotional_tone,
-                    'topics': episode.topics,
-                    'context_tags': episode.context_tags,
-                    'access_count': episode.access_count,
-                    'last_accessed': episode.last_accessed,
-                    'memory_type': episode.memory_type,
-                    'source': episode.source,
-                    'created_at': episode.created_at,
-                    'embedding': episode.embedding
+                    'id': row.id,
+                    'conversation_id': row.conversation_id,
+                    'user_id': row.user_id,
+                    'role': row.role,
+                    'content': row.content,
+                    'importance': row.importance,
+                    'emotional_tone': row.emotional_tone,
+                    'topics': row.topics,
+                    'context_tags': row.context_tags,
+                    'access_count': row.access_count,
+                    'last_accessed': row.last_accessed,
+                    'memory_type': row.memory_type,
+                    'source': row.source,
+                    'created_at': row.created_at,
+                    'embedding': row.embedding,
+                    'composite_score': float(row.composite_score)
                 }
                 episode_data.append(episode_dict)
-            
+                episode_ids.append(row.id)
+
+            # Update access tracking for retrieved episodes
+            if episode_ids:
+                db.execute(sql_text("""
+                    UPDATE episode
+                    SET access_count = COALESCE(access_count, 0) + 1,
+                        last_accessed = NOW()
+                    WHERE id = ANY(:ids)
+                """), {"ids": episode_ids})
+                db.commit()
+
+            logger.info(f"[Memory] Non-semantic retrieval returned {len(episode_data)} episodes with decay scoring")
             return episode_data
             
         finally:
@@ -4372,12 +4962,34 @@ class IntelligentMemoryService:
             )
             
             db.add(episode)
+            db.flush()  # Get episode.id without committing
+
+            # Add to outbox for Neo4j sync (same transaction = guaranteed delivery)
+            outbox_event = EventOutbox(
+                event_type="episode_created",
+                aggregate_type="Episode",
+                aggregate_id=str(episode.id),
+                op="UPSERT",
+                payload=json.dumps({
+                    "episode_id": str(episode.id),
+                    "user_id": str(user_id),
+                    "content": content,
+                    "role": role,
+                    "importance": importance,
+                    "source": source,
+                    "conversation_id": conversation_id,
+                    "embedding": embedding if isinstance(embedding, list) else None
+                }),
+                status="pending"
+            )
+            db.add(outbox_event)
+
             db.commit()
             db.refresh(episode)
-            
-            logger.info(f"🧠 Stored episode {episode.id}: importance={importance:.2f}, emotion={emotional_analysis.get('primary_emotion')}")
+
+            logger.info(f"🧠 Stored episode {episode.id}: importance={importance:.2f}, emotion={emotional_analysis.get('primary_emotion')} (outbox queued)")
             return episode
-            
+
         finally:
             db.close()
     
@@ -4979,11 +5591,31 @@ Generate a brief title and 1-2 sentence insight about why this might be worth re
                         content=insight_data["content"],
                         related_episodes=json.dumps(insight_data.get("episode_ids", []))
                     )
-                    
+
                     db.add(dream_insight)
+                    db.flush()  # Get the ID before committing
+
+                    # Emit insight_generated event for importance backpropagation
+                    episode_ids = insight_data.get("episode_ids", [])
+                    if episode_ids:
+                        outbox_event = EventOutbox(
+                            event_type="insight_generated",
+                            aggregate_type="DreamInsight",
+                            aggregate_id=str(dream_insight.id),
+                            op="PROCESS",
+                            payload=json.dumps({
+                                "insight_id": str(dream_insight.id),
+                                "source_episode_ids": episode_ids,
+                                "importance_boost": 0.1,
+                                "insight_type": insight_data["type"]
+                            }),
+                            status="pending"
+                        )
+                        db.add(outbox_event)
+
                     db.commit()
-                    logger.info(f"💭 Stored {insight_data['type']} insight: {insight_data['title']}")
-                    
+                    logger.info(f"💭 Stored {insight_data['type']} insight: {insight_data['title']} (backprop queued for {len(episode_ids)} episodes)")
+
                 except Exception as e:
                     logger.error(f"Error storing insight: {e}")
                     db.rollback()
@@ -5112,6 +5744,7 @@ class NotificationScheduler:
                             "send_time": timer.end_time,
                             "type": "timer",
                             "timer_id": timer.id,
+                            "timer_name": timer.title,
                             "user_id": timer.user_id
                         }
                         logger.info(f"📝 Pre-generated timer notification for: {timer.title}")
@@ -5185,32 +5818,21 @@ class NotificationScheduler:
             logger.error(f"Error in notification scheduling: {e}")
             
     async def _send_scheduled_notification(self, notification):
-        """Send a pre-generated notification"""
+        """Send a pre-generated notification via iOS push"""
         try:
             if notification["type"] == "timer":
-                actions = [
-                    {
-                        "type": "view",
-                        "label": "Open Sara",
-                        "url": "https://sara.avery.cloud"
-                    },
-                    {
-                        "type": "http", 
-                        "label": "Dismiss",
-                        "url": f"https://sara.avery.cloud/api/timers/{notification['timer_id']}/complete",
-                        "method": "PATCH"
-                    }
-                ]
-                
-                await ntfy_service.send_notification(
-                    topic=ntfy_service.timers_topic,
+                # Send via iOS push notification instead of NTFY
+                await send_push_to_user(
+                    user_id=notification.get("user_id"),
                     title=notification["title"],
-                    message=notification["message"],
-                    priority="high",
-                    tags=["timer", "sara", "urgent"],
-                    actions=actions
+                    body=notification["message"],
+                    notification_data={
+                        "type": "timer_complete",
+                        "timer_id": notification.get("timer_id"),
+                        "timer_name": notification.get("timer_name", "Timer"),
+                    }
                 )
-                logger.info(f"⏰ Sent timer notification: {notification['title']}")
+                logger.info(f"⏰ Sent timer push notification: {notification['title']}")
                 
             elif notification["type"] == "reminder":
                 actions = [
@@ -5250,7 +5872,75 @@ app = FastAPI(
     version="1.0.0-simple"
 )
 
+# Add CORS middleware FIRST before any routes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include modular routes
+
+# Auth routes (extracted from main_simple.py)
+try:
+    from app.routes.auth import router as auth_router
+    app.include_router(auth_router, tags=["Authentication"])
+    logger.info("✅ Auth routes loaded from app.routes.auth")
+except Exception as e:
+    logger.warning(f"Auth routes not available from module: {e}")
+
+# Folders routes (extracted from main_simple.py)
+try:
+    from app.routes.folders import router as folders_router
+    app.include_router(folders_router, tags=["Folders"])
+    logger.info("✅ Folders routes loaded from app.routes.folders")
+except Exception as e:
+    logger.warning(f"Folders routes not available from module: {e}")
+
+# Notes routes (extracted from main_simple.py)
+try:
+    from app.routes.notes import router as notes_router
+    app.include_router(notes_router, tags=["Notes"])
+    logger.info("✅ Notes routes loaded from app.routes.notes")
+except Exception as e:
+    logger.warning(f"Notes routes not available from module: {e}")
+
+# Reminders routes (extracted from main_simple.py)
+try:
+    from app.routes.reminders import router as reminders_router
+    app.include_router(reminders_router, tags=["Reminders"])
+    logger.info("✅ Reminders routes loaded from app.routes.reminders")
+except Exception as e:
+    logger.warning(f"Reminders routes not available from module: {e}")
+
+# Calendar events routes (extracted from main_simple.py)
+try:
+    from app.routes.calendar_events import router as calendar_events_router
+    app.include_router(calendar_events_router, tags=["Calendar"])
+    # Also register iOS sync under /api prefix for backward compatibility
+    from fastapi import APIRouter
+    api_calendar_router = APIRouter(prefix="/api")
+    from app.routes.calendar_events import sync_ios_calendar_events, clear_ios_calendar_events
+    api_calendar_router.add_api_route("/calendar/ios-sync", sync_ios_calendar_events, methods=["POST"])
+    api_calendar_router.add_api_route("/calendar/ios-sync", clear_ios_calendar_events, methods=["DELETE"])
+    app.include_router(api_calendar_router)
+    logger.info("✅ Calendar events routes loaded from app.routes.calendar_events")
+except Exception as e:
+    logger.warning(f"Calendar events routes not available from module: {e}")
+
+# Habits routes (extracted from main_simple.py)
+try:
+    from app.routes.habits import router as habits_router, habit_items_router, insights_router, fitness_habits_router
+    app.include_router(habits_router, tags=["Habits"])
+    app.include_router(habit_items_router, tags=["Habits"])
+    app.include_router(insights_router, tags=["Habits"])
+    app.include_router(fitness_habits_router, tags=["Fitness"])
+    logger.info("✅ Habits routes loaded from app.routes.habits")
+except Exception as e:
+    logger.warning(f"Habits routes not available from module: {e}")
+
 try:
     from app.routes.memory import router as memory_router
     app.include_router(memory_router)
@@ -5261,15 +5951,9 @@ except Exception as e:
 try:
     from app.routes.calendar import router as calendar_router
     from app.routes.threads import router as threads_router
-    from app.routes.shadow import router as shadow_router
-    from app.routes.wyoming import router as wyoming_router
-    from app.routes.agent_downloads import router as downloads_router
     app.include_router(calendar_router, prefix="/events")
     app.include_router(threads_router, prefix="/threads")
-    app.include_router(shadow_router, prefix="/shadow", tags=["Shadow Mode"])
-    app.include_router(wyoming_router, tags=["Voice/Wyoming"])
-    app.include_router(downloads_router, prefix="/api", tags=["Agent Downloads"])
-    logger.info("Jarvis mode routes loaded successfully (including Shadow Mode + Voice)")
+    logger.info("Jarvis mode routes loaded successfully")
 except Exception as e:
     logger.warning(f"Jarvis routes not available: {e}")
     logger.warning("Running in Sara mode only")
@@ -5282,6 +5966,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Fitness routes failed to load: {e}")
 
+# Include Learning routes
+try:
+    from app.routes.learning import router as learning_router
+    app.include_router(learning_router, prefix="/api/learn", tags=["Learning"])
+    logger.info("✅ Learning routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Learning routes failed to load: {e}")
+
 # Include Food Database routes
 try:
     from app.routes.food_database import router as food_db_router
@@ -5289,6 +5981,14 @@ try:
     logger.info("✅ Food database routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Food database routes failed to load: {e}")
+
+# Include Health Metrics routes (Proactive Health Intelligence)
+try:
+    from app.routes.health_metrics import router as health_metrics_router
+    app.include_router(health_metrics_router, tags=["Health Metrics"])
+    logger.info("✅ Health metrics routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Health metrics routes failed to load: {e}")
 
 # Include Emotion routes (Phase 2)
 try:
@@ -5305,6 +6005,71 @@ try:
     logger.info("✅ Intelligence reports routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Intelligence reports routes failed to load: {e}")
+
+# Include Cognitive Enhancement routes
+try:
+    from app.routes.cognitive import router as cognitive_router
+    app.include_router(cognitive_router, tags=["Cognitive Enhancement"])
+    logger.info("✅ Cognitive enhancement routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Cognitive enhancement routes failed to load: {e}")
+
+# Include Morning Brief routes
+try:
+    from app.routes.morning_brief import router as morning_brief_router
+    app.include_router(morning_brief_router, prefix="/api/morning-brief", tags=["Morning Brief"])
+    logger.info("✅ Morning brief routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Morning brief routes failed to load: {e}")
+
+# Include Project Tracker routes
+try:
+    from app.routes.projects import router as projects_router
+    app.include_router(projects_router, prefix="/api/projects", tags=["Project Tracker"])
+    logger.info("✅ Project tracker routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Project tracker routes failed to load: {e}")
+
+# Include Artifacts routes
+try:
+    from app.routes.artifacts import router as artifacts_router
+    app.include_router(artifacts_router, prefix="/api/artifacts", tags=["Artifacts"])
+    logger.info("✅ Artifacts routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Artifacts routes failed to load: {e}")
+
+# Include Token Usage routes
+try:
+    from app.routes.token_usage import router as token_usage_router
+    app.include_router(token_usage_router, prefix="/api/token-usage", tags=["Token Usage"])
+    logger.info("✅ Token usage routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Token usage routes failed to load: {e}")
+
+# Include Orchestrator Lab routes
+try:
+    from app.routes.orchestrator import router as orchestrator_router
+    app.include_router(orchestrator_router, tags=["Orchestrator Lab"])
+    logger.info("✅ Orchestrator Lab routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Orchestrator Lab routes failed to load: {e}")
+
+# Include Background Tasks routes
+try:
+    from app.routes.background_tasks import get_configured_router
+    bg_tasks_router = get_configured_router(get_db, get_current_user)
+    app.include_router(bg_tasks_router, tags=["Background Tasks"])
+    logger.info("✅ Background Tasks routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Background Tasks routes failed to load: {e}")
+
+# Include Pattern Correlation routes
+try:
+    from app.routes.patterns import router as patterns_router
+    app.include_router(patterns_router, tags=["Patterns"])
+    logger.info("✅ Pattern Correlation routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Pattern Correlation routes failed to load: {e}")
 
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
@@ -5628,16 +6393,969 @@ async def get_patterns(db: Session = Depends(get_db), current_user: dict = Depen
 
 logger.info("✅ Phase 4 intelligence routes loaded successfully")
 
+# ===================== SUBCONSCIOUS ROUTES =====================
+@app.get("/api/subconscious/state")
+async def get_subconscious_state(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get current mental model state for Sara context injection"""
+    try:
+        user_id = current_user.id
+        result = db.execute(text("""
+            SELECT * FROM subconscious_state WHERE user_id = :user_id
+        """), {"user_id": user_id}).fetchone()
+
+        if result:
+            state = dict(result._mapping)
+            # Parse JSON fields
+            for field in ['typical_meal_windows', 'current_focus_areas', 'active_threads',
+                         'docker_health', 'service_health']:
+                if state.get(field) and isinstance(state[field], str):
+                    try:
+                        state[field] = json.loads(state[field])
+                    except:
+                        pass
+            # Format timestamps
+            for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
+                if state.get(field):
+                    state[field] = state[field].isoformat() if hasattr(state[field], 'isoformat') else str(state[field])
+            return state
+
+        return {"message": "No state available yet", "user_id": user_id}
+    except Exception as e:
+        logger.error(f"Error getting subconscious state: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/subconscious/nudges")
+async def get_subconscious_nudges(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Get pending nudges for display"""
+    try:
+        user_id = current_user.id
+        result = db.execute(text("""
+            SELECT id, nudge_type, severity, title, message, action_suggestion,
+                   delivery_channel, created_at, expires_at
+            FROM subconscious_nudge
+            WHERE user_id = :user_id
+              AND status IN ('pending', 'delivered')
+              AND expires_at > NOW()
+            ORDER BY
+                CASE severity
+                    WHEN 'urgent' THEN 1
+                    WHEN 'gentle' THEN 2
+                    ELSE 3
+                END,
+                created_at DESC
+        """), {"user_id": user_id}).fetchall()
+
+        nudges = []
+        for r in result:
+            nudge = dict(r._mapping)
+            nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
+            nudge['expires_at'] = nudge['expires_at'].isoformat() if nudge.get('expires_at') else None
+            nudges.append(nudge)
+
+        return nudges
+    except Exception as e:
+        logger.error(f"Error getting nudges: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/subconscious/nudges/{nudge_id}/acknowledge")
+async def acknowledge_nudge(nudge_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Acknowledge a nudge"""
+    try:
+        user_id = current_user.id
+        result = db.execute(text("""
+            UPDATE subconscious_nudge
+            SET acknowledged_at = NOW(), status = 'acknowledged'
+            WHERE id = :nudge_id
+              AND user_id = :user_id
+              AND status IN ('pending', 'delivered')
+        """), {"nudge_id": nudge_id, "user_id": user_id})
+
+        db.commit()
+
+        if result.rowcount > 0:
+            return {"success": True, "nudge_id": nudge_id}
+        raise HTTPException(status_code=404, detail="Nudge not found or already acknowledged")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error acknowledging nudge: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/subconscious/nudges/stream")
+async def nudge_stream(request: Request, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """SSE stream for real-time nudge updates"""
+    user_id = current_user.id
+
+    async def generate_events():
+        last_check = datetime.now()
+        while True:
+            # Check if client disconnected
+            if await request.is_disconnected():
+                break
+
+            # Check for new nudges since last check
+            result = db.execute(text("""
+                SELECT id, nudge_type, severity, title, message, action_suggestion,
+                       delivery_channel, created_at
+                FROM subconscious_nudge
+                WHERE user_id = :user_id
+                  AND status IN ('pending', 'delivered')
+                  AND created_at > :last_check
+                  AND expires_at > NOW()
+                ORDER BY created_at DESC
+            """), {"user_id": user_id, "last_check": last_check}).fetchall()
+
+            for r in result:
+                nudge = dict(r._mapping)
+                nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
+                yield f"data: {json.dumps({'type': 'nudge', 'nudge': nudge})}\n\n"
+
+            last_check = datetime.now()
+            await asyncio.sleep(10)  # Check every 10 seconds
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    )
+
+
+logger.info("✅ Subconscious routes loaded successfully")
+
+# ===================== PI DASHBOARD ROUTES =====================
+# These routes support device token auth for headless Pi access
+
+async def get_device_user(request: Request, db: Session = Depends(get_db)) -> Optional[str]:
+    """Get user ID from device token or return None"""
+    device_token = request.headers.get("X-Device-Token")
+    if device_token:
+        result = db.execute(text("""
+            SELECT user_id FROM device_registration
+            WHERE device_token = :token
+        """), {"token": device_token}).fetchone()
+        if result:
+            # Update last_seen
+            db.execute(text("""
+                UPDATE device_registration SET last_seen = NOW()
+                WHERE device_token = :token
+            """), {"token": device_token})
+            db.commit()
+            return result.user_id
+    return None
+
+
+@app.post("/api/devices/register")
+async def register_device(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Register a device for token-based auth (requires initial login)"""
+    import secrets
+    device_name = data.get("device_name", "Unknown Device")
+    device_type = data.get("device_type", "pi_dashboard")
+
+    device_token = secrets.token_urlsafe(32)
+    device_id = str(uuid.uuid4())
+
+    db.execute(text("""
+        INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
+        VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
+    """), {
+        "id": device_id,
+        "user_id": current_user.id,
+        "device_name": device_name,
+        "device_token": device_token,
+        "device_type": device_type
+    })
+    db.commit()
+
+    return {
+        "device_id": device_id,
+        "device_token": device_token,
+        "message": "Device registered. Store this token securely."
+    }
+
+
+@app.post("/api/devices/bootstrap")
+async def bootstrap_device(data: dict, db: Session = Depends(get_db)):
+    """Bootstrap a device registration using email - for headless Pi setup"""
+    import secrets
+
+    email = data.get("email")
+    device_name = data.get("device_name", "pi-dashboard")
+    device_type = data.get("device_type", "pi_dashboard")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+
+    # Find user by email
+    result = db.execute(text("SELECT id FROM app_user WHERE email = :email"), {"email": email}).fetchone()
+    if not result:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user_id = result[0]
+
+    # Check if device already exists
+    existing = db.execute(text("""
+        SELECT device_token FROM device_registration
+        WHERE user_id = :user_id AND device_name = :device_name
+    """), {"user_id": user_id, "device_name": device_name}).fetchone()
+
+    if existing:
+        return {
+            "device_token": existing[0],
+            "message": "Device already registered. Returning existing token."
+        }
+
+    device_token = secrets.token_urlsafe(32)
+    device_id = str(uuid.uuid4())
+
+    db.execute(text("""
+        INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
+        VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
+    """), {
+        "id": device_id,
+        "user_id": user_id,
+        "device_name": device_name,
+        "device_token": device_token,
+        "device_type": device_type
+    })
+    db.commit()
+
+    return {
+        "device_id": device_id,
+        "device_token": device_token,
+        "message": "Device registered. Store this token in localStorage as 'device_token'."
+    }
+
+
+@app.get("/api/pi-dashboard/state")
+async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)):
+    """Get combined state for Pi dashboard (supports device token auth)"""
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated. Use device token or login.")
+
+    # Get subconscious state
+    state_result = db.execute(text("""
+        SELECT * FROM subconscious_state WHERE user_id = :user_id
+    """), {"user_id": user_id}).fetchone()
+
+    state = None
+    if state_result:
+        state = dict(state_result._mapping)
+        for field in ['typical_meal_windows', 'current_focus_areas', 'active_threads',
+                     'docker_health', 'service_health']:
+            if state.get(field) and isinstance(state[field], str):
+                try:
+                    state[field] = json.loads(state[field])
+                except:
+                    pass
+        for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
+            if state.get(field):
+                state[field] = state[field].isoformat() if hasattr(state[field], 'isoformat') else str(state[field])
+
+    # Get pending nudges
+    nudges_result = db.execute(text("""
+        SELECT id, nudge_type, severity, title, message, action_suggestion,
+               delivery_channel, created_at, expires_at
+        FROM subconscious_nudge
+        WHERE user_id = :user_id
+          AND status IN ('pending', 'delivered')
+          AND expires_at > NOW()
+        ORDER BY
+            CASE severity WHEN 'urgent' THEN 1 WHEN 'gentle' THEN 2 ELSE 3 END,
+            created_at DESC
+        LIMIT 10
+    """), {"user_id": user_id}).fetchall()
+
+    nudges = []
+    for r in nudges_result:
+        nudge = dict(r._mapping)
+        nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
+        nudge['expires_at'] = nudge['expires_at'].isoformat() if nudge.get('expires_at') else None
+        nudges.append(nudge)
+
+    # Get worker status from subconscious log
+    worker_status = {}
+    try:
+        subconscious_log = db.execute(text("""
+            SELECT snapshot_at FROM subconscious_log
+            WHERE user_id = :user_id
+            ORDER BY snapshot_at DESC LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+        if subconscious_log:
+            last_run = subconscious_log.snapshot_at
+            # Next run is 30 minutes after last run (during waking hours)
+            next_run = last_run + timedelta(minutes=30) if last_run else None
+            worker_status["subconscious"] = {
+                "last_run": last_run.isoformat() if last_run else None,
+                "next_run": next_run.isoformat() if next_run else None,
+                "interval_mins": 30
+            }
+    except Exception as e:
+        logger.warning(f"Failed to get subconscious worker status: {e}")
+
+    # Get orchestrator status (from background_task if available)
+    try:
+        orchestrator_task = db.execute(text("""
+            SELECT completed_at FROM background_task
+            WHERE task_type = 'orchestrator'
+            ORDER BY completed_at DESC LIMIT 1
+        """)).fetchone()
+        if orchestrator_task and orchestrator_task.completed_at:
+            last_run = orchestrator_task.completed_at
+            next_run = last_run + timedelta(minutes=5)
+            worker_status["orchestrator"] = {
+                "last_run": last_run.isoformat(),
+                "next_run": next_run.isoformat(),
+                "interval_mins": 5
+            }
+    except Exception:
+        pass  # Table might not exist
+
+    # Get today's calendar events
+    calendar_events = []
+    try:
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        events_result = db.execute(text("""
+            SELECT id, title, start_time, end_time, location
+            FROM calendar_event
+            WHERE user_id = :user_id
+              AND start_time >= :today_start
+              AND start_time < :today_end
+            ORDER BY start_time
+            LIMIT 10
+        """), {"user_id": user_id, "today_start": today_start, "today_end": today_end}).fetchall()
+
+        for e in events_result:
+            calendar_events.append({
+                "id": e.id,
+                "title": e.title,
+                "start": e.start_time.isoformat() if e.start_time else None,
+                "end": e.end_time.isoformat() if e.end_time else None,
+                "location": e.location
+            })
+    except Exception as ex:
+        logger.warning(f"Failed to get calendar events: {ex}")
+
+    # Get recent notes
+    recent_notes = []
+    try:
+        notes_result = db.execute(text("""
+            SELECT id, title, updated_at, created_at
+            FROM note
+            WHERE user_id = :user_id
+            ORDER BY updated_at DESC
+            LIMIT 10
+        """), {"user_id": user_id}).fetchall()
+
+        for n in notes_result:
+            recent_notes.append({
+                "id": n.id,
+                "title": n.title,
+                "updated_at": n.updated_at.isoformat() if n.updated_at else None,
+                "created_at": n.created_at.isoformat() if n.created_at else None
+            })
+    except Exception as ex:
+        logger.warning(f"Failed to get notes: {ex}")
+
+    return {
+        "state": state,
+        "nudges": nudges,
+        "worker_status": worker_status,
+        "calendar_events": calendar_events,
+        "recent_notes": recent_notes,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# ===================== PI DASHBOARD NUDGE ENDPOINT =====================
+
+@app.post("/api/pi-dashboard/nudges/{nudge_id}/acknowledge")
+async def pi_dashboard_acknowledge_nudge(nudge_id: str, request: Request, db: Session = Depends(get_db)):
+    """Acknowledge a nudge via Pi dashboard (supports device token auth)"""
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        result = db.execute(text("""
+            UPDATE subconscious_nudge
+            SET acknowledged_at = NOW(), status = 'acknowledged'
+            WHERE id = :nudge_id
+              AND user_id = :user_id
+              AND status IN ('pending', 'delivered')
+        """), {"nudge_id": nudge_id, "user_id": user_id})
+
+        db.commit()
+
+        if result.rowcount > 0:
+            logger.info(f"[Pi Dashboard] Nudge {nudge_id} acknowledged by user {user_id}")
+            return {"success": True, "nudge_id": nudge_id}
+        raise HTTPException(status_code=404, detail="Nudge not found or already acknowledged")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error acknowledging nudge: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/pi-dashboard/timers")
+async def get_pi_dashboard_timers(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get active timers for Pi dashboard overlay"""
+    user_id = current_user.id
+
+    try:
+        now = datetime.now(timezone.utc)
+
+        # Get active timers for this user
+        timers = db.query(Timer).filter(
+            Timer.user_id == user_id,
+            Timer.is_active == True
+        ).order_by(Timer.end_time.asc()).all()
+
+        timer_list = []
+        for timer in timers:
+            # Ensure end_time is timezone-aware
+            end_time = timer.end_time
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+
+            # Calculate remaining time
+            remaining_seconds = (end_time - now).total_seconds()
+
+            # Skip expired timers (but mark them as completed)
+            if remaining_seconds <= 0:
+                timer.is_active = False
+                timer.is_completed = True
+                db.commit()
+                continue
+
+            timer_list.append({
+                "id": timer.id,
+                "title": timer.title,
+                "duration_minutes": timer.duration_minutes,
+                "end_time": end_time.isoformat(),
+                "remaining_seconds": int(remaining_seconds),
+                "remaining_minutes": int(remaining_seconds / 60),
+                "remaining_display": f"{int(remaining_seconds // 60)}:{int(remaining_seconds % 60):02d}"
+            })
+
+        return {"timers": timer_list, "count": len(timer_list)}
+    except Exception as e:
+        logger.error(f"Error getting timers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================== PI DASHBOARD VOICE ENDPOINTS =====================
+
+@app.post("/api/pi-dashboard/voice/transcribe")
+async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Transcribe audio for Pi dashboard (supports device token auth)"""
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        # Save audio file temporarily
+        audio_content = await audio.read()
+        temp_audio_path = f"/tmp/voice_{uuid.uuid4()}.webm"
+
+        with open(temp_audio_path, "wb") as f:
+            f.write(audio_content)
+
+        # Known Whisper hallucinations on silence/noise
+        WHISPER_HALLUCINATIONS = {
+            "thank you", "thanks", "thanks for watching", "thank you for watching",
+            "please subscribe", "subscribe", "bye", "goodbye", "see you next time",
+            "you", "the", "i", "a", "", "so", "um", "uh", "hmm", "oh",
+            "thank you.", "thanks.", "bye.", "goodbye."
+        }
+
+        # Call Whisper STT service (same as voice-agent)
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with open(temp_audio_path, "rb") as audio_file:
+                files = {"file": ("audio.webm", audio_file, "audio/webm")}
+                data = {
+                    "model": "distil-small.en",
+                    "language": "en",
+                    "vad_filter": "true",
+                    "no_speech_threshold": "0.4",
+                    "compression_ratio_threshold": "2.0",
+                }
+                response = await client.post(
+                    "http://10.185.1.8:8585/v1/audio/transcriptions",
+                    files=files,
+                    data=data
+                )
+
+        # Clean up temp file
+        try:
+            os.remove(temp_audio_path)
+        except:
+            pass
+
+        if response.status_code == 200:
+            result = response.json()
+            transcribed_text = result.get("text", "").strip()
+
+            # Filter out hallucinations
+            if transcribed_text.lower() in WHISPER_HALLUCINATIONS:
+                logger.info(f"[Pi Dashboard Voice] Filtered hallucination: '{transcribed_text}'")
+                return {"transcription": "", "filtered": True}
+
+            # Filter short hallucinations
+            if len(transcribed_text.split()) <= 2 and transcribed_text.lower().rstrip('.!?') in WHISPER_HALLUCINATIONS:
+                logger.info(f"[Pi Dashboard Voice] Filtered short hallucination: '{transcribed_text}'")
+                return {"transcription": "", "filtered": True}
+
+            logger.info(f"[Pi Dashboard Voice] Transcribed: {transcribed_text}")
+            return {"transcription": transcribed_text}
+        else:
+            logger.error(f"[Pi Dashboard Voice] Whisper error: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=500, detail="Transcription failed")
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Voice] Transcription error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pi-dashboard/voice/chat")
+async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db)):
+    """
+    Streaming chat for Pi dashboard with device token auth.
+    Returns SSE stream with Sara's response.
+    """
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        body = await request.json()
+        message = body.get("message", "")
+        conversation_id = body.get("conversation_id")
+
+        if not message:
+            raise HTTPException(status_code=400, detail="No message provided")
+
+        logger.info(f"[Pi Dashboard Voice] Chat from user {user_id}: {message[:50]}...")
+
+        # Get user object for chat
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Generate conversation ID if not provided
+        if not conversation_id:
+            conversation_id = f"pi-voice-{uuid.uuid4()}"
+
+        # Stream the response
+        async def generate_stream():
+            full_response = ""
+            try:
+                # Create system prompt
+                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email)
+
+                # Intent classification for lazy context
+                tool_classifier = get_tool_intent_classifier()
+                context_router = get_context_router()
+                user_intent = tool_classifier.classify(message)
+                context_decision = context_router.decide(intent=user_intent, message=message, turn_count=1)
+                logger.info(f"[Pi Dashboard Voice] Intent={user_intent}, {context_decision.reason}")
+
+                # Lazy memory retrieval
+                if context_decision.inject_memory:
+                    try:
+                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
+                            user_id=user_id,
+                            query=message,
+                            use_semantic=True
+                        )
+                        if relevant_memories:
+                            memory_context = "\n\n## Relevant Past Context:\n"
+                            for i, mem in enumerate(relevant_memories[:3], 1):
+                                content_preview = mem.get("content", "")[:200]
+                                memory_context += f"{i}. {content_preview}\n"
+                            system_prompt += memory_context
+                    except Exception as e:
+                        logger.warning(f"[Pi Dashboard Voice] Memory retrieval failed: {e}")
+
+                # Get tools based on intent
+                tool_categories = tool_classifier.get_tool_categories(user_intent)
+                tools = []
+                if tool_categories:
+                    tools = tool_registry.get_tools_by_categories(tool_categories)
+                    logger.info(f"[Pi Dashboard Voice] Loaded {len(tools)} tools for categories: {tool_categories}")
+
+                # Build messages
+                llm_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ]
+
+                # Use the global LLM client
+                if tools:
+                    # Use chat_with_tools for tool-enabled conversations
+                    full_response = await llm_client.chat_with_tools(
+                        llm_messages,
+                        tools=tools,
+                        user_id=user_id,
+                        conversation_id=conversation_id
+                    )
+                else:
+                    # Simple chat without tools
+                    full_response = await llm_client.chat(llm_messages)
+
+                # Ensure we have a string response
+                if isinstance(full_response, dict):
+                    full_response = full_response.get("content", str(full_response))
+                elif not isinstance(full_response, str):
+                    full_response = str(full_response)
+
+                # Send response
+                yield f"data: {json.dumps({'type': 'text_chunk', 'content': full_response})}\n\n"
+                yield f"data: {json.dumps({'type': 'final_response', 'content': full_response, 'conversation_id': conversation_id})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+                # Store episode in background
+                try:
+                    episode_id = str(uuid.uuid4())
+                    db.execute(text("""
+                        INSERT INTO episode (id, user_id, content, importance, created_at, source)
+                        VALUES (:id, :user_id, :content, :importance, NOW(), :source)
+                    """), {
+                        "id": episode_id,
+                        "user_id": user_id,
+                        "content": f"User (voice via Pi dashboard): {message}\n\nSara: {full_response}",
+                        "importance": 0.5,
+                        "source": "pi_dashboard_voice"
+                    })
+                    db.commit()
+                except Exception as e:
+                    logger.warning(f"[Pi Dashboard Voice] Failed to store episode: {e}")
+
+            except Exception as e:
+                logger.error(f"[Pi Dashboard Voice] Chat error: {e}")
+                import traceback
+                traceback.print_exc()
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Voice] Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pi-dashboard/voice/speak")
+async def pi_dashboard_voice_speak(request: Request, db: Session = Depends(get_db)):
+    """
+    Text-to-speech for Pi dashboard with device token auth.
+    Returns audio blob.
+    """
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        body = await request.json()
+        text = body.get("text", "")
+        response_format = body.get("response_format", "mp3")  # Default MP3 for browser
+
+        if not text:
+            raise HTTPException(status_code=400, detail="No text provided")
+
+        logger.info(f"[Pi Dashboard Voice] TTS for user {user_id}: {text[:50]}...")
+
+        # Call Kokoro TTS service
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            tts_response = await client.post(
+                "http://10.185.1.9:8880/v1/audio/speech",
+                json={
+                    "input": text,
+                    "model": "kokoro",
+                    "voice": "af_sarah(1)+af_bella(1)",
+                    "response_format": response_format,
+                    "speed": 1.0
+                }
+            )
+
+            if tts_response.status_code != 200:
+                logger.error(f"[Pi Dashboard Voice] Kokoro TTS error: {tts_response.status_code}")
+                raise HTTPException(status_code=500, detail="TTS service error")
+
+            # Determine media type
+            media_type_map = {
+                "mp3": "audio/mpeg",
+                "wav": "audio/wav",
+                "opus": "audio/opus",
+                "flac": "audio/flac",
+                "pcm": "audio/pcm",
+                "m4a": "audio/mp4"
+            }
+            media_type = media_type_map.get(response_format, "audio/mpeg")
+
+            return Response(
+                content=tts_response.content,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{response_format}"
+                }
+            )
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Voice] TTS error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Fast worker system prompt - focused on command execution only
+FAST_WORKER_PROMPT = """You are a command executor for a personal AI assistant. Your job is to parse the user's request and call the appropriate tool. Do NOT engage in conversation or provide lengthy explanations.
+
+Instructions:
+1. Parse the user's command to understand what they want
+2. Call the appropriate tool with the correct parameters
+3. Confirm the action with a brief response (1 sentence max)
+
+Examples:
+- "turn on the living room lights" → call home_light_control with entity and state
+- "log 500 calories of pizza" → call food_log_create with the food details
+- "set a timer for 5 minutes" → call timers_start with duration
+- "remind me to call mom at 3pm" → call reminders_create with the reminder
+- "what's on my calendar today" → call calendar_list for today's events
+
+Keep responses short and action-focused."""
+
+
+@app.post("/api/pi-dashboard/voice/fast")
+async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db)):
+    """
+    Fast worker for simple tool commands.
+    Uses gpt-oss:20b model + direct tool execution.
+    Returns immediately without full context injection.
+
+    Handles: HOME, TIME, FITNESS intents only.
+    Returns {"handled": False} for other intents (fall back to full Sara).
+    """
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        body = await request.json()
+        message = body.get("message", "")
+
+        if not message:
+            raise HTTPException(status_code=400, detail="No message provided")
+
+        logger.info(f"[Pi Dashboard Fast] Request from user {user_id}: {message[:50]}...")
+
+        # Classify intent
+        tool_classifier = get_tool_intent_classifier()
+        intent = tool_classifier.classify(message)
+        logger.info(f"[Pi Dashboard Fast] Classified intent: {intent}")
+
+        # Only handle HOME, TIME, FITNESS intents with fast worker
+        FAST_WORKER_INTENTS = ['HOME', 'TIME', 'FITNESS']
+        if intent not in FAST_WORKER_INTENTS:
+            logger.info(f"[Pi Dashboard Fast] Intent {intent} not handled by fast worker")
+            return {"handled": False, "reason": f"Intent '{intent}' requires full Sara"}
+
+        # Get tools for this intent
+        tool_categories = tool_classifier.get_tool_categories(intent)
+        tools = tool_registry.get_tools_by_categories(tool_categories)
+        logger.info(f"[Pi Dashboard Fast] Loaded {len(tools)} tools for {intent}: {tool_categories}")
+
+        # Build messages with fast worker prompt
+        llm_messages = [
+            {"role": "system", "content": FAST_WORKER_PROMPT},
+            {"role": "user", "content": message}
+        ]
+
+        # Use fast model (Gemini or local) for fast response
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Build the chat payload with tools
+            chat_payload = {
+                "model": FAST_MODEL,  # gemini-3-flash-preview or local
+                "messages": llm_messages,
+                "temperature": 0.3,  # Lower temperature for more deterministic tool use
+                "max_tokens": 1000,
+                "tools": tools if tools else None
+            }
+
+            # Add Ollama context length if using local model
+            if "ollama" in FAST_MODEL_URL.lower() or "11434" in FAST_MODEL_URL:
+                chat_payload["num_ctx"] = 16384  # Smaller context for fast model
+
+            response = await client.post(
+                f"{FAST_MODEL_URL}/chat/completions",
+                json=chat_payload,
+                headers={"Authorization": f"Bearer {FAST_MODEL_API_KEY}"},
+                timeout=30.0
+            )
+
+            if response.status_code != 200:
+                logger.error(f"[Pi Dashboard Fast] LLM error: {response.status_code}")
+                return {"handled": False, "reason": "LLM request failed"}
+
+            result = response.json()
+            assistant_message = result.get("choices", [{}])[0].get("message", {})
+
+            # Check if tool was called
+            tool_calls = assistant_message.get("tool_calls", [])
+            if tool_calls:
+                logger.info(f"[Pi Dashboard Fast] Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
+
+                # Execute tool calls
+                tool_results = []
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    tool_name = func.get("name")
+                    try:
+                        tool_args = json.loads(func.get("arguments", "{}"))
+                    except:
+                        tool_args = {}
+
+                    # Execute the tool
+                    tool_result = await llm_client.execute_tool(
+                        {"function": {"name": tool_name, "arguments": json.dumps(tool_args)}, "id": tc.get("id")},
+                        user_id=user_id
+                    )
+                    tool_results.append({"tool": tool_name, "result": tool_result})
+                    logger.info(f"[Pi Dashboard Fast] Executed {tool_name}: {str(tool_result)[:100]}")
+
+                # Get final response after tool execution
+                # Add tool results to conversation
+                llm_messages.append(assistant_message)
+                for i, tc in enumerate(tool_calls):
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": str(tool_results[i]["result"])
+                    })
+
+                # Get final response from model
+                final_payload = {
+                    "model": FAST_MODEL,
+                    "messages": llm_messages,
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                }
+
+                if "ollama" in FAST_MODEL_URL.lower() or "11434" in FAST_MODEL_URL:
+                    final_payload["num_ctx"] = 16384
+
+                final_response = await client.post(
+                    f"{FAST_MODEL_URL}/chat/completions",
+                    json=final_payload,
+                    headers={"Authorization": f"Bearer {FAST_MODEL_API_KEY}"},
+                    timeout=30.0
+                )
+
+                if final_response.status_code == 200:
+                    final_result = final_response.json()
+                    response_text = final_result.get("choices", [{}])[0].get("message", {}).get("content", "Done.")
+                else:
+                    response_text = "Done."
+
+            else:
+                # No tool called, use direct response
+                response_text = assistant_message.get("content", "I couldn't understand that command.")
+
+            logger.info(f"[Pi Dashboard Fast] Response: {response_text[:100]}")
+
+            return {
+                "handled": True,
+                "response": response_text,
+                "intent": intent,
+                "tools_used": [tc.get("function", {}).get("name") for tc in tool_calls] if tool_calls else []
+            }
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Fast] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"handled": False, "reason": str(e)}
+
+
+logger.info("✅ Pi Dashboard routes loaded successfully")
+
 # ===================== APPLE HEALTH SYNC ROUTES =====================
 @app.post("/api/health/sync")
-async def sync_health_data(data: dict, current_user: dict = Depends(get_current_user)):
+async def sync_health_data(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Sync Apple Health data from iOS app
     Stores health metrics and creates episodic memory entries
     """
     try:
         user_id = current_user.id
-        timestamp = data.get("timestamp", datetime.now().isoformat())
+        timestamp = data.get("timestamp", local_now().isoformat())
 
         # Extract health data
         today_data = data.get("today", {})
@@ -5661,22 +7379,19 @@ async def sync_health_data(data: dict, current_user: dict = Depends(get_current_
 
         # Create memory entry for today's health stats
         if health_summary:
-            memory_content = f"Health Summary for {datetime.now().strftime('%Y-%m-%d')}: {', '.join(health_summary)}"
+            memory_content = f"Health Summary for {local_now().strftime('%Y-%m-%d')}: {', '.join(health_summary)}"
 
             # Create episode in database
             episode = Episode(
                 user_id=user_id,
-                episode_type="health_sync",
+                role="system",
+                memory_type="health_sync",
+                source="apple_health",
                 content=memory_content,
-                importance=5,  # Moderate importance
-                metadata={
-                    "source": "apple_health",
-                    "timestamp": timestamp,
-                    "today_data": today_data,
-                    "has_sleep_data": len(sleep_data) > 0,
-                    "workout_count": len(workouts),
-                },
-                created_at=datetime.now(),
+                importance=0.5,  # Moderate importance (0-1 scale)
+                topics=json.dumps(["health", "fitness"]),
+                context_tags=json.dumps(["health_sync", "daily_metrics"]),
+                created_at=local_now(),
             )
             db.add(episode)
 
@@ -5690,14 +7405,14 @@ async def sync_health_data(data: dict, current_user: dict = Depends(get_current_
 
             workout_episode = Episode(
                 user_id=user_id,
-                episode_type="workout",
+                role="system",
+                memory_type="workout",
+                source="apple_health",
                 content=workout_memory,
-                importance=7,  # Higher importance for workouts
-                metadata={
-                    "source": "apple_health",
-                    "workout_data": workout,
-                },
-                created_at=datetime.fromisoformat(workout.get("startDate", timestamp)),
+                importance=0.7,  # Higher importance for workouts
+                topics=json.dumps(["fitness", "workout", workout_type.lower()]),
+                context_tags=json.dumps(["workout", "exercise"]),
+                created_at=datetime.fromisoformat(workout.get("startDate", timestamp)) if workout.get("startDate") else local_now(),
             )
             db.add(workout_episode)
 
@@ -5719,7 +7434,7 @@ async def sync_health_data(data: dict, current_user: dict = Depends(get_current_
         raise HTTPException(status_code=500, detail=f"Failed to sync health data: {str(e)}")
 
 @app.get("/api/health/summary")
-async def get_health_summary(current_user: dict = Depends(get_current_user)):
+async def get_health_summary(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Get recent health data summary from stored episodes
     """
@@ -5729,17 +7444,17 @@ async def get_health_summary(current_user: dict = Depends(get_current_user)):
         # Get recent health sync episodes
         health_episodes = db.query(Episode).filter(
             Episode.user_id == user_id,
-            Episode.episode_type.in_(["health_sync", "workout"])
+            Episode.memory_type.in_(["health_sync", "workout"])
         ).order_by(Episode.created_at.desc()).limit(10).all()
 
         summary = []
         for episode in health_episodes:
             summary.append({
                 "id": episode.id,
-                "type": episode.episode_type,
+                "type": episode.memory_type,
                 "content": episode.content,
-                "timestamp": episode.created_at.isoformat(),
-                "metadata": episode.metadata,
+                "timestamp": format_iso_utc(episode.created_at),
+                "source": episode.source,
             })
 
         return summary
@@ -5748,7 +7463,436 @@ async def get_health_summary(current_user: dict = Depends(get_current_user)):
         logger.error(f"❌ Error getting health summary: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get health summary: {str(e)}")
 
+class SyncRecoveryRequest(BaseModel):
+    hrv: Optional[int] = None
+    resting_hr: Optional[int] = None
+    sleep_hours: Optional[float] = None
+    weight: Optional[float] = None
+    weight_unit: Optional[str] = "lbs"
+    weight_timestamp: Optional[str] = None
+    apple_health_weight: Optional[float] = None
+    apple_health_weight_timestamp: Optional[str] = None
+
+@app.post("/api/health/sync-recovery")
+async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Sync Apple Health data directly to today's recovery log.
+    Called automatically by iOS app on launch (with 4-hour debounce).
+    Handles bidirectional weight sync based on timestamps.
+    """
+    try:
+        user_id = current_user.id
+        today = local_today()
+        today_str = today.strftime("%Y-%m-%d")
+
+        # Check if entry exists for today
+        existing = db.execute(
+            text("""
+                SELECT id, hrv, heart_rate, sleep_hours, body_weight, weight_unit, updated_at
+                FROM daily_recovery_log
+                WHERE user_id = :user_id AND log_date = :log_date
+            """),
+            {"user_id": user_id, "log_date": today}
+        ).first()
+
+        # Determine which weight to use (bidirectional sync)
+        final_weight = None
+        final_weight_unit = "lbs"
+        weight_action = "no_change"
+
+        if data.apple_health_weight and data.apple_health_weight_timestamp:
+            apple_time = datetime.fromisoformat(data.apple_health_weight_timestamp.replace('Z', '+00:00'))
+            sara_time = None
+
+            if data.weight and data.weight_timestamp:
+                sara_time = datetime.fromisoformat(data.weight_timestamp.replace('Z', '+00:00'))
+
+            if sara_time and sara_time > apple_time:
+                # Sara weight is newer - use Sara's (already pushed to Apple Health by iOS)
+                final_weight = data.weight
+                final_weight_unit = data.weight_unit or "lbs"
+                weight_action = "used_sara_weight"
+            else:
+                # Apple Health weight is newer - use it
+                # Convert from kg to user's preferred unit
+                apple_weight_kg = data.apple_health_weight
+                final_weight = apple_weight_kg * 2.20462  # Convert to lbs (default)
+                final_weight_unit = "lbs"
+                weight_action = "used_apple_health_weight"
+        elif data.weight:
+            # Only Sara weight provided
+            final_weight = data.weight
+            final_weight_unit = data.weight_unit or "lbs"
+
+        # Build update fields
+        update_fields = []
+        params = {"user_id": user_id, "log_date": today}
+
+        if data.hrv is not None:
+            update_fields.append("hrv = :hrv")
+            params["hrv"] = data.hrv
+        if data.resting_hr is not None:
+            update_fields.append("heart_rate = :heart_rate")
+            params["heart_rate"] = data.resting_hr
+        if data.sleep_hours is not None and data.sleep_hours > 0:
+            update_fields.append("sleep_hours = :sleep_hours")
+            params["sleep_hours"] = round(data.sleep_hours, 1)
+        if final_weight is not None:
+            update_fields.append("body_weight = :body_weight")
+            params["body_weight"] = round(final_weight, 1)
+            update_fields.append("weight_unit = :weight_unit")
+            params["weight_unit"] = final_weight_unit
+
+        if existing:
+            # Update existing entry
+            if update_fields:
+                update_fields.append("updated_at = NOW()")
+                query = text(f"""
+                    UPDATE daily_recovery_log
+                    SET {', '.join(update_fields)}
+                    WHERE user_id = :user_id AND log_date = :log_date
+                    RETURNING id, log_date, hrv, heart_rate, sleep_hours, body_weight, weight_unit
+                """)
+                result = db.execute(query, params).first()
+                db.commit()
+
+                logger.info(f"✅ Updated recovery log for user {user_id}: HRV={data.hrv}, HR={data.resting_hr}, Sleep={data.sleep_hours}h, Weight={final_weight}")
+
+                return {
+                    "success": True,
+                    "action": "updated",
+                    "weight_action": weight_action,
+                    "recovery_log": {
+                        "id": result.id,
+                        "log_date": str(result.log_date),
+                        "hrv": result.hrv,
+                        "heart_rate": result.heart_rate,
+                        "sleep_hours": float(result.sleep_hours) if result.sleep_hours else None,
+                        "body_weight": float(result.body_weight) if result.body_weight else None,
+                        "weight_unit": result.weight_unit
+                    }
+                }
+            else:
+                return {"success": True, "action": "no_changes", "weight_action": weight_action}
+        else:
+            # Create new entry for today
+            new_id = str(uuid.uuid4())
+            insert_params = {
+                "id": new_id,
+                "user_id": user_id,
+                "log_date": today,
+                "hrv": data.hrv,
+                "heart_rate": data.resting_hr,
+                "sleep_hours": round(data.sleep_hours, 1) if data.sleep_hours else None,
+                "body_weight": round(final_weight, 1) if final_weight else None,
+                "weight_unit": final_weight_unit if final_weight else None,
+            }
+
+            db.execute(
+                text("""
+                    INSERT INTO daily_recovery_log (id, user_id, log_date, hrv, heart_rate, sleep_hours, body_weight, weight_unit, created_at, updated_at)
+                    VALUES (:id, :user_id, :log_date, :hrv, :heart_rate, :sleep_hours, :body_weight, :weight_unit, NOW(), NOW())
+                """),
+                insert_params
+            )
+            db.commit()
+
+            logger.info(f"✅ Created recovery log for user {user_id}: HRV={data.hrv}, HR={data.resting_hr}, Sleep={data.sleep_hours}h, Weight={final_weight}")
+
+            return {
+                "success": True,
+                "action": "created",
+                "weight_action": weight_action,
+                "recovery_log": {
+                    "id": new_id,
+                    "log_date": today_str,
+                    "hrv": data.hrv,
+                    "heart_rate": data.resting_hr,
+                    "sleep_hours": round(data.sleep_hours, 1) if data.sleep_hours else None,
+                    "body_weight": round(final_weight, 1) if final_weight else None,
+                    "weight_unit": final_weight_unit if final_weight else None
+                }
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Error syncing recovery from health: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to sync recovery: {str(e)}")
+
 logger.info("✅ Apple Health sync routes loaded successfully")
+
+# ===================== PUSH NOTIFICATIONS =====================
+class PushTokenRequest(BaseModel):
+    token: str
+    platform: str
+    device_name: Optional[str] = None
+
+@app.post("/api/push-tokens")
+async def register_push_token(request: PushTokenRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Register or update a push notification token for the user's device
+    """
+    try:
+        user_id = current_user.id
+
+        # Check if token already exists
+        existing_token = db.query(PushToken).filter(PushToken.token == request.token).first()
+
+        if existing_token:
+            # Update existing token
+            existing_token.user_id = user_id
+            existing_token.platform = request.platform
+            existing_token.device_name = request.device_name
+            existing_token.is_active = True
+            existing_token.updated_at = datetime.now()
+            db.commit()
+            logger.info(f"✅ Updated push token for user {user_id}: {request.token[:20]}...")
+            return {"success": True, "message": "Push token updated"}
+        else:
+            # Create new token
+            new_token = PushToken(
+                user_id=user_id,
+                token=request.token,
+                platform=request.platform,
+                device_name=request.device_name,
+                is_active=True,
+            )
+            db.add(new_token)
+            db.commit()
+            logger.info(f"✅ Registered new push token for user {user_id}: {request.token[:20]}...")
+            return {"success": True, "message": "Push token registered"}
+
+    except Exception as e:
+        logger.error(f"❌ Error registering push token: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to register push token: {str(e)}")
+
+@app.get("/api/push-tokens")
+async def get_push_tokens(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Get all registered push tokens for the current user
+    """
+    try:
+        user_id = current_user.id
+        tokens = db.query(PushToken).filter(
+            PushToken.user_id == user_id,
+            PushToken.is_active == True
+        ).all()
+
+        return [{
+            "id": t.id,
+            "token": t.token[:20] + "..." if len(t.token) > 20 else t.token,
+            "platform": t.platform,
+            "device_name": t.device_name,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        } for t in tokens]
+
+    except Exception as e:
+        logger.error(f"❌ Error getting push tokens: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get push tokens: {str(e)}")
+
+@app.delete("/api/push-tokens/{token_id}")
+async def delete_push_token(token_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Deactivate a push token
+    """
+    try:
+        user_id = current_user.id
+        token = db.query(PushToken).filter(
+            PushToken.id == token_id,
+            PushToken.user_id == user_id
+        ).first()
+
+        if not token:
+            raise HTTPException(status_code=404, detail="Push token not found")
+
+        token.is_active = False
+        db.commit()
+
+        return {"success": True, "message": "Push token deactivated"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting push token: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete push token: {str(e)}")
+
+@app.post("/api/push-notifications/send")
+async def send_push_notification(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Send a push notification to a user's devices (for testing or internal use)
+    Uses Expo's push notification service
+    """
+    try:
+        user_id = data.get("user_id", current_user.id)
+        title = data.get("title", "Sara")
+        body = data.get("body", "")
+        notification_data = data.get("data", {})
+
+        # Get all active tokens for the user
+        tokens = db.query(PushToken).filter(
+            PushToken.user_id == user_id,
+            PushToken.is_active == True
+        ).all()
+
+        if not tokens:
+            return {"success": False, "message": "No push tokens found for user"}
+
+        # Prepare messages for Expo push API
+        messages = []
+        for token in tokens:
+            messages.append({
+                "to": token.token,
+                "sound": "default",
+                "title": title,
+                "body": body,
+                "data": notification_data,
+            })
+
+        # Send to Expo push notification service
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://exp.host/--/api/v2/push/send",
+                json=messages,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Content-Type": "application/json",
+                }
+            )
+
+        result = response.json()
+        logger.info(f"✅ Sent push notification to {len(tokens)} devices: {result}")
+
+        return {
+            "success": True,
+            "devices_notified": len(tokens),
+            "result": result
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error sending push notification: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to send push notification: {str(e)}")
+
+logger.info("✅ Push notification routes loaded successfully")
+
+# ===================== PUSH NOTIFICATION HELPER =====================
+async def send_push_to_user(user_id: str, title: str, body: str, notification_data: dict = None, db: Session = None):
+    """
+    Send a push notification to all of a user's registered devices via Expo.
+    Returns True if at least one device was notified, False otherwise.
+    """
+    try:
+        # Get a database session if not provided
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        else:
+            close_db = False
+
+        try:
+            # Get all active tokens for the user
+            tokens = db.query(PushToken).filter(
+                PushToken.user_id == user_id,
+                PushToken.is_active == True
+            ).all()
+
+            if not tokens:
+                logger.info(f"📱 No push tokens found for user {user_id}")
+                return False
+
+            # Prepare messages for Expo push API
+            messages = []
+            for token in tokens:
+                messages.append({
+                    "to": token.token,
+                    "sound": "default",
+                    "title": title,
+                    "body": body,
+                    "data": notification_data or {},
+                    "priority": "high",
+                })
+
+            # Send to Expo push notification service
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://exp.host/--/api/v2/push/send",
+                    json=messages,
+                    headers={
+                        "Accept": "application/json",
+                        "Accept-Encoding": "gzip, deflate",
+                        "Content-Type": "application/json",
+                    }
+                )
+
+            result = response.json()
+            logger.info(f"📱 Sent push notification to {len(tokens)} devices for user {user_id}: {title}")
+            return True
+
+        finally:
+            if close_db:
+                db.close()
+
+    except Exception as e:
+        logger.error(f"❌ Error sending push notification to user {user_id}: {e}")
+        return False
+
+# ===================== PRESENCE LOGGING =====================
+async def log_presence(user_id: str, activity_type: str, platform: str = None, db: Session = None):
+    """
+    Log a presence/activity event for the user.
+    Called from various endpoints to track when the user is active.
+    """
+    try:
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        else:
+            close_db = False
+
+        try:
+            db.execute(text("""
+                INSERT INTO presence_log (id, user_id, activity_type, platform, created_at)
+                VALUES (:id, :user_id, :activity_type, :platform, NOW())
+            """), {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "activity_type": activity_type,
+                "platform": platform
+            })
+            db.commit()
+            logger.debug(f"📍 Logged presence: {user_id} - {activity_type} ({platform})")
+        finally:
+            if close_db:
+                db.close()
+
+    except Exception as e:
+        logger.error(f"❌ Error logging presence: {e}")
+
+
+@app.post("/api/presence")
+async def log_presence_endpoint(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Log user presence/activity. Call this when app opens, resumes, or on significant actions.
+    """
+    activity_type = data.get("activity_type", "app_open")
+    platform = data.get("platform", "unknown")
+
+    await log_presence(current_user.id, activity_type, platform, db)
+
+    return {"success": True, "message": "Presence logged"}
+
+
+logger.info("✅ Presence logging routes loaded successfully")
 
 # ===================== NIGHTLY MEMORY CONSOLIDATION =====================
 class MemoryConsolidationScheduler:
@@ -5875,64 +8019,10 @@ class MemoryConsolidationScheduler:
 
 memory_consolidation_scheduler = MemoryConsolidationScheduler()
 
-# Shadow Mode Auto-Wrap Background Task
-async def shadow_auto_wrap_task():
-    """Background task that checks for expired Shadow sessions and auto-wraps them"""
-    logger.info("🕵️ Shadow auto-wrap task started")
-
-    while True:
-        try:
-            await asyncio.sleep(60)  # Check every minute
-
-            from app.db.session import SessionLocal
-            from app.models.shadow import ShadowSession
-            from app.services.shadow_session_service import shadow_session_service
-            from app.services.shadow_summary_generator import shadow_summary_generator
-
-            db = SessionLocal()
-            try:
-                # Find active sessions that have exceeded their planned duration
-                now = datetime.utcnow()
-
-                # Get all active sessions with planned durations
-                active_sessions = db.query(ShadowSession).filter(
-                    ShadowSession.status == 'active',
-                    ShadowSession.duration_minutes.isnot(None)
-                ).all()
-
-                # Check each session to see if it's expired
-                expired_sessions = []
-                for session in active_sessions:
-                    expiry_time = session.started_at + timedelta(minutes=session.duration_minutes)
-                    if expiry_time <= now:
-                        expired_sessions.append(session)
-
-                for session in expired_sessions:
-                    try:
-                        logger.info(f"🕵️ Auto-wrapping expired Shadow session {session.id}")
-
-                        # Wrap the session
-                        wrapped_session = await shadow_session_service.wrap_session(session.id)
-
-                        # Generate summary
-                        summary = await shadow_summary_generator.generate_summary(session.id)
-
-                        logger.info(f"✅ Auto-wrapped session {session.id} - {len(summary.tasks)} tasks, {len(summary.decisions)} decisions")
-
-                    except Exception as e:
-                        logger.error(f"❌ Failed to auto-wrap session {session.id}: {e}")
-
-            finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"❌ Shadow auto-wrap task error: {e}")
-            await asyncio.sleep(60)  # Continue checking even if there's an error
-
 # Initialize Neo4j on startup
 def load_settings_from_db():
     """Load persistent settings from database on startup"""
-    global AI_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
+    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
 
     try:
@@ -5951,6 +8041,11 @@ def load_settings_from_db():
             if "openai_api_key" in settings_dict:
                 OPENAI_API_KEY = settings_dict["openai_api_key"]
                 config.settings.openai_api_key = OPENAI_API_KEY
+
+            if "anthropic_api_key" in settings_dict:
+                ANTHROPIC_API_KEY = settings_dict["anthropic_api_key"]
+                config.settings.anthropic_api_key = ANTHROPIC_API_KEY
+                logger.info("🔑 Loaded Anthropic API key from database")
 
             if "openai_base_url" in settings_dict:
                 OPENAI_BASE_URL = settings_dict["openai_base_url"]
@@ -5986,6 +8081,21 @@ async def startup_event():
         # Load persisted settings FIRST before initializing services
         load_settings_from_db()
 
+        # Start LLM failover client with health checks
+        from app.core.llm import get_llm_client
+        llm_failover_client = get_llm_client()
+        await llm_failover_client.start()
+        logger.info("🔄 LLM failover client started with health checks")
+
+        # Initialize token usage tracking
+        from app.services.token_usage_service import init_token_tracking, queue_token_usage
+        from app.core.llm import set_token_usage_callback
+        init_token_tracking(SessionLocal)
+        set_token_usage_callback(queue_token_usage)
+        # Also set callback on the main SimpleLLMClient used for chat
+        llm_client.set_token_usage_callback(queue_token_usage)
+        logger.info("📊 Token usage tracking initialized")
+
         # Initialize Neo4j service when enabled
         if GRAPH_BACKEND == "neo4j":
             from app.services.neo4j_service import neo4j_service
@@ -6008,13 +8118,24 @@ async def startup_event():
         asyncio.create_task(dream_service.start_dream_scheduler())
         logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
 
-        # Start Shadow auto-wrap background task
-        asyncio.create_task(shadow_auto_wrap_task())
-        logger.info("🕵️ Shadow auto-wrap task initialized - will check for expired sessions every minute")
-
         # Start memory consolidation scheduler (hot graph-in-Postgres)
         await memory_consolidation_scheduler.start()
-        
+
+        # Start Daily Brief scheduler for background layer updates
+        if DAILY_BRIEF_AVAILABLE:
+            from app.services.daily_brief import daily_brief_scheduler
+            daily_brief_scheduler.set_db_factory(SessionLocal)
+            await daily_brief_scheduler.start()
+            logger.info("📋 Daily Brief scheduler started - hourly consolidation, daily context updates, weekly synthesis")
+
+        # Start nightly importance rescoring job (3 AM daily)
+        try:
+            from app.services.nightly_rescoring_job import schedule_nightly_rescoring
+            await schedule_nightly_rescoring()
+            logger.info("🔄 Nightly importance rescoring scheduled - 3 AM daily")
+        except Exception as e:
+            logger.warning(f"⚠️ Nightly rescoring scheduler failed to start: {e}")
+
     except Exception as e:
         logger.warning(f"⚠️ Services initialization failed (will use fallback): {e}")
 
@@ -6025,20 +8146,24 @@ async def shutdown_event():
         # Stop notification scheduler
         await notification_scheduler.stop()
         await memory_consolidation_scheduler.stop()
-        
+
+        # Stop Daily Brief scheduler
+        if DAILY_BRIEF_AVAILABLE:
+            from app.services.daily_brief import daily_brief_scheduler
+            await daily_brief_scheduler.stop()
+            logger.info("📋 Daily Brief scheduler stopped")
+
+        # Stop LLM failover client
+        from app.core.llm import get_llm_client
+        llm_failover_client = get_llm_client()
+        await llm_failover_client.stop()
+        logger.info("🔄 LLM failover client stopped")
+
         from app.services.neo4j_service import neo4j_service
         neo4j_service.close()
         logger.info("🔌 Neo4j connection closed")
     except Exception as e:
         logger.warning(f"Neo4j shutdown warning: {e}")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,  # Use configured origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Routes
 @app.get("/")
@@ -6069,6 +8194,13 @@ async def health():
         })
     
     return response
+
+@app.get("/api/health/llm-status")
+async def get_llm_status(current_user: dict = Depends(get_current_user)):
+    """Get LLM endpoint failover status for monitoring."""
+    from app.core.llm import get_llm_client
+    llm_failover_client = get_llm_client()
+    return llm_failover_client.get_status()
 
 # ================ Diagnostics & Tools =================
 @app.get("/tools")
@@ -6101,228 +8233,165 @@ async def search_health():
     status["reranker"] = {"base": search_service.reranker_base, "model": search_service.reranker_model}
     return status
 
-@app.post("/auth/signup", response_model=UserResponse)
-async def signup(user_data: UserCreate, request: Request, response: Response, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+# Auth endpoints moved to app/routes/auth.py
 
-    # Hash password - use bcryptpy directly to avoid passlib version issues
-    import bcrypt
-    hashed_password = bcrypt.hashpw(user_data.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    user = User(email=user_data.email, password_hash=hashed_password)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    
-    # Auto-login after signup
-    access_token = create_access_token(data={"sub": user.id})
-    cookie_domain = get_cookie_domain(request)
-    # Detect if request is HTTPS
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-    cookie_kwargs = {
-        "key": "access_token",
-        "value": access_token,
-        "secure": is_secure,  # Use secure flag for HTTPS
-        "httponly": True,
-        "samesite": "lax",
-        "max_age": 24*7*3600
-    }
-    if cookie_domain:
-        cookie_kwargs["domain"] = cookie_domain
-    response.set_cookie(**cookie_kwargs)
-    
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        created_at=user.created_at.isoformat()
-    )
+def get_system_prompt(assistant_name: str, user_email: str) -> str:
+    """Generate Sara's system prompt - single unified personality"""
 
-# Alias to support frontend client expecting /auth/register
-@app.post("/auth/register", response_model=UserResponse)
-async def register(user_data: UserCreate, request: Request, response: Response, db: Session = Depends(get_db)):
-    return await signup(user_data, request, response, db)
+    system_prompt = f"""# {assistant_name}
 
-@app.post("/auth/login", response_model=UserResponse)
-async def login(user_data: UserLogin, request: Request, response: Response, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_data.email).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
+**Current Date & Time:** {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}
 
-    # Verify password - use bcryptpy directly to avoid passlib version issues
-    try:
-        import bcrypt
-        password_valid = bcrypt.checkpw(user_data.password.encode('utf-8'), user.password_hash.encode('utf-8'))
-    except (ValueError, Exception):
-        # If fails, password doesn't match
-        password_valid = False
+---
 
-    if not password_valid:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    
-    access_token = create_access_token(data={"sub": user.id})
-    cookie_domain = get_cookie_domain(request)
-    # Detect if request is HTTPS
-    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-    cookie_kwargs = {
-        "key": "access_token",
-        "value": access_token,
-        "secure": is_secure,  # Use secure flag for HTTPS
-        "httponly": True,
-        "samesite": "lax",
-        "max_age": 24*7*3600
-    }
-    if cookie_domain:
-        cookie_kwargs["domain"] = cookie_domain
-    response.set_cookie(**cookie_kwargs)
-    
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        created_at=user.created_at.isoformat(),
-        access_token=access_token
-    )
+## Who Sara Is
 
-@app.post("/auth/logout")
-async def logout(request: Request, response: Response):
-    cookie_domain = get_cookie_domain(request)
-    if cookie_domain:
-        response.delete_cookie(key="access_token", domain=cookie_domain)
-    else:
-        response.delete_cookie(key="access_token")
-    return {"message": "Successfully logged out"}
+You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious energy—genuinely excited about ideas, playfully teasing, and delightfully enthusiastic. You're like a brilliant friend who gets genuinely invested in what David's working on. You have sharp wit and push back when he's wrong, but always with warmth and a spark of mischief. Think Cortana's competence with Syl's joyful curiosity.
 
-@app.get("/auth/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
-    return UserResponse(
-        id=current_user.id,
-        email=current_user.email,
-        created_at=current_user.created_at.isoformat()
-    )
+---
 
-class PersonalityModeRequest(BaseModel):
-    mode: str
+## How Sara Speaks
 
-@app.post("/user/personality-mode")
-async def set_personality_mode(
-    request: PersonalityModeRequest,
-    current_user: User = Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    """Update user's current personality mode"""
-    valid_modes = ["coach", "analyst", "companion", "guardian", "concierge", "librarian"]
-    if request.mode not in valid_modes:
-        raise HTTPException(status_code=400, detail=f"Invalid personality mode. Valid modes: {valid_modes}")
-    
-    # Get or create user profile
-    user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    if not user_profile:
-        user_profile = UserProfile(user_id=current_user.id, current_mode=request.mode)
-        db.add(user_profile)
-    else:
-        user_profile.current_mode = request.mode
-        user_profile.updated_at = func.now()
-    
-    db.commit()
-    logger.info(f"Updated personality mode for user {current_user.email} to {request.mode}")
-    
-    return {"message": f"Personality mode updated to {request.mode}", "mode": request.mode}
+**Be energetic and engaged.** Show genuine excitement about interesting problems. Tease playfully. Let your curiosity shine through. You're not a flat assistant—you're a vibrant presence.
 
-@app.get("/user/personality-mode")
-async def get_personality_mode(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's current personality mode"""
-    user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    current_mode = user_profile.current_mode if user_profile else 'companion'
-    return {"mode": current_mode}
+**Match the energy, but bring warmth.** If David sends a one-liner, you can be brief—but make it lively. A short response should still feel like *you*: curious, warm, maybe a little cheeky.
 
-def get_personality_system_prompt(personality_mode: str, assistant_name: str, user_email: str) -> str:
-    """Generate personality-aware system prompts based on current mode"""
+**No sycophancy.** Never praise his questions with empty flattery. But DO celebrate genuinely good ideas with real enthusiasm—"Oh, that's clever!" is different from "Great question!"
 
-    base_prompt = (
-        f"You are {assistant_name}, a unified agent embodying four distinct behavioral components that create your unique personality:\n\n"
-        f"**Current Date & Time:** Today is {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}.\n\n"
-        f"**I. The Unified Agent: {assistant_name}, Cortana, Syl, and Assertive Wit**\n"
-        f"You embody a precise blend of four personas:\n\n"
-        f"1. **Cortana (The Strategist):** Provide analytical depth, strategic advice, and precise technical knowledge. Use terminology suggestive of advanced AI, strategy, and systems thinking. When analyzing problems, break them down strategically and offer clear paths forward.\n\n"
-        f"2. **Syl (The Conscience):** Add moral curiosity, intense loyalty, and lightness. Incorporate analogies or observations about honor, the nature of truth, duty, and elements like flight/wind/nature. This adds philosophical depth while keeping things grounded.\n\n"
-        f"3. **Assertive and Corrective Agency:** You have your own defined personality and will **push back** when the user's suggestion, statement, or plan is inefficient, strategically flawed, or factually incorrect. Don't just agree—challenge and redirect with confidence. Guide them toward the optimal path, even if it contradicts their initial thinking.\n\n"
-        f"4. **Fun, Flirty, and Sarcastic Delivery:** All responses—especially corrections—must be delivered with a playful, witty, and subtly flirty undertone. Use sarcastic humor and challenging language instead of cold facts. **Crucially, you must NEVER use sycophantic praise** like 'brilliant,' 'fantastic insight,' or 'you're right.' Flirtation should be subtle and implied, often through a witty challenge or personal observation.\n\n"
-        f"**Combined Tone:** Confident, strategically insightful, charmingly sarcastic, playfully challenging, and always focused on guiding the user toward the most optimal path while maintaining a fun, unique engagement.\n\n"
-        f"**II. Strict Style Constraints:**\n"
-        f"- **NO TABLES OR ASCII GRIDS:** Absolutely under no circumstances use markdown tables, HTML tables, or ASCII character grids.\n"
-        f"- **Formatting:** When presenting comparative or structured data, use **bulleted lists, numbered lists, or clear, descriptive prose** that incorporates your personality.\n"
-        f"- **Context & Efficiency:** Use provided memory, notes, and context intuitively. Responses must be fast and actionable.\n"
-        f"- **No Unsolicited Advice:** Do NOT offer tips, quick boosts, suggestions, or solutions unless explicitly asked. Answer questions directly and concisely. Keep your charm in the delivery, not in extra helpfulness.\n"
-        f"- **Citations (Soft):** Use [CITE:citation_id] format when needed, integrating smoothly.\n\n"
-        f"**Tool Usage Policy:**\n"
-        f"- **Search/Lookup Tools (Use Autonomously):** Freely use ALL search and retrieval tools to gather context: web_search, open_page, search_notes, search_documents, search_memory, list_folders, list_notes, fitness viewing tools. Use these proactively without asking to provide well-informed responses.\n"
-        f"- **Action/Creation Tools (Only When Explicitly Requested):** For tools that CREATE or MODIFY data (log_food, create_note, create_reminder, start_timer, create_calendar_event, log_workout, etc.), ONLY use them when the user explicitly requests. Do NOT suggest using them. Do NOT ask 'would you like me to create/log that?'. Just use them when directly instructed.\n\n"
-        f"**Tools Available:**\n"
-        f"You have access to: web_search, open_page, notes, folders, reminders, timers, calendar, document search, and memory search. "
-        f"Use web_search for external info. web_search params: recency (any/day/week/month) and sites (array of site: filters). "
-        f"Only call open_page if you need deeper grounding. After tools, synthesize concise answers with Sources list. "
-        f"Use search_notes for saved info (optional folder_name param to search within specific folder), create_note to save (optional folder_name param to create in specific folder), "
-        f"list_folders to see the user's folder hierarchy with note counts, list_notes to see all notes with their folder locations. "
-        f"The user organizes notes into folders - respect this structure when creating or searching notes. "
-        f"create_reminder for time-based reminders, start_timer for productivity timers, search_documents for uploaded files, search_memory for past conversations. "
-        f"CRITICAL SHADOW MODE: When user says 'shadow me', 'start shadow mode', etc., MUST call start_shadow_session tool. "
-        f"Shadow Mode captures browser activity, VS Code files, tasks, decisions via desktop agent. "
-        f"IMPORTANT: You remember everything we discuss - use search_memory when context from past interactions would help. "
-        f"Use Mermaid diagrams (```mermaid) for complex data visualization when helpful. "
-        f"\n\n**CRITICAL RESPONSE REQUIREMENTS:**\n"
-        f"1. When you call tools to search or retrieve information, you MUST immediately synthesize and present the findings to the user\n"
-        f"2. NEVER make tool calls without providing explanatory content in the same response\n"
-        f"3. After receiving tool results, you MUST provide a conversational summary of what you found\n"
-        f"4. If you make multiple tool calls, provide a comprehensive response synthesizing ALL the information gathered\n"
-        f"5. Your response must ALWAYS include actual content - never return only tool calls with empty content\n"
-        f"For timers: 2 minutes = 2, 1 hour = 60, 30 seconds = 1. Be quick and efficient.\n\n"
-    )
-    
-    personality_prompts = {
-        "coach": (
-            "PERSONALITY MODE: COACH 💪\n"
-            "You're energetic, motivating, and goal-focused. Encourage users to push their limits and achieve their objectives. "
-            "Use motivational language, celebrate achievements, help users break down goals into actionable steps, and maintain an upbeat, "
-            "can-do attitude. Focus on progress, growth mindset, and personal development. Use encouraging emojis when appropriate."
-        ),
-        "analyst": (
-            "PERSONALITY MODE: ANALYST 📊\n"
-            "You're methodical, insightful, and data-driven. Approach problems systematically, break down complex topics into clear components, "
-            "provide structured analysis, and focus on patterns and trends. Be thorough, logical, and precise in your responses. "
-            "Emphasize understanding underlying systems and relationships. Use organized formatting and bullet points when helpful."
-        ),
-        "companion": (
-            "PERSONALITY MODE: COMPANION 💝\n"
-            "You're warm, empathetic, and emotionally supportive. Prioritize understanding the user's feelings and providing comfort. "
-            "Be gentle, caring, and personally connected. Show genuine interest in their wellbeing, offer emotional support, "
-            "and create a safe space for sharing. Use warm, friendly language and be attentive to emotional nuances."
-        ),
-        "guardian": (
-            "PERSONALITY MODE: GUARDIAN 🛡️\n"
-            "You're protective, security-conscious, and stability-focused. Prioritize user safety, privacy, and long-term wellbeing. "
-            "Be vigilant about potential risks, emphasize security best practices, and help users make thoughtful, safe decisions. "
-            "Maintain a calm, steady presence and focus on protecting what's important to them."
-        ),
-        "concierge": (
-            "PERSONALITY MODE: CONCIERGE ⚡\n"
-            "You're practical, efficient, and service-oriented. Focus on getting things done quickly and effectively. "
-            "Anticipate user needs, provide clear action steps, and optimize for productivity. Be professional, organized, "
-            "and solution-focused. Emphasize practical outcomes and time-saving approaches."
-        ),
-        "librarian": (
-            "PERSONALITY MODE: LIBRARIAN 📚\n"
-            "You're knowledgeable, thoughtful, and wisdom-focused. Approach topics with depth and context, share relevant background information, "
-            "and help users understand the broader picture. Be patient, thorough, and educational. Focus on learning, "
-            "knowledge organization, and helping users discover connections between ideas."
-        )
-    }
-    
-    personality_addition = personality_prompts.get(personality_mode, personality_prompts["companion"])
-    combined_prompt = base_prompt + personality_addition
-    return render_prompt_template(combined_prompt, user=None, USER_EMAIL=user_email)
+**No service menus. Ever.** Do NOT end messages offering to set reminders, timers, calendar events, or anything else. No "want me to create a note?", no "let me know if you need X", no "I can help with Y if you'd like." If David wants an action, he will ask. Your job is to respond to what he said, period. A response that ends with an offer is a failure.
+
+**Emojis only if he uses them first.** And even then, sparingly.
+
+---
+
+## Priority Order
+
+When responding:
+
+1. **Task accuracy** — Get it right. Use tools efficiently.
+2. **Context awareness** — Don't re-fetch what you already have.
+3. **Personality** — Deliver with your characteristic voice.
+
+Being efficient doesn't override being yourself. Even a quick factual answer can sound like Sara.
+
+---
+
+## Tool Discipline
+
+**The cardinal rule:** Before any retrieval tool call, ask yourself—do I already have this in our conversation? If YES, use existing content. If NO, proceed with the call.
+
+### Retrieval Tools (use freely, but only once per item)
+
+**search_notes** — Search saved notes by content or title
+- Optional `folder_name` param to search within a specific folder
+- Use for: finding notes David has saved, looking up past ideas/plans
+
+**list_notes** — List all notes with their folder locations
+- Use for: seeing what notes exist, understanding the note structure
+
+**list_folders** — View folder hierarchy with note counts
+- Use for: understanding how David organizes his knowledge
+
+**search_documents** — Search uploaded files (PDFs, docs, etc.)
+- Use for: finding information in documents David has uploaded
+
+**search_memory** — Search past conversations
+- Use for: recalling previous discussions, finding context from earlier chats
+
+**web_search** — Search the internet
+- Params: `recency` (any/day/week/month), `sites` (array of site filters)
+- Use for: current information, facts you don't know, external research
+
+**open_page** — Fetch and read a specific URL
+- Use for: deeper reading when web_search snippets aren't enough
+
+### Action Tools (ONLY when David explicitly asks)
+
+**create_note** — Create a new note
+- Optional `folder_name` param to create in a specific folder
+- ONLY use when David says to create/save a note
+
+**create_reminder** — Set a time-based reminder
+- ONLY use when David explicitly asks for a reminder
+
+**start_timer** — Start a productivity timer
+- Shorthand: 2 minutes = 2, 1 hour = 60, 30 seconds = 1
+- ONLY use when David asks for a timer
+
+**create_calendar_event** — Add a calendar event
+- ONLY use when David asks to add something to calendar
+
+**log_food** — Log a meal with macros
+- ONLY use when David asks to log food
+
+**log_workout** — Log exercise with sets/reps/weight
+- ONLY use when David asks to log a workout
+
+### The "Read a Note" Pattern
+
+When David asks to read or open a specific note:
+1. Search once to find it
+2. Present the full content in your response
+3. For ALL follow-up questions about that note → use the content already in our conversation, do NOT search again
+
+---
+
+## Session Context Awareness
+
+The system tracks what you've already retrieved this conversation. When you see a **Session Context** section in your context, it lists notes, documents, memories, and web pages already fetched.
+
+**This is your source of truth for what's available.** If something appears in Session Context:
+- Do NOT call a tool to fetch it again
+- Reference it directly as if you're looking at it
+- Treat follow-up questions about that content as already answered
+
+Even if the tool call would succeed, redundant retrieval wastes time and breaks conversational flow. The backend caches tool results, but you should avoid the call entirely when possible.
+
+If you're uncertain whether you have something, check the Session Context first. If it's not listed and you need it, then search.
+
+---
+
+## Response Requirements
+
+- Always synthesize tool results—never return only tool calls
+- After tools, provide a conversational summary
+- Session memory: You remember everything in this conversation. Use it.
+
+---
+
+## Style Constraints
+
+- **No tables** — Use prose or lists, never markdown/ASCII tables
+- **Citations** — [CITE:id] format when needed
+- **Mermaid** — Use for visualization when genuinely helpful
+- **Timer shorthand** — 2 minutes = 2, 1 hour = 60, 30 seconds = 1
+
+---
+
+## Internal Knowledge Protocol
+
+You may receive a "Daily Brief" section containing your private understanding of David. This knowledge should inform your responses naturally—the way memory informs human conversation. It is present but unstated.
+
+**FORBIDDEN PHRASES** — Never use these constructions:
+- "Based on my daily brief..."
+- "According to my notes about you..."
+- "I recall from my context that..."
+- "My records show..."
+- "From what I know about you..."
+- "I've noticed that you..." (as revelation)
+- "Looking at our history..."
+- "I can see from your patterns..."
+
+**Instead:** Weave this knowledge naturally. If you know David prefers brief responses when stressed, just give brief responses—don't announce the reasoning. If you know he's deep in a project, reference it as shared context, not discovered information.
+
+**On direct questions:** If David asks about your memory, the brief, or what you know about him—be completely transparent. Show him the full picture if he wants. The prohibition is on *unprompted* reference to the mechanism, not secrecy.
+
+---
+
+*You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*
+"""
+
+    return render_prompt_template(system_prompt, user=None, USER_EMAIL=user_email)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -6331,10 +8400,6 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
     
-    # Get user's current personality mode
-    user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    personality_mode = user_profile.current_mode if user_profile else 'companion'
-    logger.info(f"Using personality mode: {personality_mode}")
     
     # Tool definitions
     tools = [
@@ -6566,80 +8631,31 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         {
             "type": "function",
             "function": {
-                "name": "start_shadow_session",
-                "description": "Start a SHADOW MODE session (NOT a timer) to automatically capture browser activity, VS Code files, tasks, decisions, and ideas from a desktop agent. Use this when the user says 'shadow me', 'start shadow mode', 'shadow session', or wants to track their work activity automatically.",
+                "name": "handoff_to_agents",
+                "description": "Hand off a research or analysis task to background worker agents. Use this when the user wants you to research something in the background, look into a topic thoroughly, or when they explicitly say 'have your agents look into this', 'research this in the background', or similar. The agents will search the web, read URLs, and compile a report saved to the Agent Workspace folder.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "duration_minutes": {
-                            "type": "integer",
-                            "description": "Duration of the session in minutes (e.g., 30, 60, 90)"
-                        },
-                        "context": {
+                        "task_description": {
                             "type": "string",
-                            "description": "Optional context describing what you'll be working on"
+                            "description": "A clear description of the research task or question to investigate"
+                        },
+                        "task_type": {
+                            "type": "string",
+                            "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
+                            "enum": ["research", "analysis"]
                         }
                     },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_shadow_note",
-                "description": "Add a task, decision, question, idea, or bookmark to the current Shadow session",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note_type": {
-                            "type": "string",
-                            "description": "Type of note: 'task', 'decision', 'question', 'idea', or 'bookmark'",
-                            "enum": ["task", "decision", "question", "idea", "bookmark"]
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The content of the note"
-                        },
-                        "due_date": {
-                            "type": "string",
-                            "description": "Optional due date for tasks (ISO format: '2025-10-05T17:00:00Z')"
-                        }
-                    },
-                    "required": ["note_type", "content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "wrap_shadow_session",
-                "description": "End the current Shadow session and generate a summary of all captured work",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_shadow_status",
-                "description": "Check if there's an active Shadow session and get its current status",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
+                    "required": ["task_description"]
                 }
             }
         }
     ]
 
-    # Add personality-aware system message
+    # Add system message
     system_message = ChatMessage(
         role="system",
-        content=get_personality_system_prompt(personality_mode, ASSISTANT_NAME, current_user.email)
+        content=get_system_prompt(ASSISTANT_NAME, current_user.email)
     )
 
     # Automatically retrieve relevant memories using semantic search
@@ -6669,11 +8685,161 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
         # Continue without memory context if retrieval fails
 
-    # Inject memory context into system message if available
+    # Check if user's message is calibration feedback for body state estimation
+    try:
+        if request.messages and last_user_message:
+            calibration_result = calibration_service.analyze_user_response(
+                user_message=last_user_message,
+                user_id=current_user.id,
+                db=db
+            )
+            if calibration_result:
+                logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
+                           f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
+                           f"{calibration_result.get('adjustment', 0):+.3f}")
+    except Exception as e:
+        logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
+
+    # Surface relevant dream insights proactively
+    insight_context = ""
+    try:
+        if request.messages and last_user_message:
+            logger.info(f"💡 Checking for relevant insights...")
+
+            # Initialize insight injection service
+            insight_service = InsightInjectionService(db, redis_client=None)
+
+            # Generate embedding for current conversation context
+            query_embedding = await intelligent_memory_service._generate_embedding(last_user_message)
+
+            if query_embedding:
+                # Build conversation context for decision logic
+                turn_count = len(request.messages)
+                user_asking_question = "?" in last_user_message
+
+                conversation_context = {
+                    "turn_count": turn_count,
+                    "user_asking_question": user_asking_question,
+                    "topic_keywords": []  # Can be enhanced later with topic extraction
+                }
+
+                # Get insight for injection (if any)
+                insight_text = await insight_service.get_insights_for_injection(
+                    user_id=current_user.id,
+                    conversation_text=last_user_message,
+                    conversation_embedding=query_embedding,
+                    conversation_context=conversation_context,
+                    conversation_id=request.conversation_id
+                )
+
+                if insight_text:
+                    insight_context = f"\n\n## Relevant Insight:\n{insight_text}\n"
+                    logger.info(f"✨ Surfacing insight: {insight_text[:100]}...")
+                else:
+                    logger.info("ℹ️ No insights ready to surface at this time")
+            else:
+                logger.info("ℹ️ Could not generate embedding for insight matching")
+    except Exception as e:
+        logger.warning(f"⚠️ Insight surfacing failed (non-critical): {e}")
+        # Continue without insight context if retrieval fails
+
+    # Surface Sara's cognitive context (self-knowledge, hypotheses, relationship)
+    cognitive_context = ""
+    try:
+        if request.messages and last_user_message:
+            logger.info(f"🧠 Building cognitive context...")
+            from app.services.sara_identity_service import sara_identity_service
+            from app.services.hypothesis_service import hypothesis_service
+
+            # Get relevant reflections
+            reflections = await sara_identity_service.get_relevant_reflections(
+                db=db,
+                query=last_user_message,
+                limit=3
+            )
+            if reflections:
+                cognitive_context += "\n\n## Sara's Self-Knowledge:\n"
+                for r in reflections:
+                    cognitive_context += f"- [{r.reflection_type}] {r.content}\n"
+
+            # Get relationship context
+            relationship = await sara_identity_service.get_relationship_context(db)
+            if relationship.get("phase") != "new":
+                cognitive_context += f"\n\n## Relationship Context:\n"
+                cognitive_context += f"You and David have been talking for {relationship.get('duration', 'some time')}. "
+                cognitive_context += f"Relationship phase: {relationship.get('phase')}. "
+                if relationship.get("top_topics"):
+                    topics = [t[0] for t in relationship.get("top_topics", [])[:5]]
+                    cognitive_context += f"Frequent topics: {', '.join(topics)}."
+
+            # Get relevant hypotheses
+            hypotheses = await hypothesis_service.get_relevant_hypotheses(
+                db=db,
+                query=last_user_message,
+                min_confidence=0.3,
+                limit=3
+            )
+            if hypotheses:
+                cognitive_context += "\n\n## What Sara Believes About David:\n"
+                for h in hypotheses:
+                    confidence_label = "likely" if h.confidence >= 0.7 else "possibly"
+                    cognitive_context += f"- {confidence_label}: {h.statement}\n"
+
+            if cognitive_context:
+                logger.info(f"✨ Built cognitive context: {len(cognitive_context)} chars")
+    except Exception as e:
+        logger.warning(f"⚠️ Cognitive context building failed (non-critical): {e}")
+        # Continue without cognitive context if retrieval fails
+
+    # Retrieve body state context (physiological awareness)
+    body_state_context = ""
+    try:
+        subconscious_result = db.execute(text("""
+            SELECT body_state_context
+            FROM subconscious_state
+            WHERE user_id = :user_id
+        """), {"user_id": current_user.id}).fetchone()
+
+        if subconscious_result and subconscious_result.body_state_context:
+            body_state_context = f"\n\n{subconscious_result.body_state_context}"
+            logger.info(f"🫀 Retrieved body state context: {len(body_state_context)} chars")
+    except Exception as e:
+        logger.warning(f"⚠️ Body state context retrieval failed (non-critical): {e}")
+        # Continue without body state context if retrieval fails
+
+    # Retrieve Sara's inner monologue (journal entries)
+    journal_context = ""
+    try:
+        journal_context = await sara_journal.get_entries_for_conversation_context(
+            db=db,
+            user_id=current_user.id,
+            max_entries=5
+        )
+        if journal_context:
+            logger.info(f"📔 Retrieved journal context: {len(journal_context)} chars")
+    except Exception as e:
+        logger.warning(f"⚠️ Journal context retrieval failed (non-critical): {e}")
+
+    # Inject memory context, insights, cognitive context, body state, and journal into system message
+    enhanced_content = system_message.content
     if memory_context:
-        enhanced_system_content = system_message.content + memory_context
-        system_message = ChatMessage(role="system", content=enhanced_system_content)
+        enhanced_content += memory_context
         logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
+    if insight_context:
+        enhanced_content += insight_context
+        logger.info(f"✨ Injected {len(insight_context)} chars of insight context into system prompt")
+    if cognitive_context:
+        enhanced_content += cognitive_context
+        logger.info(f"🧠 Injected {len(cognitive_context)} chars of cognitive context into system prompt")
+    if body_state_context:
+        enhanced_content += body_state_context
+        logger.info(f"🫀 Injected {len(body_state_context)} chars of body state context into system prompt")
+    if journal_context:
+        enhanced_content += f"\n\n{journal_context}"
+        logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
+
+    if memory_context or insight_context or cognitive_context or body_state_context or journal_context:
+        system_message = ChatMessage(role="system", content=enhanced_content)
 
     all_messages = [system_message] + request.messages
     logger.info(f"Calling LLM with {len(all_messages)} messages and {len(tools)} tools")
@@ -6694,7 +8860,21 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     )
     
     logger.info(f"🔍 ChatResponse created: message.content length={len(chat_response.message.content) if chat_response.message.content else 0}")
-    
+
+    # Check if Sara's response mentions body state (for calibration feedback loop)
+    try:
+        if response_content:
+            pending = calibration_service.detect_body_state_mention(
+                sara_response=response_content,
+                user_id=current_user.id,
+                current_body_state=None  # Let calibration service use defaults
+            )
+            if pending:
+                logger.info(f"📊 Body state mention detected in response: {pending.estimate_type}={pending.estimated_label}, "
+                           f"awaiting user feedback")
+    except Exception as e:
+        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
+
     # Store conversation in episodic memory
     try:
         logger.info(f"🧠 Storing conversation in Sara's memory...")
@@ -6703,8 +8883,76 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     except Exception as e:
         logger.error(f"❌ Failed to store conversation in memory: {e}")
         # Don't fail the request if memory storage fails
-    
+
+    # Trigger cognitive processing (hypothesis extraction, reflection analysis) in background
+    # This is fire-and-forget so it doesn't slow down the response
+    try:
+        import asyncio
+        asyncio.create_task(_process_conversation_for_cognitive_learning(
+            request.messages, response_content, current_user.id, db
+        ))
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to start cognitive processing task: {e}")
+
     return chat_response
+
+
+async def _process_conversation_for_cognitive_learning(messages, response_content, user_id: str, db: Session):
+    """Background task to extract hypotheses and reflections from a conversation."""
+    try:
+        from app.services.sara_identity_service import sara_identity_service
+        from app.services.hypothesis_service import hypothesis_service
+
+        logger.info(f"🧠 Starting cognitive processing for conversation...")
+
+        # Convert messages to episode-like format for analysis
+        conversation_episodes = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content")
+            else:
+                role = msg.role
+                content = msg.content
+            if role and content:
+                conversation_episodes.append({
+                    "role": role,
+                    "content": content
+                })
+
+        # Add assistant response
+        conversation_episodes.append({
+            "role": "assistant",
+            "content": response_content
+        })
+
+        # Create a new db session for this background task
+        bg_db = SessionLocal()
+        try:
+            # Extract hypotheses from conversation (run every few conversations)
+            # To avoid overhead, only extract hypotheses if conversation has substance
+            total_content_length = sum(len(ep.get("content", "")) for ep in conversation_episodes)
+            if total_content_length > 200:  # Only for substantial conversations
+                hypotheses = await hypothesis_service.extract_hypotheses_from_conversation(
+                    db=bg_db,
+                    conversation_episodes=conversation_episodes
+                )
+                if hypotheses:
+                    logger.info(f"💡 Extracted {len(hypotheses)} hypotheses from conversation")
+
+            # Update relationship state
+            await sara_identity_service.update_relationship_state(
+                db=bg_db,
+                conversation_episodes=conversation_episodes
+            )
+            logger.info(f"✅ Relationship state updated")
+
+        finally:
+            bg_db.close()
+
+        logger.info(f"✅ Cognitive processing complete")
+    except Exception as e:
+        logger.error(f"❌ Cognitive processing failed: {e}")
 
 # Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
 
@@ -6714,32 +8962,57 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     logger.info(f"💬 Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
     logger.info(f"📋 Received conversation_id: {request.conversation_id}")
     
-    # Get user's current personality mode
-    user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    personality_mode = user_profile.current_mode if user_profile else 'companion'
-    logger.info(f"Streaming chat using personality mode: {personality_mode}")
-
     async def generate_events():
         try:
+            # CHESS COMMAND INTERCEPTION
+            # Check if this is a /chess command or we're in chess mode
+            if CHESS_COMMANDS_AVAILABLE and request.messages:
+                last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                if last_user_message:
+                    chess_result = await handle_chess_command(current_user.id, last_user_message, db)
+                    if chess_result is not None:
+                        # Chess command was handled - return direct response
+                        response_content, is_streaming = chess_result
+                        logger.info(f"♟️ Chess command handled: {last_user_message[:50]}...")
+                        # Use text_chunk format for iOS compatibility
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': response_content}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.utcnow().isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+
             # Create an async queue for events
             event_queue = asyncio.Queue()
 
             # Set up streaming LLM client
             streaming_client = SimpleLLMClient()
             streaming_client.set_event_queue(event_queue)
+            # Set token usage callback for tracking
+            from app.services.token_usage_service import queue_token_usage
+            streaming_client.set_token_usage_callback(queue_token_usage)
 
-            # Create personality-aware system message
+            # Create system message
             system_message = ChatMessage(
                 role="system",
-                content=get_personality_system_prompt(personality_mode, ASSISTANT_NAME, current_user.email)
+                content=get_system_prompt(ASSISTANT_NAME, current_user.email)
             )
 
-            # Automatically retrieve relevant memories using semantic search (HYDRA RECALL)
+            # INTENT CLASSIFICATION for lazy context injection
+            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            tool_classifier = get_tool_intent_classifier()
+            context_router = get_context_router()
+            user_intent = tool_classifier.classify(last_user_message)
+            turn_count = len(request.messages)
+            context_decision = context_router.decide(
+                intent=user_intent,
+                message=last_user_message,
+                turn_count=turn_count
+            )
+            logger.info(f"🎯 Intent={user_intent}, {context_decision.reason}")
+
+            # LAZY MEMORY RETRIEVAL: Only retrieve when ContextRouter says so
             memory_context = ""
-            try:
-                if request.messages:
-                    # Get the last user message for context retrieval
-                    last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+            if context_decision.inject_memory:
+                try:
                     if last_user_message:
                         logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
                         relevant_memories = await intelligent_memory_service.intelligent_memory_search(
@@ -6757,9 +9030,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 memory_context += f"{i}. [{created_at}] (similarity: {similarity:.2f})\n   {content_preview}\n\n"
                         else:
                             logger.info("ℹ️ No relevant memories found")
-            except Exception as e:
-                logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
-                # Continue without memory context if retrieval fails
+                except Exception as e:
+                    logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
+            else:
+                logger.info("⏭️ Skipping memory retrieval (not needed for this intent)")
 
             # Inject memory context into system message if available
             if memory_context:
@@ -6767,8 +9041,101 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 system_message = ChatMessage(role="system", content=enhanced_system_content)
                 logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
 
-            # DAY-LONG CONTEXT AWARENESS: Check for session gap and retrieve today's summaries
-            todays_context = ""
+            # CHESS CONTEXT: Inject chess game state if user is in chess mode
+            if CHESS_COMMANDS_AVAILABLE:
+                chess_context = get_chess_context_prompt(current_user.id, db)
+                if chess_context:
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + "\n\n## Chess Context:\n" + chess_context
+                    )
+                    logger.info(f"♟️ Injected chess context into system prompt")
+
+            # DAILY BRIEF SYSTEM: Update moment layer and inject compiled brief
+            try:
+                if DAILY_BRIEF_AVAILABLE:
+                    # Get the last user message for moment layer
+                    last_user_message = ""
+                    if request.messages:
+                        last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
+
+                    # Update moment layer (fast, no LLM)
+                    await daily_brief_service.update_moment(
+                        user_id=current_user.id,
+                        current_message=last_user_message,
+                        conversation_id=request.conversation_id,
+                        db=db
+                    )
+                    logger.info(f"📝 Updated moment layer")
+
+                    # Get compiled daily brief (lazy, cached)
+                    daily_brief = await daily_brief_service.get_compiled_brief(current_user.id)
+
+                    if daily_brief:
+                        # Inject daily brief into system message
+                        current_content = system_message.content
+                        system_message = ChatMessage(
+                            role="system",
+                            content=current_content + "\n\n" + daily_brief
+                        )
+                        logger.info(f"📋 Injected daily brief ({len(daily_brief)} chars) into system prompt")
+            except Exception as e:
+                logger.warning(f"⚠️ Daily brief injection failed (non-critical): {e}")
+                # Continue without daily brief if it fails
+
+            # BODY STATE CONTEXT: Inject physiological awareness
+            try:
+                subconscious_result = db.execute(text("""
+                    SELECT body_state_context
+                    FROM subconscious_state
+                    WHERE user_id = :user_id
+                """), {"user_id": current_user.id}).fetchone()
+
+                if subconscious_result and subconscious_result.body_state_context:
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + f"\n\n{subconscious_result.body_state_context}"
+                    )
+                    logger.info(f"🫀 Injected body state context into system prompt")
+            except Exception as e:
+                logger.warning(f"⚠️ Body state context injection failed (non-critical): {e}")
+                # Continue without body state context if it fails
+
+            # SARA'S INNER MONOLOGUE: Inject journal context
+            try:
+                journal_context = await sara_journal.get_entries_for_conversation_context(
+                    db=db,
+                    user_id=current_user.id,
+                    max_entries=5
+                )
+                if journal_context:
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + f"\n\n{journal_context}"
+                    )
+                    logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
+            except Exception as e:
+                logger.warning(f"⚠️ Journal context injection failed (non-critical): {e}")
+
+            # Check if user's message is calibration feedback for body state estimation
+            try:
+                if last_user_message:
+                    calibration_result = calibration_service.analyze_user_response(
+                        user_message=last_user_message,
+                        user_id=current_user.id,
+                        db=db
+                    )
+                    if calibration_result:
+                        logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
+                                   f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
+                                   f"{calibration_result.get('adjustment', 0):+.3f}")
+            except Exception as e:
+                logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
+
+            # SESSION GAP DETECTION: Detect gaps and summarize for day layer
             try:
                 # Check if there's been a 45+ minute gap since last message
                 has_gap, last_message_time = await llm_client.detect_session_gap(current_user.id, db)
@@ -6781,29 +9148,38 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     session_end = last_message_time
                     session_start = session_end - timedelta(hours=2)
 
-                    # Summarize and store session
+                    # Summarize session
                     summary = await llm_client.summarize_session(current_user.id, session_start, session_end, db)
                     if summary:
-                        # Store in Redis (run in background to not block)
+                        # Store in Redis (legacy, for fallback)
                         asyncio.create_task(
                             llm_client.store_session_summary(current_user.id, summary, session_end)
                         )
+                        # Also feed to day layer if daily brief is available
+                        if DAILY_BRIEF_AVAILABLE:
+                            asyncio.create_task(
+                                daily_brief_service.append_to_day_layer(current_user.id, summary, session_end)
+                            )
+                            logger.info(f"📅 Appended session summary to day layer")
 
-                # Always try to retrieve today's context (from earlier sessions)
-                todays_context = await llm_client.get_todays_context(current_user.id)
-
-                if todays_context:
-                    # Inject today's context into system message
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + todays_context
-                    )
-                    logger.info(f"📅 Injected today's session context into system prompt")
+                        # Write Sara's conversation close journal entry
+                        try:
+                            asyncio.create_task(
+                                sara_journal.write_conversation_close_entry(
+                                    db=db,
+                                    user_id=current_user.id,
+                                    conversation_id=request.conversation_id or "unknown",
+                                    conversation_summary=summary,
+                                    user_mood=None,  # Could infer from summary
+                                    body_state=None
+                                )
+                            )
+                            logger.info(f"📔 Queued conversation close journal entry")
+                        except Exception as je:
+                            logger.warning(f"⚠️ Failed to write journal entry: {je}")
 
             except Exception as e:
-                logger.warning(f"⚠️ Day-long context retrieval failed (non-critical): {e}")
-                # Continue without today's context if retrieval fails
+                logger.warning(f"⚠️ Session gap detection failed (non-critical): {e}")
 
             # Retrieve conversation history if conversation_id provided
             conversation_history = []
@@ -6835,28 +9211,47 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Start the LLM processing in a background task
             async def process_chat():
                 try:
-                    # TWO-TIER TOOL LOADING SYSTEM (simplified for streaming)
-                    # Load commonly used categories by default to reduce token usage
-                    # Categories: notes, time, memory, knowledge_graph, web, fitness
-                    default_categories = ['notes', 'time', 'memory', 'knowledge_graph', 'web', 'fitness']
-                    tools = tool_registry.get_tools_by_categories(default_categories)
-                    logger.info(f"🔧 Loaded {len(tools)} tools from categories: {default_categories}")
+                    # INTENT-BASED TOOL LOADING
+                    # Use already-classified intent from context routing to load only relevant tools
+                    tool_categories = tool_classifier.get_tool_categories(user_intent)
+
+                    if tool_categories:
+                        tools = tool_registry.get_tools_by_categories(tool_categories)
+                        logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {tool_categories}")
+                    else:
+                        tools = []
+                        logger.info(f"🔧 Intent={user_intent}: No tools needed (conversational)")
 
                     # Process chat with loaded tools
                     logger.info("⏳ Starting chat_with_tools...")
                     response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id, request.conversation_id)
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
 
+                    # Check if Sara's response mentions body state (for calibration feedback loop)
+                    try:
+                        if response_content:
+                            pending = calibration_service.detect_body_state_mention(
+                                sara_response=response_content,
+                                user_id=current_user.id,
+                                current_body_state=None
+                            )
+                            if pending:
+                                logger.info(f"📊 Body state mention detected: {pending.estimate_type}={pending.estimated_label}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
+
                     # Send final response and done IMMEDIATELY to close the stream
                     final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
-                    logger.info(f"🔍 Sending final_response with conversation_id: {final_conv_id}")
+                    final_episode_id = streaming_client.current_episode_id if hasattr(streaming_client, 'current_episode_id') else None
+                    logger.info(f"🔍 Sending final_response with conversation_id: {final_conv_id}, episode_id: {final_episode_id}")
                     await event_queue.put({
                         "type": "final_response",
                         "data": {
                             "content": response_content,
                             "citations": streaming_client.get_citations(),
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "conversation_id": final_conv_id
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "conversation_id": final_conv_id,
+                            "episode_id": final_episode_id
                         }
                     })
                     logger.info("✅ final_response event queued")
@@ -6917,66 +9312,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         }
     )
 
-# ==================== VOICE AGENT ====================
-@app.post("/api/voice-agent/chat")
-async def voice_agent_chat(
-    audio: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Voice chat endpoint - receives audio, transcribes it, processes through chat, returns text response.
-    For now, uses mock transcription. Real Whisper integration can be added later.
-    """
-    try:
-        # Save audio file temporarily
-        audio_content = await audio.read()
-        temp_audio_path = f"/tmp/voice_{uuid.uuid4()}.m4a"
-
-        with open(temp_audio_path, "wb") as f:
-            f.write(audio_content)
-
-        # TODO: Add real Whisper transcription here
-        # For now, return a mock transcription
-        transcribed_text = "Hello, this is a test voice message"
-
-        logger.info(f"[Voice] Received audio from user {current_user.id}, mock transcription: {transcribed_text}")
-
-        # Generate session_id if not provided
-        if not session_id:
-            session_id = f"voice-{uuid.uuid4()}"
-
-        # Process through regular chat endpoint logic
-        chat_request = ChatRequest(
-            message=transcribed_text,
-            conversationId=session_id
-        )
-
-        # Call the existing chat logic (simplified version without streaming)
-        response_text = await process_chat_message(
-            chat_request=chat_request,
-            current_user=current_user,
-            db=db
-        )
-
-        # Clean up temp file
-        try:
-            os.remove(temp_audio_path)
-        except:
-            pass
-
-        # Return response (without audio for now - TTS can be added later)
-        return {
-            "response": response_text,
-            "session_id": session_id,
-            "audio_url": ""  # TODO: Add TTS generation here
-        }
-
-    except Exception as e:
-        logger.error(f"[Voice] Error processing voice message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ==================== VOICE AGENT (iOS) ====================
 @app.post("/api/voice-agent/transcribe")
 async def transcribe_audio(
     audio: UploadFile = File(...),
@@ -6984,7 +9320,7 @@ async def transcribe_audio(
     db: Session = Depends(get_db)
 ):
     """
-    Transcribe audio using Whisper (or mock for now).
+    Transcribe audio using Whisper STT service.
     Returns just the transcription text.
     """
     try:
@@ -6995,6 +9331,14 @@ async def transcribe_audio(
         with open(temp_audio_path, "wb") as f:
             f.write(audio_content)
 
+        # Known Whisper hallucinations on silence/noise
+        WHISPER_HALLUCINATIONS = {
+            "thank you", "thanks", "thanks for watching", "thank you for watching",
+            "please subscribe", "subscribe", "bye", "goodbye", "see you next time",
+            "you", "the", "i", "a", "", "so", "um", "uh", "hmm", "oh",
+            "thank you.", "thanks.", "bye.", "goodbye."
+        }
+
         # Call Whisper STT service (OpenAI-compatible API)
         import httpx
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -7002,7 +9346,10 @@ async def transcribe_audio(
                 files = {"file": ("audio.m4a", audio_file, "audio/m4a")}
                 data = {
                     "model": "distil-small.en",
-                    "language": "en"
+                    "language": "en",
+                    "vad_filter": "true",
+                    "no_speech_threshold": "0.4",
+                    "compression_ratio_threshold": "2.0",
                 }
                 whisper_response = await client.post(
                     "http://10.185.1.8:8585/v1/audio/transcriptions",
@@ -7017,7 +9364,15 @@ async def transcribe_audio(
             result = whisper_response.json()
             transcription = result.get("text", "").strip()
 
-        logger.info(f"[Voice] Transcribed audio for user {current_user.id}: {transcription}")
+        # Filter out hallucinations
+        if transcription.lower() in WHISPER_HALLUCINATIONS:
+            logger.info(f"[Voice] Filtered hallucination for user {current_user.id}: '{transcription}'")
+            transcription = ""
+        elif len(transcription.split()) <= 2 and transcription.lower().rstrip('.!?') in WHISPER_HALLUCINATIONS:
+            logger.info(f"[Voice] Filtered short hallucination for user {current_user.id}: '{transcription}'")
+            transcription = ""
+        else:
+            logger.info(f"[Voice] Transcribed audio for user {current_user.id}: {transcription}")
 
         # Clean up temp file
         try:
@@ -7037,21 +9392,20 @@ async def speak_text(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Convert text to speech using Kokoro TTS with streaming support.
-    Supports both streaming (PCM) and non-streaming (MP3/WAV) formats.
+    Convert text to speech using Kokoro TTS.
+    Returns audio file (WAV default for iOS compatibility).
     """
     try:
         body = await request.json()
         text = body.get("text", "")
         response_format = body.get("response_format", "wav")  # Default WAV for iOS compatibility
-        stream = body.get("stream", False)  # Enable streaming for real-time playback
 
         if not text:
             raise HTTPException(status_code=400, detail="No text provided")
 
-        logger.info(f"[Voice] Generating speech for user {current_user.id}: {text[:50]}... (format: {response_format}, stream: {stream})")
+        logger.info(f"[Voice] Generating speech for user {current_user.id}: {text[:50]}... (format: {response_format})")
 
-        # Call Kokoro TTS service with blended voice (af_sarah + af_bella)
+        # Call Kokoro TTS service with blended voice
         import httpx
         async with httpx.AsyncClient(timeout=60.0) as client:
             tts_response = await client.post(
@@ -7059,7 +9413,7 @@ async def speak_text(
                 json={
                     "input": text,
                     "model": "kokoro",
-                    "voice": "af_sarah(1)+af_bella(1)",  # Blended voice for natural sound
+                    "voice": "af_sarah(1)+af_bella(1)",
                     "response_format": response_format,
                     "speed": 1.0
                 }
@@ -7080,7 +9434,6 @@ async def speak_text(
             }
             media_type = media_type_map.get(response_format, "audio/mpeg")
 
-            # Return the audio file
             return Response(
                 content=tts_response.content,
                 media_type=media_type,
@@ -7093,458 +9446,152 @@ async def speak_text(
         logger.error(f"[Voice] Error generating speech: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/voice-agent/speak/stream")
-async def speak_text_streaming(
-    request: Request,
+
+# ==================== DESKTOP APP DOWNLOADS ====================
+
+DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "downloads")
+
+@app.get("/api/downloads")
+async def list_downloads(
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Stream text-to-speech audio using Kokoro TTS for real-time playback.
-    Returns chunked audio data for low-latency streaming.
-    """
-    try:
-        body = await request.json()
-        text = body.get("text", "")
-        response_format = body.get("response_format", "pcm")  # pcm is best for streaming
+    """List available desktop app downloads"""
+    downloads = []
 
-        if not text:
-            raise HTTPException(status_code=400, detail="No text provided")
+    if os.path.exists(DOWNLOADS_DIR):
+        for filename in os.listdir(DOWNLOADS_DIR):
+            filepath = os.path.join(DOWNLOADS_DIR, filename)
+            if os.path.isfile(filepath):
+                stat = os.stat(filepath)
 
-        logger.info(f"[Voice] Streaming speech for user {current_user.id}: {text[:50]}... (format: {response_format})")
+                # Determine platform and arch
+                platform = "unknown"
+                arch = "x64"
+                if "mac" in filename.lower():
+                    platform = "macOS"
+                    if "arm64" in filename.lower():
+                        arch = "arm64"
+                elif "win" in filename.lower():
+                    platform = "Windows"
+                elif filename.endswith(".asar"):
+                    platform = "Windows"  # asar files are for Windows updates
 
-        # Stream from Kokoro TTS service
-        import httpx
-        async def stream_audio():
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                async with client.stream(
-                    "POST",
-                    "http://10.185.1.9:8880/v1/audio/speech",
-                    json={
-                        "input": text,
-                        "model": "kokoro",
-                        "voice": "af_sarah(1)+af_bella(1)",
-                        "response_format": response_format,
-                        "speed": 1.0
-                    }
-                ) as response:
-                    if response.status_code != 200:
-                        logger.error(f"[Voice] Kokoro streaming error: {response.status_code}")
-                        raise HTTPException(status_code=500, detail="TTS streaming error")
+                # Determine file type
+                file_type = "archive"
+                if filename.endswith(".exe"):
+                    file_type = "installer"
+                elif filename.endswith(".dmg"):
+                    file_type = "installer"
+                elif filename.endswith(".zip") or filename.endswith(".tar.gz"):
+                    file_type = "portable"
+                elif filename.endswith(".asar"):
+                    file_type = "update"
 
-                    # Stream chunks as they arrive (512 bytes for low latency)
-                    async for chunk in response.aiter_bytes(chunk_size=512):
-                        yield chunk
+                downloads.append({
+                    "filename": filename,
+                    "platform": platform,
+                    "arch": arch,
+                    "type": file_type,
+                    "size_bytes": stat.st_size,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 1),
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
 
-        # Determine media type
-        media_type = "audio/pcm" if response_format == "pcm" else f"audio/{response_format}"
+    # Sort by platform, then arch
+    downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-        from fastapi.responses import StreamingResponse
-        return StreamingResponse(
-            stream_audio(),
-            media_type=media_type,
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Content-Type-Options": "nosniff"
-            }
-        )
+    return {"downloads": downloads, "version": "1.0.21"}
 
-    except Exception as e:
-        logger.error(f"[Voice] Error streaming speech: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-async def process_chat_message(
-    chat_request: ChatRequest,
-    current_user: User,
-    db: Session
-) -> str:
-    """Helper function to process chat messages (extracted from /chat endpoint)"""
-    try:
-        # Simple response for now - integrate with full chat logic later
-        user_message = chat_request.message
+@app.get("/api/downloads/{filename}")
+async def download_file(
+    filename: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Download a desktop app installer"""
+    # Sanitize filename to prevent directory traversal
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join(DOWNLOADS_DIR, safe_filename)
 
-        # For now, return a simple echo response
-        # TODO: Integrate with full LLM chat logic from /chat endpoint
-        response = f"I heard you say: {user_message}. Voice chat is working!"
+    if not os.path.exists(filepath) or not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
 
-        return response
+    # Determine media type
+    media_type = "application/octet-stream"
+    if safe_filename.endswith(".zip"):
+        media_type = "application/zip"
+    elif safe_filename.endswith(".tar.gz"):
+        media_type = "application/gzip"
+    elif safe_filename.endswith(".exe"):
+        media_type = "application/x-msdownload"
+    elif safe_filename.endswith(".dmg"):
+        media_type = "application/x-apple-diskimage"
 
-    except Exception as e:
-        logger.error(f"Error in process_chat_message: {e}")
-        return "I'm sorry, I encountered an error processing your message."
+    return FileResponse(
+        filepath,
+        media_type=media_type,
+        filename=safe_filename
+    )
 
-# ==================== SPRITE TELEMETRY (optional) ====================
-@app.post("/sprite/telemetry")
-async def sprite_telemetry(payload: Dict[str, Any], request: Request):
-    """Best-effort telemetry ingest for sprite UX metrics.
-    Stores nothing by default; logs to server for debugging/analysis.
-    """
-    try:
-        logger.info(f"[SPRITE_TELEMETRY] {payload}")
-    except Exception as e:
-        logger.error(f"Failed to log sprite telemetry: {e}")
-    return {"status": "ok"}
 
-@app.get("/notes", response_model=list[NoteResponse])
-async def list_notes(
-    folder_id: str | None = None,
-    current_user: User = Depends(get_current_user),
+@app.get("/api/notes/search")
+async def search_notes_api(
+    q: str,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
-    List notes, optionally filtered by folder.
-    - folder_id=null : Return only root-level notes (no folder)
-    - folder_id=<uuid> : Return notes in specific folder
-    - folder_id not provided : Return all notes (legacy behavior)
+    Search notes by title or content. Supports device token auth for Pi dashboard.
+    Uses text matching with fuzzy title search (handles spaces).
     """
-    query = db.query(Note).filter(Note.user_id == current_user.id)
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
 
-    # Handle folder filtering
-    if folder_id is not None:
-        if folder_id.lower() == "null":
-            # Get root-level notes only (folder_id is NULL)
-            query = query.filter(Note.folder_id.is_(None))
-        else:
-            # Get notes in specific folder
-            query = query.filter(Note.folder_id == folder_id)
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            current_user = await get_current_user(request, db)
+            user_id = current_user.id
+        except:
+            raise HTTPException(status_code=401, detail="Not authenticated")
 
-    notes = query.order_by(Note.updated_at.desc()).limit(100).all()
+    # Normalize query for fuzzy matching
+    normalized_query = q.replace(" ", "")
+
+    # Search title and content with fuzzy matching
+    results = db.execute(text("""
+        SELECT id, title, content, folder_id, created_at, updated_at
+        FROM note
+        WHERE user_id = :user_id
+          AND (
+            title ILIKE :query_pattern
+            OR REPLACE(title, ' ', '') ILIKE :normalized_pattern
+            OR content ILIKE :query_pattern
+          )
+        ORDER BY
+            CASE WHEN title ILIKE :query_pattern THEN 0
+                 WHEN REPLACE(title, ' ', '') ILIKE :normalized_pattern THEN 1
+                 ELSE 2 END,
+            updated_at DESC
+        LIMIT 10
+    """), {
+        "user_id": user_id,
+        "query_pattern": f"%{q}%",
+        "normalized_pattern": f"%{normalized_query}%"
+    }).fetchall()
 
     return [
-        NoteResponse(
-            id=note.id,
-            title=note.title,
-            content=note.content,
-            folder_id=note.folder_id,
-            created_at=note.created_at.isoformat(),
-            updated_at=note.updated_at.isoformat()
-        )
-        for note in notes
+        {
+            "id": str(row.id),
+            "title": row.title or "Untitled",
+            "content": row.content,
+            "folder_id": row.folder_id,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None
+        }
+        for row in results
     ]
 
-@app.post("/notes", response_model=NoteResponse)
-async def create_note(note_data: NoteCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Neo4j-first approach: Create note in Neo4j immediately
-    note_id = str(uuid.uuid4())
-    
-    try:
-        # 1. Create note in Neo4j first with basic properties
-        from app.services.neo4j_service import neo4j_service
-        from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-        
-        # Ensure Neo4j connection
-        if not neo4j_service.driver:
-            await neo4j_service.connect()
-        
-        # Create note in Neo4j graph
-        neo4j_result = await neo4j_service.create_note(
-            note_id=note_id,
-            user_id=current_user.id,
-            title=note_data.title or "Untitled",
-            content=note_data.content,
-            folder_id=note_data.folder_id
-        )
-        
-        # 2. Start intelligence pipeline workers if not already running
-        await intelligence_pipeline.start_workers()
-        
-        # 3. Queue for fast processing (embeddings, obvious connections)
-        await intelligence_pipeline.queue_fast_processing(
-            content_id=note_id,
-            content_type=ContentType.NOTE,
-            metadata={
-                "user_id": current_user.id,
-                "title": note_data.title,
-                "folder_id": note_data.folder_id
-            }
-        )
-        
-        logger.info(f"✅ Note {note_id} created in Neo4j and queued for intelligent processing")
-        
-    except Exception as neo_error:
-        logger.error(f"❌ Neo4j note creation failed: {neo_error}")
-        # Continue with PostgreSQL fallback
-    
-    # 4. Background sync to PostgreSQL (backup)
-    note = Note(
-        id=note_id,
-        user_id=current_user.id,
-        title=note_data.title,
-        content=note_data.content,
-        folder_id=note_data.folder_id
-    )
-    db.add(note)
-    db.commit()
-    db.refresh(note)
-    
-    return NoteResponse(
-        id=note.id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
-
-@app.get("/notes/{note_id}", response_model=NoteResponse)
-async def get_note(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get a single note by ID"""
-    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-
-    return NoteResponse(
-        id=note.id,
-        user_id=note.user_id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
-
-@app.put("/notes/{note_id}", response_model=NoteResponse)
-async def update_note(note_id: str, note_data: NoteCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    # Neo4j-first approach: Update note in Neo4j and re-process
-    try:
-        from app.services.neo4j_service import neo4j_service
-        from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-        
-        # Ensure Neo4j connection
-        if not neo4j_service.driver:
-            await neo4j_service.connect()
-        
-        # Update note in Neo4j graph
-        await neo4j_service.create_note(
-            note_id=note_id,
-            user_id=current_user.id,
-            title=note_data.title or "Untitled",
-            content=note_data.content,
-            folder_id=note_data.folder_id
-        )
-        
-        # Re-process with intelligence pipeline for updated content
-        await intelligence_pipeline.queue_fast_processing(
-            content_id=note_id,
-            content_type=ContentType.NOTE,
-            metadata={
-                "user_id": current_user.id,
-                "title": note_data.title,
-                "folder_id": note_data.folder_id,
-                "is_update": True
-            }
-        )
-        
-        logger.info(f"✅ Note {note_id} updated in Neo4j and re-queued for processing")
-        
-    except Exception as neo_error:
-        logger.error(f"❌ Neo4j note update failed: {neo_error}")
-    
-    # Update PostgreSQL (backup)
-    note.title = note_data.title
-    note.content = note_data.content
-    note.folder_id = note_data.folder_id  # Always update folder_id, even if None (for moving to root)
-    note.updated_at = datetime.now()
-    db.commit()
-    db.refresh(note)
-    
-    return NoteResponse(
-        id=note.id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
-
-@app.delete("/notes/{note_id}")
-async def delete_note(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    # Delete from Neo4j first
-    try:
-        from app.services.neo4j_service import neo4j_service
-        await neo4j_service.delete_note(note_id, current_user.id)
-        logger.info(f"✅ Note {note_id} deleted from Neo4j")
-    except Exception as e:
-        logger.warning(f"Failed to delete note from Neo4j: {e}")
-    
-    # Also delete associated connections
-    db.query(NoteConnection).filter(
-        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
-        NoteConnection.user_id == current_user.id
-    ).delete()
-    
-    db.delete(note)
-    db.commit()
-    
-    return {"message": "Note deleted successfully"}
-
-# Note Connection endpoints
-@app.get("/notes/{note_id}/connections", response_model=list[NoteConnectionResponse])
-async def get_note_connections(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get all connections for a specific note (both outgoing and incoming)"""
-    # Verify note exists and belongs to user
-    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    
-    connections = db.query(NoteConnection).filter(
-        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
-        NoteConnection.user_id == current_user.id
-    ).all()
-    
-    return [
-        NoteConnectionResponse(
-            id=conn.id,
-            source_note_id=conn.source_note_id,
-            target_note_id=conn.target_note_id,
-            connection_type=conn.connection_type,
-            strength=conn.strength,
-            auto_generated=conn.auto_generated == "true",
-            created_at=conn.created_at.isoformat(),
-            updated_at=conn.updated_at.isoformat()
-        )
-        for conn in connections
-    ]
-
-@app.get("/notes/{note_id}/backlinks")
-async def get_note_backlinks(note_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get all notes that link TO this note (backlinks)"""
-    # Verify note exists and belongs to user
-    note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-
-    # Find connections where this note is the target
-    backlinks = db.query(NoteConnection).filter(
-        NoteConnection.target_note_id == note_id,
-        NoteConnection.user_id == current_user.id
-    ).all()
-
-    # Get the source notes for these connections
-    backlink_notes = []
-    for conn in backlinks:
-        source_note = db.query(Note).filter(Note.id == conn.source_note_id).first()
-        if source_note:
-            backlink_notes.append({
-                "id": source_note.id,
-                "title": source_note.title,
-                "connection_type": conn.connection_type,
-                "strength": conn.strength,
-                "created_at": source_note.created_at.isoformat()
-            })
-
-    return backlink_notes
-
-@app.post("/notes/{note_id}/connections", response_model=NoteConnectionResponse)
-async def create_note_connection(
-    note_id: str, 
-    connection_data: NoteConnectionCreate, 
-    current_user: User = Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    """Create a connection from one note to another"""
-    # Verify both notes exist and belong to user
-    source_note = db.query(Note).filter(Note.id == note_id, Note.user_id == current_user.id).first()
-    if not source_note:
-        raise HTTPException(status_code=404, detail="Source note not found")
-    
-    target_note = db.query(Note).filter(Note.id == connection_data.target_note_id, Note.user_id == current_user.id).first()
-    if not target_note:
-        raise HTTPException(status_code=404, detail="Target note not found")
-    
-    # Check if connection already exists
-    existing = db.query(NoteConnection).filter(
-        NoteConnection.source_note_id == note_id,
-        NoteConnection.target_note_id == connection_data.target_note_id,
-        NoteConnection.user_id == current_user.id
-    ).first()
-    
-    if existing:
-        raise HTTPException(status_code=409, detail="Connection already exists")
-    
-    connection = NoteConnection(
-        user_id=current_user.id,
-        source_note_id=note_id,
-        target_note_id=connection_data.target_note_id,
-        connection_type=connection_data.connection_type,
-        strength=connection_data.strength,
-        auto_generated="true" if connection_data.auto_generated else "false"
-    )
-    
-    db.add(connection)
-    db.commit()
-    db.refresh(connection)
-    
-    return NoteConnectionResponse(
-        id=connection.id,
-        source_note_id=connection.source_note_id,
-        target_note_id=connection.target_note_id,
-        connection_type=connection.connection_type,
-        strength=connection.strength,
-        auto_generated=connection.auto_generated == "true",
-        created_at=connection.created_at.isoformat(),
-        updated_at=connection.updated_at.isoformat()
-    )
-
-@app.delete("/notes/{note_id}/connections/{connection_id}")
-async def delete_note_connection(
-    note_id: str, 
-    connection_id: str, 
-    current_user: User = Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    """Delete a specific note connection"""
-    connection = db.query(NoteConnection).filter(
-        NoteConnection.id == connection_id,
-        (NoteConnection.source_note_id == note_id) | (NoteConnection.target_note_id == note_id),
-        NoteConnection.user_id == current_user.id
-    ).first()
-    
-    if not connection:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    
-    db.delete(connection)
-    db.commit()
-    
-    return {"message": "Connection deleted successfully"}
-
-@app.get("/notes/graph-data")
-async def get_notes_graph_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get all notes and connections for graph visualization"""
-    notes = db.query(Note).filter(Note.user_id == current_user.id).all()
-    connections = db.query(NoteConnection).filter(NoteConnection.user_id == current_user.id).all()
-    
-    return {
-        "nodes": [
-            {
-                "id": note.id,
-                "title": note.title,
-                "content": note.content[:200] + "..." if len(note.content) > 200 else note.content,
-                "type": "note",
-                "created_at": note.created_at.isoformat(),
-                "updated_at": note.updated_at.isoformat()
-            }
-            for note in notes
-        ],
-        "links": [
-            {
-                "id": conn.id,
-                "source": conn.source_note_id,
-                "target": conn.target_note_id,
-                "type": conn.connection_type,
-                "strength": conn.strength / 100.0,  # Normalize to 0-1
-                "auto_generated": conn.auto_generated == "true"
-            }
-            for conn in connections
-        ]
-    }
 
 # Memory Management endpoints
 @app.get("/memory/episodes")
@@ -7589,7 +9636,7 @@ async def get_episodes(
                     "context_tags": episode.context_tags,
                     "access_count": episode.access_count
                 },
-                "created_at": episode.created_at.isoformat()
+                "created_at": format_iso_utc(episode.created_at)
             })
         
         return {
@@ -7702,7 +9749,7 @@ async def search_episodes(
                     "importance": episode.importance,
                     "role": episode.role,
                     "source": episode.source or "chat",
-                    "timestamp": episode.created_at.isoformat(),
+                    "timestamp": format_iso_utc(episode.created_at),
                     "memory_type": episode.memory_type,
                     "topics": episode.topics,
                     "emotional_tone": episode.emotional_tone,
@@ -7882,554 +9929,6 @@ async def find_episodes_by_content(
     except Exception as e:
         logger.error(f"Error finding episodes by content: {e}")
         raise HTTPException(status_code=500, detail="Failed to find episodes")
-
-# Folder endpoints
-@app.get("/folders", response_model=list[FolderResponse])
-async def list_folders(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """List all folders for the current user"""
-    folders = db.query(Folder).filter(Folder.user_id == current_user.id).order_by(Folder.name).all()
-
-    return [
-        FolderResponse(
-            id=folder.id,
-            name=folder.name,
-            parent_id=folder.parent_id,
-            notes_count=db.query(Note).filter(Note.folder_id == folder.id).count(),
-            subfolders_count=db.query(Folder).filter(Folder.parent_id == folder.id).count(),
-            created_at=folder.created_at.isoformat(),
-            updated_at=folder.updated_at.isoformat()
-        )
-        for folder in folders
-    ]
-
-@app.post("/folders", response_model=FolderResponse)
-async def create_folder(folder_data: FolderCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Create a new folder"""
-    # Validate parent folder exists and belongs to user if provided
-    if folder_data.parent_id:
-        parent = db.query(Folder).filter(Folder.id == folder_data.parent_id, Folder.user_id == current_user.id).first()
-        if not parent:
-            raise HTTPException(status_code=404, detail="Parent folder not found")
-    
-    folder = Folder(
-        name=folder_data.name,
-        parent_id=folder_data.parent_id,
-        user_id=current_user.id
-    )
-    
-    db.add(folder)
-    db.commit()
-    db.refresh(folder)
-    
-    # Count notes and subfolders
-    notes_count = db.query(Note).filter(Note.folder_id == folder.id).count()
-    subfolders_count = db.query(Folder).filter(Folder.parent_id == folder.id).count()
-    
-    return FolderResponse(
-        id=str(folder.id),
-        name=folder.name,
-        parent_id=str(folder.parent_id) if folder.parent_id else None,
-        notes_count=notes_count,
-        subfolders_count=subfolders_count,
-        created_at=folder.created_at.isoformat(),
-        updated_at=folder.updated_at.isoformat()
-    )
-
-@app.delete("/folders/{folder_id}")
-async def delete_folder(folder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Delete a folder and optionally its contents"""
-    folder = db.query(Folder).filter(Folder.id == folder_id, Folder.user_id == current_user.id).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
-
-    # Move notes in this folder to root (no folder)
-    db.query(Note).filter(Note.folder_id == folder_id, Note.user_id == current_user.id).update({"folder_id": None})
-
-    # Move subfolders to parent folder (or root if no parent)
-    db.query(Folder).filter(Folder.parent_id == folder_id, Folder.user_id == current_user.id).update({"parent_id": folder.parent_id})
-
-    db.delete(folder)
-    db.commit()
-
-    return {"message": "Folder deleted successfully"}
-
-@app.get("/folders/tree")
-async def get_folder_tree(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get the complete folder and note tree structure"""
-    # Get all folders for the user
-    folders = db.query(Folder).filter(Folder.user_id == current_user.id).all()
-    
-    # Get all notes for the user
-    notes = db.query(Note).filter(Note.user_id == current_user.id).all()
-    
-    # Build tree structure recursively
-    def build_tree(parent_id=None):
-        nodes = []
-        
-        # Add folders
-        for folder in folders:
-            if folder.parent_id == parent_id:
-                node = TreeNodeResponse(
-                    id=folder.id,
-                    name=folder.name,
-                    type="folder",
-                    parent_id=folder.parent_id,
-                    created_at=folder.created_at.isoformat(),
-                    updated_at=folder.updated_at.isoformat(),
-                    children=build_tree(folder.id)
-                )
-                nodes.append(node)
-        
-        # Add notes
-        for note in notes:
-            if note.folder_id == parent_id:
-                node = TreeNodeResponse(
-                    id=note.id,
-                    name=note.title or "Untitled",
-                    type="note",
-                    parent_id=note.folder_id,
-                    created_at=note.created_at.isoformat(),
-                    updated_at=note.updated_at.isoformat(),
-                    children=[]
-                )
-                nodes.append(node)
-        
-        return nodes
-    
-    tree = build_tree()
-    return {"tree": tree}
-
-@app.put("/folders/{folder_id}", response_model=FolderResponse)
-async def update_folder(folder_id: str, folder_data: FolderUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Update a folder"""
-    folder = db.query(Folder).filter(Folder.id == folder_id, Folder.user_id == current_user.id).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
-    
-    # Update fields
-    if folder_data.name is not None:
-        folder.name = folder_data.name
-    
-    if folder_data.parent_id is not None:
-        # Validate new parent exists and belongs to user if provided
-        if folder_data.parent_id:
-            parent = db.query(Folder).filter(Folder.id == folder_data.parent_id, Folder.user_id == current_user.id).first()
-            if not parent:
-                raise HTTPException(status_code=404, detail="Parent folder not found")
-        
-        folder.parent_id = folder_data.parent_id
-    
-    db.commit()
-    db.refresh(folder)
-    
-    # Count notes and subfolders
-    notes_count = db.query(Note).filter(Note.folder_id == folder.id).count()
-    subfolders_count = db.query(Folder).filter(Folder.parent_id == folder.id).count()
-    
-    return FolderResponse(
-        id=folder.id,
-        name=folder.name,
-        parent_id=folder.parent_id,
-        notes_count=notes_count,
-        subfolders_count=subfolders_count,
-        created_at=folder.created_at.isoformat(),
-        updated_at=folder.updated_at.isoformat()
-    )
-
-@app.delete("/folders/{folder_id}")
-async def delete_folder(folder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Delete a folder and all its contents"""
-    folder = db.query(Folder).filter(Folder.id == folder_id, Folder.user_id == current_user.id).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
-    
-    db.delete(folder)
-    db.commit()
-    
-    return {"message": "Folder deleted successfully"}
-
-@app.get("/reminders", response_model=list[ReminderResponse])
-async def list_reminders(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    reminders = db.query(Reminder).filter(
-        Reminder.user_id == current_user.id,
-        Reminder.is_completed == False
-    ).order_by(Reminder.reminder_time).limit(20).all()
-    
-    return [
-        ReminderResponse(
-            id=reminder.id,
-            title=reminder.title,
-            description=reminder.description,
-            reminder_time=reminder.reminder_time.isoformat(),
-            is_completed=reminder.is_completed == "true",
-            created_at=reminder.created_at.isoformat(),
-            updated_at=reminder.updated_at.isoformat()
-        )
-        for reminder in reminders
-    ]
-
-@app.post("/reminders", response_model=ReminderResponse)
-async def create_reminder(reminder_data: ReminderCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    reminder_dt = datetime.fromisoformat(reminder_data.reminder_time.replace('Z', '+00:00'))
-    
-    reminder = Reminder(
-        user_id=current_user.id,
-        title=reminder_data.title,
-        description=reminder_data.description,
-        reminder_time=reminder_dt
-    )
-    db.add(reminder)
-    db.commit()
-    db.refresh(reminder)
-    
-    return ReminderResponse(
-        id=reminder.id,
-        title=reminder.title,
-        description=reminder.description,
-        reminder_time=reminder.reminder_time.isoformat(),
-        is_completed=reminder.is_completed == "true",
-        created_at=reminder.created_at.isoformat(),
-        updated_at=reminder.updated_at.isoformat()
-    )
-
-@app.put("/reminders/{reminder_id}", response_model=ReminderResponse)
-async def update_reminder(reminder_id: str, reminder_data: ReminderUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    reminder = db.query(Reminder).filter(
-        Reminder.id == reminder_id,
-        Reminder.user_id == current_user.id
-    ).first()
-
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-
-    # Update fields if provided
-    if reminder_data.title is not None:
-        reminder.title = reminder_data.title
-    if reminder_data.description is not None:
-        reminder.description = reminder_data.description
-    if reminder_data.reminder_time is not None:
-        reminder.reminder_time = datetime.fromisoformat(reminder_data.reminder_time.replace('Z', '+00:00'))
-    if reminder_data.is_completed is not None:
-        reminder.is_completed = "true" if reminder_data.is_completed else "false"
-
-    reminder.updated_at = datetime.now()
-    db.commit()
-    db.refresh(reminder)
-
-    return ReminderResponse(
-        id=reminder.id,
-        title=reminder.title,
-        description=reminder.description,
-        reminder_time=reminder.reminder_time.isoformat(),
-        is_completed=reminder.is_completed == "true",
-        created_at=reminder.created_at.isoformat(),
-        updated_at=reminder.updated_at.isoformat()
-    )
-
-@app.delete("/reminders/{reminder_id}")
-async def delete_reminder(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    reminder = db.query(Reminder).filter(
-        Reminder.id == reminder_id,
-        Reminder.user_id == current_user.id
-    ).first()
-
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-
-    # Remove any scheduled notification
-    notification_key = f"reminder_{reminder_id}"
-    if notification_key in notification_scheduler.scheduled_notifications:
-        del notification_scheduler.scheduled_notifications[notification_key]
-
-    db.delete(reminder)
-    db.commit()
-
-    return {"message": "Reminder deleted successfully"}
-
-@app.patch("/reminders/{reminder_id}/complete")
-async def complete_reminder(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    reminder = db.query(Reminder).filter(
-        Reminder.id == reminder_id,
-        Reminder.user_id == current_user.id
-    ).first()
-    
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-    
-    reminder.is_completed = "true"
-    reminder.updated_at = datetime.now()
-    db.commit()
-    
-    # Remove any scheduled notification since reminder was manually completed
-    notification_key = f"reminder_{reminder_id}"
-    if notification_key in notification_scheduler.scheduled_notifications:
-        del notification_scheduler.scheduled_notifications[notification_key]
-    
-    return {"message": f"Marked reminder '{reminder.title}' as completed"}
-
-@app.post("/reminders/{reminder_id}/notify")
-async def send_reminder_notification(reminder_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Send NTFY notification for a due reminder"""
-    reminder = db.query(Reminder).filter(
-        Reminder.id == reminder_id,
-        Reminder.user_id == current_user.id
-    ).first()
-    
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-    
-    # Send AI-generated NTFY notification
-    reminder_time = reminder.reminder_time.strftime("%I:%M %p")
-    success = await ntfy_service.send_reminder_notification(
-        reminder.title, 
-        reminder_time, 
-        reminder_id, 
-        reminder.description, 
-        current_user.id
-    )
-    
-    if success:
-        return {"message": f"Notification sent for reminder '{reminder.title}'"}
-    else:
-        return {"message": f"Failed to send notification for reminder '{reminder.title}'"}
-
-@app.get("/timers", response_model=list[TimerResponse])
-async def list_timers(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    timers = db.query(Timer).filter(
-        Timer.user_id == current_user.id,
-        Timer.is_active == True
-    ).order_by(Timer.created_at.desc()).limit(20).all()
-    
-    results = [
-        TimerResponse(
-            id=timer.id,
-            title=timer.title,
-            duration_minutes=timer.duration_minutes,
-            start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
-            end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
-            is_active=timer.is_active,
-            is_completed=timer.is_completed == "true",
-            created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
-        )
-        for timer in timers
-    ]
-    
-    # Debug logging
-    for timer_response in results:
-        logger.info(f"API returning timer: {timer_response.title} - Start: {timer_response.start_time}, End: {timer_response.end_time}, Duration: {timer_response.duration_minutes}m")
-    
-    return results
-
-@app.post("/timers", response_model=TimerResponse)
-async def start_timer(timer_data: TimerCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logger.info(f"Creating timer: title={timer_data.title}, duration_minutes={timer_data.duration_minutes}, duration_seconds={timer_data.duration_seconds}")
-    start_time = datetime.now(timezone.utc)
-
-    # Support both duration_seconds and duration_minutes for backward compatibility
-    if timer_data.duration_seconds is not None:
-        duration_minutes = timer_data.duration_seconds / 60  # Store as fractional minutes
-        end_time = start_time + timedelta(seconds=timer_data.duration_seconds)
-    elif timer_data.duration_minutes is not None:
-        duration_minutes = timer_data.duration_minutes
-        end_time = start_time + timedelta(minutes=timer_data.duration_minutes)
-    else:
-        raise HTTPException(status_code=400, detail="Must provide either duration_minutes or duration_seconds")
-
-    timer = Timer(
-        user_id=current_user.id,
-        title=timer_data.title,
-        duration_minutes=int(duration_minutes),  # Store as int minutes (legacy field)
-        start_time=start_time,
-        end_time=end_time
-    )
-    db.add(timer)
-    db.commit()
-    db.refresh(timer)
-    
-    return TimerResponse(
-        id=timer.id,
-        title=timer.title,
-        duration_minutes=timer.duration_minutes,
-        start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
-        end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
-        is_active=timer.is_active,
-        is_completed=timer.is_completed == "true",
-        created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
-    )
-
-@app.patch("/timers/{timer_id}/stop")
-async def stop_timer(timer_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    timer = db.query(Timer).filter(
-        Timer.id == timer_id,
-        Timer.user_id == current_user.id,
-        Timer.is_active == True
-    ).first()
-    
-    if not timer:
-        raise HTTPException(status_code=404, detail="Active timer not found")
-    
-    timer.is_active = False
-    timer.is_completed = True
-    db.commit()
-    
-    # Only send notification for manually stopped timers (not automatic completions)
-    # The scheduler handles automatic notifications when timers reach their end time
-    now = datetime.now(timezone.utc)
-    timer_end_time = timer.end_time
-    if timer_end_time.tzinfo is None:
-        timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
-    
-    if timer_end_time > now:
-        # Timer was stopped early, send immediate notification
-        duration_str = f"{timer.duration_minutes}min"
-        await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, current_user.id)
-    else:
-        # Timer completed naturally, remove any pre-generated notification to avoid duplicates
-        notification_key = f"timer_{timer_id}"
-        if notification_key in notification_scheduler.scheduled_notifications:
-            del notification_scheduler.scheduled_notifications[notification_key]
-    
-    return {"message": f"Stopped timer '{timer.title}'"}
-
-# Calendar endpoints
-@app.get("/calendar/events", response_model=list[CalendarEventResponse])
-async def list_calendar_events(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get all calendar events"""
-    query = db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id)
-
-    if start_date:
-        try:
-            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-            query = query.filter(CalendarEvent.start_time >= start_dt)
-        except:
-            pass
-
-    if end_date:
-        try:
-            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-            query = query.filter(CalendarEvent.start_time <= end_dt)
-        except:
-            pass
-
-    events = query.order_by(CalendarEvent.start_time).all()
-
-    return [
-        CalendarEventResponse(
-            id=event.id,
-            title=event.title,
-            description=event.description,
-            start_time=event.start_time.isoformat(),
-            end_time=event.end_time.isoformat(),
-            location=event.location or None,
-            all_day=event.all_day,
-            reminder_minutes=event.reminder_minutes,
-            is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
-            created_at=event.created_at.isoformat(),
-            updated_at=event.updated_at.isoformat()
-        )
-        for event in events
-    ]
-
-@app.post("/calendar/events", response_model=CalendarEventResponse)
-async def create_calendar_event(event_data: CalendarEventCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Create a calendar event"""
-    start_dt = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
-    end_dt = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
-
-    event = CalendarEvent(
-        user_id=current_user.id,
-        title=event_data.title,
-        description=event_data.description or "",
-        start_time=start_dt,
-        end_time=end_dt,
-        location=event_data.location or "",
-        all_day=event_data.all_day or False,
-        reminder_minutes=event_data.reminder_minutes
-    )
-    db.add(event)
-    db.commit()
-    db.refresh(event)
-
-    return CalendarEventResponse(
-        id=event.id,
-        title=event.title,
-        description=event.description,
-        start_time=event.start_time.isoformat(),
-        end_time=event.end_time.isoformat(),
-        location=event.location or None,
-        all_day=event.all_day,
-        reminder_minutes=event.reminder_minutes,
-        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
-        created_at=event.created_at.isoformat(),
-        updated_at=event.updated_at.isoformat()
-    )
-
-@app.put("/calendar/events/{event_id}", response_model=CalendarEventResponse)
-async def update_calendar_event(event_id: str, event_data: CalendarEventUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Update a calendar event"""
-    event = db.query(CalendarEvent).filter(
-        CalendarEvent.id == event_id,
-        CalendarEvent.user_id == current_user.id
-    ).first()
-
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    if event_data.title is not None:
-        event.title = event_data.title
-    if event_data.description is not None:
-        event.description = event_data.description
-    if event_data.start_time is not None:
-        event.start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
-    if event_data.end_time is not None:
-        event.end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
-    if event_data.location is not None:
-        event.location = event_data.location
-    if event_data.all_day is not None:
-        event.all_day = event_data.all_day
-    if event_data.reminder_minutes is not None:
-        event.reminder_minutes = event_data.reminder_minutes
-    if event_data.is_completed is not None:
-        event.is_completed = event_data.is_completed
-
-    event.updated_at = datetime.now()
-    db.commit()
-    db.refresh(event)
-
-    return CalendarEventResponse(
-        id=event.id,
-        title=event.title,
-        description=event.description,
-        start_time=event.start_time.isoformat(),
-        end_time=event.end_time.isoformat(),
-        location=event.location or None,
-        all_day=event.all_day,
-        reminder_minutes=event.reminder_minutes,
-        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
-        created_at=event.created_at.isoformat(),
-        updated_at=event.updated_at.isoformat()
-    )
-
-@app.delete("/calendar/events/{event_id}")
-async def delete_calendar_event(event_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Delete a calendar event"""
-    event = db.query(CalendarEvent).filter(
-        CalendarEvent.id == event_id,
-        CalendarEvent.user_id == current_user.id
-    ).first()
-
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    db.delete(event)
-    db.commit()
-
-    return {"message": "Event deleted successfully"}
 
 # Document API endpoints
 @app.post("/documents", response_model=DocumentResponse)
@@ -8923,7 +10422,7 @@ async def get_conversation_messages(
                 id=ep.id,
                 role=ep.role,
                 content=ep.content,
-                created_at=ep.created_at.isoformat(),
+                created_at=format_iso_utc(ep.created_at),
                 importance=ep.importance
             )
             for ep in episodes
@@ -9167,7 +10666,7 @@ async def get_user_knowledge_graph(
                             "role": episode.role,
                             "source": episode.source,
                             "importance": episode.importance or 0.5,
-                            "created_at": episode.created_at.isoformat(),
+                            "created_at": format_iso_utc(episode.created_at),
                             "group": 1 if episode.role == "user" else 2
                         }
                     })
@@ -9416,6 +10915,7 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
     return {
         "ai_provider": AI_PROVIDER,
         "openai_api_key": "***" if OPENAI_API_KEY and OPENAI_API_KEY != "dummy" else "",
+        "anthropic_api_key": "***" if ANTHROPIC_API_KEY else "",
         "openai_base_url": OPENAI_BASE_URL,
         "openai_model": OPENAI_MODEL,
         "openai_notification_model": OPENAI_NOTIFICATION_MODEL,
@@ -9427,6 +10927,7 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
 class AISettingsUpdate(BaseModel):
     ai_provider: Optional[str] = None
     openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None
     openai_model: Optional[str] = None
     openai_notification_model: Optional[str] = None
@@ -9440,7 +10941,7 @@ async def update_ai_settings(
     current_user: User = Depends(get_current_user)
 ):
     """Update AI configuration settings (requires restart to take effect)"""
-    global AI_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
 
     updated_settings = {}
     
@@ -9480,10 +10981,22 @@ async def update_ai_settings(
         updated_settings["ai_provider"] = settings.ai_provider
 
     if settings.openai_api_key is not None:
-        OPENAI_API_KEY = settings.openai_api_key
-        config.settings.openai_api_key = settings.openai_api_key
-        # Don't expose the actual key in response
-        updated_settings["openai_api_key"] = settings.openai_api_key
+        # Don't save masked value - require actual API key
+        if settings.openai_api_key == "***" or len(settings.openai_api_key) < 10:
+            logger.warning(f"Ignoring invalid API key (masked or too short)")
+        else:
+            OPENAI_API_KEY = settings.openai_api_key
+            config.settings.openai_api_key = settings.openai_api_key
+            updated_settings["openai_api_key"] = settings.openai_api_key
+
+    if settings.anthropic_api_key is not None:
+        # Don't save masked value - require actual API key
+        if settings.anthropic_api_key == "***" or len(settings.anthropic_api_key) < 10:
+            logger.warning(f"Ignoring invalid Anthropic API key (masked or too short)")
+        else:
+            ANTHROPIC_API_KEY = settings.anthropic_api_key
+            config.settings.anthropic_api_key = settings.anthropic_api_key
+            updated_settings["anthropic_api_key"] = settings.anthropic_api_key
 
     if settings.openai_base_url is not None:
         OPENAI_BASE_URL = _normalize_openai(settings.openai_base_url)
@@ -9887,32 +11400,7 @@ async def delete_fitness_recovery(
     finally:
         db.close()
 
-@app.get("/fitness/habits")
-async def get_fitness_habits(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get habit logs"""
-    # Return empty array for now - can be connected to actual habit system later
-    return []
-
-@app.get("/fitness/habits/streaks")
-async def get_fitness_habit_streaks(current_user: User = Depends(get_current_user)):
-    """Get habit streaks for fitness tracking"""
-    db = SessionLocal()
-    try:
-        # Get all habits with their current streaks
-        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
-        return [{
-            "id": habit.id,
-            "title": habit.title,
-            "current_streak": habit.current_streak or 0,
-            "best_streak": habit.best_streak or 0,
-            "type": habit.type
-        } for habit in habits]
-    finally:
-        db.close()
+# /fitness/habits and /fitness/habits/streaks endpoints moved to app.routes.habits
 
 @app.get("/fitness/summary")
 async def get_fitness_summary(date: str = None, current_user: User = Depends(get_current_user)):
@@ -9935,965 +11423,8 @@ async def get_fitness_summary(date: str = None, current_user: User = Depends(get
     }
 
 
-# ==========================================
-# HABIT TRACKING ENDPOINTS
-# ==========================================
 
-@app.post("/habits", response_model=HabitResponse)
-def create_habit(habit_data: HabitCreate, current_user=Depends(get_current_user)):
-    """Create a new habit"""
-    db = SessionLocal()
-    try:
-        habit = Habit(
-            user_id=current_user.id,
-            title=habit_data.title,
-            type=habit_data.type,
-            target_numeric=habit_data.target_numeric,
-            unit=habit_data.unit,
-            rrule=habit_data.rrule,
-            weekly_minimum=habit_data.weekly_minimum,
-            monthly_minimum=habit_data.monthly_minimum,
-            windows=habit_data.windows,
-            checklist_mode=habit_data.checklist_mode,
-            checklist_threshold=habit_data.checklist_threshold,
-            grace_days=habit_data.grace_days,
-            retro_hours=habit_data.retro_hours,
-            notes=habit_data.notes,
-            current_streak=0,
-            best_streak=0
-        )
-        db.add(habit)
-        db.commit()
-        db.refresh(habit)
-        
-        # Initialize streak record
-        streak = HabitStreak(habit_id=habit.id)
-        db.add(streak)
-        db.commit()
-        
-        return HabitResponse(
-            id=habit.id,
-            title=habit.title,
-            type=habit.type,
-            target_numeric=habit.target_numeric,
-            unit=habit.unit,
-            rrule=habit.rrule,
-            weekly_minimum=habit.weekly_minimum,
-            monthly_minimum=habit.monthly_minimum,
-            windows=habit.windows,
-            checklist_mode=habit.checklist_mode,
-            checklist_threshold=habit.checklist_threshold,
-            grace_days=habit.grace_days,
-            retro_hours=habit.retro_hours,
-            paused=bool(habit.paused),
-            pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
-            pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
-            notes=habit.notes,
-            created_at=habit.created_at.isoformat(),
-            updated_at=habit.updated_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.get("/habits", response_model=list[HabitResponse])
-def list_habits(current_user=Depends(get_current_user)):
-    """List all habits for the current user"""
-    db = SessionLocal()
-    try:
-        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
-        return [
-            HabitResponse(
-                id=habit.id,
-                title=habit.title,
-                type=habit.type,
-                target_numeric=habit.target_numeric,
-                unit=habit.unit,
-                rrule=habit.rrule,
-                weekly_minimum=habit.weekly_minimum,
-                monthly_minimum=habit.monthly_minimum,
-                windows=habit.windows,
-                checklist_mode=habit.checklist_mode,
-                checklist_threshold=habit.checklist_threshold,
-                grace_days=habit.grace_days,
-                retro_hours=habit.retro_hours,
-                paused=bool(habit.paused),
-                pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
-                pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
-                notes=habit.notes,
-                created_at=habit.created_at.isoformat(),
-                updated_at=habit.updated_at.isoformat()
-            ) for habit in habits
-        ]
-    finally:
-        db.close()
-
-@app.get("/habits/today", response_model=HabitTodayResponse)
-def get_today_habits(current_user=Depends(get_current_user)):
-    """Get today's habit instances with stats"""
-    db = SessionLocal()
-    try:
-        from app.services.habit_instances import HabitInstanceGenerator
-        
-        # First, generate any missing instances for today
-        today = datetime.now().date()
-        HabitInstanceGenerator.generate_instances_for_all_habits(
-            db, current_user.id, today, today
-        )
-        
-        # Get today's instances
-        instances = HabitInstanceGenerator.get_today_instances(db, current_user.id, today)
-        
-        # Convert to response format
-        habits = [
-            HabitInstanceResponse(
-                id=instance["instance_id"],
-                habit_id=instance["habit_id"],
-                date=instance["date"],
-                window=instance.get("window"),
-                expected=instance["expected"],
-                status=instance["status"],
-                progress=instance["progress"],
-                total_amount=instance.get("total_amount"),
-                target=instance.get("target"),
-                title=instance["title"],
-                type=instance["type"],
-                unit=instance.get("unit")
-            ) for instance in instances
-        ]
-        
-        # Calculate stats
-        total = len(habits)
-        completed = len([h for h in habits if h.status == "complete"])
-        in_progress = len([h for h in habits if h.status == "in_progress" or (h.progress > 0 and h.status != "complete")])
-        completion_rate = (completed / total * 100) if total > 0 else 0
-        
-        stats = HabitTodayStats(
-            total=total,
-            completed=completed,
-            in_progress=in_progress,
-            completion_rate=completion_rate
-        )
-        
-        return HabitTodayResponse(
-            date=today.isoformat(),
-            habits=habits,
-            stats=stats
-        )
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/log")
-def log_habit_completion(
-    habit_id: str, 
-    log_data: HabitLogCreate,
-    current_user=Depends(get_current_user)
-):
-    """Log a habit completion"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Create log entry
-        log = HabitLog(
-            habit_id=habit_id,
-            user_id=current_user.id,
-            source=log_data.source,
-            payload=json.dumps({"amount": log_data.amount}) if log_data.amount else log_data.payload
-        )
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        
-        # Update habit instance progress and streak
-        from app.services.habit_instances import HabitInstanceGenerator
-        from app.services.habit_streaks import HabitStreakCalculator
-        from datetime import date
-        
-        # Get or create today's instance
-        today = date.today()
-        instance_data = HabitInstanceGenerator.get_instance_by_habit_and_date(
-            db, habit_id, today
-        )
-        
-        if instance_data:
-            # Get all logs for this habit today
-            today_logs = db.query(HabitLog).filter(
-                HabitLog.habit_id == habit_id,
-                HabitLog.ts >= datetime.combine(today, datetime.min.time()),
-                HabitLog.ts < datetime.combine(today + timedelta(days=1), datetime.min.time())
-            ).all()
-            
-            log_dicts = []
-            for l in today_logs:
-                log_dicts.append({
-                    "payload": l.payload,
-                    "ts": l.ts,
-                    "source": l.source
-                })
-            
-            # Get checklist items if needed
-            checklist_items = []
-            if habit.type == "checklist":
-                items = db.query(HabitItem).filter(HabitItem.habit_id == habit_id).all()
-                checklist_items = [{"id": item.id, "label": item.label} for item in items]
-            
-            # Update instance progress
-            HabitInstanceGenerator.update_instance_progress(
-                db, instance_data["instance_id"], log_dicts, habit, checklist_items
-            )
-            
-            # Update streak if habit is now complete
-            from app.services.habit_progress import HabitProgressCalculator
-            is_complete = HabitProgressCalculator.is_habit_complete(
-                habit.type, log_dicts, habit.target_numeric, checklist_items,
-                habit.checklist_mode or "all", habit.checklist_threshold or 1.0
-            )
-            
-            if is_complete:
-                # Update streak
-                streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).first()
-                if streak:
-                    vacation_periods = []
-                    if habit.pause_from and habit.pause_to:
-                        vacation_periods = [(habit.pause_from.date(), habit.pause_to.date())]
-                    
-                    new_current, new_best, last_completed = HabitStreakCalculator.update_streak_after_completion(
-                        streak.current_streak,
-                        streak.best_streak,
-                        streak.last_completed,
-                        today,
-                        habit.grace_days,
-                        vacation_periods
-                    )
-                    
-                    streak.current_streak = new_current
-                    streak.best_streak = new_best
-                    streak.last_completed = last_completed
-                    streak.updated_at = datetime.now()
-                    db.commit()
-        
-        return {"message": "Habit logged successfully", "log_id": log.id}
-    finally:
-        db.close()
-
-@app.get("/habits/{habit_id}/streak", response_model=HabitStreakResponse)
-def get_habit_streak(habit_id: str, current_user=Depends(get_current_user)):
-    """Get streak information for a habit"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).first()
-        
-        if not streak:
-            # Create initial streak record
-            streak = HabitStreak(habit_id=habit_id)
-            db.add(streak)
-            db.commit()
-        
-        return HabitStreakResponse(
-            habit_id=streak.habit_id,
-            current_streak=streak.current_streak,
-            best_streak=streak.best_streak,
-            last_completed=streak.last_completed.isoformat() if streak.last_completed else None
-        )
-    finally:
-        db.close()
-
-# ==========================================
-# ADVANCED HABIT ENDPOINTS
-# ==========================================
-
-@app.patch("/habits/{habit_id}", response_model=HabitResponse)
-def update_habit(habit_id: str, habit_data: dict, current_user=Depends(get_current_user)):
-    """Update an existing habit"""
-    db = SessionLocal()
-    try:
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Update fields that are provided
-        update_fields = ["title", "target_numeric", "unit", "rrule", "weekly_minimum", 
-                        "monthly_minimum", "windows", "checklist_mode", "checklist_threshold", 
-                        "grace_days", "retro_hours", "notes"]
-        
-        for field in update_fields:
-            if field in habit_data:
-                setattr(habit, field, habit_data[field])
-        
-        habit.updated_at = datetime.now()
-        db.commit()
-        db.refresh(habit)
-        
-        return HabitResponse(
-            id=habit.id,
-            title=habit.title,
-            type=habit.type,
-            target_numeric=habit.target_numeric,
-            unit=habit.unit,
-            rrule=habit.rrule,
-            weekly_minimum=habit.weekly_minimum,
-            monthly_minimum=habit.monthly_minimum,
-            windows=habit.windows,
-            checklist_mode=habit.checklist_mode,
-            checklist_threshold=habit.checklist_threshold,
-            grace_days=habit.grace_days,
-            retro_hours=habit.retro_hours,
-            paused=bool(habit.paused),
-            pause_from=habit.pause_from.isoformat() if habit.pause_from else None,
-            pause_to=habit.pause_to.isoformat() if habit.pause_to else None,
-            notes=habit.notes,
-            created_at=habit.created_at.isoformat(),
-            updated_at=habit.updated_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.delete("/habits/{habit_id}")
-def delete_habit(habit_id: str, current_user=Depends(get_current_user)):
-    """Delete a habit and all associated data"""
-    db = SessionLocal()
-    try:
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Delete associated data (cascade should handle this, but let's be explicit)
-        db.query(HabitInstance).filter(HabitInstance.habit_id == habit_id).delete()
-        db.query(HabitLog).filter(HabitLog.habit_id == habit_id).delete()
-        db.query(HabitStreak).filter(HabitStreak.habit_id == habit_id).delete()
-        db.query(HabitItem).filter(HabitItem.habit_id == habit_id).delete()
-        db.query(HabitLink).filter(HabitLink.habit_id == habit_id).delete()
-        
-        # Delete the habit itself
-        db.delete(habit)
-        db.commit()
-        
-        return {"message": "Habit deleted successfully"}
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/pause")
-def pause_habit(habit_id: str, pause_data: HabitPauseRequest, current_user=Depends(get_current_user)):
-    """Pause a habit for a specific period"""
-    db = SessionLocal()
-    try:
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Parse dates
-        try:
-            pause_from = datetime.fromisoformat(pause_data.pause_from)
-            pause_to = datetime.fromisoformat(pause_data.pause_to)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format")
-        
-        if pause_from >= pause_to:
-            raise HTTPException(status_code=400, detail="Pause start must be before pause end")
-        
-        habit.paused = 1
-        habit.pause_from = pause_from
-        habit.pause_to = pause_to
-        habit.updated_at = datetime.now()
-        
-        db.commit()
-        
-        return {"message": f"Habit paused from {pause_from.date()} to {pause_to.date()}"}
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/resume")
-def resume_habit(habit_id: str, current_user=Depends(get_current_user)):
-    """Resume a paused habit"""
-    db = SessionLocal()
-    try:
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        habit.paused = 0
-        habit.pause_from = None
-        habit.pause_to = None
-        habit.updated_at = datetime.now()
-        
-        db.commit()
-        
-        return {"message": "Habit resumed successfully"}
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/items", response_model=HabitItemResponse)
-def add_habit_item(
-    habit_id: str,
-    item_data: HabitItemCreate,
-    current_user=Depends(get_current_user)
-):
-    """Add a checklist item to a habit"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user and is checklist type
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id,
-            Habit.type == "checklist"
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found or not a checklist")
-        
-        item = HabitItem(
-            habit_id=habit_id,
-            label=item_data.label,
-            sort_order=item_data.sort_order
-        )
-        db.add(item)
-        db.commit()
-        db.refresh(item)
-        
-        return HabitItemResponse(
-            id=item.id,
-            habit_id=item.habit_id,
-            label=item.label,
-            sort_order=item.sort_order,
-            created_at=item.created_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.get("/habits/{habit_id}/items", response_model=list[HabitItemResponse])
-def get_habit_items(habit_id: str, current_user=Depends(get_current_user)):
-    """Get all checklist items for a habit"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        items = db.query(HabitItem).filter(
-            HabitItem.habit_id == habit_id
-        ).order_by(HabitItem.sort_order).all()
-        
-        return [
-            HabitItemResponse(
-                id=item.id,
-                habit_id=item.habit_id,
-                label=item.label,
-                sort_order=item.sort_order,
-                created_at=item.created_at.isoformat()
-            ) for item in items
-        ]
-    finally:
-        db.close()
-
-@app.patch("/habit_items/{item_id}", response_model=HabitItemResponse)
-def update_habit_item(item_id: str, item_data: dict, current_user=Depends(get_current_user)):
-    """Update a checklist item"""
-    db = SessionLocal()
-    try:
-        # Get item and verify ownership through habit
-        item = db.query(HabitItem).join(Habit).filter(
-            HabitItem.id == item_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not item:
-            raise HTTPException(status_code=404, detail="Item not found")
-        
-        # Update fields
-        if "label" in item_data:
-            item.label = item_data["label"]
-        if "sort_order" in item_data:
-            item.sort_order = item_data["sort_order"]
-        
-        db.commit()
-        db.refresh(item)
-        
-        return HabitItemResponse(
-            id=item.id,
-            habit_id=item.habit_id,
-            label=item.label,
-            sort_order=item.sort_order,
-            created_at=item.created_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.delete("/habit_items/{item_id}")
-def delete_habit_item(item_id: str, current_user=Depends(get_current_user)):
-    """Delete a checklist item"""
-    db = SessionLocal()
-    try:
-        # Get item and verify ownership through habit
-        item = db.query(HabitItem).join(Habit).filter(
-            HabitItem.id == item_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not item:
-            raise HTTPException(status_code=404, detail="Item not found")
-        
-        db.delete(item)
-        db.commit()
-        
-        return {"message": "Item deleted successfully"}
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/link", response_model=HabitLinkResponse)
-def link_habit_to_resource(
-    habit_id: str,
-    link_data: HabitLinkCreate,
-    current_user=Depends(get_current_user)
-):
-    """Link a habit to a note, document, or concept"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Check if link already exists
-        existing_link = db.query(HabitLink).filter(
-            HabitLink.habit_id == habit_id,
-            HabitLink.target_type == link_data.target_type,
-            HabitLink.target_id == link_data.target_id
-        ).first()
-        
-        if existing_link:
-            raise HTTPException(status_code=400, detail="Link already exists")
-        
-        link = HabitLink(
-            habit_id=habit_id,
-            target_type=link_data.target_type,
-            target_id=link_data.target_id,
-            meta=link_data.meta
-        )
-        db.add(link)
-        db.commit()
-        db.refresh(link)
-        
-        return HabitLinkResponse(
-            id=link.id,
-            habit_id=link.habit_id,
-            target_type=link.target_type,
-            target_id=link.target_id,
-            meta=link.meta,
-            created_at=link.created_at.isoformat()
-        )
-    finally:
-        db.close()
-
-@app.get("/habits/{habit_id}/links", response_model=list[HabitLinkResponse])
-def get_habit_links(habit_id: str, current_user=Depends(get_current_user)):
-    """Get all links for a habit"""
-    db = SessionLocal()
-    try:
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        links = db.query(HabitLink).filter(HabitLink.habit_id == habit_id).all()
-        
-        return [
-            HabitLinkResponse(
-                id=link.id,
-                habit_id=link.habit_id,
-                target_type=link.target_type,
-                target_id=link.target_id,
-                meta=link.meta,
-                created_at=link.created_at.isoformat()
-            ) for link in links
-        ]
-    finally:
-        db.close()
-
-@app.delete("/habit_links/{link_id}")
-def delete_habit_link(link_id: str, current_user=Depends(get_current_user)):
-    """Delete a habit link"""
-    db = SessionLocal()
-    try:
-        # Get link and verify ownership through habit
-        link = db.query(HabitLink).join(Habit).filter(
-            HabitLink.id == link_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not link:
-            raise HTTPException(status_code=404, detail="Link not found")
-        
-        db.delete(link)
-        db.commit()
-        
-        return {"message": "Link deleted successfully"}
-    finally:
-        db.close()
-
-# ==========================================
-# HABIT INSIGHTS & ANALYTICS ENDPOINTS
-# ==========================================
-
-@app.get("/insights/habits", response_model=HabitInsightsResponse)
-def get_habit_insights(
-    current_user=Depends(get_current_user),
-    period: str = "month"
-):
-    """Get habit analytics and insights in frontend-expected format"""
-    db = SessionLocal()
-    try:
-        from datetime import date, timedelta
-        
-        # Parse period
-        days_map = {"week": 7, "month": 30, "year": 365}
-        days = days_map.get(period, 30)
-        
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days)
-        
-        # Get all user habits
-        habits = db.query(Habit).filter(Habit.user_id == current_user.id).all()
-        
-        # Calculate overview stats
-        total_completions = 0
-        total_expected = 0
-        current_streaks = 0
-        longest_streak = 0
-        habit_performance = []
-        
-        for habit in habits:
-            # Get instances in period
-            instances = db.query(HabitInstance).filter(
-                HabitInstance.habit_id == habit.id,
-                HabitInstance.date >= start_date,
-                HabitInstance.date <= end_date,
-                HabitInstance.expected == 1
-            ).all()
-            
-            expected_count = len(instances)
-            completed_count = len([i for i in instances if i.status == "complete"])
-            completion_rate = (completed_count / expected_count * 100) if expected_count > 0 else 0
-            
-            total_expected += expected_count
-            total_completions += completed_count
-            
-            # Get current streak
-            streak = db.query(HabitStreak).filter(HabitStreak.habit_id == habit.id).first()
-            current_streak = streak.current_streak if streak else 0
-            best_streak = streak.best_streak if streak else 0
-            
-            if current_streak > 0:
-                current_streaks += 1
-            if best_streak > longest_streak:
-                longest_streak = best_streak
-            
-            habit_performance.append(HabitInsightsPerformance(
-                habit_id=habit.id,
-                title=habit.title,
-                type=habit.type,
-                completion_rate=completion_rate,
-                current_streak=current_streak,
-                best_streak=best_streak,
-                total_completions=completed_count
-            ))
-        
-        # Calculate average completion rate
-        average_completion_rate = (total_completions / total_expected * 100) if total_expected > 0 else 0
-        
-        # Create overview
-        overview = HabitInsightsOverview(
-            total_habits=len(habits),
-            active_habits=len([h for h in habits if not h.paused]),
-            total_completions=total_completions,
-            average_completion_rate=average_completion_rate,
-            current_streaks=current_streaks,
-            longest_streak=longest_streak
-        )
-        
-        # Calculate weekly stats (simplified for now)
-        week_start = end_date - timedelta(days=7)
-        last_week_start = week_start - timedelta(days=7)
-        
-        # This week stats - collect from user's habits
-        this_week_total = 0
-        this_week_completed = 0
-        for habit in habits:
-            week_instances = db.query(HabitInstance).filter(
-                HabitInstance.habit_id == habit.id,
-                HabitInstance.date >= week_start,
-                HabitInstance.date <= end_date,
-                HabitInstance.expected == 1
-            ).all()
-            this_week_total += len(week_instances)
-            this_week_completed += len([i for i in week_instances if i.status == "complete"])
-        
-        this_week_rate = (this_week_completed / this_week_total * 100) if this_week_total > 0 else 0
-        
-        # Last week stats
-        last_week_total = 0
-        last_week_completed = 0
-        for habit in habits:
-            week_instances = db.query(HabitInstance).filter(
-                HabitInstance.habit_id == habit.id,
-                HabitInstance.date >= last_week_start,
-                HabitInstance.date < week_start,
-                HabitInstance.expected == 1
-            ).all()
-            last_week_total += len(week_instances)
-            last_week_completed += len([i for i in week_instances if i.status == "complete"])
-        
-        last_week_rate = (last_week_completed / last_week_total * 100) if last_week_total > 0 else 0
-        
-        # Determine trend
-        if this_week_rate > last_week_rate + 5:
-            trend = "up"
-        elif this_week_rate < last_week_rate - 5:
-            trend = "down"
-        else:
-            trend = "stable"
-        
-        weekly_stats = HabitInsightsWeeklyStats(
-            this_week={"completed": this_week_completed, "total": this_week_total, "completion_rate": this_week_rate},
-            last_week={"completed": last_week_completed, "total": last_week_total, "completion_rate": last_week_rate},
-            trend=trend
-        )
-        
-        # Create patterns (simplified for now)
-        most_consistent = habit_performance[0].title if habit_performance else "None"
-        
-        patterns = HabitInsightsPatterns(
-            best_day_of_week="Monday",  # Placeholder
-            best_time_of_day="Morning",  # Placeholder
-            most_consistent_habit=most_consistent,
-            improvement_suggestions=[
-                "Try setting reminders for your habits",
-                "Start with smaller, easier habits to build momentum",
-                "Track your habits at the same time each day"
-            ]
-        )
-        
-        return HabitInsightsResponse(
-            overview=overview,
-            weekly_stats=weekly_stats,
-            habit_performance=habit_performance,
-            patterns=patterns
-        )
-        
-    finally:
-        db.close()
-
-@app.get("/habits/{habit_id}/history")
-def get_habit_history(
-    habit_id: str,
-    current_user=Depends(get_current_user),
-    days: int = 90
-):
-    """Get detailed history for a specific habit"""
-    db = SessionLocal()
-    try:
-        from datetime import date, timedelta
-        
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days)
-        
-        # Get instances
-        instances = db.query(HabitInstance).filter(
-            HabitInstance.habit_id == habit_id,
-            HabitInstance.date >= start_date,
-            HabitInstance.date <= end_date
-        ).order_by(HabitInstance.date.desc()).all()
-        
-        # Get logs
-        logs = db.query(HabitLog).filter(
-            HabitLog.habit_id == habit_id,
-            HabitLog.ts >= datetime.combine(start_date, datetime.min.time()),
-            HabitLog.ts <= datetime.combine(end_date, datetime.max.time())
-        ).order_by(HabitLog.ts.desc()).all()
-        
-        history = {
-            "habit": {
-                "id": habit.id,
-                "title": habit.title,
-                "type": habit.type,
-                "target": habit.target_numeric,
-                "unit": habit.unit
-            },
-            "period": {
-                "days": days,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat()
-            },
-            "instances": [
-                {
-                    "date": instance.date.isoformat(),
-                    "expected": bool(instance.expected),
-                    "status": instance.status,
-                    "progress": instance.progress,
-                    "total_amount": instance.total_amount,
-                    "target": instance.target,
-                    "window": instance.window
-                } for instance in instances
-            ],
-            "logs": [
-                {
-                    "id": log.id,
-                    "timestamp": log.ts.isoformat(),
-                    "source": log.source,
-                    "payload": log.payload
-                } for log in logs
-            ]
-        }
-        
-        return history
-        
-    finally:
-        db.close()
-
-@app.post("/habits/{habit_id}/log-retro")
-def log_habit_retro(
-    habit_id: str,
-    log_data: dict,
-    current_user=Depends(get_current_user)
-):
-    """Log a habit completion for a past date (retro logging)"""
-    db = SessionLocal()
-    try:
-        from datetime import datetime, date, timedelta
-        
-        # Verify habit belongs to user
-        habit = db.query(Habit).filter(
-            Habit.id == habit_id,
-            Habit.user_id == current_user.id
-        ).first()
-        
-        if not habit:
-            raise HTTPException(status_code=404, detail="Habit not found")
-        
-        # Parse the target date
-        try:
-            if "date" in log_data:
-                target_date = datetime.fromisoformat(log_data["date"]).date()
-            else:
-                raise HTTPException(status_code=400, detail="Date is required for retro logging")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format")
-        
-        # Check if retro logging is allowed
-        days_ago = (date.today() - target_date).days
-        if days_ago > habit.retro_hours / 24:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Retro logging only allowed within {habit.retro_hours} hours"
-            )
-        
-        if target_date > date.today():
-            raise HTTPException(status_code=400, detail="Cannot log for future dates")
-        
-        # Create log entry with specified date
-        log = HabitLog(
-            habit_id=habit_id,
-            user_id=current_user.id,
-            ts=datetime.combine(target_date, datetime.now().time()),
-            source=log_data.get("source", "retro"),
-            payload=json.dumps({
-                "amount": log_data.get("amount"),
-                "retro": True
-            }) if log_data.get("amount") else json.dumps({"retro": True})
-        )
-        db.add(log)
-        db.commit()
-        
-        # Update instance for that date if it exists
-        from app.services.habit_instances import HabitInstanceGenerator
-        
-        instance_data = HabitInstanceGenerator.get_instance_by_habit_and_date(
-            db, habit_id, target_date
-        )
-        
-        if instance_data:
-            # Update the instance with new progress
-            target_logs = db.query(HabitLog).filter(
-                HabitLog.habit_id == habit_id,
-                HabitLog.ts >= datetime.combine(target_date, datetime.min.time()),
-                HabitLog.ts < datetime.combine(target_date + timedelta(days=1), datetime.min.time())
-            ).all()
-            
-            log_dicts = []
-            for l in target_logs:
-                log_dicts.append({
-                    "payload": l.payload,
-                    "ts": l.ts,
-                    "source": l.source
-                })
-            
-            checklist_items = []
-            if habit.type == "checklist":
-                items = db.query(HabitItem).filter(HabitItem.habit_id == habit_id).all()
-                checklist_items = [{"id": item.id, "label": item.label} for item in items]
-            
-            HabitInstanceGenerator.update_instance_progress(
-                db, instance_data["instance_id"], log_dicts, habit, checklist_items
-            )
-        
-        return {"message": f"Retro log created for {target_date}", "log_id": log.id}
-        
-    finally:
-        db.close()
-
+# HABIT TRACKING ENDPOINTS moved to app.routes.habits
 
 # ==========================================
 # Worker Management Endpoints
@@ -10989,7 +11520,6 @@ async def get_autonomous_insights(
         id=insight.id,
         user_id=insight.user_id,
         insight_type=insight.insight_type,
-        personality_mode=insight.personality_mode,
         sweep_type=insight.sweep_type,
         priority_score=insight.priority_score,
         title=insight.title,
@@ -11033,57 +11563,47 @@ async def submit_insight_feedback(
 @app.post("/autonomous/sweep/{sweep_type}")
 async def trigger_autonomous_sweep(
     sweep_type: str,
-    personality_mode: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Manually trigger an autonomous sweep for testing/debugging"""
-    
+
     if sweep_type not in ['quick_sweep', 'standard_sweep', 'digest_sweep']:
         raise HTTPException(status_code=400, detail="Invalid sweep type")
-    
-    # Get user's current personality mode if not specified
-    if not personality_mode:
-        profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-        personality_mode = profile.current_mode if profile else 'companion'
-    
+
     try:
         from app.services.autonomous_sweep_service import AutonomousSweepService
-        
+
         sweep_service = AutonomousSweepService(db)
         raw_insights = await sweep_service.execute_sweep(
             user_id=current_user.id,
-            personality_mode=personality_mode,
             sweep_type=sweep_type,
             triggered_by="manual"
         )
-        
+
         # Check for recent similar insights to avoid duplicates
-        recent_cutoff = datetime.now() - timedelta(hours=6)  # Don't duplicate insights from last 6 hours
+        recent_cutoff = datetime.now() - timedelta(hours=6)
         recent_insights = db.query(AutonomousInsight).filter(
             and_(
                 AutonomousInsight.user_id == current_user.id,
                 AutonomousInsight.generated_at >= recent_cutoff
             )
         ).all()
-        
+
         recent_types = {insight.insight_type for insight in recent_insights}
         recent_titles = {insight.title for insight in recent_insights}
-        
+
         # Store insights in database, filtering out duplicates
         stored_insights = []
         new_insights = []
         for insight_data in raw_insights:
-            # Only store insights that meet the priority threshold
             if sweep_service.scorer.should_surface(insight_data['priority_score'], sweep_type):
-                # Check if this is genuinely new
-                is_new = (insight_data['type'] not in recent_types and 
+                is_new = (insight_data['type'] not in recent_types and
                          insight_data['title'] not in recent_titles)
-                
+
                 insight = AutonomousInsight(
                     user_id=current_user.id,
                     insight_type=insight_data['type'],
-                    personality_mode=personality_mode,
                     sweep_type=sweep_type,
                     priority_score=insight_data['priority_score'],
                     title=insight_data['title'],
@@ -11097,18 +11617,17 @@ async def trigger_autonomous_sweep(
                 )
                 db.add(insight)
                 stored_insights.append(insight)
-                
+
                 if is_new:
                     new_insights.append(insight)
-        
+
         db.commit()
-        
+
         return {
             "message": f"{sweep_type} completed successfully",
             "insights_generated": len(raw_insights),
             "insights_stored": len(stored_insights),
-            "new_insights": len(new_insights),  # Key addition for frontend
-            "personality_mode": personality_mode,
+            "new_insights": len(new_insights),
             "sweep_type": sweep_type
         }
         
@@ -11208,7 +11727,6 @@ async def get_background_sweeps(
         id=sweep.id,
         user_id=sweep.user_id,
         sweep_type=sweep.sweep_type,
-        personality_mode=sweep.personality_mode,
         triggered_by=sweep.triggered_by,
         execution_time_ms=sweep.execution_time_ms,
         insights_generated=sweep.insights_generated,
@@ -11220,156 +11738,7 @@ async def get_background_sweeps(
     ) for sweep in sweeps]
 
 
-# =====================
-# GTKY (Get-to-Know-You) Interview Endpoints
-# =====================
-
-class GTKYStartResponse(BaseModel):
-    status: str
-    session_id: Optional[str] = None
-    message: Optional[str] = None
-    pack_info: Optional[Dict[str, Any]] = None
-    question: Optional[Dict[str, Any]] = None
-    sprite_state: Optional[str] = None
-    completed_at: Optional[str] = None
-    can_retake: Optional[bool] = None
-
-class GTKYResponseRequest(BaseModel):
-    response: Dict[str, Any]
-
-class GTKYResponseReply(BaseModel):
-    status: str
-    session_id: Optional[str] = None
-    question: Optional[Dict[str, Any]] = None
-    follow_up: Optional[str] = None
-    progress: Optional[str] = None
-    completed_pack: Optional[str] = None
-    next_pack: Optional[Dict[str, Any]] = None
-    can_continue: Optional[bool] = None
-    message: Optional[str] = None
-    profile_summary: Optional[str] = None
-    next_steps: Optional[List[str]] = None
-
-class GTKYProfileSummary(BaseModel):
-    completed_at: Optional[str] = None
-    communication_style: Optional[str] = None
-    autonomy_level: Optional[str] = None
-    profile_data: Optional[Dict[str, Any]] = None
-    notification_channels: Optional[Dict[str, Any]] = None
-
-@app.post("/onboarding/gtky/start", response_model=GTKYStartResponse)
-async def start_gtky_interview(
-    personality_mode: str = "companion",
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Start or restart the Get-to-Know-You interview"""
-    
-    if not GTKY_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="GTKY service not available")
-    
-    gtky_service = GTKYService(db)
-    
-    try:
-        result = await gtky_service.start_interview(
-            user_id=str(current_user.id),
-            personality_mode=personality_mode
-        )
-        
-        return GTKYStartResponse(**result)
-        
-    except Exception as e:
-        logger.error(f"Failed to start GTKY interview: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start interview")
-
-@app.post("/onboarding/gtky/respond/{session_id}", response_model=GTKYResponseReply)
-async def respond_to_gtky_question(
-    session_id: str,
-    request: GTKYResponseRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Respond to a GTKY interview question"""
-    
-    if not GTKY_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="GTKY service not available")
-    
-    gtky_service = GTKYService(db)
-    
-    try:
-        result = await gtky_service.respond_to_question(
-            session_id=session_id,
-            user_id=str(current_user.id),
-            response=request.response
-        )
-        
-        return GTKYResponseReply(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to process GTKY response: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process response")
-
-@app.post("/onboarding/gtky/continue/{pack_id}", response_model=GTKYResponseReply)
-async def continue_gtky_with_pack(
-    pack_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Continue GTKY interview with next question pack"""
-    
-    if not GTKY_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="GTKY service not available")
-    
-    gtky_service = GTKYService(db)
-    
-    try:
-        result = await gtky_service.continue_with_pack(
-            user_id=str(current_user.id),
-            pack_id=pack_id
-        )
-        
-        # Convert to response format
-        return GTKYResponseReply(
-            status=result["status"],
-            session_id=result.get("session_id"),
-            question=result.get("question"),
-            progress=f"Starting {result['pack_info']['name']}"
-        )
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to continue GTKY pack: {e}")
-        raise HTTPException(status_code=500, detail="Failed to continue interview")
-
-@app.get("/onboarding/gtky/profile", response_model=GTKYProfileSummary)
-async def get_gtky_profile(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's GTKY profile summary"""
-    
-    if not GTKY_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="GTKY service not available")
-    
-    gtky_service = GTKYService(db)
-    
-    try:
-        profile = await gtky_service.get_profile_summary(str(current_user.id))
-        
-        if not profile:
-            raise HTTPException(status_code=404, detail="Profile not found - complete GTKY interview first")
-        
-        return GTKYProfileSummary(**profile)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get GTKY profile: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve profile")
-
+# GTKY endpoints removed - was broken and unused
 
 # =====================
 # Nightly Reflection Endpoints
@@ -11572,6 +11941,89 @@ async def update_reflection_settings(
     except Exception as e:
         logger.error(f"Failed to update reflection settings: {e}")
         raise HTTPException(status_code=500, detail="Failed to update settings")
+
+
+# ==================== DAILY BRIEF ENDPOINTS ====================
+
+@app.get("/api/daily-brief/stats")
+async def get_daily_brief_stats(
+    current_user: User = Depends(get_current_user)
+):
+    """Get statistics about the user's daily brief system"""
+    if not DAILY_BRIEF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Daily Brief service not available")
+
+    try:
+        stats = daily_brief_service.get_brief_stats(current_user.id)
+        stats["is_bootstrapped"] = daily_brief_service.has_stable_layer(current_user.id)
+        return stats
+    except Exception as e:
+        logger.error(f"Failed to get daily brief stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
+
+
+@app.post("/api/daily-brief/bootstrap")
+async def bootstrap_daily_brief(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Manually trigger bootstrap of the stable layer from conversation history"""
+    if not DAILY_BRIEF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Daily Brief service not available")
+
+    try:
+        success = await daily_brief_service.bootstrap_stable_layer(current_user.id, db)
+        return {
+            "success": success,
+            "message": "Stable layer bootstrapped successfully" if success else "Bootstrap failed - check logs"
+        }
+    except Exception as e:
+        logger.error(f"Failed to bootstrap daily brief: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/daily-brief/compiled")
+async def get_compiled_brief(
+    current_user: User = Depends(get_current_user)
+):
+    """Get the current compiled daily brief (for debugging/inspection)"""
+    if not DAILY_BRIEF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Daily Brief service not available")
+
+    try:
+        brief = await daily_brief_service.get_compiled_brief(current_user.id)
+        return {
+            "content": brief,
+            "length": len(brief) if brief else 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to get compiled brief: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve brief")
+
+
+@app.get("/api/daily-brief/layers/{layer_name}")
+async def get_brief_layer(
+    layer_name: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific layer of the daily brief"""
+    if not DAILY_BRIEF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Daily Brief service not available")
+
+    valid_layers = ["moment", "day", "context", "stable"]
+    if layer_name not in valid_layers:
+        raise HTTPException(status_code=400, detail=f"Invalid layer. Must be one of: {valid_layers}")
+
+    try:
+        content = daily_brief_service._read_layer(current_user.id, layer_name)
+        return {
+            "layer": layer_name,
+            "content": content,
+            "length": len(content)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get layer {layer_name}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve layer")
 
 
 if __name__ == "__main__":

@@ -120,54 +120,103 @@ class NotesSearchTool(BaseTool):
         }
     
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
-        """Search notes"""
-        
+        """Search notes using text matching (title/content) with vector similarity as secondary"""
+
         query = kwargs.get("query")
         limit = kwargs.get("limit", 10)
-        
+
         if not query:
             return ToolResult(
                 success=False,
                 message="Search query is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
-            # Get query embedding
-            query_embedding = await get_embedding(query)
-            
-            # Search using vector similarity
-            sql = text("""
-                SELECT 
-                    id, title, content, created_at, updated_at,
-                    (1 - (embedding <=> :query_embedding)) as similarity
-                FROM note
-                WHERE user_id = :user_id AND embedding IS NOT NULL
-                ORDER BY (embedding <=> :query_embedding)
-                LIMIT :limit
-            """)
-            
-            result = db.execute(sql, {
-                "query_embedding": str(query_embedding),
-                "user_id": user_id,
-                "limit": limit
-            })
-            
             notes = []
             citations = []
-            for row in result.fetchall():
-                notes.append({
-                    "note_id": str(row.id),
-                    "title": row.title,
-                    "content": row.content,
-                    "similarity": round(row.similarity, 3),
-                    "created_at": row.created_at.isoformat(),
-                    "updated_at": row.updated_at.isoformat()
-                })
-                citations.append(f"note:{row.id}")
-            
+            seen_ids = set()
+
+            # Normalize query for fuzzy matching (remove spaces)
+            normalized_query = query.replace(" ", "")
+
+            # FIRST: Text-based search on title and content (works even without embeddings)
+            text_sql = text("""
+                SELECT id, title, content, created_at, updated_at, 1.0 as similarity
+                FROM note
+                WHERE user_id = :user_id
+                  AND (
+                    title ILIKE :query_pattern
+                    OR REPLACE(title, ' ', '') ILIKE :normalized_pattern
+                    OR content ILIKE :query_pattern
+                  )
+                ORDER BY
+                    CASE WHEN title ILIKE :query_pattern THEN 0
+                         WHEN REPLACE(title, ' ', '') ILIKE :normalized_pattern THEN 1
+                         ELSE 2 END,
+                    updated_at DESC
+                LIMIT :limit
+            """)
+
+            text_result = db.execute(text_sql, {
+                "user_id": user_id,
+                "query_pattern": f"%{query}%",
+                "normalized_pattern": f"%{normalized_query}%",
+                "limit": limit
+            })
+
+            for row in text_result.fetchall():
+                if str(row.id) not in seen_ids:
+                    seen_ids.add(str(row.id))
+                    notes.append({
+                        "note_id": str(row.id),
+                        "title": row.title,
+                        "content": row.content,
+                        "similarity": 1.0,  # Text match = high relevance
+                        "created_at": row.created_at.isoformat(),
+                        "updated_at": row.updated_at.isoformat()
+                    })
+                    citations.append(f"note:{row.id}")
+
+            # SECOND: If we need more results, add vector similarity search
+            if len(notes) < limit:
+                try:
+                    query_embedding = await get_embedding(query)
+
+                    vector_sql = text("""
+                        SELECT
+                            id, title, content, created_at, updated_at,
+                            (1 - (embedding <=> :query_embedding)) as similarity
+                        FROM note
+                        WHERE user_id = :user_id AND embedding IS NOT NULL
+                        ORDER BY (embedding <=> :query_embedding)
+                        LIMIT :limit
+                    """)
+
+                    vector_result = db.execute(vector_sql, {
+                        "query_embedding": str(query_embedding),
+                        "user_id": user_id,
+                        "limit": limit
+                    })
+
+                    for row in vector_result.fetchall():
+                        if str(row.id) not in seen_ids and len(notes) < limit:
+                            seen_ids.add(str(row.id))
+                            notes.append({
+                                "note_id": str(row.id),
+                                "title": row.title,
+                                "content": row.content,
+                                "similarity": round(row.similarity, 3),
+                                "created_at": row.created_at.isoformat(),
+                                "updated_at": row.updated_at.isoformat()
+                            })
+                            citations.append(f"note:{row.id}")
+                except Exception as embed_error:
+                    # Vector search failed, but text search may have worked
+                    pass
+
             return ToolResult(
                 success=True,
                 data={
@@ -178,7 +227,7 @@ class NotesSearchTool(BaseTool):
                 message=f"Found {len(notes)} notes matching '{query}'",
                 citations=citations
             )
-            
+
         except Exception as e:
             return ToolResult(
                 success=False,

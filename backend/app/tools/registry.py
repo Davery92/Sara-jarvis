@@ -5,7 +5,6 @@ from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool, Not
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool
-from app.tools.shadow import ShadowStartTool
 from app.tools.knowledge_graph import (
     KnowledgeGraphSearchTool, 
     ConnectionFinderTool, 
@@ -40,9 +39,69 @@ from app.tools.fitness.recovery_log import (
 )
 from app.tools.fitness.template_tools import (
     TemplateListTool,
-    TemplateGetTool
+    TemplateGetTool,
+    TemplateCreateTool,
+    TemplateUpdateTool,
+    TemplateDeleteTool
 )
+from app.tools.fitness.program_tools import (
+    ProgramListTool,
+    ProgramGetTool,
+    ProgramCreateTool,
+    ProgramUpdateTool,
+    ProgramActivateTool,
+    ProgramDeleteTool,
+    PhaseListTool,
+    PhaseGetTool,
+    PhaseCreateTool,
+    PhaseUpdateTool,
+    PhaseActivateTool,
+    PhaseDeleteTool
+)
+from app.tools.fitness.workout_suggest import WorkoutSuggestTool
 from app.tools.fitness.summary import FitnessSummaryTool
+from app.tools.chess import (
+    ChessStartGameTool,
+    ChessMoveTool,
+    ChessGetBoardTool,
+    ChessResignTool,
+    ChessDrawTool,
+    ChessPauseTool,
+    ChessResumeTool,
+    ChessStatsTool,
+    ChessHistoryTool,
+    ChessAnalyzeTool,
+    ChessCoachTool,
+    ChessReviewGameTool,
+    ChessProgressTool
+)
+from app.tools.learning import (
+    LearningTopicCreateTool,
+    LearningTopicListTool,
+    LearningTopicUpdateTool,
+    LearningSourceAddTool,
+    LearningSourceListTool,
+    LearningScratchpadReadTool,
+    LearningScratchpadUpdateTool,
+    LearningResearchTool,
+    LearningAnalyzeGapsTool,
+    LearningFetchSourceTool,
+    LearningPathTool,
+    LearningNextSessionTool
+)
+from app.tools.morning_brief import MorningBriefTool, WeatherTool
+from app.tools.projects import PROJECT_TOOLS
+from app.tools.home import HOME_TOOLS
+from app.tools.agents import HandoffToAgentsTool, GetBackgroundTasksTool
+from app.tools.health import HEALTH_TOOLS
+from app.tools.canvas import (
+    CanvasOpenTool,
+    CanvasUpdateTool,
+    CanvasCloseTool,
+    CanvasOpenNoteTool,
+    CanvasSaveAsNoteTool
+)
+from app.tools.patterns import PATTERN_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -99,19 +158,86 @@ class ToolRegistry:
             ]
         },
         'fitness': {
-            'description': 'Track and manage fitness, nutrition, workouts, and recovery',
+            'description': 'Track and manage fitness, nutrition, workouts, recovery, training programs and phases',
             'tools': [
                 'fitness_summary',
                 'fitness_note_create', 'fitness_note_search', 'fitness_note_edit',
                 'food_search_and_log', 'food_log_create', 'food_log_search', 'food_log_summary',
                 'workout_list', 'workout_log_create', 'workout_details', 'workout_stats',
                 'recovery_log_create', 'recovery_log_get', 'recovery_log_recent',
-                'template_list', 'template_get'
+                'template_list', 'template_get', 'template_create', 'template_update', 'template_delete',
+                'program_list', 'program_get', 'program_create', 'program_update', 'program_activate', 'program_delete',
+                'phase_list', 'phase_get', 'phase_create', 'phase_update', 'phase_activate', 'phase_delete',
+                'workout_suggest'
             ]
         },
-        'shadow': {
-            'description': 'Activate silent observation mode to monitor without responding',
-            'tools': ['shadow_start']
+        'chess': {
+            'description': 'Play chess games, track statistics, get coaching and analysis',
+            'tools': [
+                'chess_start_game', 'chess_move', 'chess_get_board',
+                'chess_resign', 'chess_offer_draw', 'chess_pause',
+                'chess_resume', 'chess_stats', 'chess_history',
+                'chess_analyze_game', 'chess_coach', 'chess_review_game',
+                'chess_learning_progress'
+            ]
+        },
+        'learning': {
+            'description': 'Manage learning topics, sources, study notes, autonomous research, and personalized learning paths',
+            'tools': [
+                'learning_topic_create', 'learning_topic_list', 'learning_topic_update',
+                'learning_source_add', 'learning_source_list', 'learning_fetch_source',
+                'learning_scratchpad_read', 'learning_scratchpad_update',
+                'learning_research', 'learning_analyze_gaps',
+                'learning_path', 'learning_next_session'
+            ]
+        },
+        'daily': {
+            'description': 'Get daily briefings with news, weather, calendar, and training recommendations',
+            'tools': ['morning_brief', 'weather']
+        },
+        'projects': {
+            'description': 'Track software development projects, tasks, commits, and development progress',
+            'tools': [
+                'get_project_state', 'get_task_detail', 'list_tasks_by_status',
+                'get_open_bugs', 'get_shipped_this_week', 'get_recent_commits',
+                'suggest_next_task', 'get_weekly_velocity'
+            ]
+        },
+        'home': {
+            'description': 'Control smart home devices via Home Assistant - get home status, control lights, switches, thermostats, locks, covers, scenes, media players. Schedule actions for later.',
+            'tools': [
+                'home_status',  # Quick overview of entire home - use first!
+                'home_get_devices', 'home_light_control', 'home_switch_control',
+                'home_climate_control', 'home_cover_control', 'home_lock_control',
+                'home_scene_activate', 'home_media_control', 'home_all_lights_off',
+                'home_schedule_action', 'home_list_scheduled', 'home_cancel_scheduled'
+            ]
+        },
+        'agents': {
+            'description': 'Hand off research tasks to background worker agents for autonomous investigation',
+            'tools': [
+                'handoff_to_agents', 'get_background_tasks'
+            ]
+        },
+        'health': {
+            'description': 'Access health metrics, trends, insights, and alerts from HealthKit data',
+            'tools': [
+                'health_status', 'health_trend'
+            ]
+        },
+        'canvas': {
+            'description': 'Control the canvas panel to show code, documents, mindmaps, diagrams, or notes alongside the chat',
+            'tools': [
+                'canvas_open', 'canvas_update', 'canvas_close',
+                'canvas_open_note', 'canvas_save_as_note'
+            ]
+        },
+        'patterns': {
+            'description': 'Query discovered cross-domain patterns and correlations (sleep vs productivity, food vs energy, etc.)',
+            'tools': [
+                'pattern_query', 'pattern_insights',
+                'pattern_timeseries', 'pattern_correlation'
+            ]
         }
     }
 
@@ -141,9 +267,6 @@ class ToolRegistry:
             TimersStartTool(),
             TimersStatusTool(),
             TimersCancelTool(),
-
-            # Shadow Mode
-            ShadowStartTool(),
 
             # Calendar
             CalendarListTool(),
@@ -186,9 +309,87 @@ class ToolRegistry:
             # Template Tools
             TemplateListTool(),
             TemplateGetTool(),
+            TemplateCreateTool(),
+            TemplateUpdateTool(),
+            TemplateDeleteTool(),
+
+            # Program Tools
+            ProgramListTool(),
+            ProgramGetTool(),
+            ProgramCreateTool(),
+            ProgramUpdateTool(),
+            ProgramActivateTool(),
+            ProgramDeleteTool(),
+
+            # Phase Tools
+            PhaseListTool(),
+            PhaseGetTool(),
+            PhaseCreateTool(),
+            PhaseUpdateTool(),
+            PhaseActivateTool(),
+            PhaseDeleteTool(),
+
+            # Workout Suggestion (intelligent weight recommendations)
+            WorkoutSuggestTool(),
 
             # Fitness Summary (for regular Sara)
             FitnessSummaryTool(),
+
+            # Chess Tools
+            ChessStartGameTool(),
+            ChessMoveTool(),
+            ChessGetBoardTool(),
+            ChessResignTool(),
+            ChessDrawTool(),
+            ChessPauseTool(),
+            ChessResumeTool(),
+            ChessStatsTool(),
+            ChessHistoryTool(),
+            ChessAnalyzeTool(),
+            ChessCoachTool(),
+            ChessReviewGameTool(),
+            ChessProgressTool(),
+
+            # Learning Tools
+            LearningTopicCreateTool(),
+            LearningTopicListTool(),
+            LearningTopicUpdateTool(),
+            LearningSourceAddTool(),
+            LearningSourceListTool(),
+            LearningFetchSourceTool(),
+            LearningScratchpadReadTool(),
+            LearningScratchpadUpdateTool(),
+            LearningResearchTool(),
+            LearningAnalyzeGapsTool(),
+            LearningPathTool(),
+            LearningNextSessionTool(),
+
+            # Morning Brief & Weather Tools
+            MorningBriefTool(),
+            WeatherTool(),
+
+            # Project Tracker Tools
+            *PROJECT_TOOLS,
+
+            # Home Control Tools
+            *HOME_TOOLS,
+
+            # Agent Handoff Tools
+            HandoffToAgentsTool(),
+            GetBackgroundTasksTool(),
+
+            # Health Monitoring Tools
+            *HEALTH_TOOLS,
+
+            # Canvas Control Tools
+            CanvasOpenTool(),
+            CanvasUpdateTool(),
+            CanvasCloseTool(),
+            CanvasOpenNoteTool(),
+            CanvasSaveAsNoteTool(),
+
+            # Pattern Correlation Tools
+            *PATTERN_TOOLS,
         ]
 
         for tool in tools:
@@ -282,7 +483,12 @@ class ToolRegistry:
         for tool_name in tool_names:
             tool = self.tools.get(tool_name)
             if tool:
-                schemas.append(tool.to_openai_schema())
+                schema = tool.to_openai_schema()
+                # Fix empty required arrays that cause Gemini to fail
+                params = schema.get('function', {}).get('parameters', {})
+                if 'required' in params and len(params['required']) == 0:
+                    del params['required']
+                schemas.append(schema)
             else:
                 logger.warning(f"Tool '{tool_name}' not found in registry")
 

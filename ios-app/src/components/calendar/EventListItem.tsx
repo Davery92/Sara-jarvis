@@ -44,6 +44,11 @@ export default function EventListItem({ event, onPress, onLongPress }: EventList
           <Text style={styles.title} numberOfLines={1}>
             {event.title}
           </Text>
+          {event.source === 'ios_calendar' && (
+            <View style={styles.iosBadge}>
+              <Text style={styles.iosBadgeText}>iOS</Text>
+            </View>
+          )}
           {event.all_day && (
             <View style={styles.allDayBadge}>
               <Text style={styles.allDayText}>All Day</Text>
@@ -157,6 +162,18 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   allDayText: {
+    color: colors.text,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  iosBadge: {
+    backgroundColor: '#555',
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    marginLeft: spacing.sm,
+  },
+  iosBadgeText: {
     color: colors.text,
     fontSize: fontSizes.xs,
     fontWeight: '600',

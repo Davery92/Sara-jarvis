@@ -5,14 +5,7 @@ import HomeScreen from '../screens/home/HomeScreen';
 import ChatScreen from '../screens/chat/ChatScreen';
 import NotesListScreen from '../screens/notes/NotesListScreen';
 import FitnessScreen from '../screens/fitness/FitnessScreen';
-import RecipesScreen from '../screens/recipes/RecipesScreen';
-import DocumentsScreen from '../screens/documents/DocumentsScreen';
-import CalendarScreen from '../screens/calendar/CalendarScreen';
-import SettingsScreen from '../screens/settings/SettingsScreen';
-import BriefingsScreen from '../screens/briefings/BriefingsScreen';
-import ContextModeScreen from '../screens/insights/ContextModeScreen';
-import SmartInsightsScreen from '../screens/insights/SmartInsightsScreen';
-import HealthDataScreen from '../screens/health/HealthDataScreen';
+import LearningScreen from '../screens/learning/LearningScreen';
 import MoreScreen from '../screens/more/MoreScreen';
 import CustomTabBar from '../components/CustomTabBar';
 import { MainTabParamList } from '../types/navigation';
@@ -66,6 +59,18 @@ export default function MainNavigator() {
           tabBarIcon: ({ color, size }) => (
             <TabBarIcon name="📝" color={color} size={size} />
           ),
+        }}
+      />
+      <Tab.Screen
+        name="Learning"
+        component={LearningScreen}
+        options={{
+          title: 'Learning',
+          tabBarLabel: 'Learn',
+          tabBarIcon: ({ color, size }) => (
+            <TabBarIcon name="📚" color={color} size={size} />
+          ),
+          headerShown: false,
         }}
       />
       <Tab.Screen

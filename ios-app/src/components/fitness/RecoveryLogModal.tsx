@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { fitnessService } from '../../services/fitness';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { getLocalDateString } from '../../utils/dateUtils';
 
 interface Props {
   visible: boolean;
@@ -55,7 +56,7 @@ export default function RecoveryLogModal({ visible, onClose, onComplete }: Props
 
     try {
       setLoading(true);
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
 
       await fitnessService.createRecoveryLog({
         log_date: today,

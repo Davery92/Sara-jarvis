@@ -120,15 +120,15 @@ class GTKYService:
     def __init__(self, db: Session):
         self.db = db
     
-    async def start_interview(self, user_id: str, personality_mode: str = "companion") -> Dict[str, Any]:
+    async def start_interview(self, user_id: str) -> Dict[str, Any]:
         """Start a new GTKY interview session"""
-        
+
         # Check if user already has a complete profile
         existing_profile = self.db.query(UserProfile).filter(
             UserProfile.user_id == user_id,
             UserProfile.gtky_completed_at.isnot(None)
         ).first()
-        
+
         if existing_profile:
             return {
                 "status": "already_completed",
@@ -136,28 +136,26 @@ class GTKYService:
                 "completed_at": existing_profile.gtky_completed_at.isoformat(),
                 "can_retake": True
             }
-        
+
         # Create new session for identity pack
         session = GTKYSession(
             user_id=user_id,
             question_pack="identity",
             session_metadata={
-                "personality_mode": personality_mode,
                 "started_at": datetime.utcnow().isoformat(),
                 "current_question_index": 0
             }
         )
-        
+
         self.db.add(session)
         self.db.commit()
-        
+
         # Get first question
         first_question = self.QUESTION_PACKS["identity"]["questions"][0]
-        
+
         # Log activity
         await self._log_activity(user_id, "gtky_started", {
-            "session_id": str(session.id),
-            "personality_mode": personality_mode
+            "session_id": str(session.id)
         })
         
         return {
@@ -208,8 +206,7 @@ class GTKYService:
         if current_question.get("follow_up") and response.get("value"):
             follow_up = await self._generate_follow_up(
                 current_question,
-                response,
-                session.session_metadata.get("personality_mode", "companion")
+                response
             )
         
         # Check if we need next question in current pack
@@ -337,13 +334,12 @@ class GTKYService:
     async def _generate_follow_up(
         self,
         question: Dict[str, Any],
-        response: Dict[str, Any],
-        personality_mode: str
+        response: Dict[str, Any]
     ) -> Optional[str]:
         """Generate a contextual follow-up comment using LLM"""
-        
+
         try:
-            prompt = f"""You are Sara, an AI assistant in {personality_mode} mode conducting a get-to-know-you interview.
+            prompt = f"""You are Sara, a warm and curious AI assistant conducting a get-to-know-you interview.
 
 The user just answered: "{question['question']}"
 Their response: "{response.get('value', '')}"
@@ -354,14 +350,6 @@ Generate a brief, warm follow-up comment that:
 - Might ask a quick clarifying question if helpful
 - Stays conversational and friendly
 - Is 1-2 sentences max
-
-Mode context:
-- companion: warm, encouraging, personal
-- analyst: thoughtful, insightful, structured  
-- coach: supportive, goal-focused
-- guardian: protective, caring
-- concierge: helpful, accommodating
-- librarian: knowledgeable, organized
 
 Follow-up:"""
 

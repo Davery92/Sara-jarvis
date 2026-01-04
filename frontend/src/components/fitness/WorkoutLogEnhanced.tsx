@@ -128,16 +128,14 @@ export default function WorkoutLog() {
 
   const fetchTodayWorkout = async () => {
     try {
-      const today = new Date().toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase()
-      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/templates`, {
+      // Use dedicated endpoint that prioritizes active phase templates
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/templates/today`, {
         credentials: 'include',
       })
       if (response.ok) {
         const data = await response.json()
-        const todaysWorkout = data.templates?.find((t: Template) =>
-          t.scheduled_days.includes(today)
-        )
-        setTodayTemplate(todaysWorkout || null)
+        // First template is the best match (active phase > standalone)
+        setTodayTemplate(data.templates?.[0] || null)
       }
     } catch (error) {
       console.error('Failed to fetch today\'s workout:', error)

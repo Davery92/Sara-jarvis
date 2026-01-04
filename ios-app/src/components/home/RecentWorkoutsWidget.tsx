@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { fitnessService, WorkoutSession } from '../../services/fitness';
+import { getLocalDateString } from '../../utils/dateUtils';
 
 export default function RecentWorkoutsWidget() {
   const [session, setSession] = useState<WorkoutSession | null>(null);
@@ -14,7 +15,7 @@ export default function RecentWorkoutsWidget() {
   const fetchRecentWorkout = async () => {
     try {
       setLoading(true);
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       const sessions = await fitnessService.getWorkoutSessions(today, today);
       if (sessions.length > 0) {
         setSession(sessions[0]);

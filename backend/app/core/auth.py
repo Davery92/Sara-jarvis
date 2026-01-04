@@ -2,9 +2,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import jwt
 from passlib.context import CryptContext
+from fastapi import Request
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def get_cookie_domain(request: Request) -> Optional[str]:
+    """Determine the appropriate cookie domain based on the request host."""
+    host = request.headers.get("host", "")
+    # Check if host is avery.cloud or any subdomain
+    if host.endswith("avery.cloud") or "avery.cloud:" in host:
+        return ".avery.cloud"
+    else:
+        # For local development, don't set a domain (defaults to current host)
+        return None
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):

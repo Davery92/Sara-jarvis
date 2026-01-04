@@ -6,11 +6,9 @@ import { GTKYInterview } from './GTKYInterview';
 
 interface GTKYTriggerProps {
   onComplete?: () => void;
-  onSpriteStateChange?: (state: string) => void;
-  personalityMode?: string;
 }
 
-export function GTKYTrigger({ onComplete, onSpriteStateChange, personalityMode = 'companion' }: GTKYTriggerProps) {
+export function GTKYTrigger({ onComplete }: GTKYTriggerProps) {
   const [showInterview, setShowInterview] = useState(false);
 
   const handleComplete = (profileSummary: string) => {
@@ -25,8 +23,6 @@ export function GTKYTrigger({ onComplete, onSpriteStateChange, personalityMode =
     return (
       <GTKYInterview
         onComplete={handleComplete}
-        onSpriteStateChange={onSpriteStateChange}
-        personalityMode={personalityMode}
       />
     );
   }
@@ -39,11 +35,11 @@ export function GTKYTrigger({ onComplete, onSpriteStateChange, personalityMode =
         </div>
         <CardTitle className="text-2xl">Let's get to know each other!</CardTitle>
         <CardDescription className="text-base">
-          Help Sara understand your preferences, goals, and how you'd like to work together. 
+          Help Sara understand your preferences, goals, and how you'd like to work together.
           This quick 5-minute conversation will personalize your experience.
         </CardDescription>
       </CardHeader>
-      
+
       <CardContent className="space-y-6">
         <div className="grid gap-4">
           <div className="flex items-center gap-3 p-3 bg-blue-900/30 border border-blue-700/50 rounded-lg">
@@ -52,14 +48,14 @@ export function GTKYTrigger({ onComplete, onSpriteStateChange, personalityMode =
               <strong>Personal & natural:</strong> Sara will ask questions like a friendly conversation
             </div>
           </div>
-          
+
           <div className="flex items-center gap-3 p-3 bg-green-900/30 border border-green-700/50 rounded-lg">
             <Settings className="h-5 w-5 text-green-400" />
             <div className="text-sm text-gray-200">
               <strong>Customized experience:</strong> Your answers will personalize how Sara works with you
             </div>
           </div>
-          
+
           <div className="flex items-center gap-3 p-3 bg-purple-900/30 border border-purple-700/50 rounded-lg">
             <Heart className="h-5 w-5 text-purple-400" />
             <div className="text-sm text-gray-200">
@@ -69,14 +65,14 @@ export function GTKYTrigger({ onComplete, onSpriteStateChange, personalityMode =
         </div>
 
         <div className="text-center space-y-4">
-          <Button 
+          <Button
             onClick={() => setShowInterview(true)}
             size="lg"
             className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
           >
             Start Interview
           </Button>
-          
+
           <Button variant="ghost" size="sm" className="text-gray-400 hover:text-gray-200">
             Skip for now (you can do this later in Settings)
           </Button>

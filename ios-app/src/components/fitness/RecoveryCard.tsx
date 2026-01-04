@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { RecoveryLog } from '../../services/fitness';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { parseLocalDateString, formatSleepHours } from '../../utils/dateUtils';
 
 interface RecoveryCardProps {
   log: RecoveryLog;
@@ -10,7 +11,11 @@ interface RecoveryCardProps {
 }
 
 export default function RecoveryCard({ log, onPress, onLongPress }: RecoveryCardProps) {
-  const date = new Date(log.log_date || log.logged_at || new Date()).toLocaleDateString('en-US', {
+  // Parse YYYY-MM-DD date string correctly (avoiding UTC timezone shift)
+  const dateObj = log.log_date
+    ? parseLocalDateString(log.log_date)
+    : new Date(log.logged_at || new Date());
+  const date = dateObj.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
   });
@@ -77,7 +82,7 @@ export default function RecoveryCard({ log, onPress, onLongPress }: RecoveryCard
       {log.sleep_hours !== undefined && log.sleep_hours !== null && (
         <View style={styles.sleepCard}>
           <Text style={styles.sleepEmoji}>😴</Text>
-          <Text style={styles.sleepHours}>{log.sleep_hours}h</Text>
+          <Text style={styles.sleepHours}>{formatSleepHours(log.sleep_hours)}</Text>
           <Text style={styles.sleepLabel}>Sleep</Text>
         </View>
       )}

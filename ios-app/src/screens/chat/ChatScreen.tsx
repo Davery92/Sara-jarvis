@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   FlatList,
@@ -11,11 +11,13 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { MainTabScreenProps } from '../../types/navigation';
+import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext } from '../../types/navigation';
 import { Message } from '../../types/api';
 import { chatService } from '../../services/chat';
 import { voiceService } from '../../services/voice';
+import { ImageAttachment } from '../../services/imagePicker';
 import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
@@ -24,7 +26,7 @@ import { apiClient } from '../../services/api';
 
 type Props = MainTabScreenProps<'Chat'>;
 
-export default function ChatScreen({ navigation }: Props) {
+export default function ChatScreen({ navigation, route }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -39,6 +41,65 @@ export default function ChatScreen({ navigation }: Props) {
   const isRecordingRef = useRef(false);
   const shouldResumeListening = useRef(false);
   const hasLoadedHistory = useRef(false);
+  const handledHealthAlertRef = useRef<string | null>(null);
+  const handledNudgeRef = useRef<string | null>(null);
+  const handledQuickReplyRef = useRef<string | null>(null);
+
+  // Track pending contexts to send after component is ready
+  const pendingHealthAlertRef = useRef<HealthAlertContext | null>(null);
+  const pendingNudgeRef = useRef<NudgeContext | null>(null);
+  const pendingQuickReplyRef = useRef<QuickReplyContext | null>(null);
+
+  // Handle health alert from push notification
+  useEffect(() => {
+    const healthAlert = route.params?.healthAlert;
+    if (!healthAlert) return;
+
+    // Don't re-handle the same alert
+    const alertKey = `${healthAlert.insightId || healthAlert.title}`;
+    if (handledHealthAlertRef.current === alertKey) return;
+    handledHealthAlertRef.current = alertKey;
+
+    console.log('[Chat] Health alert received, queuing for conversation:', healthAlert);
+    pendingHealthAlertRef.current = healthAlert;
+
+    // Clear the params
+    navigation.setParams({ healthAlert: undefined });
+  }, [route.params?.healthAlert, navigation]);
+
+  // Handle nudge from push notification (meal reminders, morning check-ins, etc.)
+  useEffect(() => {
+    const nudge = route.params?.nudge;
+    if (!nudge) return;
+
+    // Don't re-handle the same nudge
+    const nudgeKey = `${nudge.nudgeType}-${nudge.title}`;
+    if (handledNudgeRef.current === nudgeKey) return;
+    handledNudgeRef.current = nudgeKey;
+
+    console.log('[Chat] Nudge received, queuing for conversation:', nudge);
+    pendingNudgeRef.current = nudge;
+
+    // Clear the params
+    navigation.setParams({ nudge: undefined });
+  }, [route.params?.nudge, navigation]);
+
+  // Handle quick reply from notification action button
+  useEffect(() => {
+    const quickReply = route.params?.quickReply;
+    if (!quickReply) return;
+
+    // Don't re-handle the same reply
+    const replyKey = `${quickReply.message}-${Date.now()}`;
+    if (handledQuickReplyRef.current === replyKey) return;
+    handledQuickReplyRef.current = replyKey;
+
+    console.log('[Chat] Quick reply received:', quickReply);
+    pendingQuickReplyRef.current = quickReply;
+
+    // Clear the params
+    navigation.setParams({ quickReply: undefined });
+  }, [route.params?.quickReply, navigation]);
 
   // Load conversation history on mount
   useEffect(() => {
@@ -74,6 +135,7 @@ export default function ChatScreen({ navigation }: Props) {
             role: ep.role,
             content: ep.content,
             created_at: ep.created_at,
+            episode_id: ep.id,  // Map episode ID for rating
           }));
 
           setMessages(loadedMessages);
@@ -131,7 +193,7 @@ export default function ChatScreen({ navigation }: Props) {
     }
   }, [messages, streamingMessage]);
 
-  const handleSendMessage = async (messageText: string) => {
+  const handleSendMessage = async (messageText: string, images?: ImageAttachment[]) => {
     // Add user message immediately
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -150,12 +212,13 @@ export default function ChatScreen({ navigation }: Props) {
     // Filter out the welcome message - it's not part of the real conversation
     const conversationMessages = updatedMessages.filter(m => m.id !== 'welcome');
 
-    console.log('[Chat] 📤 Sending message with conversationId:', conversationId);
+    console.log('[Chat] 📤 Sending message with conversationId:', conversationId, 'images:', images?.length || 0);
 
     await chatService.sendMessage(
       {
         messages: conversationMessages,  // Send full history, not just new message
         conversationId,
+        images,  // Pass images to the service
       },
       // onChunk - called for each piece of streaming text
       (chunk: string) => {
@@ -163,15 +226,17 @@ export default function ChatScreen({ navigation }: Props) {
         setStreamingMessage(streamingMessageRef.current);
       },
       // onComplete - called when streaming finishes
-      (newConversationId: string) => {
-        // Add the complete assistant message
+      (newConversationId: string, episodeId?: string) => {
+        // Add the complete assistant message with episode_id for rating
         const assistantMessage: Message = {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
           content: streamingMessageRef.current,
           created_at: new Date().toISOString(),
+          episode_id: episodeId,  // Include episode_id for star rating
         };
 
+        console.log('[Chat] 📝 Creating assistant message with episode_id:', episodeId);
         setMessages((prev) => [...prev, assistantMessage]);
         setStreamingMessage('');
         streamingMessageRef.current = '';
@@ -203,6 +268,79 @@ export default function ChatScreen({ navigation }: Props) {
       }
     );
   };
+
+  // Process pending contexts after handleSendMessage is available
+  useEffect(() => {
+    if (isStreaming || isLoadingHistory) return;
+
+    // Process health alert
+    if (pendingHealthAlertRef.current) {
+      const healthAlert = pendingHealthAlertRef.current;
+      pendingHealthAlertRef.current = null;
+
+      setTimeout(() => {
+        const alertMessage = healthAlert.body
+          ? `You just sent me a health alert: "${healthAlert.title}". ${healthAlert.body} - Can you explain what you noticed and what I should do about it?`
+          : `You just notified me about a health alert: "${healthAlert.title || 'health concern'}". Can you tell me more about what you noticed?`;
+
+        console.log('[Chat] Sending health alert message:', alertMessage);
+        handleSendMessage(alertMessage);
+      }, 300);
+      return;
+    }
+
+    // Process nudge (meal reminders, morning check-ins, etc.)
+    if (pendingNudgeRef.current) {
+      const nudge = pendingNudgeRef.current;
+      pendingNudgeRef.current = null;
+
+      setTimeout(() => {
+        // Add Sara's nudge as her message first, then user responds
+        const saraMessage: Message = {
+          id: `sara-nudge-${Date.now()}`,
+          role: 'assistant',
+          content: nudge.message,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, saraMessage]);
+
+        // Build contextual response based on nudge type
+        let userResponse: string;
+        switch (nudge.nudgeType) {
+          case 'morning_checkin':
+            userResponse = "Hey Sara! I saw your check-in. What's on my schedule today?";
+            break;
+          case 'missed_meal':
+          case 'late_breakfast':
+          case 'late_lunch':
+          case 'late_dinner':
+            userResponse = "Thanks for the reminder about eating. What should I have?";
+            break;
+          case 'bedtime':
+            userResponse = "I know, I know... I should go to bed. What do I have tomorrow morning?";
+            break;
+          default:
+            userResponse = `I got your message: "${nudge.title}". What do you think I should do?`;
+        }
+
+        console.log('[Chat] Sending nudge response:', userResponse);
+        handleSendMessage(userResponse);
+      }, 300);
+      return;
+    }
+
+    // Process quick reply from notification action
+    if (pendingQuickReplyRef.current) {
+      const quickReply = pendingQuickReplyRef.current;
+      pendingQuickReplyRef.current = null;
+
+      setTimeout(() => {
+        console.log('[Chat] Sending quick reply:', quickReply.message);
+        handleSendMessage(quickReply.message);
+      }, 300);
+      return;
+    }
+  }, [isStreaming, isLoadingHistory]);
 
   const handleVoiceMessage = async (audioUri: string) => {
     if (!voiceInitialized) {
@@ -255,17 +393,19 @@ export default function ChatScreen({ navigation }: Props) {
           setStreamingMessage(streamingMessageRef.current);
         },
         // onComplete
-        async (newConversationId: string) => {
+        async (newConversationId: string, episodeId?: string) => {
           const responseText = streamingMessageRef.current;
 
-          // Add assistant message
+          // Add assistant message with episode_id for rating
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
             role: 'assistant',
             content: responseText,
             created_at: new Date().toISOString(),
+            episode_id: episodeId,  // Include episode_id for star rating
           };
 
+          console.log('[Chat] 🎤 Voice response with episode_id:', episodeId);
           setMessages((prev) => [...prev, assistantMessage]);
           setStreamingMessage('');
           streamingMessageRef.current = '';
@@ -320,6 +460,14 @@ export default function ChatScreen({ navigation }: Props) {
   // Start continuous listening with VAD
   const startContinuousListening = async () => {
     try {
+      // Ensure voice is initialized (re-initialize in case audio mode was changed by TTS)
+      const initialized = await voiceService.initialize();
+      if (!initialized) {
+        console.error('[Chat] Voice initialization failed - microphone permission denied');
+        Alert.alert('Microphone Access', 'Please enable microphone access in Settings to use voice features.');
+        return;
+      }
+
       setIsListening(true);
       await voiceService.startContinuousRecording(async () => {
         // VAD detected silence, process the recording

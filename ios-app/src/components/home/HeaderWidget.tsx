@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { colors, spacing, fontSizes } from '../../styles/theme';
+import BackgroundTasksIndicator from '../BackgroundTasksIndicator';
 
 export default function HeaderWidget() {
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -38,6 +39,11 @@ export default function HeaderWidget() {
 
   return (
     <View style={styles.container}>
+      {/* Background Tasks Indicator in top-right */}
+      <View style={styles.indicatorContainer}>
+        <BackgroundTasksIndicator />
+      </View>
+
       <Text style={styles.greeting}>{getGreeting()}</Text>
       <Text style={styles.time}>{formatTime()}</Text>
       <Text style={styles.date}>{formatDate()}</Text>
@@ -49,6 +55,13 @@ const styles = StyleSheet.create({
   container: {
     padding: spacing.lg,
     alignItems: 'center',
+    position: 'relative',
+  },
+  indicatorContainer: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.md,
+    zIndex: 10,
   },
   greeting: {
     fontSize: fontSizes.lg,

@@ -87,7 +87,6 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
       'habit_salvage': '💪',
       'content_pattern': '🔍',
       'knowledge_connection': '🔗',
-      'security_alert': '🛡️',
       'calendar_prep': '📅',
       'weekly_summary': '📊',
       'habit_performance': '📈',
@@ -96,18 +95,6 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
       'long_term_trend': '📈'
     }
     return icons[type] || '🤖'
-  }
-
-  const getModeColor = (mode: string) => {
-    const colors: Record<string, string> = {
-      'coach': 'text-blue-400 bg-blue-500/10',
-      'analyst': 'text-purple-400 bg-purple-500/10', 
-      'companion': 'text-pink-400 bg-pink-500/10',
-      'guardian': 'text-blue-600 bg-blue-600/10',
-      'concierge': 'text-teal-400 bg-teal-500/10',
-      'librarian': 'text-green-400 bg-green-500/10'
-    }
-    return colors[mode] || 'text-gray-400 bg-gray-500/10'
   }
 
   const getSweepTypeLabel = (sweepType: string) => {
@@ -184,9 +171,6 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
                   <div>
                     <h3 className="font-semibold text-white">{insight.title}</h3>
                     <div className="flex items-center gap-2 mt-1">
-                      <span className={`text-xs px-2 py-1 rounded-full ${getModeColor(insight.personality_mode)}`}>
-                        {insight.personality_mode}
-                      </span>
                       <span className="text-xs text-gray-500">{getSweepTypeLabel(insight.sweep_type)}</span>
                       <span className="text-xs text-gray-500">
                         {new Date(insight.generated_at).toLocaleDateString()}
@@ -274,14 +258,6 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
                     </button>
                   )}
                   
-                  {insight.insight_type === 'security_alert' && (
-                    <button
-                      onClick={() => onNavigate?.('vulnerability-watch')}
-                      className="px-4 py-2 bg-red-600/20 text-red-400 rounded-lg hover:bg-red-600/30 text-sm"
-                    >
-                      View Security
-                    </button>
-                  )}
                 </div>
               )}
               

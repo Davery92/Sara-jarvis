@@ -11,6 +11,7 @@ const TOKEN_KEY = '@sara_auth_token';
 class ApiClient {
   private client: AxiosInstance;
   public baseURL: string;
+  private onAuthError: (() => void) | null = null;
 
   constructor() {
     this.baseURL = API_URL;
@@ -41,11 +42,23 @@ class ApiClient {
         if (error.response?.status === 401) {
           // Token expired or invalid - clear it
           await AsyncStorage.removeItem(TOKEN_KEY);
-          // Could trigger navigation to login here
+          console.log('[API] 401 received - token expired, triggering logout');
+          // Notify AuthContext to clear user state
+          if (this.onAuthError) {
+            this.onAuthError();
+          }
         }
         return Promise.reject(error);
       }
     );
+  }
+
+  /**
+   * Set callback to be called when authentication fails (401)
+   * This allows AuthContext to be notified and trigger logout
+   */
+  setOnAuthError(callback: () => void) {
+    this.onAuthError = callback;
   }
 
   async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
@@ -73,6 +86,21 @@ class ApiClient {
     return response.data;
   }
 
+  async upload<T>(url: string, formData: FormData, config?: AxiosRequestConfig): Promise<T> {
+    const response: AxiosResponse<T> = await this.client.post(url, formData, {
+      ...config,
+      headers: {
+        ...config?.headers,
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  }
+
+  getBaseUrl(): string {
+    return this.baseURL;
+  }
+
   async setAuthToken(token: string) {
     await AsyncStorage.setItem(TOKEN_KEY, token);
   }
@@ -93,7 +121,7 @@ class ApiClient {
   async streamChat(
     messages: any[],
     onChunk: (chunk: string) => void,
-    onComplete: (conversationId?: string) => void,
+    onComplete: (conversationId?: string, episodeId?: string) => void,
     onError: (error: Error) => void,
     sessionId?: string
   ) {
@@ -106,6 +134,7 @@ class ApiClient {
         let buffer = '';
         let lastProcessedIndex = 0;
         let receivedConversationId: string | undefined = undefined;
+        let receivedEpisodeId: string | undefined = undefined;
 
         xhr.open('POST', `${API_URL}/chat/stream`, true);
         xhr.setRequestHeader('Content-Type', 'application/json');
@@ -141,7 +170,7 @@ class ApiClient {
                 if (parsed.type === 'text_chunk' && parsed.data?.content) {
                   onChunk(parsed.data.content);
                 } else if (parsed.type === 'final_response') {
-                  // Final response event - extract conversation_id
+                  // Final response event - extract conversation_id and episode_id
                   console.log('[API] Received final_response event');
                   console.log('[API] Full final_response data:', JSON.stringify(parsed.data));
                   if (parsed.data?.conversation_id) {
@@ -149,6 +178,12 @@ class ApiClient {
                     console.log('[API] ✅ Got conversation_id:', receivedConversationId);
                   } else {
                     console.warn('[API] ⚠️ No conversation_id in final_response!');
+                  }
+                  if (parsed.data?.episode_id) {
+                    receivedEpisodeId = parsed.data.episode_id;
+                    console.log('[API] ✅ Got episode_id:', receivedEpisodeId);
+                  } else {
+                    console.warn('[API] ⚠️ No episode_id in final_response!');
                   }
                 } else if (parsed.content) {
                   // Fallback for other formats
@@ -177,8 +212,10 @@ class ApiClient {
                     if (parsed.data?.conversation_id) {
                       receivedConversationId = parsed.data.conversation_id;
                       console.log('[API] ✅ Got conversation_id from final buffer:', receivedConversationId);
-                    } else {
-                      console.warn('[API] ⚠️ No conversation_id in final buffer!');
+                    }
+                    if (parsed.data?.episode_id) {
+                      receivedEpisodeId = parsed.data.episode_id;
+                      console.log('[API] ✅ Got episode_id from final buffer:', receivedEpisodeId);
                     }
                   }
                 } catch (e) {
@@ -188,12 +225,12 @@ class ApiClient {
             }
 
             if (receivedConversationId) {
-              console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId);
+              console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId, 'episode_id:', receivedEpisodeId);
             } else {
               console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
             }
-            // Call onComplete with the conversation_id from backend
-            onComplete(receivedConversationId);
+            // Call onComplete with the conversation_id and episode_id from backend
+            onComplete(receivedConversationId, receivedEpisodeId);
             resolve();
           } else {
             const error = new Error(`HTTP error! status: ${xhr.status} - ${xhr.responseText}`);
@@ -305,6 +342,24 @@ class ApiClient {
   async testAISettings(): Promise<any> {
     const response = await this.client.post('/settings/ai/test');
     return response.data;
+  }
+
+  // ==================== PRESENCE LOGGING ====================
+
+  /**
+   * Log user presence/activity. Called on app open, resume, etc.
+   */
+  async logPresence(activityType: string = 'app_open'): Promise<void> {
+    try {
+      await this.client.post('/api/presence', {
+        activity_type: activityType,
+        platform: 'ios',
+      });
+      console.log(`[API] Presence logged: ${activityType}`);
+    } catch (error) {
+      // Don't throw - presence logging is best-effort
+      console.warn('[API] Failed to log presence:', error);
+    }
   }
 }
 

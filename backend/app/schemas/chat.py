@@ -1,0 +1,37 @@
+"""Chat and messaging schemas."""
+from typing import Optional, List, Dict, Any, Union
+from pydantic import BaseModel
+
+
+class UserSettings(BaseModel):
+    theme: Optional[str] = "dark"
+    notifications_enabled: Optional[bool] = True
+    language: Optional[str] = "en"
+    timezone: Optional[str] = "America/New_York"
+
+
+class ImageContent(BaseModel):
+    """Image content for multimodal messages"""
+    type: str = "image"
+    data: str  # Base64 encoded image data
+    media_type: str = "image/jpeg"  # e.g., "image/jpeg", "image/png"
+
+
+class TextContent(BaseModel):
+    """Text content for multimodal messages"""
+    type: str = "text"
+    text: str
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: Union[str, List[Dict[str, Any]]]  # Support both text-only and multimodal
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    conversation_id: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    message: ChatMessage

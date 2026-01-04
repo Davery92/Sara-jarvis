@@ -2,7 +2,7 @@
 Nightly Importance Rescoring Job
 Runs at 3am daily to rescore all episodes
 """
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.importance_scorer import get_importance_scorer

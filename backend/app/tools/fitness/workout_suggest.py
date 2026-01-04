@@ -12,12 +12,21 @@ This is the KEY tool that makes Sara an intelligent fitness coach.
 """
 
 import json
+import logging
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..base import BaseTool, ToolResult
+
+logger = logging.getLogger(__name__)
+
+
+def get_fitness_db():
+    """Get database session"""
+    from app.db.session import get_db
+    return next(get_db())
 
 
 class WorkoutSuggestTool(BaseTool):
@@ -35,6 +44,17 @@ class WorkoutSuggestTool(BaseTool):
 
     Use this when the user asks "what should I do today?", "what's today's workout?", or similar questions about their training."""
 
+    parameters = {
+        "type": "object",
+        "properties": {
+            "target_date": {
+                "type": "string",
+                "description": "Optional date in YYYY-MM-DD format. Defaults to today if not provided."
+            }
+        },
+        "required": []
+    }
+
     async def execute(self, user_id: str, target_date: Optional[str] = None, db: Session = None, **kwargs) -> ToolResult:
         """
         Suggest today's workout
@@ -51,6 +71,10 @@ class WorkoutSuggestTool(BaseTool):
             - Progressive overload recommendations
             - Recovery notes
         """
+        # Get db session if not provided
+        if db is None:
+            db = get_fitness_db()
+
         try:
             # Parse target date
             if target_date:
@@ -60,21 +84,43 @@ class WorkoutSuggestTool(BaseTool):
 
             day_of_week = workout_date.strftime("%A").lower()
 
-            # 1. Find templates scheduled for this day
+            # 1. Find the active phase (if any)
+            active_phase = db.execute(text("""
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = :user_id AND status = 'active'
+                LIMIT 1
+            """), {"user_id": user_id}).fetchone()
+
+            active_phase_id = active_phase.id if active_phase else None
+
+            # 2. Find templates scheduled for this day
             templates_result = db.execute(text("""
                 SELECT id, name, phase_id, scheduled_days, exercises, notes
                 FROM fitness_template
                 WHERE user_id = :user_id
             """), {"user_id": user_id}).fetchall()
 
-            matching_templates = []
+            # Separate into active phase templates and standalone templates
+            active_phase_templates = []
+            standalone_templates = []
+
             for row in templates_result:
                 template = dict(row._mapping)
                 scheduled_days = json.loads(template.get("scheduled_days", "[]"))
                 if day_of_week in [d.lower() for d in scheduled_days]:
                     template["scheduled_days"] = scheduled_days
                     template["exercises"] = json.loads(template.get("exercises", "[]"))
-                    matching_templates.append(template)
+
+                    # Prioritize active phase templates
+                    if active_phase_id and template.get("phase_id") == active_phase_id:
+                        active_phase_templates.append(template)
+                    elif not template.get("phase_id"):
+                        # Standalone templates (not linked to any phase)
+                        standalone_templates.append(template)
+                    # Skip templates from inactive phases
+
+            # Active phase templates first, then standalone
+            matching_templates = active_phase_templates + standalone_templates
 
             if not matching_templates:
                 return ToolResult(
@@ -110,11 +156,12 @@ class WorkoutSuggestTool(BaseTool):
                 target_rpe = exercise_spec.get("rpe_target", 7)
 
                 # Get last 3 sessions of this exercise
+                # Note: workout_log uses exercise_id which stores exercise names as strings
                 past_sessions = db.execute(text("""
                     SELECT session_date, weight, reps, rpe, notes
                     FROM workout_log
                     WHERE user_id = :user_id
-                      AND (exercise_name = :exercise_name OR exercise_id = :exercise_name)
+                      AND LOWER(exercise_id) = LOWER(:exercise_name)
                       AND session_date IS NOT NULL
                     ORDER BY session_date DESC, created_at DESC
                     LIMIT 15
@@ -248,6 +295,7 @@ class WorkoutSuggestTool(BaseTool):
             )
 
         except Exception as e:
+            logger.exception(f"workout_suggest failed: {e}")
             return ToolResult(
                 success=False,
                 error=f"Failed to suggest workout: {str(e)}"

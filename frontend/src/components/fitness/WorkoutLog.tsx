@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Dumbbell, Plus, X, TrendingUp, Calendar, FileText, Edit } from 'lucide-react'
+import { Dumbbell, Plus, X, TrendingUp, Calendar, FileText, Edit, ChevronDown, ChevronRight } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 interface WorkoutSet {
@@ -53,6 +53,10 @@ export default function WorkoutLog() {
     completed: boolean
   }>>([])
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0)
+
+  // Collapsible state for workout history
+  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
+  const [expandedExercises, setExpandedExercises] = useState<Set<string>>(new Set())
 
   // Form state (for custom single exercise)
   const [exerciseName, setExerciseName] = useState('')
@@ -108,16 +112,14 @@ export default function WorkoutLog() {
 
   const fetchTodayWorkout = async () => {
     try {
-      const today = new Date().toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase()
-      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/templates`, {
+      // Use dedicated endpoint that prioritizes active phase templates
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/templates/today`, {
         credentials: 'include',
       })
       if (response.ok) {
         const data = await response.json()
-        const todaysWorkout = data.templates?.find((t: Template) =>
-          t.scheduled_days.includes(today)
-        )
-        setTodayTemplate(todaysWorkout || null)
+        // First template is the best match (active phase > standalone)
+        setTodayTemplate(data.templates?.[0] || null)
       }
     } catch (error) {
       console.error('Failed to fetch today\'s workout:', error)
@@ -233,53 +235,120 @@ export default function WorkoutLog() {
           <p className="text-sm mt-1">Click "Log Workout" to get started</p>
         </div>
       ) : (
-        <div className="space-y-6">
-          {workoutHistory.map((session, idx) => (
-            <div key={idx} className="bg-gray-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-lg flex items-center gap-2">
-                  <Dumbbell className="w-5 h-5 text-blue-400" />
-                  {session.date}
-                </h3>
-                <button
-                  onClick={() => deleteWorkoutSession(session.sets)}
-                  className="px-3 py-1 text-sm bg-red-600/20 text-red-400 rounded hover:bg-red-600/30 transition-colors"
+        <div className="space-y-3">
+          {workoutHistory.map((session, idx) => {
+            const sessionKey = session.date
+            const isSessionExpanded = expandedSessions.has(sessionKey)
+            const exerciseGroups = Object.entries(
+              session.sets.reduce((acc, set) => {
+                const name = set.exercise_name || `Exercise ${set.exercise_id}`
+                if (!acc[name]) acc[name] = []
+                acc[name].push(set)
+                return acc
+              }, {} as { [key: string]: WorkoutSet[] })
+            )
+            const totalSets = session.sets.length
+            const totalVolume = session.sets.reduce((sum, s) => sum + (s.weight * s.reps), 0)
+
+            return (
+              <div key={idx} className="bg-gray-800 rounded-lg overflow-hidden">
+                {/* Session Header - Always Visible */}
+                <div
+                  className="p-4 flex items-center justify-between cursor-pointer hover:bg-gray-750 transition-colors"
+                  onClick={() => {
+                    const next = new Set(expandedSessions)
+                    if (isSessionExpanded) next.delete(sessionKey)
+                    else next.add(sessionKey)
+                    setExpandedSessions(next)
+                  }}
                 >
-                  Delete Session
-                </button>
-              </div>
-              <div className="space-y-4">
-                {Object.entries(
-                  session.sets.reduce((acc, set) => {
-                    const name = set.exercise_name || `Exercise ${set.exercise_id}`
-                    if (!acc[name]) acc[name] = []
-                    acc[name].push(set)
-                    return acc
-                  }, {} as { [key: string]: WorkoutSet[] })
-                ).map(([exerciseName, exerciseSets]) => (
-                  <div key={exerciseName} className="border-l-2 border-blue-600 pl-4">
-                    <h4 className="font-medium mb-2">{exerciseName}</h4>
-                    <div className="space-y-1">
-                      {exerciseSets.map((set, setIdx) => (
-                        <div key={set.id} className="text-sm text-gray-400 flex items-center gap-4">
-                          <span className="text-gray-500">Set {set.set_index}:</span>
-                          <span className="font-mono">{set.weight}lbs × {set.reps}</span>
-                          {set.rpe && (
-                            <span className="text-xs px-2 py-0.5 bg-purple-600/20 text-purple-400 rounded">
-                              RPE {set.rpe}
-                            </span>
-                          )}
-                          {set.notes && setIdx === 0 && (
-                            <span className="text-xs text-gray-500">- {set.notes}</span>
-                          )}
-                        </div>
-                      ))}
+                  <div className="flex items-center gap-3">
+                    {isSessionExpanded ? (
+                      <ChevronDown className="w-5 h-5 text-gray-400" />
+                    ) : (
+                      <ChevronRight className="w-5 h-5 text-gray-400" />
+                    )}
+                    <Dumbbell className="w-5 h-5 text-blue-400" />
+                    <div>
+                      <h3 className="font-semibold">{session.date}</h3>
+                      <div className="text-sm text-gray-400">
+                        {exerciseGroups.length} exercises • {totalSets} sets • {Math.round(totalVolume).toLocaleString()} lbs
+                      </div>
                     </div>
                   </div>
-                ))}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      deleteWorkoutSession(session.sets)
+                    }}
+                    className="px-3 py-1 text-sm bg-red-600/20 text-red-400 rounded hover:bg-red-600/30 transition-colors"
+                  >
+                    Delete
+                  </button>
+                </div>
+
+                {/* Expanded Session Content */}
+                {isSessionExpanded && (
+                  <div className="px-4 pb-4 border-t border-gray-700 pt-3 space-y-2">
+                    {exerciseGroups.map(([exName, exerciseSets]) => {
+                      const exerciseKey = `${sessionKey}-${exName}`
+                      const isExerciseExpanded = expandedExercises.has(exerciseKey)
+                      const topSet = exerciseSets.reduce((best, s) =>
+                        (s.weight * s.reps) > (best.weight * best.reps) ? s : best
+                      , exerciseSets[0])
+
+                      return (
+                        <div key={exName} className="bg-gray-900 rounded-lg overflow-hidden">
+                          {/* Exercise Header */}
+                          <div
+                            className="p-3 flex items-center justify-between cursor-pointer hover:bg-gray-800 transition-colors"
+                            onClick={() => {
+                              const next = new Set(expandedExercises)
+                              if (isExerciseExpanded) next.delete(exerciseKey)
+                              else next.add(exerciseKey)
+                              setExpandedExercises(next)
+                            }}
+                          >
+                            <div className="flex items-center gap-2">
+                              {isExerciseExpanded ? (
+                                <ChevronDown className="w-4 h-4 text-gray-500" />
+                              ) : (
+                                <ChevronRight className="w-4 h-4 text-gray-500" />
+                              )}
+                              <span className="font-medium">{exName}</span>
+                            </div>
+                            <div className="text-sm text-gray-400">
+                              {exerciseSets.length} sets • Best: {topSet.weight}×{topSet.reps}
+                            </div>
+                          </div>
+
+                          {/* Expanded Sets */}
+                          {isExerciseExpanded && (
+                            <div className="px-3 pb-3 space-y-1 border-t border-gray-800">
+                              {exerciseSets.map((set, setIdx) => (
+                                <div key={set.id} className="text-sm text-gray-400 flex items-center gap-4 pt-2">
+                                  <span className="text-gray-500 w-12">Set {set.set_index}</span>
+                                  <span className="font-mono text-white">{set.weight}lbs × {set.reps}</span>
+                                  {set.rpe && (
+                                    <span className="text-xs px-2 py-0.5 bg-purple-600/20 text-purple-400 rounded">
+                                      RPE {set.rpe}
+                                    </span>
+                                  )}
+                                  {set.notes && setIdx === 0 && (
+                                    <span className="text-xs text-gray-500 truncate">- {set.notes}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

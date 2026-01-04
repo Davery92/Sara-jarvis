@@ -1,0 +1,17 @@
+[Unit]
+Description=Sara Scheduled Home Actions Worker
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david/jarvis/backend
+Environment="PATH=/home/david/.local/bin:/usr/local/bin:/usr/bin"
+Environment="PYTHONPATH=/home/david/jarvis/backend"
+Environment="DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
+ExecStart=/usr/bin/python3 /home/david/jarvis/backend/app/workers/scheduled_home_worker.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

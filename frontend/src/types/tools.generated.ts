@@ -16,8 +16,7 @@ export enum ToolCategory {
   INTELLIGENCE = 'intelligence',
 }
 
-// 🔍 Analyze your knowledge graph to identify gaps, isolated content, and potential connections.
-        Helps discover orphaned content and suggests areas for knowledge expansion.
+// 🔍 Analyze your knowledge graph to identify gaps, isolated content, and potential connections. Helps discover orphaned content and suggests areas for knowledge expansion.
 // Category: knowledge_graph
 export interface AnalyzeKnowledgeGapsParams {
   isolation_threshold?: number | undefined; // Consider items with fewer than this many connections as isolated (default: 2)
@@ -41,15 +40,13 @@ export interface CalendarListParams {
   limit?: number | undefined; // Maximum number of events to return (default: 50)
 }
 
-// 🧩 Discover knowledge clusters and communities in your content using advanced graph algorithms.
-        Finds groups of related content and identifies knowledge themes.
+// 🧩 Discover knowledge clusters and communities in your content using advanced graph algorithms. Finds groups of related content and identifies knowledge themes.
 // Category: knowledge_graph
 export interface DiscoverKnowledgeClustersParams {
   min_cluster_size?: number | undefined; // Minimum size for clusters to report (default: 3)
 }
 
-// 🔗 Discover what content is connected to a specific note, conversation, or document. 
-        Shows direct and indirect relationships, helping understand how ideas are linked in your knowledge.
+// 🔗 Discover what content is connected to a specific note, conversation, or document. Shows direct and indirect relationships, helping understand how ideas are linked in your knowledge.
 // Category: knowledge_graph
 export interface FindConnectionsParams {
   content_id: string; // ID of the content to find connections for
@@ -137,8 +134,7 @@ export interface GetWebSearchDetailsParams {
   reference_id: string; // The reference ID from a previous web_search call
 }
 
-// 🧠 Search across ALL of your knowledge - notes, conversations, and documents - using advanced graph intelligence. 
-        This tool can find content by topic, discover related items, and show connections between different types of content.
+// 🧠 Search across ALL of your knowledge - notes, conversations, and documents - using advanced graph intelligence. This tool can find content by topic, discover related items, and show connections between different types of content.
 // Category: knowledge_graph
 export interface KnowledgeGraphSearchParams {
   query: string; // Search query to find relevant content across all types

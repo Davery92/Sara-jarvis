@@ -291,38 +291,73 @@ class FitnessService {
     if (endDate) params.append('end_date', endDate);
 
     // Backend returns meal logs with food_items as JSON array
-    // We need to flatten them into individual FoodLog items for display
     const mealLogs: any[] = await apiClient.get(`/api/fitness/food-log?${params}`);
-
-    console.log('🍽️ Raw meal logs from API:', JSON.stringify(mealLogs, null, 2));
 
     const foodLogs: FoodLog[] = [];
     mealLogs.forEach((meal) => {
-      console.log('Processing meal:', meal.log_id, 'food_items:', meal.food_items);
       if (meal.food_items && Array.isArray(meal.food_items)) {
-        meal.food_items.forEach((item: any, index: number) => {
+        // Check if this is a recipe - all detailed_items have source='recipe' with same recipe ID prefix
+        const isRecipe = meal.detailed_items &&
+          Array.isArray(meal.detailed_items) &&
+          meal.detailed_items.length > 0 &&
+          meal.detailed_items.every((item: any) => item.source === 'recipe');
+
+        if (isRecipe && meal.food_items.length > 1) {
+          // This is a recipe logged with ingredients - show as single recipe entry
+          // Extract recipe name from the first detailed item's ID (format: recipe-UUID-ingredientName)
+          const firstDetailedItem = meal.detailed_items[0];
+          const recipeIdParts = firstDetailedItem.id?.split('-') || [];
+          // Try to find recipe name, fallback to combined ingredient names
+          const ingredientNames = meal.food_items.map((i: any) => i.name).join(', ');
+          const displayName = `Recipe: ${ingredientNames.substring(0, 30)}${ingredientNames.length > 30 ? '...' : ''}`;
+
           foodLogs.push({
-            id: `${meal.log_id}-${index}`, // Make unique ID for each food item in the meal
-            meal_log_id: meal.log_id, // Store actual database UUID for deletion
+            id: meal.log_id,
+            meal_log_id: meal.log_id,
             user_id: meal.user_id,
             logged_at: meal.logged_at,
             meal_type: meal.meal_type,
-            food_name: item.name,
-            quantity: item.quantity,
-            unit: item.unit,
-            calories: meal.calories / meal.food_items.length, // Distribute equally
-            protein: meal.protein / meal.food_items.length,
-            carbs: meal.carbs / meal.food_items.length,
-            fat: meal.fats / meal.food_items.length,
+            food_name: displayName,
+            quantity: 1,
+            unit: 'serving',
+            calories: Math.round(meal.calories || 0),
+            protein: Math.round((meal.protein || 0) * 100) / 100,
+            carbs: Math.round((meal.carbs || 0) * 100) / 100,
+            fat: Math.round((meal.fats || 0) * 100) / 100,
             notes: meal.notes,
           });
-        });
-      } else {
-        console.warn('⚠️ Meal has no food_items or not array:', meal.log_id, typeof meal.food_items);
+        } else {
+          // Regular food items - show each separately
+          meal.food_items.forEach((item: any, index: number) => {
+            foodLogs.push({
+              id: `${meal.log_id}-${index}`,
+              meal_log_id: meal.log_id,
+              user_id: meal.user_id,
+              logged_at: meal.logged_at,
+              meal_type: meal.meal_type,
+              food_name: item.name,
+              quantity: item.quantity,
+              unit: item.unit,
+              // If single item, use full calories; if multiple non-recipe items, distribute
+              calories: meal.food_items.length === 1
+                ? Math.round(meal.calories || 0)
+                : Math.round((meal.calories || 0) / meal.food_items.length),
+              protein: meal.food_items.length === 1
+                ? Math.round((meal.protein || 0) * 100) / 100
+                : Math.round(((meal.protein || 0) / meal.food_items.length) * 100) / 100,
+              carbs: meal.food_items.length === 1
+                ? Math.round((meal.carbs || 0) * 100) / 100
+                : Math.round(((meal.carbs || 0) / meal.food_items.length) * 100) / 100,
+              fat: meal.food_items.length === 1
+                ? Math.round((meal.fats || 0) * 100) / 100
+                : Math.round(((meal.fats || 0) / meal.food_items.length) * 100) / 100,
+              notes: meal.notes,
+            });
+          });
+        }
       }
     });
 
-    console.log('🍽️ Final food logs count:', foodLogs.length);
     return foodLogs;
   }
 
@@ -511,6 +546,63 @@ class FitnessService {
   async getRecipes(category?: string): Promise<Recipe[]> {
     const params = category ? `?category=${category}` : '';
     return await apiClient.get<Recipe[]>(`/api/fitness/recipes${params}`);
+  }
+
+  // Recent Foods (frequently logged in last 30 days)
+  async getRecentFoods(limit: number = 20): Promise<any[]> {
+    try {
+      const response: any = await apiClient.get(`/api/fitness/food-log/recent-foods?limit=${limit}`);
+      return response.recent_foods || [];
+    } catch (error) {
+      console.error('Failed to fetch recent foods:', error);
+      return [];
+    }
+  }
+
+  // Yesterday's Foods
+  async getYesterdayFoods(): Promise<{ meals: Record<string, any[]>; all_foods: any[] }> {
+    try {
+      return await apiClient.get('/api/fitness/food-log/yesterday');
+    } catch (error) {
+      console.error('Failed to fetch yesterday foods:', error);
+      return { meals: {}, all_foods: [] };
+    }
+  }
+
+  // Barcode lookup
+  async lookupBarcode(barcode: string, region: string = 'US'): Promise<FoodItem | null> {
+    try {
+      const response: any = await apiClient.get(`/api/fitness/foods/barcode/${barcode}?region=${region}`);
+
+      if (!response || !response.servings || response.servings.length === 0) {
+        return null;
+      }
+
+      // Get the first serving as default
+      const defaultServing = response.servings[0];
+
+      return {
+        id: response.id,
+        name: response.name,
+        brand: response.brand,
+        serving_size: defaultServing.metric_serving_amount || 1,
+        serving_unit: defaultServing.serving_description || 'serving',
+        calories: defaultServing.calories,
+        protein: defaultServing.protein,
+        carbs: defaultServing.carbs,
+        fats: defaultServing.fat,
+        fiber: defaultServing.fiber,
+        sugar: defaultServing.sugar,
+        sodium: defaultServing.sodium,
+        is_custom: false,
+        source: 'fatsecret',
+      };
+    } catch (error: any) {
+      if (error?.response?.status === 404) {
+        return null; // Barcode not found
+      }
+      throw error;
+    }
   }
 }
 

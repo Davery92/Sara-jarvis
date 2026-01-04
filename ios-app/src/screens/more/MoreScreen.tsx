@@ -11,12 +11,11 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
+  { name: 'Projects', icon: '📋', label: 'Projects', screen: 'Projects' },
   { name: 'Recipes', icon: '🍳', label: 'Recipes', screen: 'Recipes' },
   { name: 'Documents', icon: '📄', label: 'Documents', screen: 'Documents' },
   { name: 'Calendar', icon: '📅', label: 'Calendar', screen: 'Calendar' },
-  { name: 'Briefings', icon: '📋', label: 'Daily Briefings', screen: 'Briefings' },
-  { name: 'ContextMode', icon: '🎛️', label: 'Context Mode', screen: 'ContextMode' },
-  { name: 'SmartInsights', icon: '✨', label: 'Smart Insights', screen: 'SmartInsights' },
+  { name: 'Briefings', icon: '☀️', label: 'Morning Brief', screen: 'Briefings' },
   { name: 'Health', icon: '⚕️', label: 'Apple Health', screen: 'Health' },
   { name: 'Settings', icon: '⚙️', label: 'Settings', screen: 'Settings' },
 ];

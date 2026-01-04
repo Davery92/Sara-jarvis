@@ -83,6 +83,16 @@ export default function CalendarScreen({ navigation }: Props) {
   };
 
   const handleEventLongPress = (event: CalendarEvent) => {
+    // iOS calendar events are read-only
+    if (event.read_only || event.source === 'ios_calendar') {
+      Alert.alert(
+        event.title,
+        `This event is synced from iOS Calendar${event.ios_calendar_name ? ` (${event.ios_calendar_name})` : ''} and cannot be edited here.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     Alert.alert(
       event.title,
       'What would you like to do?',

@@ -42,7 +42,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'nav-habits', title: 'Go to Habits', icon: '🎯', keywords: ['habits', 'tracking', 'goals'], action: () => onNavigate('habits'), category: 'navigation' },
     { id: 'nav-memory', title: 'Go to Memory Garden', icon: '🧠', keywords: ['memory', 'garden', 'graph'], action: () => onNavigate('memory-garden'), category: 'navigation' },
     { id: 'nav-insights', title: 'Go to Insights', icon: '💡', keywords: ['insights', 'sara', 'suggestions'], action: () => onNavigate('insights'), category: 'navigation' },
-    { id: 'nav-vulns', title: 'Go to Vulnerability Watch', icon: '🛡️', keywords: ['vulnerability', 'security', 'vulns'], action: () => onNavigate('vulnerability-watch'), category: 'navigation' },
     { id: 'nav-docs', title: 'Go to Documents', icon: '📄', keywords: ['documents', 'files', 'uploads'], action: () => onNavigate('documents'), category: 'navigation' },
     { id: 'nav-settings', title: 'Go to Settings', icon: '⚙️', keywords: ['settings', 'preferences', 'config'], action: () => onNavigate('settings'), category: 'navigation' },
 

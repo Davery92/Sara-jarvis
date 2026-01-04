@@ -11,6 +11,12 @@ export interface CalendarEvent {
   all_day: boolean;
   reminder_minutes?: number;
   is_completed: boolean;
+  // iOS calendar sync fields
+  source?: string;  // 'sara' or 'ios_calendar'
+  ios_event_id?: string;
+  ios_calendar_id?: string;
+  ios_calendar_name?: string;
+  read_only?: boolean;
   created_at: string;
   updated_at: string;
 }

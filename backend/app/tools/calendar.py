@@ -1,11 +1,40 @@
 from typing import Dict, Any
 from app.tools.base import BaseTool, ToolResult
-from app.models.calendar import Event
 from app.db.session import get_db
+from app.db.base import Base
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, Column, String, Text, DateTime, Boolean, Integer
+from sqlalchemy.sql import func
 from datetime import datetime, timezone, date, time
 import uuid
+
+
+# Define CalendarEvent model here to match the calendar_event table
+# This avoids circular import with main_simple.py
+# Use extend_existing to avoid conflict with model defined in main_simple.py
+class CalendarEvent(Base):
+    """Model matching calendar_event table used by iOS calendar sync"""
+    __tablename__ = "calendar_event"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, default="")
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=False)
+    location = Column(String, default="")
+    all_day = Column(Boolean, default=False)
+    reminder_minutes = Column(Integer)
+    is_completed = Column(Boolean, default=False)
+    # iOS calendar sync fields
+    source = Column(String, default="sara")  # 'sara' or 'ios_calendar'
+    ios_event_id = Column(String, nullable=True)
+    ios_calendar_id = Column(String, nullable=True)
+    ios_calendar_name = Column(String, nullable=True)
+    read_only = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
 
 
 class CalendarListTool(BaseTool):
@@ -82,27 +111,32 @@ class CalendarListTool(BaseTool):
             start_datetime = datetime.combine(start_date, time.min, timezone.utc)
             end_datetime = datetime.combine(end_date, time.max, timezone.utc)
             
-            # Query events
-            events = db.query(Event).filter(
-                Event.user_id == user_id,
+            # Query events from calendar_event table (includes iOS synced events)
+            events = db.query(CalendarEvent).filter(
+                CalendarEvent.user_id == user_id,
                 and_(
-                    Event.starts_at <= end_datetime,
-                    Event.ends_at >= start_datetime
+                    CalendarEvent.start_time <= end_datetime,
+                    CalendarEvent.end_time >= start_datetime
                 )
-            ).order_by(Event.starts_at).limit(limit).all()
-            
+            ).order_by(CalendarEvent.start_time).limit(limit).all()
+
             event_list = []
             for event in events:
-                event_list.append({
+                event_data = {
                     "event_id": str(event.id),
                     "title": event.title,
-                    "starts_at": event.starts_at.isoformat(),
-                    "ends_at": event.ends_at.isoformat(),
-                    "location": event.location,
-                    "description": event.description,
+                    "starts_at": event.start_time.isoformat(),
+                    "ends_at": event.end_time.isoformat(),
+                    "location": event.location or "",
+                    "description": event.description or "",
                     "created_at": event.created_at.isoformat(),
                     "updated_at": event.updated_at.isoformat()
-                })
+                }
+                # Include source info for iOS events
+                if hasattr(event, 'source') and event.source == 'ios_calendar':
+                    event_data["source"] = "ios_calendar"
+                    event_data["ios_calendar_name"] = getattr(event, 'ios_calendar_name', None)
+                event_list.append(event_data)
             
             return ToolResult(
                 success=True,
@@ -217,27 +251,28 @@ class CalendarCreateTool(BaseTool):
                     message="End time must be after start time"
                 )
             
-            # Create event
-            event = Event(
+            # Create event in calendar_event table
+            event = CalendarEvent(
                 user_id=user_id,
                 title=title,
-                starts_at=starts_at,
-                ends_at=ends_at,
-                location=location,
-                description=description
+                start_time=starts_at,
+                end_time=ends_at,
+                location=location or "",
+                description=description or "",
+                source="sara"
             )
-            
+
             db.add(event)
             db.commit()
             db.refresh(event)
-            
+
             return ToolResult(
                 success=True,
                 data={
                     "event_id": str(event.id),
                     "title": event.title,
-                    "starts_at": event.starts_at.isoformat(),
-                    "ends_at": event.ends_at.isoformat(),
+                    "starts_at": event.start_time.isoformat(),
+                    "ends_at": event.end_time.isoformat(),
                     "location": event.location,
                     "description": event.description,
                     "created_at": event.created_at.isoformat()

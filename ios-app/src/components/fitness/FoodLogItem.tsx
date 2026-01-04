@@ -3,6 +3,12 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { FoodLog } from '../../services/fitness';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
+// Format numbers to max 2 decimal places, removing trailing zeros
+const formatNumber = (value: number | undefined): string => {
+  if (value === undefined || value === null) return '?';
+  return parseFloat(value.toFixed(2)).toString();
+};
+
 interface FoodLogItemProps {
   log: FoodLog;
   onPress?: (log: FoodLog) => void;
@@ -39,15 +45,15 @@ export default function FoodLogItem({ log, onPress, onLongPress }: FoodLogItemPr
             <Text style={styles.time}>{time}</Text>
           </View>
         </View>
-        {log.calories && (
+        {log.calories !== undefined && (
           <View style={styles.caloriesBadge}>
-            <Text style={styles.caloriesText}>{log.calories} cal</Text>
+            <Text style={styles.caloriesText}>{formatNumber(log.calories)} cal</Text>
           </View>
         )}
       </View>
 
       <Text style={styles.foodName}>
-        {log.food_name} ({log.quantity} {log.unit})
+        {log.food_name} ({formatNumber(log.quantity)} {log.unit})
       </Text>
 
       {hasMacros && (
@@ -55,19 +61,19 @@ export default function FoodLogItem({ log, onPress, onLongPress }: FoodLogItemPr
           {log.protein !== undefined && (
             <View style={styles.macroItem}>
               <Text style={styles.macroLabel}>P</Text>
-              <Text style={styles.macroValue}>{log.protein}g</Text>
+              <Text style={styles.macroValue}>{formatNumber(log.protein)}g</Text>
             </View>
           )}
           {log.carbs !== undefined && (
             <View style={styles.macroItem}>
               <Text style={styles.macroLabel}>C</Text>
-              <Text style={styles.macroValue}>{log.carbs}g</Text>
+              <Text style={styles.macroValue}>{formatNumber(log.carbs)}g</Text>
             </View>
           )}
           {log.fat !== undefined && (
             <View style={styles.macroItem}>
               <Text style={styles.macroLabel}>F</Text>
-              <Text style={styles.macroValue}>{log.fat}g</Text>
+              <Text style={styles.macroValue}>{formatNumber(log.fat)}g</Text>
             </View>
           )}
         </View>

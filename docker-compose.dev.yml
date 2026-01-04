@@ -44,21 +44,22 @@ services:
       - TAVILY_API_KEY=REDACTED_TAVILY_KEY
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
       - REDIS_URL=redis://redis:6379/0
-      # AI Provider: gemini or local (current)
-      # NOTE: gpt-oss:120b uses OPENAI_BASE_URL=http://100.104.68.115:11434/v1
-      - AI_PROVIDER=${AI_PROVIDER-local}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=gpt-oss:120b
-      - OPENAI_API_KEY=dummy
-      - FAST_MODEL_URL=http://10.185.1.8:11434/v1
-      - FAST_MODEL=granite4
+      # AI Provider: gemini
+      - AI_PROVIDER=${AI_PROVIDER-gemini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-https://generativelanguage.googleapis.com/v1beta/openai}
+      - OPENAI_MODEL=gemini-3-flash-preview
+      - OPENAI_API_KEY=REDACTED_GEMINI_KEY
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
+      - FAST_MODEL_URL=https://generativelanguage.googleapis.com/v1beta/openai
+      - FAST_MODEL=gemini-3-flash-preview
+      - FAST_MODEL_API_KEY=REDACTED_GEMINI_KEY
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000"]
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
@@ -66,16 +67,21 @@ services:
       - MINIO_URL=http://minio:9000
       - MINIO_BUCKET=sara-docs
       - MINIO_ACCESS_KEY=sara
-      - MINIO_SECRET_KEY=sara123
+      - MINIO_SECRET_KEY=sara1234
       - JWT_SECRET=sara-hub-jwt-secret-change-in-production
       - TIMEZONE=America/New_York
       - TZ=America/New_York
       - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=sara-graph-secret
+      # FatSecret API credentials for food search
+      - FATSECRET_CLIENT_ID=REDACTED_FATSECRET_ID
+      - FATSECRET_CLIENT_SECRET=REDACTED_FATSECRET_SECRET
     volumes:
       # Mount source code for live editing
       - ./backend:/app
+      # Mount shadow-agent for installer downloads
+      - ./shadow-agent:/shadow-agent
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__

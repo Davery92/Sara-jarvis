@@ -176,7 +176,7 @@ class Neo4jService:
         """Create an Episode node (conversation turn)"""
         with self.driver.session() as session:
             query = """
-            MATCH (u:User {id: $user_id})
+            MERGE (u:User {id: $user_id})
             MERGE (e:Episode {id: $episode_id})
             SET e.content = $content,
                 e.role = $role,

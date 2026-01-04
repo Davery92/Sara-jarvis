@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:18-alpine AS builder
 
 WORKDIR /app
 
@@ -22,8 +22,19 @@ COPY . .
 # Build the application
 RUN npm run build
 
+# Production stage with serve
+FROM node:18-alpine
+
+# Install serve globally
+RUN npm install -g serve
+
+# Copy built files
+COPY --from=builder /app/dist /app/dist
+
+WORKDIR /app
+
 # Expose port
 EXPOSE 3000
 
-# Start the application
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "3000"]
+# Serve with SPA fallback
+CMD ["serve", "-s", "dist", "-l", "3000"]

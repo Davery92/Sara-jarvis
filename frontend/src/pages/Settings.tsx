@@ -7,50 +7,290 @@ import {
   getEmbeddingDimension, setEmbeddingDimension
 } from '../utils/prefs'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient, AISettingsUpdate } from '../api/client'
-import { GTKYTrigger } from '../components/onboarding/GTKYTrigger'
+import { apiClient, AISettingsUpdate, TokenStats } from '../api/client'
 import { APP_CONFIG } from '../config'
 
-function AgentStatus() {
-  const { data: agentStatus } = useQuery({
-    queryKey: ['shadow', 'agent-status'],
-    queryFn: () => apiClient.getShadowAgentStatus(),
-    refetchInterval: 10000, // Poll every 10 seconds
+function TokenUsageStats() {
+  const queryClient = useQueryClient()
+  const [showResetConfirm, setShowResetConfirm] = useState(false)
+
+  const { data: tokenStats, isLoading, error } = useQuery({
+    queryKey: ['token-usage', 'stats'],
+    queryFn: () => apiClient.getTokenStats(),
+    refetchInterval: 30000, // Refresh every 30 seconds
   })
 
-  if (!agentStatus || agentStatus.total_active === 0) {
+  const resetMutation = useMutation({
+    mutationFn: () => apiClient.resetTokenStats(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['token-usage', 'stats'] })
+      setShowResetConfirm(false)
+    },
+  })
+
+  const formatNumber = (num: number): string => {
+    if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`
+    if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
+    return num.toString()
+  }
+
+  const formatDate = (dateStr: string | null): string => {
+    if (!dateStr) return 'Never'
+    const date = new Date(dateStr)
+    return date.toLocaleString()
+  }
+
+  if (isLoading) {
     return (
-      <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg">
-        <div className="flex items-center">
-          <div className="w-2 h-2 bg-gray-500 rounded-full mr-3"></div>
-          <p className="text-sm text-gray-400">No agents connected (agents appear when Shadow session is active)</p>
+      <div className="animate-pulse">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="bg-gray-800 rounded-lg p-4 h-20"></div>
+          ))}
         </div>
       </div>
     )
   }
 
+  if (error) {
+    return (
+      <div className="text-red-400 text-sm">
+        Failed to load token statistics. The feature may not be available yet.
+      </div>
+    )
+  }
+
   return (
-    <div className="mt-4 space-y-2">
-      <h4 className="text-sm font-medium text-white">Connected Agents</h4>
-      {agentStatus.agents.map((agent: any, idx: number) => (
-        <div key={idx} className="p-3 bg-green-900/20 border border-green-500/30 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <div className="w-2 h-2 bg-green-500 rounded-full mr-3 animate-pulse"></div>
-              <div>
-                <p className="text-sm font-medium text-green-300">Agent Online</p>
-                <p className="text-xs text-gray-400">
-                  Monitoring: {agent.monitoring.browser && 'Browser'} {agent.monitoring.browser && agent.monitoring.editor && '+ '}{agent.monitoring.editor && 'VS Code'}
-                </p>
-              </div>
-            </div>
-            <div className="text-right">
-              <p className="text-xs text-gray-400">{agent.event_count} events</p>
-              <p className="text-xs text-gray-500">Last seen: {new Date(agent.last_seen).toLocaleTimeString()}</p>
-            </div>
+    <div className="space-y-4">
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+          <div className="text-xs text-gray-400 uppercase tracking-wide">Total Tokens</div>
+          <div className="text-2xl font-bold text-teal-400 mt-1">
+            {formatNumber(tokenStats?.total_tokens || 0)}
           </div>
         </div>
-      ))}
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+          <div className="text-xs text-gray-400 uppercase tracking-wide">Prompt Tokens</div>
+          <div className="text-2xl font-bold text-blue-400 mt-1">
+            {formatNumber(tokenStats?.total_prompt_tokens || 0)}
+          </div>
+        </div>
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+          <div className="text-xs text-gray-400 uppercase tracking-wide">Completion Tokens</div>
+          <div className="text-2xl font-bold text-purple-400 mt-1">
+            {formatNumber(tokenStats?.total_completion_tokens || 0)}
+          </div>
+        </div>
+        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+          <div className="text-xs text-gray-400 uppercase tracking-wide">Total Requests</div>
+          <div className="text-2xl font-bold text-green-400 mt-1">
+            {formatNumber(tokenStats?.total_requests || 0)}
+          </div>
+        </div>
+      </div>
+
+      {/* Meta Info & Reset */}
+      <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
+        <div className="text-gray-400">
+          {tokenStats?.last_reset_at ? (
+            <span>Tracking since: {formatDate(tokenStats.last_reset_at)}</span>
+          ) : (
+            <span>Tracking since: Start</span>
+          )}
+          {tokenStats?.updated_at && (
+            <span className="ml-4 text-gray-500">Last update: {formatDate(tokenStats.updated_at)}</span>
+          )}
+        </div>
+
+        {!showResetConfirm ? (
+          <button
+            onClick={() => setShowResetConfirm(true)}
+            className="px-3 py-1.5 text-xs font-medium text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg hover:bg-red-900/30 transition-colors"
+          >
+            Reset Counter
+          </button>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400">Are you sure?</span>
+            <button
+              onClick={() => resetMutation.mutate()}
+              disabled={resetMutation.isPending}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+            >
+              {resetMutation.isPending ? 'Resetting...' : 'Yes, Reset'}
+            </button>
+            <button
+              onClick={() => setShowResetConfirm(false)}
+              className="px-3 py-1.5 text-xs font-medium text-gray-400 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+interface DownloadInfo {
+  filename: string
+  platform: string
+  arch: string
+  type: string
+  size_bytes: number
+  size_mb: number
+  modified: string
+}
+
+function DesktopAppDownloads() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['downloads'],
+    queryFn: async () => {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/downloads`, {
+        credentials: 'include',
+      })
+      if (!response.ok) throw new Error('Failed to fetch downloads')
+      return response.json() as Promise<{ downloads: DownloadInfo[]; version: string }>
+    },
+  })
+
+  const handleDownload = (filename: string) => {
+    window.open(`${APP_CONFIG.apiUrl}/api/downloads/${filename}`, '_blank')
+  }
+
+  const getPlatformIcon = (platform: string) => {
+    if (platform === 'Windows') {
+      return (
+        <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M3 5.5L10.5 4.5V11.5H3V5.5ZM10.5 12.5V19.5L3 18.5V12.5H10.5ZM11.5 4.35L21 3V11.5H11.5V4.35ZM21 12.5V21L11.5 19.65V12.5H21Z" />
+        </svg>
+      )
+    }
+    if (platform === 'macOS') {
+      return (
+        <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M18.71 19.5C17.88 20.74 17 21.95 15.66 21.97C14.32 22 13.89 21.18 12.37 21.18C10.84 21.18 10.37 21.95 9.1 22C7.79 22.05 6.8 20.68 5.96 19.47C4.25 17 2.94 12.45 4.7 9.39C5.57 7.87 7.13 6.91 8.82 6.88C10.1 6.86 11.32 7.75 12.11 7.75C12.89 7.75 14.37 6.68 15.92 6.84C16.57 6.87 18.39 7.1 19.56 8.82C19.47 8.88 17.39 10.1 17.41 12.63C17.44 15.65 20.06 16.66 20.09 16.67C20.06 16.74 19.67 18.11 18.71 19.5ZM13 3.5C13.73 2.67 14.94 2.04 15.94 2C16.07 3.17 15.6 4.35 14.9 5.19C14.21 6.04 13.07 6.7 11.95 6.61C11.8 5.46 12.36 4.26 13 3.5Z" />
+        </svg>
+      )
+    }
+    return (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+      </svg>
+    )
+  }
+
+  const getArchLabel = (arch: string) => {
+    if (arch === 'arm64') return 'Apple Silicon'
+    if (arch === 'x64') return 'Intel/AMD 64-bit'
+    return arch
+  }
+
+  if (isLoading) {
+    return (
+      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+        <div className="animate-pulse">
+          <div className="h-6 bg-gray-700 rounded w-48 mb-4"></div>
+          <div className="space-y-3">
+            <div className="h-20 bg-gray-800 rounded"></div>
+            <div className="h-20 bg-gray-800 rounded"></div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (error || !data?.downloads?.length) {
+    return (
+      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+        <div className="flex items-center mb-4">
+          <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <h3 className="text-lg font-medium text-white">Desktop App</h3>
+        </div>
+        <p className="text-gray-400 text-sm">
+          {error ? 'Failed to load downloads. Please try again later.' : 'No downloads available yet.'}
+        </p>
+      </div>
+    )
+  }
+
+  // Group by platform
+  const byPlatform: Record<string, DownloadInfo[]> = {}
+  data.downloads.forEach((d) => {
+    if (!byPlatform[d.platform]) byPlatform[d.platform] = []
+    byPlatform[d.platform].push(d)
+  })
+
+  return (
+    <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center">
+          <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <h3 className="text-lg font-medium text-white">Sara Desktop Companion</h3>
+        </div>
+        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded">v{data.version}</span>
+      </div>
+
+      <p className="text-gray-400 text-sm mb-6">
+        A floating voice assistant that lives on your desktop. Features wake word detection, push-to-talk, and silent text mode.
+      </p>
+
+      <div className="space-y-4">
+        {Object.entries(byPlatform).map(([platform, downloads]) => (
+          <div key={platform} className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="text-gray-300">{getPlatformIcon(platform)}</div>
+              <h4 className="text-white font-medium">{platform}</h4>
+            </div>
+            <div className="space-y-2">
+              {downloads.map((download) => (
+                <div
+                  key={download.filename}
+                  className="flex items-center justify-between bg-gray-900/50 rounded-lg px-4 py-3"
+                >
+                  <div className="flex-1">
+                    <div className="text-sm text-white font-medium">
+                      {getArchLabel(download.arch)}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {download.filename} ({download.size_mb} MB)
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleDownload(download.filename)}
+                    className="ml-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Download
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 p-3 bg-blue-900/20 border border-blue-500/20 rounded-lg">
+        <div className="flex items-start gap-2">
+          <svg className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+          </svg>
+          <div className="text-xs text-blue-300">
+            <p className="font-medium">Installation:</p>
+            <ul className="mt-1 space-y-1 text-blue-300/80">
+              <li><strong>Windows:</strong> Extract the archive and run Sara.exe</li>
+              <li><strong>macOS:</strong> Extract the zip and move Sara.app to Applications</li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -65,7 +305,7 @@ const PROVIDER_PRESETS = {
   },
   gemini: {
     openai_base_url: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-    openai_model: 'gemini-2.5-flash-lite',
+    openai_model: 'gemini-3-flash-preview',
     embedding_base_url: 'http://10.185.1.8:11434',
     embedding_model: 'bge-m3',
   },
@@ -75,8 +315,21 @@ const PROVIDER_PRESETS = {
     embedding_base_url: 'https://api.openai.com/v1',
     embedding_model: 'text-embedding-3-large',
   },
+  claude: {
+    openai_base_url: 'https://api.anthropic.com/v1',
+    openai_model: 'claude-sonnet-4-5-20250929',
+    embedding_base_url: 'http://100.104.68.115:11434',
+    embedding_model: 'bge-m3',
+  },
   custom: {} // Keep current values
 } as const
+
+// Claude model options for the dropdown
+const CLAUDE_MODELS = [
+  { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
+  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+] as const
 
 type ProviderType = keyof typeof PROVIDER_PRESETS
 
@@ -92,10 +345,7 @@ export default function Settings() {
     embedding_model: getEmbeddingModel(),
     embedding_dimension: getEmbeddingDimension(),
   })
-  const [showGTKY, setShowGTKY] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
-  const [fitnessPrompt, setFitnessPrompt] = useState('')
-  const [fitnessSaveResult, setFitnessSaveResult] = useState<{ success: boolean; message: string } | null>(null)
   const queryClient = useQueryClient()
 
   // Fetch current AI settings
@@ -150,34 +400,27 @@ export default function Settings() {
     }
   }, [settings])
 
-  // Fetch fitness settings
-  useEffect(() => {
-    const fetchFitnessSettings = async () => {
-      try {
-        const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/settings`, {
-          credentials: 'include',
-        })
-        if (response.ok) {
-          const data = await response.json()
-          setFitnessPrompt(data.system_prompt || '')
-        }
-      } catch (error) {
-        console.error('Failed to fetch fitness settings:', error)
-      }
-    }
-    fetchFitnessSettings()
-  }, [])
-
   const handleProviderChange = (provider: ProviderType) => {
+    // Save current API key to provider-specific storage before switching
+    const currentProvider = aiProvider
+    if (formData.openai_api_key && formData.openai_api_key !== '***') {
+      localStorage.setItem(`sara_${currentProvider}_api_key`, formData.openai_api_key)
+    }
+
     setAiProviderState(provider)
     setAIProvider(provider)
 
     if (provider !== 'custom') {
       // Auto-fill form with provider presets
       const preset = PROVIDER_PRESETS[provider]
+
+      // Load provider-specific API key from localStorage
+      const savedApiKey = localStorage.getItem(`sara_${provider}_api_key`) || ''
+
       const updated = {
         ...formData,
         ai_provider: provider,
+        openai_api_key: savedApiKey,
         ...preset
       }
       setFormData(updated)
@@ -187,6 +430,7 @@ export default function Settings() {
       if (preset.openai_model) setAIModel(preset.openai_model)
       if (preset.embedding_base_url) setEmbeddingBaseUrl(preset.embedding_base_url)
       if (preset.embedding_model) setEmbeddingModel(preset.embedding_model)
+      if (savedApiKey) setAIApiKey(savedApiKey)
     } else {
       // Just update provider, keep existing values
       setFormData(prev => ({ ...prev, ai_provider: provider }))
@@ -206,6 +450,10 @@ export default function Settings() {
         break
       case 'openai_api_key':
         setAIApiKey(value as string)
+        // Also save to provider-specific storage
+        if (value && value !== '***') {
+          localStorage.setItem(`sara_${aiProvider}_api_key`, value as string)
+        }
         break
       case 'openai_base_url':
         setAIBaseUrl(value as string)
@@ -231,9 +479,14 @@ export default function Settings() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     // Remove empty-string fields so we don't overwrite with blanks
+    // Also skip masked API key values (***) to avoid overwriting the real key
     const cleaned: AISettingsUpdate = {}
     Object.entries(formData).forEach(([k, v]) => {
       if (v !== '' && v !== undefined && v !== null) {
+        // Don't send masked API key - would overwrite the real one
+        if (k === 'openai_api_key' && (v === '***' || String(v).startsWith('***'))) {
+          return
+        }
         // @ts-ignore - dynamic assembly of payload
         cleaned[k] = v
       }
@@ -260,27 +513,6 @@ export default function Settings() {
       embedding_dimension: getEmbeddingDimension(),
     }
     setFormData(resetData)
-  }
-
-  const handleSaveFitnessPrompt = async () => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ system_prompt: fitnessPrompt }),
-      })
-      if (response.ok) {
-        setFitnessSaveResult({ success: true, message: 'Fitness system prompt saved successfully!' })
-        setTimeout(() => setFitnessSaveResult(null), 3000)
-      } else {
-        setFitnessSaveResult({ success: false, message: 'Failed to save fitness prompt' })
-        setTimeout(() => setFitnessSaveResult(null), 5000)
-      }
-    } catch (error) {
-      setFitnessSaveResult({ success: false, message: 'Failed to save fitness prompt' })
-      setTimeout(() => setFitnessSaveResult(null), 5000)
-    }
   }
 
   if (isLoading) {
@@ -349,6 +581,7 @@ export default function Settings() {
                     <option value="local">Local (Ollama/LM Studio)</option>
                     <option value="gemini">Google Gemini</option>
                     <option value="openai">OpenAI</option>
+                    <option value="claude">Anthropic Claude</option>
                     <option value="custom">Custom Configuration</option>
                   </select>
                   <p className="mt-1 text-xs text-gray-400">
@@ -356,7 +589,7 @@ export default function Settings() {
                   </p>
                 </div>
 
-                {(aiProvider === 'gemini' || aiProvider === 'openai') && (
+                {(aiProvider === 'gemini' || aiProvider === 'openai' || aiProvider === 'claude') && (
                   <div>
                     <label htmlFor="openai_api_key" className="block text-sm font-medium text-gray-300 mb-2">
                       API Key
@@ -367,12 +600,39 @@ export default function Settings() {
                       value={formData.openai_api_key || ''}
                       onChange={(e) => handleInputChange('openai_api_key', e.target.value)}
                       className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
-                      placeholder={aiProvider === 'gemini' ? 'Enter Gemini API key' : 'Enter OpenAI API key'}
+                      placeholder={
+                        aiProvider === 'gemini' ? 'Enter Gemini API key' :
+                        aiProvider === 'claude' ? 'Enter Claude API key (sk-ant-...)' :
+                        'Enter OpenAI API key'
+                      }
                     />
                     <p className="mt-1 text-xs text-gray-400">
                       {aiProvider === 'gemini'
                         ? 'Get your API key from https://aistudio.google.com/apikey'
+                        : aiProvider === 'claude'
+                        ? 'Get your API key from https://console.anthropic.com/settings/keys'
                         : 'Get your API key from https://platform.openai.com/api-keys'}
+                    </p>
+                  </div>
+                )}
+
+                {aiProvider === 'claude' && (
+                  <div>
+                    <label htmlFor="claude_model" className="block text-sm font-medium text-gray-300 mb-2">
+                      Claude Model
+                    </label>
+                    <select
+                      id="claude_model"
+                      value={formData.openai_model || 'claude-sonnet-4-5-20241022'}
+                      onChange={(e) => handleInputChange('openai_model', e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white"
+                    >
+                      {CLAUDE_MODELS.map((model) => (
+                        <option key={model.value} value={model.value}>{model.label}</option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      Select the Claude model to use. Opus is most capable, Haiku is fastest.
                     </p>
                   </div>
                 )}
@@ -481,6 +741,12 @@ export default function Settings() {
                   <p className="mt-1 text-xs text-gray-400">Vector dimension for embeddings</p>
                 </div>
               </div>
+            </div>
+
+            {/* Token Usage Statistics */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Token Usage Statistics</h3>
+              <TokenUsageStats />
             </div>
 
             {/* Appearance */}
@@ -608,254 +874,52 @@ export default function Settings() {
           </form>
         </div>
 
-        {/* Voice Agent Downloads */}
-        <div className="mt-8 bg-card border border-card rounded-xl p-6">
-          <div className="flex items-center mb-4">
-            <svg className="w-6 h-6 text-green-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-            <h3 className="text-lg font-medium text-white">🎙️ Voice Control Agent</h3>
-          </div>
+        {/* Desktop App Downloads */}
+        <DesktopAppDownloads />
 
-          <p className="text-gray-400 text-sm mb-6">
-            Download the voice-controlled desktop agent. Say "sarah" to activate voice commands and interact with Sara hands-free.
-            Supports Shadow Mode, reminders, notes, and all Sara features via voice.
-          </p>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Windows Voice Agent */}
-            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center mb-3">
-                <svg className="w-8 h-8 text-blue-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
-                </svg>
-                <div>
-                  <h4 className="text-white font-medium">Windows Voice Agent</h4>
-                  <p className="text-xs text-gray-400">Single-file installer</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-300 mb-3">
-                Wake word detection, voice commands, system tray control. No installation required!
-              </p>
-              <a
-                href="http://10.185.1.180:8000/api/agent/downloads/windows"
-                download="SaraShadowAgent-Installer.exe"
-                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-medium w-full justify-center"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download for Windows
-              </a>
-              <p className="text-xs text-gray-500 mt-2">
-                Just run the .exe - it will appear in your system tray. Say "sarah" to activate!
-              </p>
-            </div>
-
-            {/* macOS Voice Agent */}
-            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center mb-3">
-                <svg className="w-8 h-8 text-purple-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
-                </svg>
-                <div>
-                  <h4 className="text-white font-medium">macOS Voice Agent</h4>
-                  <p className="text-xs text-gray-400">DMG installer</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-300 mb-3">
-                Wake word detection, voice commands, menu bar control. Drag-and-drop installation!
-              </p>
-              <a
-                href="http://10.185.1.180:8000/api/agent/downloads/macos"
-                download="SaraShadowAgent-Installer.dmg"
-                className="inline-flex items-center px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm font-medium w-full justify-center"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download for macOS
-              </a>
-              <p className="text-xs text-gray-500 mt-2">
-                Open DMG, drag to Applications. Grant microphone permission when prompted.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 p-3 bg-green-900/20 border border-green-500/30 rounded-lg">
-            <p className="text-sm text-green-300">
-              <strong>Voice Modes:</strong> Always-On (continuously listens), Shadow-Only (active during sessions), or Push-to-Talk (manual activation).
-              Configure via system tray menu.
-            </p>
-          </div>
-        </div>
-
-        {/* Shadow Agent Downloads */}
+        {/* Developer Tools */}
         <div className="mt-8 bg-card border border-card rounded-xl p-6">
           <div className="flex items-center mb-4">
             <svg className="w-6 h-6 text-purple-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
             </svg>
-            <h3 className="text-lg font-medium text-white">🕵️ Shadow Mode Desktop Agent</h3>
-          </div>
-
-          <p className="text-gray-400 text-sm mb-6">
-            Download and install the Shadow Mode agent to automatically capture browser and VS Code activity during Shadow sessions.
-            The agent runs in the background and only sends events when a Shadow session is active.
-          </p>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Windows Agent */}
-            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center mb-3">
-                <svg className="w-8 h-8 text-blue-400 mr-3" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
-                </svg>
-                <div>
-                  <h4 className="text-white font-medium">Windows Agent</h4>
-                  <p className="text-xs text-gray-400">PowerShell installer</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-300 mb-3">
-                Supports Chrome, Firefox, Edge, Brave, Opera, and VS Code on Windows 10/11
-              </p>
-              <a
-                href="http://10.185.1.180:8000/shadow/agent/download/windows"
-                download="sara-shadow-agent-install.ps1"
-                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-medium w-full justify-center"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download for Windows
-              </a>
-              <p className="text-xs text-gray-500 mt-2">
-                Run: <code className="bg-gray-900 px-1 rounded">powershell -ExecutionPolicy Bypass -File install.ps1</code>
-              </p>
-            </div>
-
-            {/* macOS/Linux Agent */}
-            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center mb-3">
-                <svg className="w-8 h-8 text-gray-300 mr-3" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
-                </svg>
-                <div>
-                  <h4 className="text-white font-medium">macOS / Linux Agent</h4>
-                  <p className="text-xs text-gray-400">Bash installer</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-300 mb-3">
-                Supports Chrome, Safari, Firefox, Brave, and VS Code on macOS/Linux
-              </p>
-              <a
-                href="http://10.185.1.180:8000/shadow/agent/download/macos"
-                download="sara-shadow-agent-install.sh"
-                className="inline-flex items-center px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition text-sm font-medium w-full justify-center"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download for macOS/Linux
-              </a>
-              <p className="text-xs text-gray-500 mt-2">
-                Run: <code className="bg-gray-900 px-1 rounded">bash install.sh [API_URL]</code>
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 p-3 bg-purple-900/20 border border-purple-500/30 rounded-lg">
-            <p className="text-sm text-purple-300">
-              <strong>Privacy:</strong> The agent only captures metadata (window titles, URLs, file paths) when a Shadow session is active.
-              No screenshots or keystrokes are recorded.
-            </p>
-          </div>
-
-          {/* Agent Status */}
-          <AgentStatus />
-        </div>
-
-        {/* Fitness System Prompt */}
-        <div className="mt-8 bg-card border border-card rounded-xl p-6">
-          <div className="flex items-center mb-4">
-            <svg className="w-6 h-6 text-orange-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-            <h3 className="text-lg font-medium text-white">Fitness System Prompt</h3>
+            <h3 className="text-lg font-medium text-white">Developer Tools</h3>
           </div>
 
           <p className="text-gray-400 text-sm mb-4">
-            Customize Sara's fitness coaching behavior. Use template variables to dynamically insert system information into the prompt.
+            Experimental features for testing and development.
           </p>
 
-          {/* Result Alert */}
-          {fitnessSaveResult && (
-            <div className={`mb-4 p-3 rounded-lg ${
-              fitnessSaveResult.success
-                ? 'bg-green-900/20 border border-green-500/30 text-green-400'
-                : 'bg-red-900/20 border border-red-500/30 text-red-400'
-            }`}>
-              <div className="flex items-center">
-                <div className="flex-shrink-0">
-                  {fitnessSaveResult.success ? (
-                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                    </svg>
-                  ) : (
-                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                    </svg>
-                  )}
+          <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🧪</span>
+                  <h4 className="text-white font-medium">Orchestrator Lab</h4>
                 </div>
-                <div className="ml-3">
-                  <p className="text-sm font-medium">{fitnessSaveResult.message}</p>
+                <p className="text-xs text-gray-400 mt-1">
+                  Test multi-agent task orchestration with live visualization
+                </p>
+                <div className="flex gap-4 mt-2 text-xs text-gray-500">
+                  <span>Orchestrator: <span className="text-teal-400">qwen3-vl:30b</span></span>
+                  <span>Workers: <span className="text-purple-400">ministral-3</span></span>
                 </div>
               </div>
+              <button
+                onClick={() => {
+                  // Navigate to orchestrator lab - this will be handled by parent
+                  const event = new CustomEvent('navigate', { detail: { view: 'orchestrator-lab' } })
+                  window.dispatchEvent(event)
+                }}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm font-medium flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Open Lab
+              </button>
             </div>
-          )}
-
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="fitnessPrompt" className="block text-sm font-medium text-gray-300 mb-2">
-                Custom System Prompt
-              </label>
-              <textarea
-                id="fitnessPrompt"
-                value={fitnessPrompt}
-                onChange={(e) => setFitnessPrompt(e.target.value)}
-                rows={8}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 text-white placeholder-gray-400 font-mono text-sm"
-                placeholder="You are a fitness coach. Today is {{SYSTEM_DATE}}..."
-              />
-              <p className="mt-2 text-xs text-gray-400">
-                This prompt will be used when Sara provides fitness-related suggestions and analysis.
-              </p>
-            </div>
-
-            <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-              <h4 className="text-sm font-medium text-white mb-2">Available Template Variables</h4>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_DATE}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_TIME}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_DAY_OF_WEEK}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_MONTH}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{SYSTEM_YEAR}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{USER_NAME}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{USER_EMAIL}}`}</code>
-                <code className="px-2 py-1 bg-gray-900 rounded text-blue-300">{`{{ASSISTANT_NAME}}`}</code>
-              </div>
-              <p className="mt-2 text-xs text-gray-400">
-                Variables are automatically replaced with current values when Sara processes your requests.
-              </p>
-            </div>
-
-            <button
-              onClick={handleSaveFitnessPrompt}
-              className="w-full px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition text-sm font-medium"
-            >
-              Save Fitness Prompt
-            </button>
           </div>
         </div>
 
@@ -873,31 +937,6 @@ export default function Settings() {
                 <p>Changes to these settings will affect how Sara processes your requests, generates responses, and creates push notifications. The notification model should be smaller/faster for quick message generation. Make sure your AI and embedding services are accessible before saving.</p>
                 <p className="mt-2"><strong>Auto-Save:</strong> URL and model settings are automatically saved to your browser's local storage as you type, so you don't need to re-enter them on each visit.</p>
               </div>
-            </div>
-
-            {/* Get To Know You (GTKY) */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Get To Know You (GTKY)</h3>
-              <p className="text-gray-400 text-sm mb-4">
-                Help Sara personalize your experience. You can start or revisit the GTKY interview any time.
-              </p>
-              {!showGTKY ? (
-                <button
-                  onClick={() => setShowGTKY(true)}
-                  className="px-4 py-2 bg-teal-600/20 text-teal-300 rounded-lg hover:bg-teal-600/30 text-sm"
-                >
-                  Start GTKY Interview
-                </button>
-              ) : (
-                <div className="mt-4">
-                  <GTKYTrigger
-                    onComplete={() => {
-                      setShowGTKY(false)
-                    }}
-                    personalityMode={'companion'}
-                  />
-                </div>
-              )}
             </div>
 
             {/* Memory Maintenance */}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sara Home Assistant Listener
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david/jarvis/backend
+Environment="HA_HOST=10.185.1.61"
+Environment="HA_PORT=8123"
+Environment="HA_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjODhkZGQ0ZWVlOWI0ODNjOTIwMTU1YTA0ZTM3YTk0NCIsImlhdCI6MTc2NTU2OTczNiwiZXhwIjoyMDgwOTI5NzM2fQ.oLO_hR-RzJFP-TsrKWEteDZbUReVEUdtENIeMAE5Teg"
+Environment="DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
+ExecStart=/usr/bin/python3 -m app.workers.ha_listener
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/david/jarvis/logs/ha_listener.log
+StandardError=append:/home/david/jarvis/logs/ha_listener.log
+
+[Install]
+WantedBy=multi-user.target

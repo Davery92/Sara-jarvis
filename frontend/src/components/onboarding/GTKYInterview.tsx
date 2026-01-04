@@ -45,14 +45,10 @@ interface GTKYResponse {
 
 interface GTKYInterviewProps {
   onComplete?: (profileSummary: string) => void;
-  onSpriteStateChange?: (state: string) => void;
-  personalityMode?: string;
 }
 
-export function GTKYInterview({ 
-  onComplete, 
-  onSpriteStateChange, 
-  personalityMode = 'companion' 
+export function GTKYInterview({
+  onComplete
 }: GTKYInterviewProps) {
   const [currentResponse, setCurrentResponse] = useState<GTKYResponse | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -65,37 +61,33 @@ export function GTKYInterview({
   const startInterview = useCallback(async () => {
     setLoading(true);
     setError(null);
-    
+
     try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/onboarding/gtky/start?personality_mode=${personalityMode}`, {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/onboarding/gtky/start`, {
         method: 'POST',
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
       });
-      
+
       if (!response.ok) {
         throw new Error(`Failed to start interview: ${response.statusText}`);
       }
-      
+
       const data: GTKYResponse = await response.json();
       setCurrentResponse(data);
-      
+
       if (data.session_id) {
         setSessionId(data.session_id);
       }
-      
-      if (data.sprite_state && onSpriteStateChange) {
-        onSpriteStateChange(data.sprite_state);
-      }
-      
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start interview');
     } finally {
       setLoading(false);
     }
-  }, [personalityMode, onSpriteStateChange]);
+  }, []);
 
   // Submit an answer
   const submitAnswer = useCallback(async (answer: any) => {

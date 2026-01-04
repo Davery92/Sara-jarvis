@@ -1,6 +1,6 @@
 """
 Food Search and Log Tool
-Parses natural language food descriptions, searches USDA database, and logs meals automatically
+Parses natural language food descriptions, searches FatSecret database, and logs meals automatically
 """
 from typing import Dict, Any, List, Optional, Tuple
 from app.tools.base import BaseTool, ToolResult
@@ -21,7 +21,7 @@ def get_fitness_db():
 
 
 class FoodSearchAndLogTool(BaseTool):
-    """Parse natural language food descriptions, search USDA, and log meals"""
+    """Parse natural language food descriptions, search FatSecret, and log meals"""
 
     @property
     def name(self) -> str:
@@ -31,9 +31,9 @@ class FoodSearchAndLogTool(BaseTool):
     def description(self) -> str:
         return ("PREFERRED TOOL for logging meals. Parse natural language food descriptions "
                 "(e.g., '3 eggs and 4oz ground beef' or 'chicken breast 6oz and rice 1 cup'), "
-                "automatically search USDA nutrition database for accurate data, calculate nutritional totals, "
+                "automatically search FatSecret nutrition database for accurate data, calculate nutritional totals, "
                 "and log the meal. Use this whenever the user mentions eating food in natural language. "
-                "This provides accurate USDA nutrition data instead of estimates.")
+                "This provides accurate FatSecret nutrition data instead of estimates.")
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -84,11 +84,11 @@ class FoodSearchAndLogTool(BaseTool):
             simple_items = []  # For food_items field
 
             for quantity, unit, food_name in food_items:
-                # Search USDA database
-                usda_result = await self._search_food(food_name)
+                # Search FatSecret database
+                fatsecret_result = await self._search_food(food_name)
 
-                if not usda_result:
-                    logger.warning(f"No USDA result found for: {food_name}")
+                if not fatsecret_result:
+                    logger.warning(f"No FatSecret result found for: {food_name}")
                     simple_items.append({
                         "name": food_name,
                         "quantity": quantity,
@@ -96,16 +96,14 @@ class FoodSearchAndLogTool(BaseTool):
                     })
                     continue
 
-                # Convert quantity to grams
-                grams = self._convert_to_grams(quantity, unit, food_name)
+                # FatSecret returns nutrition per serving, not per 100g
+                # So we scale by quantity (number of servings)
+                scaling_factor = quantity
 
-                # Scale nutrition from per-100g to actual quantity
-                scaling_factor = grams / 100.0
-
-                item_calories = (usda_result.get("calories") or 0) * scaling_factor
-                item_protein = (usda_result.get("protein") or 0) * scaling_factor
-                item_carbs = (usda_result.get("carbs") or 0) * scaling_factor
-                item_fats = (usda_result.get("fats") or 0) * scaling_factor
+                item_calories = (fatsecret_result.get("calories") or 0) * scaling_factor
+                item_protein = (fatsecret_result.get("protein") or 0) * scaling_factor
+                item_carbs = (fatsecret_result.get("carbs") or 0) * scaling_factor
+                item_fats = (fatsecret_result.get("fats") or 0) * scaling_factor
 
                 # Add to totals
                 total_calories += item_calories
@@ -115,29 +113,29 @@ class FoodSearchAndLogTool(BaseTool):
 
                 # Store detailed item
                 detailed_items.append({
-                    "food_id": usda_result.get("id"),
-                    "name": usda_result.get("name"),
+                    "food_id": fatsecret_result.get("id"),
+                    "name": fatsecret_result.get("name"),
                     "quantity": quantity,
-                    "unit": unit or "g",
-                    "grams": round(grams, 1),
+                    "unit": unit or fatsecret_result.get("serving_unit", "serving"),
+                    "serving_description": fatsecret_result.get("serving_description"),
                     "calories": round(item_calories, 1),
                     "protein": round(item_protein, 1),
                     "carbs": round(item_carbs, 1),
                     "fats": round(item_fats, 1),
-                    "source": "usda"
+                    "source": "fatsecret"
                 })
 
                 # Simple item for food_items field
                 simple_items.append({
-                    "name": usda_result.get("name"),
+                    "name": fatsecret_result.get("name"),
                     "quantity": quantity,
-                    "unit": unit or "g"
+                    "unit": unit or fatsecret_result.get("serving_unit", "serving")
                 })
 
             if not detailed_items:
                 return ToolResult(
                     success=False,
-                    message="Could not find any matching foods in the USDA database. Please try again with different food names."
+                    message="Could not find any matching foods in the FatSecret database. Please try again with different food names."
                 )
 
             # Log to database
@@ -217,25 +215,25 @@ class FoodSearchAndLogTool(BaseTool):
         return food_items
 
     async def _search_food(self, food_name: str) -> Optional[Dict[str, Any]]:
-        """Search USDA database for a food item"""
+        """Search FatSecret database for a food item"""
         try:
-            from app.routes.food_database import search_usda_foods
+            from app.services.fatsecret_service import get_fatsecret_service
 
-            # Search USDA
-            results = await search_usda_foods(food_name, limit=1)
+            service = get_fatsecret_service()
+            results, total = await service.search_foods(food_name, page=0, max_results=1)
 
             if results and len(results) > 0:
                 # Return the first (best) match
                 food = results[0]
                 return {
-                    "id": food.id,
-                    "name": food.name,
-                    "calories": food.calories,
-                    "protein": food.protein,
-                    "carbs": food.carbs,
-                    "fats": food.fats,
-                    "fiber": food.fiber,
-                    "sugar": food.sugar
+                    "id": food.get("food_id"),
+                    "name": food.get("food_name"),
+                    "calories": food.get("calories"),
+                    "protein": food.get("protein"),
+                    "carbs": food.get("carbs"),
+                    "fats": food.get("fat"),
+                    "serving_description": food.get("serving_description"),
+                    "serving_unit": food.get("serving_description", "serving")
                 }
 
             return None
@@ -325,7 +323,7 @@ class FoodSearchAndLogTool(BaseTool):
                 "protein": round(protein, 1),
                 "carbs": round(carbs, 1),
                 "fats": round(fats, 1),
-                "notes": "Auto-logged via USDA search",
+                "notes": "Auto-logged via FatSecret search",
                 "logged_at": datetime.now()
             })
 

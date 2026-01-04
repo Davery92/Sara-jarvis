@@ -34,11 +34,26 @@ export interface UserPreferences {
   notifications_enabled?: boolean;
 }
 
+// Content types for multimodal messages
+export interface TextContent {
+  type: 'text';
+  text: string;
+}
+
+export interface ImageContent {
+  type: 'image';
+  data: string;  // Base64 encoded
+  media_type: string;  // e.g., 'image/jpeg'
+}
+
+export type MessageContent = string | (TextContent | ImageContent)[];
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
-  content: string;
+  content: MessageContent;
   created_at: string;
+  episode_id?: string;  // For rating episodes
   metadata?: Record<string, any>;
   attachments?: Attachment[];
 }
@@ -172,4 +187,134 @@ export interface Recipe {
   fats?: number;
   created_at: string;
   updated_at: string;
+}
+
+// Project Tracker Types
+export interface Project {
+  id: string;
+  name: string;
+  prefix: string;
+  description?: string;
+  tech_stack?: string;
+  business_context?: string;
+  github_repo_owner?: string;
+  github_repo_name?: string;
+  github_repo_url?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  task_counts?: Record<string, number>;
+}
+
+export interface Task {
+  id: string;
+  project_id: string;
+  task_number: number;
+  tag: string;
+  title: string;
+  description?: string;
+  task_type: 'feature' | 'bug' | 'task' | 'chore';
+  status: 'backlog' | 'in_progress' | 'in_qa' | 'completed';
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  tags?: string[];
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+  commit_count: number;
+}
+
+export interface TaskBoard {
+  backlog: Task[];
+  in_progress: Task[];
+  in_qa: Task[];
+  completed: Task[];
+  total: number;
+}
+
+export interface Commit {
+  id: string;
+  sha: string;
+  short_sha: string;
+  message: string;
+  author_name?: string;
+  author_email?: string;
+  committed_at: string;
+  branch?: string;
+  additions?: number;
+  deletions?: number;
+  linked_tasks: string[];
+}
+
+export interface QAChecklistItem {
+  id: string;
+  label: string;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface QAPendingCommit {
+  id: string;
+  sha: string;
+  message: string;
+  author_name?: string;
+  committed_at: string;
+  qa_status?: string;
+}
+
+export interface QAPendingTask {
+  task_id: string;
+  task_tag: string;
+  task_title: string;
+  commits: QAPendingCommit[];
+}
+
+// Project Files Types
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectFile {
+  id: string;
+  filename: string;
+  folder_id: string | null;
+  mime_type: string | null;
+  file_size: number;
+  file_size_formatted: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileListResponse {
+  files: ProjectFile[];
+  folders: ProjectFolder[];
+  total_files: number;
+  total_folders: number;
+  current_folder_id: string | null;
+  breadcrumb: ProjectFolder[];
+}
+
+// Background Task Types
+export interface BackgroundTask {
+  id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'needs_clarification';
+  task_type: string;
+  original_query: string;
+  result_note_id: string | null;
+  workspace_folder_id: string | null;
+  clarification_question: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface BackgroundTasksResponse {
+  tasks: BackgroundTask[];
 }

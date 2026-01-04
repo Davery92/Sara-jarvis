@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
@@ -7,8 +7,12 @@ import { APP_CONFIG } from '../config'
 import { apiClient } from '../api/client'
 import type { Document } from '../api/client'
 import MermaidDiagram from './MermaidDiagram'
-import { ttsService } from '../services/tts'
 import StarRating from './StarRating'
+import { CanvasPanel } from './canvas/CanvasPanel'
+import { useArtifacts } from './canvas/hooks/useArtifacts'
+import { NoteSelectorModal } from './canvas/NoteSelectorModal'
+import { Code, FileText, GitBranch, Maximize2, StickyNote } from 'lucide-react'
+import { ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
 
 interface Conversation {
   id: string
@@ -18,13 +22,105 @@ interface Conversation {
   user_id: string
 }
 
+interface AttachedImage {
+  data: string      // Base64 encoded image data
+  type: string      // MIME type (e.g., "image/jpeg")
+  preview: string   // Data URL for preview display
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
-  content: string
+  content: string | Array<{type: string, text?: string, data?: string, media_type?: string}>
   timestamp: Date
   citations?: any[]
   attachedDocuments?: Document[]
+  attachedImages?: AttachedImage[]
   episode_id?: string
+  artifacts?: ParsedArtifact[]
+}
+
+// Parsed artifact from message content
+interface ParsedArtifact {
+  id: string
+  type: 'code' | 'diagram' | 'document'
+  title: string
+  content: string
+  language?: string
+}
+
+// Extract artifacts from message content
+function parseArtifacts(content: string): { cleanContent: string; artifacts: ParsedArtifact[] } {
+  const artifacts: ParsedArtifact[] = []
+
+  // Match ```artifact:type blocks
+  const artifactRegex = /```artifact:(code|diagram|document)(?:\s+title="([^"]*)")?(?:\s+language="([^"]*)")?\n([\s\S]*?)```/g
+
+  let cleanContent = content
+  let match
+
+  while ((match = artifactRegex.exec(content)) !== null) {
+    const [fullMatch, type, title, language, artifactContent] = match
+
+    artifacts.push({
+      id: `artifact-${Date.now()}-${artifacts.length}`,
+      type: type as 'code' | 'diagram' | 'document',
+      title: title || `${type.charAt(0).toUpperCase() + type.slice(1)} Artifact`,
+      content: artifactContent.trim(),
+      language: language || (type === 'code' ? 'javascript' : undefined)
+    })
+
+    // Replace the artifact block with a placeholder
+    cleanContent = cleanContent.replace(fullMatch, `[Artifact: ${title || type}]`)
+  }
+
+  return { cleanContent, artifacts }
+}
+
+// Artifact preview card component
+const ArtifactCard: React.FC<{
+  artifact: ParsedArtifact
+  onExpand: () => void
+}> = ({ artifact, onExpand }) => {
+  const getIcon = () => {
+    switch (artifact.type) {
+      case 'code': return <Code size={18} />
+      case 'diagram': return <GitBranch size={18} />
+      case 'document': return <FileText size={18} />
+    }
+  }
+
+  const getPreview = () => {
+    const lines = artifact.content.split('\n').slice(0, 3)
+    return lines.join('\n') + (artifact.content.split('\n').length > 3 ? '\n...' : '')
+  }
+
+  return (
+    <div
+      className="mt-3 bg-gray-800 border border-gray-600 rounded-lg overflow-hidden cursor-pointer hover:border-teal-500 transition-colors"
+      onClick={onExpand}
+    >
+      <div className="flex items-center justify-between px-3 py-2 bg-gray-700 border-b border-gray-600">
+        <div className="flex items-center gap-2 text-gray-300">
+          {getIcon()}
+          <span className="text-sm font-medium">{artifact.title}</span>
+          {artifact.language && (
+            <span className="text-xs px-1.5 py-0.5 bg-gray-600 rounded text-gray-400">
+              {artifact.language}
+            </span>
+          )}
+        </div>
+        <button
+          className="p-1 hover:bg-gray-600 rounded text-gray-400 hover:text-white"
+          title="Open in Canvas"
+        >
+          <Maximize2 size={14} />
+        </button>
+      </div>
+      <pre className="p-3 text-xs text-gray-400 font-mono overflow-hidden max-h-20">
+        {getPreview()}
+      </pre>
+    </div>
+  )
 }
 
 interface ChatInterfaceProps {
@@ -57,9 +153,62 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [isUploading, setIsUploading] = useState(false)
   const [speakingMessageIndex, setSpeakingMessageIndex] = useState<number | null>(null)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [canvasPanelOpen, setCanvasPanelOpen] = useState(false)
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null)
+  const [pendingArtifact, setPendingArtifact] = useState<ParsedArtifact | null>(null)
+  const [showNoteSelector, setShowNoteSelector] = useState(false)
+  const [canvasNoteContent, setCanvasNoteContent] = useState<NoteContent | null>(null)
+  const [canvasWidth, setCanvasWidth] = useState(50) // percentage
+  const [isResizing, setIsResizing] = useState(false)
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
+  const [showImageMenu, setShowImageMenu] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
+  const imageMenuRef = useRef<HTMLDivElement>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
   const hasLoadedHistory = useRef(false)
+
+  // Artifacts hook for creating/managing artifacts
+  const { createArtifact, artifacts } = useArtifacts({ conversationId: currentConversationId || undefined })
+
+  // Handle opening an artifact in the canvas panel
+  const handleOpenArtifact = useCallback(async (artifact: ParsedArtifact) => {
+    // Create the artifact in the backend
+    const artifactType = artifact.type
+
+    let content: any
+    if (artifact.type === 'code') {
+      content = { code: artifact.content, language: artifact.language || 'javascript' }
+    } else if (artifact.type === 'diagram') {
+      content = { source: artifact.content, diagram_type: 'mermaid' }
+    } else {
+      content = { content: artifact.content, format: 'markdown' }
+    }
+
+    try {
+      const newArtifact = await createArtifact(
+        artifactType,
+        artifact.title,
+        content
+      )
+
+      if (newArtifact) {
+        setSelectedArtifactId(newArtifact.id)
+        setCanvasPanelOpen(true)
+      } else {
+        // Still show panel with pending artifact for preview
+        setPendingArtifact(artifact)
+        setCanvasPanelOpen(true)
+      }
+    } catch (error) {
+      console.error('Failed to create artifact:', error)
+      // Still show panel with pending artifact for preview
+      setPendingArtifact(artifact)
+      setCanvasPanelOpen(true)
+    }
+  }, [createArtifact])
 
   // Load conversation history on mount
   useEffect(() => {
@@ -172,14 +321,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // Fetch episode IDs for messages (for rating functionality)
   useEffect(() => {
-    const fetchEpisodeIds = async () => {
-      if (!currentConversationId || messages.length === 0) return
+    // Skip if loading/streaming to avoid aborted requests
+    if (loading || !currentConversationId || messages.length === 0) return
 
+    const controller = new AbortController()
+
+    const fetchEpisodeIds = async () => {
       try {
         const response = await fetch(`${APP_CONFIG.apiUrl}/api/episodes/find-by-content`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
+          signal: controller.signal,
           body: JSON.stringify({
             conversation_id: currentConversationId,
             messages: messages.map(m => ({ role: m.role, content: m.content }))
@@ -197,14 +350,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           }
         }
       } catch (error) {
+        // Ignore abort errors - they're expected when component updates
+        if (error instanceof Error && error.name === 'AbortError') return
         console.error('Error fetching episode IDs:', error)
       }
     }
 
     // Debounce to avoid excessive API calls
-    const timeoutId = setTimeout(fetchEpisodeIds, 1000)
-    return () => clearTimeout(timeoutId)
-  }, [currentConversationId, messages.length])
+    const timeoutId = setTimeout(fetchEpisodeIds, 1500)
+    return () => {
+      clearTimeout(timeoutId)
+      controller.abort()
+    }
+  }, [currentConversationId, messages.length, loading])
 
   // Handle document upload for chat context
   const handleDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -239,10 +397,81 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setUploadedDocuments(prev => prev.filter(doc => doc.id !== docId))
   }
 
+  // Handle image selection from gallery
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    if (!file.type.startsWith('image/')) {
+      console.error('Selected file is not an image')
+      return
+    }
+
+    // Convert to base64
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      const base64 = result.split(',')[1]
+      setAttachedImages(prev => [...prev, {
+        data: base64,
+        type: file.type,
+        preview: result
+      }])
+    }
+    reader.readAsDataURL(file)
+
+    // Reset input
+    if (imageInputRef.current) {
+      imageInputRef.current.value = ''
+    }
+  }
+
+  // Handle camera capture (same logic, just different input)
+  const handleCameraCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      const base64 = result.split(',')[1]
+      setAttachedImages(prev => [...prev, {
+        data: base64,
+        type: file.type,
+        preview: result
+      }])
+    }
+    reader.readAsDataURL(file)
+
+    if (cameraInputRef.current) {
+      cameraInputRef.current.value = ''
+    }
+  }
+
+  // Remove attached image
+  const removeAttachedImage = (index: number) => {
+    setAttachedImages(prev => prev.filter((_, i) => i !== index))
+  }
+
+  // Close image menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (imageMenuRef.current && !imageMenuRef.current.contains(event.target as Node)) {
+        setShowImageMenu(false)
+      }
+    }
+    if (showImageMenu) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showImageMenu])
+
   // Enhanced send message with tool activity tracking
   const handleSendMessage = async (e: React.FormEvent, isQuickChat = false) => {
     e.preventDefault()
-    if ((!message.trim() && uploadedDocuments.length === 0) || loading) return
+    if ((!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0) || loading) return
     
     // If parent provided onSendMessage, use it
     if (onSendMessage) {
@@ -258,18 +487,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     // Create new abort controller for this request
     abortControllerRef.current = new AbortController()
 
-    // Create user message with attached documents
-    const userMessage = { 
-      role: 'user' as const, 
-      content: message, 
+    // Create user message with attached documents and images
+    const userMessage: ChatMessage = {
+      role: 'user' as const,
+      content: message,
       timestamp: new Date(),
-      attachedDocuments: uploadedDocuments.length > 0 ? [...uploadedDocuments] : undefined
+      attachedDocuments: uploadedDocuments.length > 0 ? [...uploadedDocuments] : undefined,
+      attachedImages: attachedImages.length > 0 ? [...attachedImages] : undefined
     }
     setMessages(prev => [...prev, userMessage])
     setMessage('')
-    
-    // Clear uploaded documents after sending
+
+    // Clear uploaded documents and images after sending
     setUploadedDocuments([])
+    setAttachedImages([])
     setIsLoading(true)
     // Sprite: indicate listening state when sending
     setIsUsingTools(false)
@@ -295,8 +526,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         }
       }
 
-      // Best-effort save of user's message to memory
-      saveTrace(userMessage.content, 'user')
+      // Best-effort save of user's message to memory (text only)
+      const textContent = typeof userMessage.content === 'string'
+        ? userMessage.content
+        : (userMessage.content as any[]).find(c => c.type === 'text')?.text || ''
+      saveTrace(textContent, 'user')
+
       const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -304,17 +539,36 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         signal: abortControllerRef.current.signal,
         body: JSON.stringify({
           messages: [...messages, userMessage].map(m => {
-            let messageContent = m.content
-            
+            // Get text content
+            let textContent = typeof m.content === 'string' ? m.content : ''
+            if (Array.isArray(m.content)) {
+              textContent = m.content.find((c: any) => c.type === 'text')?.text || ''
+            }
+
             // If this message has attached documents, prepend their content
             if (m.attachedDocuments && m.attachedDocuments.length > 0) {
               const documentContext = m.attachedDocuments
                 .map(doc => `[Document: ${doc.title || doc.original_filename}]\n${doc.content_text || 'Content could not be extracted'}\n[End of ${doc.title || doc.original_filename}]`)
                 .join('\n\n')
-              messageContent = `${documentContext}\n\n${m.content}`
+              textContent = `${documentContext}\n\n${textContent}`
             }
-            
-            return { role: m.role, content: messageContent }
+
+            // If this message has attached images, use multimodal format
+            if (m.attachedImages && m.attachedImages.length > 0) {
+              const multimodalContent: Array<{type: string, text?: string, data?: string, media_type?: string}> = [
+                // Add images first
+                ...m.attachedImages.map(img => ({
+                  type: 'image',
+                  data: img.data,
+                  media_type: img.type
+                })),
+                // Then add text
+                { type: 'text', text: textContent }
+              ]
+              return { role: m.role, content: multimodalContent }
+            }
+
+            return { role: m.role, content: textContent }
           }),
           conversation_id: currentConversationId
         })
@@ -446,6 +700,40 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setToolActivity('')
                     setIsLoading(false)
                     break
+
+                  case 'canvas_command':
+                    console.log('📐 CANVAS_COMMAND event received:', eventData.data)
+                    const canvasData = eventData.data as CanvasCommand
+                    if (canvasData.canvas_command === 'open') {
+                      if (canvasData.artifact_type === 'note' && canvasData.content) {
+                        // Opening a note - use the note content directly
+                        setCanvasNoteContent(canvasData.content as NoteContent)
+                        setSelectedArtifactId(null)
+                        setPendingArtifact(null)
+                        setCanvasPanelOpen(true)
+                      } else if (canvasData.artifact_type && canvasData.content) {
+                        // Opening other content types - create as pending artifact
+                        const artifactContent = {
+                          type: canvasData.artifact_type,
+                          title: canvasData.title || 'Canvas',
+                          content: canvasData.content
+                        }
+                        setPendingArtifact(artifactContent as any)
+                        setCanvasNoteContent(null)
+                        setCanvasPanelOpen(true)
+                      }
+                    } else if (canvasData.canvas_command === 'update') {
+                      // Update current canvas content
+                      if (canvasNoteContent && canvasData.content) {
+                        setCanvasNoteContent(prev => prev ? { ...prev, ...canvasData.content as NoteContent } : null)
+                      }
+                    } else if (canvasData.canvas_command === 'close') {
+                      setCanvasPanelOpen(false)
+                      setSelectedArtifactId(null)
+                      setPendingArtifact(null)
+                      setCanvasNoteContent(null)
+                    }
+                    break
                 }
               } catch (e) {
                 console.warn('Failed to parse SSE data:', dataLine)
@@ -481,27 +769,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   }
 
-  // Handle text-to-speech for messages
+  // Handle text-to-speech for messages (disabled - use iOS app for voice)
   const handleSpeak = async (text: string, messageIndex: number) => {
-    try {
-      // If already speaking this message, stop it
-      if (speakingMessageIndex === messageIndex) {
-        ttsService.stop()
-        setSpeakingMessageIndex(null)
-        return
-      }
-
-      // Stop any currently playing audio
-      ttsService.stop()
-
-      // Start speaking
-      setSpeakingMessageIndex(messageIndex)
-      await ttsService.speak(text)
-      setSpeakingMessageIndex(null)
-    } catch (error) {
-      console.error('[TTS] Error:', error)
-      setSpeakingMessageIndex(null)
-    }
+    // TTS disabled on web - use iOS app for voice features
+    console.log('[TTS] Web TTS disabled - use iOS app for voice')
   }
 
   // Handle new chat - clear conversation and start fresh
@@ -523,10 +794,47 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   }
 
+  // Handle resize of chat/canvas panels
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }, [])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!containerRef.current) return
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newChatWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100
+      // Clamp between 25% and 75%
+      const clampedWidth = Math.max(25, Math.min(75, newChatWidth))
+      setCanvasWidth(100 - clampedWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing])
+
   return (
-    <div className="relative flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden">
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+    <div
+      ref={containerRef}
+      className={`relative flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden ${isResizing ? 'select-none' : ''}`}
+    >
+      {/* Main Chat Area - shrinks when canvas is open */}
+      <div
+        className={`flex flex-col min-w-0 ${!isResizing ? 'transition-all duration-300' : ''}`}
+        style={{ width: canvasPanelOpen ? `${100 - canvasWidth}%` : '100%' }}
+      >
         {/* Header */}
         <div className="p-4 border-b border-gray-700 flex items-center justify-between bg-gray-800">
           <h2 className="text-lg font-semibold">Chat with Sara</h2>
@@ -560,94 +868,114 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     ? 'bg-teal-600 text-white ml-auto' 
                     : 'bg-gray-700 text-gray-100'
                 }`}>
-                  {msg.role === 'assistant' ? (
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      skipHtml={false}
-                      components={{
-                        code({node, inline, className, children, ...props}) {
-                          const match = /language-(\w+)/.exec(className || '')
-                          const language = match ? match[1] : ''
-                          const codeContent = String(children).replace(/\n$/, '')
-                          
-                          // Handle Mermaid diagrams
-                          if (!inline && language === 'mermaid') {
-                            return (
-                              <MermaidDiagram 
-                                chart={codeContent} 
-                                id={`mermaid-${Date.now()}-${Math.random()}`} 
-                              />
-                            )
-                          }
-                          
-                          // Handle regular code blocks
-                          return !inline && match ? (
-                            <SyntaxHighlighter
-                              style={oneDark}
-                              language={language}
-                              PreTag="div"
-                              className="rounded-md mt-2"
-                              {...props}
-                            >
-                              {codeContent}
-                            </SyntaxHighlighter>
-                          ) : (
-                            <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...props}>
-                              {children}
-                            </code>
-                          )
-                        },
-                        p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                        ul: ({children}) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
-                        ol: ({children}) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
-                        blockquote: ({children}) => (
-                          <blockquote className="border-l-4 border-gray-500 pl-4 italic my-2">
-                            {children}
-                          </blockquote>
-                        ),
-                        h1: ({children}) => <h1 className="text-xl font-bold mb-2">{children}</h1>,
-                        h2: ({children}) => <h2 className="text-lg font-bold mb-2">{children}</h2>,
-                        h3: ({children}) => <h3 className="text-md font-bold mb-2">{children}</h3>,
-                        hr: () => <hr className="border-gray-600 my-4" />,
-                        a: ({href, children}) => {
-                          if (href && href.startsWith('#')) {
-                            return (
-                              <span className="inline-block px-1.5 py-0.5 text-xs bg-teal-600/20 border border-teal-500/30 rounded text-teal-400 hover:bg-teal-600/30 cursor-pointer transition-colors">
+                  {msg.role === 'assistant' ? (() => {
+                    // Parse artifacts from content
+                    const { cleanContent, artifacts: parsedArtifacts } = parseArtifacts(msg.content)
+
+                    return (
+                      <>
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          skipHtml={false}
+                          components={{
+                            code({node, inline, className, children, ...props}) {
+                              const match = /language-(\w+)/.exec(className || '')
+                              const language = match ? match[1] : ''
+                              const codeContent = String(children).replace(/\n$/, '')
+
+                              // Handle Mermaid diagrams
+                              if (!inline && language === 'mermaid') {
+                                return (
+                                  <MermaidDiagram
+                                    chart={codeContent}
+                                    id={`mermaid-${Date.now()}-${Math.random()}`}
+                                  />
+                                )
+                              }
+
+                              // Handle regular code blocks
+                              return !inline && match ? (
+                                <SyntaxHighlighter
+                                  style={oneDark}
+                                  language={language}
+                                  PreTag="div"
+                                  className="rounded-md mt-2"
+                                  {...props}
+                                >
+                                  {codeContent}
+                                </SyntaxHighlighter>
+                              ) : (
+                                <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...props}>
+                                  {children}
+                                </code>
+                              )
+                            },
+                            p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                            ul: ({children}) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
+                            ol: ({children}) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
+                            blockquote: ({children}) => (
+                              <blockquote className="border-l-4 border-gray-500 pl-4 italic my-2">
                                 {children}
-                              </span>
-                            )
-                          }
-                          return (
-                            <a href={href} className="text-teal-400 hover:text-teal-300 underline" target="_blank" rel="noopener noreferrer">
-                              {children}
-                            </a>
-                          )
-                        },
-                        table: ({children}) => (
-                          <div className="overflow-x-auto my-4">
-                            <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
-                              {children}
-                            </table>
+                              </blockquote>
+                            ),
+                            h1: ({children}) => <h1 className="text-xl font-bold mb-2">{children}</h1>,
+                            h2: ({children}) => <h2 className="text-lg font-bold mb-2">{children}</h2>,
+                            h3: ({children}) => <h3 className="text-md font-bold mb-2">{children}</h3>,
+                            hr: () => <hr className="border-gray-600 my-4" />,
+                            a: ({href, children}) => {
+                              if (href && href.startsWith('#')) {
+                                return (
+                                  <span className="inline-block px-1.5 py-0.5 text-xs bg-teal-600/20 border border-teal-500/30 rounded text-teal-400 hover:bg-teal-600/30 cursor-pointer transition-colors">
+                                    {children}
+                                  </span>
+                                )
+                              }
+                              return (
+                                <a href={href} className="text-teal-400 hover:text-teal-300 underline" target="_blank" rel="noopener noreferrer">
+                                  {children}
+                                </a>
+                              )
+                            },
+                            table: ({children}) => (
+                              <div className="overflow-x-auto my-4">
+                                <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
+                                  {children}
+                                </table>
+                              </div>
+                            ),
+                            thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
+                            tbody: ({children}) => <tbody>{children}</tbody>,
+                            tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
+                            th: ({children}) => (
+                              <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
+                                {children}
+                              </th>
+                            ),
+                            td: ({children}) => (
+                              <td className="border border-gray-600 px-3 py-2 text-gray-300">
+                                {children}
+                              </td>
+                            ),
+                          }}
+                        >
+                          {cleanContent}
+                        </ReactMarkdown>
+
+                        {/* Render artifact cards */}
+                        {parsedArtifacts.length > 0 && (
+                          <div className="mt-3 space-y-2">
+                            {parsedArtifacts.map((artifact) => (
+                              <ArtifactCard
+                                key={artifact.id}
+                                artifact={artifact}
+                                onExpand={() => handleOpenArtifact(artifact)}
+                              />
+                            ))}
                           </div>
-                        ),
-                        thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
-                        tbody: ({children}) => <tbody>{children}</tbody>,
-                        tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
-                        th: ({children}) => (
-                          <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
-                            {children}
-                          </th>
-                        ),
-                        td: ({children}) => (
-                          <td className="border border-gray-600 px-3 py-2 text-gray-300">
-                            {children}
-                          </td>
-                        ),
-                      }}
-                    >
-                      {msg.content}
-                    </ReactMarkdown>
-                  ) : (
+                        )}
+                      </>
+                    )
+                  })() : (
                     <p>{msg.content}</p>
                   )}
                   
@@ -777,7 +1105,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
               </div>
             </div>
           )}
-          
+
+          {/* Attached Images Preview */}
+          {attachedImages.length > 0 && (
+            <div className="p-4 border-b border-gray-700">
+              <div className="text-xs text-gray-400 mb-2">Attached Images:</div>
+              <div className="flex flex-wrap gap-2">
+                {attachedImages.map((img, idx) => (
+                  <div key={idx} className="relative group">
+                    <img
+                      src={img.preview}
+                      alt={`Attached ${idx + 1}`}
+                      className="h-16 w-16 object-cover rounded-lg border border-gray-600"
+                    />
+                    <button
+                      onClick={() => removeAttachedImage(idx)}
+                      className="absolute -top-1 -right-1 bg-red-500 hover:bg-red-600 rounded-full w-5 h-5 flex items-center justify-center text-white text-xs transition-colors"
+                      type="button"
+                    >
+                      <span className="material-icons text-xs">close</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <form onSubmit={handleSendMessage} className="p-3 md:p-4">
             <div className="flex space-x-2 md:space-x-4">
               <input
@@ -789,7 +1142,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 disabled={isLoading}
               />
               
-              {/* Hidden file input */}
+              {/* Hidden file inputs */}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -797,8 +1150,62 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 accept=".pdf,.doc,.docx,.txt,.md"
                 className="hidden"
               />
-              
-              {/* File upload button */}
+              <input
+                ref={imageInputRef}
+                type="file"
+                onChange={handleImageSelect}
+                accept="image/*"
+                className="hidden"
+              />
+              <input
+                ref={cameraInputRef}
+                type="file"
+                onChange={handleCameraCapture}
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+              />
+
+              {/* Image menu button */}
+              <div className="relative" ref={imageMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowImageMenu(!showImageMenu)}
+                  disabled={isLoading}
+                  className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 rounded-lg transition-colors flex items-center tap-target"
+                  title="Add image"
+                >
+                  <span className="material-icons">add_photo_alternate</span>
+                </button>
+                {showImageMenu && (
+                  <div className="absolute bottom-full left-0 mb-2 bg-gray-700 rounded-lg shadow-lg border border-gray-600 overflow-hidden z-50">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        imageInputRef.current?.click()
+                        setShowImageMenu(false)
+                      }}
+                      className="w-full px-4 py-2 text-left text-white hover:bg-gray-600 flex items-center gap-2 whitespace-nowrap"
+                    >
+                      <span className="material-icons text-sm">photo_library</span>
+                      Choose from gallery
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        cameraInputRef.current?.click()
+                        setShowImageMenu(false)
+                      }}
+                      className="w-full px-4 py-2 text-left text-white hover:bg-gray-600 flex items-center gap-2 whitespace-nowrap"
+                    >
+                      <span className="material-icons text-sm">photo_camera</span>
+                      Take a photo
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Document upload button */}
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -812,10 +1219,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   <span className="material-icons">attach_file</span>
                 )}
               </button>
-              
+
+              {/* Open Note in Canvas button */}
+              <button
+                type="button"
+                onClick={() => setShowNoteSelector(true)}
+                disabled={isLoading}
+                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 rounded-lg transition-colors flex items-center tap-target"
+                title="Open note in canvas"
+              >
+                <StickyNote size={20} />
+              </button>
+
               <button
                 type="submit"
-                disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0)}
+                disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0)}
                 className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-4 md:px-6 rounded-lg transition-colors flex items-center tap-target"
               >
                 <span className="material-icons">send</span>
@@ -824,6 +1242,61 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           </form>
         </div>
       </div>
+
+      {/* Resizable Divider */}
+      {canvasPanelOpen && (
+        <div
+          className="w-1 bg-gray-700 hover:bg-teal-500 cursor-col-resize flex-shrink-0 transition-colors group relative"
+          onMouseDown={handleResizeStart}
+        >
+          <div className="absolute inset-y-0 -left-1 -right-1 group-hover:bg-teal-500/20" />
+        </div>
+      )}
+
+      {/* Canvas Panel for Artifacts */}
+      <CanvasPanel
+        isOpen={canvasPanelOpen}
+        onClose={() => {
+          setCanvasPanelOpen(false)
+          setSelectedArtifactId(null)
+          setPendingArtifact(null)
+          setCanvasNoteContent(null)
+        }}
+        artifactId={selectedArtifactId}
+        conversationId={currentConversationId || undefined}
+        width={canvasWidth}
+        isResizing={isResizing}
+        directArtifact={canvasNoteContent ? {
+          id: `note-${canvasNoteContent.note_id}`,
+          user_id: '',
+          artifact_type: 'note',
+          title: canvasNoteContent.title || 'Untitled',
+          content: canvasNoteContent,
+          metadata: null,
+          conversation_id: null,
+          episode_id: null,
+          is_pinned: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        } : null}
+      />
+
+      {/* Note Selector Modal */}
+      <NoteSelectorModal
+        isOpen={showNoteSelector}
+        onClose={() => setShowNoteSelector(false)}
+        onSelectNote={(note) => {
+          setCanvasNoteContent({
+            note_id: note.id,
+            title: note.title,
+            content: note.content,
+            folder_id: note.folder_id
+          })
+          setSelectedArtifactId(null)
+          setPendingArtifact(null)
+          setCanvasPanelOpen(true)
+        }}
+      />
     </div>
   )
 }

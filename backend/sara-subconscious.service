@@ -1,0 +1,36 @@
+[Unit]
+Description=Sara Subconscious - Background mental model service
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=david
+Group=david
+WorkingDirectory=/home/david/jarvis/backend
+
+# Environment
+Environment=PYTHONPATH=/home/david/jarvis/backend
+Environment=DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub
+Environment=OPENAI_BASE_URL=http://100.104.68.115:11434/v1
+Environment=OPENAI_MODEL=gpt-oss:120b
+Environment=OPENAI_API_KEY=dummy
+Environment=LLM_PRIMARY_URL=http://100.104.68.115:11434/v1
+Environment=LLM_FALLBACK_URL=http://100.104.68.115:11435/v1
+Environment=EMBEDDING_BASE_URL=http://100.104.68.115:11434
+Environment=EMBEDDING_MODEL=bge-m3
+Environment=EMBEDDING_DIM=1024
+
+# Run the subconscious worker
+ExecStart=/usr/bin/python3 -m app.workers.subconscious_worker
+
+# Restart policy
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=append:/home/david/jarvis/logs/subconscious_worker.log
+StandardError=append:/home/david/jarvis/logs/subconscious_worker.log
+
+[Install]
+WantedBy=multi-user.target

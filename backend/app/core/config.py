@@ -11,13 +11,23 @@ class Settings(BaseSettings):
     backend_url: str = "https://sara.avery.cloud/api"
     
     # LLM Configuration
-    ai_provider: str = "local"  # Options: local, gemini, openai, custom
+    ai_provider: str = "local"  # Options: local, gemini, openai, claude, custom
     openai_base_url: str = "http://100.104.68.115:11434/v1"
     openai_model: str = "gpt-oss:120b"
     openai_api_key: str = "dummy"
+    anthropic_api_key: str = ""  # Separate key for Anthropic Claude API
+    gemini_api_key: str = ""  # Separate key for Google Gemini API
     embedding_base_url: str = "http://10.185.1.8:11434"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
+
+    # LLM Failover Configuration
+    llm_primary_url: str = "http://100.104.68.115:11434/v1"
+    llm_fallback_url: str = "http://10.185.1.8:11434/v1"
+    llm_request_timeout: float = 8.0  # Short timeout for failover detection
+    llm_health_check_interval: int = 30  # seconds between health checks
+    llm_health_check_timeout: float = 5.0  # timeout for health check requests
+    llm_recovery_checks_required: int = 3  # successful checks to mark as healthy
     
     # Search / Reranker / Caching
     search_provider: str = "tavily"  # Options: searxng, tavily
@@ -61,10 +71,15 @@ class Settings(BaseSettings):
     minio_url: str = "http://minio:9000"
     minio_bucket: str = "sara-docs"
     minio_access_key: str = "sara"
-    minio_secret_key: str = "sara123"
+    minio_secret_key: str = "sara1234"
     
     # Scheduling
     timezone: str = "America/New_York"
+
+    # Home Assistant
+    ha_host: str = "10.185.1.61"
+    ha_port: int = 8123
+    ha_token: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjODhkZGQ0ZWVlOWI0ODNjOTIwMTU1YTA0ZTM3YTk0NCIsImlhdCI6MTc2NTU2OTczNiwiZXhwIjoyMDgwOTI5NzM2fQ.oLO_hR-RzJFP-TsrKWEteDZbUReVEUdtENIeMAE5Teg"
     
     # Memory settings
     memory_chunk_size: int = 700

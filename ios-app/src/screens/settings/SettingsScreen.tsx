@@ -9,6 +9,8 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
+  TextInput,
+  Platform,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -25,6 +27,7 @@ import { apiClient } from '../../services/api';
 import ProfileSection from '../../components/settings/ProfileSection';
 import MemoryListItem from '../../components/settings/MemoryListItem';
 import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
+import { iosCalendarSyncService, IOSCalendar } from '../../services/iosCalendarSync';
 
 type Props = MainTabScreenProps<'Settings'>;
 
@@ -42,15 +45,134 @@ export default function SettingsScreen({ navigation }: Props) {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
 
   // AI Configuration states
-  const [aiProvider, setAiProvider] = useState<'local' | 'gemini'>('local');
+  const [aiProvider, setAiProvider] = useState<'local' | 'gemini' | 'claude'>('local');
   const [localUrl, setLocalUrl] = useState<string>('http://100.104.68.115:11434/v1');
   const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
+  const [apiKey, setApiKey] = useState<string>('');
   const [savingAISettings, setSavingAISettings] = useState(false);
+
+  // Calendar sync states (iOS only)
+  const [calendarSyncEnabled, setCalendarSyncEnabled] = useState(false);
+  const [iosCalendars, setIosCalendars] = useState<IOSCalendar[]>([]);
+  const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
+  const [lastCalendarSync, setLastCalendarSync] = useState<Date | null>(null);
+  const [syncingCalendar, setSyncingCalendar] = useState(false);
+  const [loadingCalendars, setLoadingCalendars] = useState(false);
+
+  // Claude model options
+  const CLAUDE_MODELS = [
+    { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
+    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+  ];
 
   useEffect(() => {
     loadData();
     loadAISettings();
+    if (Platform.OS === 'ios') {
+      loadCalendarSyncSettings();
+    }
   }, []);
+
+  const loadCalendarSyncSettings = async () => {
+    try {
+      const [enabled, selectedIds, lastSync] = await Promise.all([
+        iosCalendarSyncService.isSyncEnabled(),
+        iosCalendarSyncService.getSelectedCalendarIds(),
+        iosCalendarSyncService.getLastSyncTime(),
+      ]);
+      setCalendarSyncEnabled(enabled);
+      setSelectedCalendarIds(selectedIds);
+      setLastCalendarSync(lastSync);
+
+      // If sync is enabled, load available calendars
+      if (enabled) {
+        await loadIOSCalendars();
+      }
+    } catch (error) {
+      console.error('Failed to load calendar sync settings:', error);
+    }
+  };
+
+  const loadIOSCalendars = async () => {
+    try {
+      setLoadingCalendars(true);
+      const calendars = await iosCalendarSyncService.getCalendars();
+      setIosCalendars(calendars);
+    } catch (error) {
+      console.error('Failed to load iOS calendars:', error);
+    } finally {
+      setLoadingCalendars(false);
+    }
+  };
+
+  const handleCalendarSyncToggle = async (enabled: boolean) => {
+    setCalendarSyncEnabled(enabled);
+    await iosCalendarSyncService.setSyncEnabled(enabled);
+
+    if (enabled) {
+      // Initialize and load calendars
+      const initialized = await iosCalendarSyncService.initialize();
+      if (initialized) {
+        await loadIOSCalendars();
+      } else {
+        Alert.alert(
+          'Calendar Access Required',
+          'Please enable calendar access in Settings to sync your iOS calendar with Sara.'
+        );
+        setCalendarSyncEnabled(false);
+        await iosCalendarSyncService.setSyncEnabled(false);
+      }
+    } else {
+      // Clear synced events when disabled
+      Alert.alert(
+        'Disable Calendar Sync',
+        'Do you also want to remove previously synced events from Sara?',
+        [
+          { text: 'Keep Events', style: 'cancel' },
+          {
+            text: 'Remove Events',
+            style: 'destructive',
+            onPress: async () => {
+              await iosCalendarSyncService.clearSyncedEvents();
+            },
+          },
+        ]
+      );
+    }
+  };
+
+  const handleCalendarSelect = async (calendarId: string) => {
+    const newSelection = selectedCalendarIds.includes(calendarId)
+      ? selectedCalendarIds.filter(id => id !== calendarId)
+      : [...selectedCalendarIds, calendarId];
+
+    setSelectedCalendarIds(newSelection);
+    await iosCalendarSyncService.setSelectedCalendarIds(newSelection);
+  };
+
+  const handleSyncNow = async () => {
+    if (selectedCalendarIds.length === 0) {
+      Alert.alert('No Calendars Selected', 'Please select at least one calendar to sync.');
+      return;
+    }
+
+    try {
+      setSyncingCalendar(true);
+      const result = await iosCalendarSyncService.syncSelectedCalendars();
+
+      if (result.success) {
+        setLastCalendarSync(new Date());
+        Alert.alert('Sync Complete', `Synced ${result.synced} events from your iOS calendar.`);
+      } else {
+        Alert.alert('Sync Failed', result.message || 'Failed to sync calendar events.');
+      }
+    } catch (error: any) {
+      Alert.alert('Sync Error', error?.message || 'An error occurred during sync.');
+    } finally {
+      setSyncingCalendar(false);
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -79,13 +201,17 @@ export default function SettingsScreen({ navigation }: Props) {
       if (backendSettings) {
         // Update state from backend
         if (backendSettings.ai_provider) {
-          setAiProvider(backendSettings.ai_provider as 'local' | 'gemini');
+          setAiProvider(backendSettings.ai_provider as 'local' | 'gemini' | 'claude');
         }
         if (backendSettings.openai_base_url) {
           setLocalUrl(backendSettings.openai_base_url);
         }
         if (backendSettings.openai_model) {
           setSelectedModel(backendSettings.openai_model);
+        }
+        // Only set API key if it's not the masked value
+        if (backendSettings.openai_api_key && backendSettings.openai_api_key !== '***') {
+          setApiKey(backendSettings.openai_api_key);
         }
 
         // Also save to AsyncStorage for quick access
@@ -108,7 +234,7 @@ export default function SettingsScreen({ navigation }: Props) {
         const savedUrl = await AsyncStorage.getItem('@sara_local_url');
         const savedModel = await AsyncStorage.getItem('@sara_model');
 
-        if (savedProvider) setAiProvider(savedProvider as 'local' | 'gemini');
+        if (savedProvider) setAiProvider(savedProvider as 'local' | 'gemini' | 'claude');
         if (savedUrl) setLocalUrl(savedUrl);
         if (savedModel) setSelectedModel(savedModel);
       } catch (storageError) {
@@ -237,7 +363,12 @@ export default function SettingsScreen({ navigation }: Props) {
     }
   };
 
-  const handleProviderChange = async (provider: 'local' | 'gemini') => {
+  const handleProviderChange = async (provider: 'local' | 'gemini' | 'claude') => {
+    // Save current API key to provider-specific storage before switching
+    if (apiKey && apiKey !== '***') {
+      await AsyncStorage.setItem(`@sara_${aiProvider}_api_key`, apiKey);
+    }
+
     setAiProvider(provider);
     await AsyncStorage.setItem('@sara_ai_provider', provider);
 
@@ -246,23 +377,34 @@ export default function SettingsScreen({ navigation }: Props) {
 
     // Auto-set defaults based on provider
     if (provider === 'gemini') {
-      newModel = 'gemini-2.5-flash-lite';
+      newModel = 'gemini-3-flash-preview';
       newUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+    } else if (provider === 'claude') {
+      newModel = 'claude-sonnet-4-5-20250929';
+      newUrl = 'https://api.anthropic.com/v1';
     } else {
       // Reset to default local model based on current URL
       newModel = localUrl.includes('100.104.68.115') ? 'gpt-oss:120b' : 'gpt-oss:20b';
       newUrl = localUrl;
     }
 
+    // Load provider-specific API key
+    const savedApiKey = await AsyncStorage.getItem(`@sara_${provider}_api_key`) || '';
+    setApiKey(savedApiKey);
+
     setSelectedModel(newModel);
     await AsyncStorage.setItem('@sara_model', newModel);
 
-    // Save to backend immediately
-    await saveSettingsToBackend({
+    // Save to backend immediately (include API key if we have one)
+    const settings: any = {
       ai_provider: provider,
       openai_model: newModel,
       openai_base_url: newUrl,
-    });
+    };
+    if (savedApiKey) {
+      settings.openai_api_key = savedApiKey;
+    }
+    await saveSettingsToBackend(settings);
   };
 
   const handleUrlChange = async (url: string) => {
@@ -311,6 +453,14 @@ export default function SettingsScreen({ navigation }: Props) {
         settings.openai_base_url = localUrl;
       } else if (aiProvider === 'gemini') {
         settings.openai_base_url = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+      } else if (aiProvider === 'claude') {
+        settings.openai_base_url = 'https://api.anthropic.com/v1';
+      }
+
+      // Include API key if provided (for Gemini or Claude)
+      // Don't send if it's the masked value from backend
+      if (apiKey && apiKey !== '***' && (aiProvider === 'gemini' || aiProvider === 'claude')) {
+        settings.openai_api_key = apiKey;
       }
 
       await apiClient.updateAISettings(settings);
@@ -325,7 +475,11 @@ export default function SettingsScreen({ navigation }: Props) {
 
   const getModelOptions = () => {
     if (aiProvider === 'gemini') {
-      return ['gemini-2.5-flash-lite'];
+      return ['gemini-3-flash-preview', 'gemini-3-pro-preview'];
+    }
+
+    if (aiProvider === 'claude') {
+      return CLAUDE_MODELS.map(m => m.value);
     }
 
     if (localUrl.includes('100.104.68.115')) {
@@ -333,6 +487,14 @@ export default function SettingsScreen({ navigation }: Props) {
     } else {
       return ['gpt-oss:20b', 'gemini-3-pro-preview:latest'];
     }
+  };
+
+  const getModelLabel = (modelValue: string) => {
+    if (aiProvider === 'claude') {
+      const model = CLAUDE_MODELS.find(m => m.value === modelValue);
+      return model ? model.label : modelValue;
+    }
+    return modelValue;
   };
 
   if (loading && !userProfile) {
@@ -369,6 +531,7 @@ export default function SettingsScreen({ navigation }: Props) {
             >
               <Picker.Item label="Local (Ollama)" value="local" color={colors.text} />
               <Picker.Item label="Google Gemini" value="gemini" color={colors.text} />
+              <Picker.Item label="Anthropic Claude" value="claude" color={colors.text} />
             </Picker>
           </View>
         </View>
@@ -399,6 +562,36 @@ export default function SettingsScreen({ navigation }: Props) {
           </View>
         )}
 
+        {/* API Key Input (for Claude and Gemini) */}
+        {(aiProvider === 'claude' || aiProvider === 'gemini') && (
+          <View style={styles.pickerContainer}>
+            <Text style={styles.pickerLabel}>API Key</Text>
+            <View style={styles.inputWrapper}>
+              <TextInput
+                style={styles.textInput}
+                value={apiKey}
+                onChangeText={(text) => {
+                  setApiKey(text);
+                  // Save to provider-specific storage
+                  if (text && text !== '***') {
+                    AsyncStorage.setItem(`@sara_${aiProvider}_api_key`, text);
+                  }
+                }}
+                placeholder={aiProvider === 'claude' ? 'sk-ant-...' : 'Enter API key'}
+                placeholderTextColor={colors.textMuted}
+                secureTextEntry={true}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </View>
+            <Text style={styles.pickerHint}>
+              {aiProvider === 'claude'
+                ? 'Get key from console.anthropic.com'
+                : 'Get key from aistudio.google.com'}
+            </Text>
+          </View>
+        )}
+
         {/* Model Dropdown */}
         <View style={styles.pickerContainer}>
           <Text style={styles.pickerLabel}>Model</Text>
@@ -410,10 +603,13 @@ export default function SettingsScreen({ navigation }: Props) {
               dropdownIconColor={colors.text}
             >
               {getModelOptions().map((model) => (
-                <Picker.Item key={model} label={model} value={model} color={colors.text} />
+                <Picker.Item key={model} label={getModelLabel(model)} value={model} color={colors.text} />
               ))}
             </Picker>
           </View>
+          {aiProvider === 'claude' && (
+            <Text style={styles.pickerHint}>Opus is most capable, Haiku is fastest</Text>
+          )}
         </View>
 
         {/* Save Button */}
@@ -467,6 +663,99 @@ export default function SettingsScreen({ navigation }: Props) {
           />
         </View>
       </View>
+
+      {/* Calendar Sync Section (iOS only) */}
+      {Platform.OS === 'ios' && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Calendar Sync</Text>
+
+          <View style={styles.settingRow}>
+            <View style={styles.settingLabelContainer}>
+              <Text style={styles.settingLabel}>Sync iOS Calendar</Text>
+              <Text style={styles.settingHint}>Import events from your iPhone calendar</Text>
+            </View>
+            <Switch
+              value={calendarSyncEnabled}
+              onValueChange={handleCalendarSyncToggle}
+              trackColor={{ false: colors.background, true: colors.primary }}
+            />
+          </View>
+
+          {calendarSyncEnabled && (
+            <>
+              {loadingCalendars ? (
+                <View style={styles.loadingCalendars}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={styles.loadingCalendarsText}>Loading calendars...</Text>
+                </View>
+              ) : iosCalendars.length > 0 ? (
+                <>
+                  <Text style={styles.calendarListLabel}>Select calendars to sync:</Text>
+                  {iosCalendars.map((calendar) => (
+                    <TouchableOpacity
+                      key={calendar.id}
+                      style={styles.calendarItem}
+                      onPress={() => handleCalendarSelect(calendar.id)}
+                    >
+                      <View style={styles.calendarItemLeft}>
+                        <View
+                          style={[
+                            styles.calendarColorDot,
+                            { backgroundColor: calendar.color },
+                          ]}
+                        />
+                        <View style={styles.calendarItemText}>
+                          <Text style={styles.calendarName}>{calendar.title}</Text>
+                          <Text style={styles.calendarSource}>{calendar.source.name}</Text>
+                        </View>
+                      </View>
+                      <View
+                        style={[
+                          styles.calendarCheckbox,
+                          selectedCalendarIds.includes(calendar.id) &&
+                            styles.calendarCheckboxSelected,
+                        ]}
+                      >
+                        {selectedCalendarIds.includes(calendar.id) && (
+                          <Text style={styles.calendarCheckmark}>✓</Text>
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+
+                  {/* Sync Now Button */}
+                  <TouchableOpacity
+                    style={[
+                      styles.syncButton,
+                      (syncingCalendar || selectedCalendarIds.length === 0) &&
+                        styles.syncButtonDisabled,
+                    ]}
+                    onPress={handleSyncNow}
+                    disabled={syncingCalendar || selectedCalendarIds.length === 0}
+                  >
+                    {syncingCalendar ? (
+                      <ActivityIndicator size="small" color={colors.text} />
+                    ) : (
+                      <Text style={styles.syncButtonText}>Sync Now</Text>
+                    )}
+                  </TouchableOpacity>
+
+                  {/* Last Sync Time */}
+                  {lastCalendarSync && (
+                    <Text style={styles.lastSyncText}>
+                      Last synced: {lastCalendarSync.toLocaleString()}
+                    </Text>
+                  )}
+                </>
+              ) : (
+                <Text style={styles.noCalendarsText}>
+                  No calendars found. Make sure you have calendars set up in the iOS Calendar app.
+                </Text>
+              )}
+            </>
+          )}
+        </View>
+      )}
 
       {/* About Section */}
       <View style={styles.section}>
@@ -675,6 +964,25 @@ const styles = StyleSheet.create({
     color: colors.text,
     backgroundColor: 'transparent',
   },
+  pickerHint: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginTop: spacing.xs,
+  },
+  inputWrapper: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.textMuted,
+    overflow: 'hidden',
+  },
+  textInput: {
+    color: colors.text,
+    backgroundColor: 'transparent',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: fontSizes.md,
+  },
   saveButton: {
     backgroundColor: colors.primary,
     padding: spacing.md,
@@ -689,5 +997,105 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: fontSizes.md,
     fontWeight: '600',
+  },
+  // Calendar Sync styles
+  settingLabelContainer: {
+    flex: 1,
+  },
+  settingHint: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
+  },
+  loadingCalendars: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+  },
+  loadingCalendarsText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginLeft: spacing.sm,
+  },
+  calendarListLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  calendarItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  calendarItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  calendarColorDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: spacing.sm,
+  },
+  calendarItemText: {
+    flex: 1,
+  },
+  calendarName: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+  },
+  calendarSource: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+  },
+  calendarCheckbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: colors.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calendarCheckboxSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  calendarCheckmark: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+  },
+  syncButton: {
+    backgroundColor: colors.primary,
+    padding: spacing.md,
+    borderRadius: borderRadius.md,
+    alignItems: 'center',
+    marginTop: spacing.md,
+  },
+  syncButtonDisabled: {
+    opacity: 0.6,
+  },
+  syncButtonText: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  lastSyncText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    textAlign: 'center',
+    marginTop: spacing.sm,
+  },
+  noCalendarsText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    textAlign: 'center',
+    paddingVertical: spacing.md,
   },
 });

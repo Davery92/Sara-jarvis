@@ -9,6 +9,7 @@ class VoiceService {
   private silenceStartTime: number | null = null;
   private readonly SILENCE_THRESHOLD_MS = 1500; // Stop after 1.5 seconds of silence
   private onSilenceDetected: (() => void) | null = null;
+  private lastMeteringLog: number | null = null;
 
   /**
    * Initialize audio permissions for recording
@@ -103,7 +104,9 @@ class VoiceService {
       this.isListening = true;
 
       // Start polling for metering data to detect silence
+      console.log('[Voice] About to call startVADPolling()...');
       this.startVADPolling();
+      console.log('[Voice] startVADPolling() returned');
 
       console.log('[Voice] Continuous recording started with VAD');
     } catch (error) {
@@ -116,9 +119,16 @@ class VoiceService {
    * Poll for audio metering to detect silence
    */
   private startVADPolling() {
+    try {
+      console.log('[VAD] Starting VAD polling...');
+      console.log('[VAD] this.recording:', !!this.recording, 'this.isListening:', this.isListening);
+    } catch (e) {
+      console.error('[VAD] Error in startVADPolling preamble:', e);
+    }
     // Poll every 100ms for metering data
     this.vadCheckInterval = setInterval(async () => {
       if (!this.recording || !this.isListening) {
+        console.log('[VAD] Exiting: recording=', !!this.recording, 'isListening=', this.isListening);
         this.stopVADPolling();
         return;
       }
@@ -127,16 +137,22 @@ class VoiceService {
         const status = await this.recording.getStatusAsync();
 
         if (!status.isRecording) {
+          console.log('[VAD] Recording stopped, exiting polling');
           this.stopVADPolling();
           return;
         }
 
         // Check metering level (ranges from -160 to 0)
+        // Note: metering is undefined if isMeteringEnabled was false in recording options
         const metering = status.metering ?? -160;
         const SILENCE_THRESHOLD = -35; // dB threshold for silence (speech is usually > -30 dB)
         const isSilent = metering < SILENCE_THRESHOLD;
 
-        console.log('[VAD] Metering:', metering.toFixed(1), 'dB, Silent:', isSilent);
+        // Only log periodically to avoid spam (every 500ms)
+        if (!this.lastMeteringLog || Date.now() - this.lastMeteringLog > 500) {
+          console.log('[VAD] Metering:', metering.toFixed(1), 'dB, Silent:', isSilent, 'isMeteringEnabled:', status.metering !== undefined);
+          this.lastMeteringLog = Date.now();
+        }
 
         if (isSilent) {
           if (this.silenceStartTime === null) {

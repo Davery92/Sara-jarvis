@@ -13,11 +13,28 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.avery.sara",
+      "bundleIdentifier": "cloud.avery.sara-ios",
+      "icon": "./assets/icon.png",
       "infoPlist": {
-        "UIBackgroundModes": ["remote-notification"],
+        "UIBackgroundModes": [
+          "remote-notification",
+          "fetch",
+          "processing"
+        ],
         "NSMicrophoneUsageDescription": "Sara needs access to your microphone for voice chat.",
-        "NSSpeechRecognitionUsageDescription": "Sara needs access to speech recognition for voice chat."
+        "NSSpeechRecognitionUsageDescription": "Sara needs access to speech recognition for voice chat.",
+        "NSPhotoLibraryUsageDescription": "Sara needs access to your photo library to send images in chat.",
+        "NSCameraUsageDescription": "Sara needs camera access to take photos for chat.",
+        "NSHealthShareUsageDescription": "Sara reads your health data to provide personalized wellness insights, track your fitness progress, and help you achieve your health goals.",
+        "NSHealthUpdateUsageDescription": "Sara can write workout and nutrition data to Apple Health to keep your health records complete.",
+        "NSCalendarsUsageDescription": "Sara reads your calendar to show upcoming events and help you stay organized.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "entitlements": {
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.healthkit.access": [],
+        "com.apple.developer.healthkit.background-delivery": true,
+        "aps-environment": "production"
       }
     },
     "android": {
@@ -25,11 +42,39 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#18181b"
       },
-      "package": "com.avery.sara"
+      "package": "com.avery.sara",
+      "permissions": [
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "scheme": "sara"
+    "scheme": "sara",
+    "plugins": [
+      "expo-notifications",
+      "expo-calendar",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Sara needs access to your photo library to send images in chat.",
+          "cameraPermission": "Sara needs camera access to take photos for chat."
+        }
+      ],
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "Sara reads your health data to provide personalized wellness insights, track your fitness progress, and help you achieve your health goals.",
+          "NSHealthUpdateUsageDescription": "Sara can write workout and nutrition data to Apple Health to keep your health records complete.",
+          "background": true
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "03861b80-cbfa-40bd-8384-c6d8c117c775"
+      }
+    }
   }
 }

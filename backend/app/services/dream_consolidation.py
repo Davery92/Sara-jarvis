@@ -505,129 +505,446 @@ Respond with only valid JSON."""
         clusters: List[List[Dict]],
         summaries: List[Dict]
     ) -> List[str]:
-        """Generate DreamInsight records for interesting patterns"""
+        """Generate LLM-powered DreamInsight records from daily conversations"""
         from app.main_simple import DreamInsight
+        import uuid
 
         insights = []
 
         try:
-            # Fetch fitness metrics for the day
-            fitness_metrics = await self._fetch_fitness_metrics(db, user_id, day)
-            # Insight 1: Daily summary
-            if summaries:
-                daily_summary = DreamInsight(
-                    user_id=user_id,
-                    dream_date=day,
-                    insight_type="summary",
-                    confidence=0.9,
-                    title=f"Daily Summary - {day.strftime('%B %d, %Y')}",
-                    content=f"Processed {len(traces)} memories across {len(clusters)} themes: " +
-                            ", ".join([s.get("topics", ["unknown"])[0] for s in summaries[:3]]),
-                    related_episodes=json.dumps([t["id"] for t in traces[:20]])
-                )
-                db.add(daily_summary)
-                insights.append(daily_summary.id)
+            # Gather context for the LLM
+            context = await self._gather_insight_context(db, user_id, day, traces, clusters, summaries)
 
-            # Insight 2: Pattern detection (high-salience clusters)
-            for summary in summaries:
-                if summary["cluster_size"] >= 5:  # Significant cluster
-                    pattern_insight = DreamInsight(
+            # Generate LLM-powered insights
+            llm_insights = await self._generate_llm_insights(context)
+
+            # Store each insight
+            for insight_data in llm_insights:
+                try:
+                    # Calculate expiry if specified
+                    expiry_at = None
+                    if insight_data.get("expiry_days"):
+                        expiry_at = day + timedelta(days=insight_data["expiry_days"])
+
+                    # Find related trace IDs based on evidence
+                    related_ids = self._find_related_traces(traces, insight_data.get("evidence", ""))
+
+                    insight = DreamInsight(
+                        id=str(uuid.uuid4()),
                         user_id=user_id,
                         dream_date=day,
-                        insight_type="pattern",
-                        confidence=0.75,
-                        title=f"Recurring Theme: {summary.get('topics', ['Unknown'])[0].title()}",
-                        content=summary.get("summary", "Multiple related memories detected"),
-                        related_episodes=json.dumps(summary["trace_ids"][:10])
+                        insight_type=insight_data.get("type", "pattern"),
+                        confidence=insight_data.get("confidence", 0.5),
+                        title=insight_data.get("title", "Insight"),
+                        content=insight_data.get("content", ""),
+                        related_episodes=json.dumps(related_ids),
+                        surface_strategy=insight_data.get("surface_strategy", "contextual"),
+                        evidence=insight_data.get("evidence", ""),
+                        expiry_at=expiry_at,
+                        surfaced_count=0
                     )
-                    db.add(pattern_insight)
-                    insights.append(pattern_insight.id)
+                    db.add(insight)
+                    insights.append(insight.id)
 
-            # Insight 3: Forgotten gems (old but relevant traces)
-            high_salience_traces = [t for t in traces if t["salience"] > 0.8]
-            if high_salience_traces:
-                gem = high_salience_traces[0]  # Most salient
-                forgotten_gem = DreamInsight(
-                    user_id=user_id,
-                    dream_date=day,
-                    insight_type="forgotten_gem",
-                    confidence=0.6,
-                    title="Important Memory Resurfaced",
-                    content=gem["content"][:200] + "...",
-                    related_episodes=json.dumps([gem["id"]])
-                )
-                db.add(forgotten_gem)
-                insights.append(forgotten_gem.id)
+                    logger.info(f"💡 Created insight: {insight_data.get('title', 'Unknown')[:50]}...")
 
-            # Insight 4: Fitness - Workout Summary
-            if fitness_metrics["workouts"]["count"] > 0:
-                workout_summary = DreamInsight(
-                    user_id=user_id,
-                    dream_date=day,
-                    insight_type="fitness_workout",
-                    confidence=0.9,
-                    title=f"Training Day - {fitness_metrics['workouts']['count']} Workout{'s' if fitness_metrics['workouts']['count'] > 1 else ''}",
-                    content=f"Completed {fitness_metrics['workouts']['total_sets']} sets with {fitness_metrics['workouts']['total_volume']}lbs total volume (avg RPE: {fitness_metrics['workouts']['avg_rpe']})",
-                    related_episodes=json.dumps([])
-                )
-                db.add(workout_summary)
-                insights.append(workout_summary.id)
+                except Exception as e:
+                    logger.error(f"Failed to store insight: {e}")
+                    continue
 
-            # Insight 5: Fitness - Nutrition Summary
-            if fitness_metrics["nutrition"]["meals_count"] > 0:
-                nutrition_summary = DreamInsight(
-                    user_id=user_id,
-                    dream_date=day,
-                    insight_type="fitness_nutrition",
-                    confidence=0.9,
-                    title=f"Nutrition - {fitness_metrics['nutrition']['meals_count']} Meals Logged",
-                    content=f"{fitness_metrics['nutrition']['calories']}cal | {fitness_metrics['nutrition']['protein']}g protein, {fitness_metrics['nutrition']['carbs']}g carbs, {fitness_metrics['nutrition']['fats']}g fats",
-                    related_episodes=json.dumps([])
-                )
-                db.add(nutrition_summary)
-                insights.append(nutrition_summary.id)
-
-            # Insight 6: Fitness - Training Trend
-            if fitness_metrics["workouts"]["count"] > 0 and fitness_metrics["weekly_avg"]["workouts"] > 0:
-                volume_change = fitness_metrics["workouts"]["total_volume"] - fitness_metrics["weekly_avg"]["volume"]
-                if abs(volume_change) > fitness_metrics["weekly_avg"]["volume"] * 0.2:  # 20% change
-                    trend_direction = "increased" if volume_change > 0 else "decreased"
-                    trend_insight = DreamInsight(
-                        user_id=user_id,
-                        dream_date=day,
-                        insight_type="fitness_trend",
-                        confidence=0.75,
-                        title=f"Training Volume {trend_direction.title()}",
-                        content=f"Today's volume ({fitness_metrics['workouts']['total_volume']}lbs) {trend_direction} by {abs(volume_change):.0f}lbs compared to your 7-day average ({fitness_metrics['weekly_avg']['volume']}lbs)",
-                        related_episodes=json.dumps([])
-                    )
-                    db.add(trend_insight)
-                    insights.append(trend_insight.id)
-
-            # Insight 7: Fitness - Protein Target
-            if fitness_metrics["nutrition"]["protein"] > 0:
-                # Assume target of 0.8g per lb bodyweight (adjust as needed)
-                # For now, check if they hit >100g as a simple threshold
-                if fitness_metrics["nutrition"]["protein"] >= 100:
-                    protein_insight = DreamInsight(
-                        user_id=user_id,
-                        dream_date=day,
-                        insight_type="fitness_nutrition",
-                        confidence=0.8,
-                        title="Protein Goal Achieved",
-                        content=f"Hit {fitness_metrics['nutrition']['protein']}g protein today - great for recovery and muscle growth",
-                        related_episodes=json.dumps([])
-                    )
-                    db.add(protein_insight)
-                    insights.append(protein_insight.id)
+            # Also generate fitness insights (these are data-driven, not LLM)
+            fitness_insights = await self._generate_fitness_insights(db, user_id, day)
+            for fi in fitness_insights:
+                db.add(fi)
+                insights.append(fi.id)
 
             db.commit()
+            logger.info(f"💡 Generated {len(insights)} total insights ({len(llm_insights)} LLM, {len(fitness_insights)} fitness)")
             return insights
 
         except Exception as e:
-            logger.error(f"Insight generation failed: {e}")
+            logger.error(f"Insight generation failed: {e}", exc_info=True)
             db.rollback()
             return []
+
+    async def _gather_insight_context(
+        self,
+        db: Session,
+        user_id: str,
+        day: datetime,
+        traces: List[Dict],
+        clusters: List[List[Dict]],
+        summaries: List[Dict]
+    ) -> Dict[str, Any]:
+        """Gather all context needed for LLM insight generation"""
+
+        # Get recent insights to avoid repetition
+        recent_insights = await self._get_recent_insights(db, user_id, days=7)
+
+        # Get active projects
+        active_projects = await self._get_active_projects(db, user_id)
+
+        # Extract representative conversation snippets
+        conversation_snippets = self._extract_conversation_snippets(traces, clusters)
+
+        return {
+            "day": day.strftime("%A, %B %d, %Y"),
+            "total_traces": len(traces),
+            "cluster_count": len(clusters),
+            "summaries": summaries,
+            "conversation_snippets": conversation_snippets,
+            "recent_insights": recent_insights,
+            "active_projects": active_projects
+        }
+
+    async def _get_recent_insights(self, db: Session, user_id: str, days: int = 7) -> List[Dict]:
+        """Get insights from the last N days to avoid repetition"""
+        from app.main_simple import DreamInsight
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        recent = db.query(DreamInsight).filter(
+            DreamInsight.user_id == user_id,
+            DreamInsight.dream_date >= cutoff
+        ).order_by(desc(DreamInsight.dream_date)).limit(20).all()
+
+        return [
+            {
+                "type": r.insight_type,
+                "title": r.title,
+                "content": r.content[:200],
+                "date": r.dream_date.strftime("%Y-%m-%d")
+            }
+            for r in recent
+        ]
+
+    async def _get_active_projects(self, db: Session, user_id: str) -> List[Dict]:
+        """Get active projects for context"""
+        try:
+            from app.models.project_tracker import DevProject, TaskItem
+
+            projects = db.query(DevProject).filter(
+                DevProject.user_id == user_id,
+                DevProject.is_active == True
+            ).all()
+
+            result = []
+            for p in projects:
+                # Get recent tasks
+                recent_tasks = db.query(TaskItem).filter(
+                    TaskItem.project_id == p.id,
+                    TaskItem.is_deleted == False,
+                    TaskItem.status.in_(["in_progress", "todo"])
+                ).limit(5).all()
+
+                result.append({
+                    "name": p.name,
+                    "prefix": p.prefix,
+                    "active_tasks": [t.title for t in recent_tasks]
+                })
+
+            return result
+        except Exception as e:
+            logger.warning(f"Could not fetch projects: {e}")
+            return []
+
+    def _extract_conversation_snippets(
+        self,
+        traces: List[Dict],
+        clusters: List[List[Dict]]
+    ) -> List[Dict]:
+        """Extract representative conversation snippets with raw quotes"""
+        snippets = []
+
+        for i, cluster in enumerate(clusters[:5]):  # Limit to 5 clusters
+            # Get user messages from this cluster
+            user_messages = [t for t in cluster if t.get("role") == "user"]
+            sara_messages = [t for t in cluster if t.get("role") != "user"]
+
+            # Pick representative quotes (up to 3 per cluster)
+            quotes = []
+            for msg in user_messages[:3]:
+                content = msg.get("content", "")[:300]
+                if content:
+                    quotes.append(f"David: \"{content}\"")
+
+            for msg in sara_messages[:2]:
+                content = msg.get("content", "")[:200]
+                if content:
+                    quotes.append(f"Sara: \"{content}\"")
+
+            if quotes:
+                snippets.append({
+                    "cluster_id": i + 1,
+                    "message_count": len(cluster),
+                    "quotes": quotes,
+                    "time_range": f"{cluster[0]['created_at'].strftime('%H:%M')} - {cluster[-1]['created_at'].strftime('%H:%M')}"
+                })
+
+        return snippets
+
+    async def _generate_llm_insights(self, context: Dict[str, Any]) -> List[Dict]:
+        """Use LLM to generate meaningful insights from context"""
+        llm = self._get_llm_client()
+        if not llm:
+            logger.warning("LLM unavailable, skipping insight generation")
+            return []
+
+        # Build the prompt
+        prompt = self._build_insight_prompt(context)
+
+        try:
+            result = await llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": self._get_insight_system_prompt()},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=2000
+            )
+
+            response_text = result["choices"][0]["message"]["content"]
+
+            # Parse JSON response
+            insights = self._parse_insight_response(response_text)
+
+            logger.info(f"LLM generated {len(insights)} insights")
+            return insights
+
+        except Exception as e:
+            logger.error(f"LLM insight generation failed: {e}")
+            return []
+
+    def _get_insight_system_prompt(self) -> str:
+        """System prompt for insight generation"""
+        return """You are Sara's reflective subsystem, processing a day of conversations with David to extract insights worth remembering.
+
+Your task is to generate 3-7 insights that are genuinely valuable - things worth surfacing later either proactively or when contextually relevant.
+
+## Insight Types (use exactly these type values)
+
+1. **behavioral_pattern** - Recurring behaviors, habits, or tendencies
+   Example: "Third time this week you've mentioned putting off the QA documentation."
+
+2. **connection** - Links between separate conversations or topics
+   Example: "Your frustration with the deployment pipeline echoes what you said about CI/CD two weeks ago."
+
+3. **unresolved_thread** - Questions asked, intentions stated, or tasks mentioned without closure
+   Example: "On Monday you said you'd look into the FatSecret API rate limits but haven't mentioned it since."
+
+4. **emerging_pattern** - New interests, concerns, or focus areas
+   Example: "You've brought up voice interaction quality three times recently."
+
+5. **contradiction** - Changes in stance, mood, or priorities
+   Example: "Last week you were excited about projection mapping, but you seem more focused on core features now."
+
+6. **wellbeing_signal** - Energy levels, stress indicators, sleep/exercise mentions
+   Example: "You've mentioned being tired in 4 of the last 5 morning conversations."
+
+## Bad Insights (avoid these)
+- Pure summaries: "You discussed fitness today"
+- Vague emotional labels: "Emotional pattern: neutral"
+- Obvious observations: "You're working on Sara"
+- Generic encouragement: "Keep up the good work"
+
+## Output Format
+Respond with ONLY a JSON array. Each insight object must have:
+- "type": One of the 6 types above (lowercase with underscore)
+- "title": Short title (under 60 chars)
+- "content": The insight itself, written naturally as Sara would say it
+- "confidence": 0.0-1.0 based on evidence strength
+- "evidence": Brief note on what conversations/data support this
+- "surface_strategy": One of "proactive", "contextual", or "passive"
+- "expiry_days": How long this stays relevant (null if indefinite, 14 for unresolved threads)
+
+Example output:
+[
+  {
+    "type": "unresolved_thread",
+    "title": "API Rate Limits Investigation",
+    "content": "You mentioned wanting to look into the FatSecret API rate limits on Monday but haven't brought it up since. Did that get resolved or deprioritized?",
+    "confidence": 0.75,
+    "evidence": "Monday conversation about food logging performance",
+    "surface_strategy": "proactive",
+    "expiry_days": 14
+  }
+]"""
+
+    def _build_insight_prompt(self, context: Dict[str, Any]) -> str:
+        """Build the user prompt with context"""
+        parts = [f"## Today's Conversations ({context['day']})"]
+        parts.append(f"Total messages: {context['total_traces']} across {context['cluster_count']} conversation sessions\n")
+
+        # Add conversation snippets with actual quotes
+        if context.get("conversation_snippets"):
+            parts.append("### Conversation Excerpts")
+            for snippet in context["conversation_snippets"]:
+                parts.append(f"\n**Session {snippet['cluster_id']}** ({snippet['time_range']}, {snippet['message_count']} messages):")
+                for quote in snippet["quotes"]:
+                    parts.append(f"  {quote}")
+
+        # Add summaries if available
+        if context.get("summaries"):
+            parts.append("\n### Session Summaries")
+            for i, summary in enumerate(context["summaries"][:5]):
+                topics = ", ".join(summary.get("topics", [])[:3])
+                parts.append(f"- Session {i+1}: {summary.get('summary', 'N/A')[:150]} (Topics: {topics})")
+
+        # Add active projects context
+        if context.get("active_projects"):
+            parts.append("\n### Active Projects")
+            for proj in context["active_projects"]:
+                tasks = ", ".join(proj.get("active_tasks", [])[:3]) or "No active tasks"
+                parts.append(f"- {proj['name']} ({proj['prefix']}): {tasks}")
+
+        # Add recent insights to avoid repetition
+        if context.get("recent_insights"):
+            parts.append("\n### Recent Insights (avoid repeating these)")
+            for ri in context["recent_insights"][:5]:
+                parts.append(f"- [{ri['date']}] {ri['title']}: {ri['content'][:100]}...")
+
+        parts.append("\n---")
+        parts.append("Generate 3-7 insights based on today's conversations. Focus on unresolved threads, behavioral patterns, and emerging concerns. Respond with only a JSON array.")
+
+        return "\n".join(parts)
+
+    def _parse_insight_response(self, response_text: str) -> List[Dict]:
+        """Parse JSON response from LLM"""
+        try:
+            # Try to extract JSON from response
+            text = response_text.strip()
+
+            # Handle markdown code blocks
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            insights = json.loads(text)
+
+            # Validate and clean each insight
+            valid_types = ["behavioral_pattern", "connection", "unresolved_thread",
+                         "emerging_pattern", "contradiction", "wellbeing_signal"]
+            valid_strategies = ["proactive", "contextual", "passive"]
+
+            validated = []
+            for insight in insights:
+                if not isinstance(insight, dict):
+                    continue
+
+                # Validate required fields
+                if not insight.get("content") or not insight.get("type"):
+                    continue
+
+                # Normalize type
+                insight_type = insight["type"].lower().replace(" ", "_")
+                if insight_type not in valid_types:
+                    insight_type = "pattern"  # Fallback
+
+                # Normalize strategy
+                strategy = insight.get("surface_strategy", "contextual").lower()
+                if strategy not in valid_strategies:
+                    strategy = "contextual"
+
+                validated.append({
+                    "type": insight_type,
+                    "title": insight.get("title", insight["content"][:50]),
+                    "content": insight["content"],
+                    "confidence": max(0.0, min(1.0, float(insight.get("confidence", 0.5)))),
+                    "evidence": insight.get("evidence", ""),
+                    "surface_strategy": strategy,
+                    "expiry_days": insight.get("expiry_days")
+                })
+
+            return validated
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse insight JSON: {e}")
+            logger.debug(f"Response was: {response_text[:500]}")
+            return []
+        except Exception as e:
+            logger.error(f"Error parsing insights: {e}")
+            return []
+
+    def _find_related_traces(self, traces: List[Dict], evidence: str) -> List[str]:
+        """Find trace IDs that might be related to the evidence"""
+        if not evidence:
+            return []
+
+        evidence_lower = evidence.lower()
+        related = []
+
+        for trace in traces:
+            content = (trace.get("content") or "").lower()
+            # Simple keyword matching
+            if any(word in content for word in evidence_lower.split()[:5]):
+                related.append(trace["id"])
+                if len(related) >= 5:
+                    break
+
+        return related
+
+    async def _generate_fitness_insights(
+        self,
+        db: Session,
+        user_id: str,
+        day: datetime
+    ) -> List:
+        """Generate data-driven fitness insights (separate from LLM insights)"""
+        from app.main_simple import DreamInsight
+        import uuid
+
+        insights = []
+        fitness_metrics = await self._fetch_fitness_metrics(db, user_id, day)
+
+        # Workout summary
+        if fitness_metrics["workouts"]["count"] > 0:
+            insights.append(DreamInsight(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                dream_date=day,
+                insight_type="fitness_workout",
+                confidence=0.9,
+                title=f"Training Day - {fitness_metrics['workouts']['count']} Workout{'s' if fitness_metrics['workouts']['count'] > 1 else ''}",
+                content=f"Completed {fitness_metrics['workouts']['total_sets']} sets with {fitness_metrics['workouts']['total_volume']}lbs total volume (avg RPE: {fitness_metrics['workouts']['avg_rpe']})",
+                related_episodes=json.dumps([]),
+                surface_strategy="passive",  # Don't proactively surface fitness metrics
+                surfaced_count=0
+            ))
+
+        # Nutrition summary
+        if fitness_metrics["nutrition"]["meals_count"] > 0:
+            insights.append(DreamInsight(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                dream_date=day,
+                insight_type="fitness_nutrition",
+                confidence=0.9,
+                title=f"Nutrition - {fitness_metrics['nutrition']['meals_count']} Meals Logged",
+                content=f"{fitness_metrics['nutrition']['calories']}cal | {fitness_metrics['nutrition']['protein']}g protein, {fitness_metrics['nutrition']['carbs']}g carbs, {fitness_metrics['nutrition']['fats']}g fats",
+                related_episodes=json.dumps([]),
+                surface_strategy="passive",
+                surfaced_count=0
+            ))
+
+        # Training volume trend (only if significant change)
+        if fitness_metrics["workouts"]["count"] > 0 and fitness_metrics["weekly_avg"]["workouts"] > 0:
+            volume_change = fitness_metrics["workouts"]["total_volume"] - fitness_metrics["weekly_avg"]["volume"]
+            if abs(volume_change) > fitness_metrics["weekly_avg"]["volume"] * 0.2:
+                trend_direction = "increased" if volume_change > 0 else "decreased"
+                insights.append(DreamInsight(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    dream_date=day,
+                    insight_type="fitness_trend",
+                    confidence=0.75,
+                    title=f"Training Volume {trend_direction.title()}",
+                    content=f"Today's volume ({fitness_metrics['workouts']['total_volume']}lbs) {trend_direction} by {abs(volume_change):.0f}lbs compared to your 7-day average ({fitness_metrics['weekly_avg']['volume']}lbs)",
+                    related_episodes=json.dumps([]),
+                    surface_strategy="contextual",  # Surface when discussing fitness
+                    surfaced_count=0
+                ))
+
+        return insights
 
     async def _store_summaries(
         self,

@@ -1,16 +1,18 @@
 from typing import Optional
-from fastapi import Depends, HTTPException, status, Cookie
+from fastapi import Depends, HTTPException, status, Cookie, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.core.auth import verify_token
 from app.db.session import get_db
 from app.models.user import User
 
 
 async def get_current_user(
+    request: Request,
     access_token: Optional[str] = Cookie(None),
     db: Session = Depends(get_db)
 ) -> User:
-    """Get the current authenticated user from JWT cookie"""
+    """Get the current authenticated user from JWT cookie, Authorization header, or device token"""
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -18,31 +20,61 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    if not access_token:
-        raise credentials_exception
+    # Try cookie first
+    token = access_token
 
-    payload = verify_token(access_token)
-    if payload is None:
-        raise credentials_exception
+    # If no cookie, try Authorization header (for mobile apps)
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]  # Remove "Bearer " prefix
 
-    user_id: str = payload.get("sub")
-    if user_id is None:
-        raise credentials_exception
+    # If we have a JWT token, validate it
+    if token:
+        payload = verify_token(token)
+        if payload is None:
+            raise credentials_exception
 
-    # Database uses string IDs, not UUIDs
-    user = db.query(User).filter(User.id == user_id).first()
-    if user is None:
-        raise credentials_exception
-    
-    return user
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None:
+            raise credentials_exception
+
+        return user
+
+    # Try device token as fallback (for iOS app)
+    device_token = request.headers.get("X-Device-Token")
+    if device_token:
+        result = db.execute(text("""
+            SELECT user_id FROM device_registration
+            WHERE device_token = :token
+        """), {"token": device_token}).fetchone()
+
+        if result:
+            # Update last_seen
+            db.execute(text("""
+                UPDATE device_registration SET last_seen = NOW()
+                WHERE device_token = :token
+            """), {"token": device_token})
+            db.commit()
+
+            user = db.query(User).filter(User.id == result[0]).first()
+            if user:
+                return user
+
+    raise credentials_exception
 
 
 async def get_current_user_optional(
+    request: Request,
     access_token: Optional[str] = Cookie(None),
     db: Session = Depends(get_db)
 ) -> Optional[User]:
     """Get the current user if authenticated, otherwise None"""
     try:
-        return await get_current_user(access_token, db)
+        return await get_current_user(request, access_token, db)
     except HTTPException:
         return None

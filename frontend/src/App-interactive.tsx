@@ -8,23 +8,27 @@ import MermaidDiagram from './components/MermaidDiagram'
 import Notes from './components/Notes'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
-import ShadowHistory from './components/ShadowHistory'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
-import InsightInbox from './components/InsightInbox'
 import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
 import FitnessSection from './components/fitness/FitnessSection'
 import RecipesSection from './components/fitness/RecipesSection'
+import LearningSection from './components/learning/LearningSection'
+import ProjectSection from './components/projects/ProjectSection'
 // Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
 import { getCalmMode } from './utils/prefs'
 import { CommandPalette } from './components/CommandPalette'
-import DailyBriefings from './components/DailyBriefings'
-import ContextModeSwitcher from './components/ContextModeSwitcher'
-import SmartInsightsDashboard from './components/SmartInsightsDashboard'
+import MorningBrief from './components/MorningBrief'
+import OrchestratorLab from './components/OrchestratorLab'
+import NotificationBanner from './components/NotificationBanner'
+import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
+import MiniChatOverlay from './components/MiniChatOverlay'
+import HealthAlertChat from './components/HealthAlertChat'
+import { PatternsDashboard } from './components/patterns'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -69,7 +73,7 @@ function LiveTimer({ endTime, className = "" }) {
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, shadow-history, fitness, recipes, settings, briefings, context-mode, smart-insights
+  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, fitness, recipes, settings, briefings, context-mode, smart-insights, orchestrator-lab
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -104,6 +108,31 @@ function App() {
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
 
+  // Health alert chat state
+  const [activeHealthAlert, setActiveHealthAlert] = useState<{
+    severity: string
+    title: string
+    body: string
+    insightId?: string
+  } | null>(null)
+  const [dismissedHealthAlertIds, setDismissedHealthAlertIds] = useState<Set<string>>(() => {
+    // Load dismissed IDs from localStorage on mount
+    try {
+      const stored = localStorage.getItem('dismissedHealthAlertIds')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        // Only keep IDs from last 24 hours (they're timestamped as id:timestamp)
+        const now = Date.now()
+        const valid = parsed.filter((entry: string) => {
+          const [, timestamp] = entry.split(':')
+          return timestamp && (now - parseInt(timestamp)) < 24 * 60 * 60 * 1000
+        })
+        return new Set(valid.map((entry: string) => entry.split(':')[0]))
+      }
+    } catch {}
+    return new Set()
+  })
+
   // Ref for auto-scrolling chat messages
   const chatMessagesEndRef = useRef(null)
 
@@ -122,7 +151,7 @@ function App() {
       
       try {
         // Call backend autonomous sweep
-        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/${threshold}?personality_mode=companion`, {
+        const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/sweep/${threshold}`, {
           method: 'POST',
           credentials: 'include'
         })
@@ -197,6 +226,40 @@ function App() {
     }
   }, [isAuthenticated])
 
+  // Poll for health alerts that need attention
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    const checkHealthAlerts = async () => {
+      try {
+        const res = await fetch(`${APP_CONFIG.apiUrl}/api/health/insights?limit=1&severity=warning`, {
+          credentials: 'include'
+        })
+        if (!res.ok) return
+
+        const data = await res.json()
+        if (data.insights && data.insights.length > 0) {
+          const insight = data.insights[0]
+          // Only show if not dismissed and not already showing
+          if (!dismissedHealthAlertIds.has(insight.id) && !activeHealthAlert) {
+            setActiveHealthAlert({
+              severity: insight.severity,
+              title: insight.title,
+              body: insight.content,
+              insightId: insight.id
+            })
+          }
+        }
+      } catch (error) {
+        // Silently ignore - health alerts are optional
+      }
+    }
+
+    checkHealthAlerts()
+    const interval = setInterval(checkHealthAlerts, 60000) // Check every minute
+    return () => clearInterval(interval)
+  }, [isAuthenticated, dismissedHealthAlertIds, activeHealthAlert])
+
   // Load analytics and notes when view changes to dashboard
   useEffect(() => {
     if (isAuthenticated && view === 'dashboard') {
@@ -242,6 +305,18 @@ function App() {
     // Use capture phase to intercept before browser handles it
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [])
+
+  // Custom navigation event listener (used by Settings page for Orchestrator Lab)
+  useEffect(() => {
+    const handleNavigate = (e: CustomEvent<{ view: string }>) => {
+      if (e.detail?.view) {
+        setView(e.detail.view)
+      }
+    }
+
+    window.addEventListener('navigate', handleNavigate as EventListener)
+    return () => window.removeEventListener('navigate', handleNavigate as EventListener)
   }, [])
 
   const loadTimersAndReminders = async () => {
@@ -384,10 +459,6 @@ function App() {
           content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
           timestamp: new Date()
         }])
-        
-        // Welcome notification via sprite
-        setTimeout(() => {
-        }, 2000)
       } else {
         const error = await response.json()
         setMessage(error.detail || 'Authentication failed')
@@ -948,16 +1019,8 @@ function App() {
       if (response.ok) {
         const insights = await response.json()
         if (insights.length > 0) {
-          const insight = insights[0]
-          
-          // Set appropriate sprite state based on sweep type
-          const spriteState = threshold === 'quickSweep' ? 'thinking' : 
-                             threshold === 'standardSweep' ? 'listening' : 'notifying'
-          
-          
-          // Display insight via sprite notification
-          setTimeout(() => {
-          }, 1500)
+          // Insights fetched successfully - can be used for notifications
+          console.log('Fetched insight:', insights[0]?.content?.substring(0, 100))
         }
       }
     } catch (error) {
@@ -1143,6 +1206,20 @@ function App() {
                   <span>Fitness</span>
                 </button>
                 <button
+                  onClick={() => { setView('learn'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'learn' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">school</span>
+                  <span>Learn</span>
+                </button>
+                <button
+                  onClick={() => { setView('projects'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'projects' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">work</span>
+                  <span>Projects</span>
+                </button>
+                <button
                   onClick={() => { setView('recipes'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'recipes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1150,39 +1227,18 @@ function App() {
                   <span>Recipes</span>
                 </button>
                 <button
-                  onClick={() => { setView('shadow-history'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'shadow-history' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">🕵️</span>
-                  <span>Shadow History</span>
-                </button>
-                <button
-                  onClick={() => { setView('insights'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">🧠</span>
-                  <span>Sara's Insights</span>
-                </button>
-                <button
                   onClick={() => { setView('briefings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'briefings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="material-icons">event_note</span>
-                  <span>Daily Briefings</span>
+                  <span className="material-icons">wb_sunny</span>
+                  <span>Morning Brief</span>
                 </button>
                 <button
-                  onClick={() => { setView('context-mode'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'context-mode' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  onClick={() => { setView('patterns'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'patterns' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
-                  <span className="material-icons">tune</span>
-                  <span>Context Mode</span>
-                </button>
-                <button
-                  onClick={() => { setView('smart-insights'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'smart-insights' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">auto_awesome</span>
-                  <span>Smart Insights</span>
+                  <span className="material-icons">insights</span>
+                  <span>Patterns</span>
                 </button>
                 <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
@@ -1257,6 +1313,20 @@ function App() {
               <span className="text-xs">Fitness</span>
             </button>
             <button
+              onClick={() => setView('learn')}
+              className={`flex flex-col items-center ${view === 'learn' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">school</span>
+              <span className="text-xs">Learn</span>
+            </button>
+            <button
+              onClick={() => setView('projects')}
+              className={`flex flex-col items-center ${view === 'projects' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">work</span>
+              <span className="text-xs">Projects</span>
+            </button>
+            <button
               onClick={() => setView('recipes')}
               className={`flex flex-col items-center ${view === 'recipes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
@@ -1264,41 +1334,19 @@ function App() {
               <span className="text-xs">Recipes</span>
             </button>
             <button
-              onClick={() => setView('shadow-history')}
-              className={`flex flex-col items-center ${view === 'shadow-history' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">🕵️</span>
-              <span className="text-xs">Shadow</span>
-            </button>
-            <button
-              onClick={() => setView('insights')}
-              className={`flex flex-col items-center ${view === 'insights' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">psychology</span>
-              <span className="text-xs">Insights</span>
-            </button>
-            <button
               onClick={() => setView('briefings')}
               className={`flex flex-col items-center ${view === 'briefings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">event_note</span>
-              <span className="text-xs">Briefings</span>
+              <span className="material-icons">wb_sunny</span>
+              <span className="text-xs">Brief</span>
             </button>
             <button
-              onClick={() => setView('context-mode')}
-              className={`flex flex-col items-center ${view === 'context-mode' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setView('patterns')}
+              className={`flex flex-col items-center ${view === 'patterns' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">tune</span>
-              <span className="text-xs">Context</span>
+              <span className="material-icons">insights</span>
+              <span className="text-xs">Patterns</span>
             </button>
-            <button
-              onClick={() => setView('smart-insights')}
-              className={`flex flex-col items-center ${view === 'smart-insights' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">auto_awesome</span>
-              <span className="text-xs">Smart</span>
-            </button>
-            {/* GTKY moved to Settings; Reflect removed */}
             <button
               onClick={() => setView('settings')}
               className={`flex flex-col items-center ${view === 'settings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
@@ -1322,6 +1370,12 @@ function App() {
           <header className="hidden md:flex justify-between items-center mb-8">
             <h1 className="text-4xl font-bold">{APP_CONFIG.assistantName}</h1>
             <div className="flex items-center space-x-4">
+              <BackgroundTasksIndicator
+                onNavigateToWorkspace={(noteId) => {
+                  setView('notes')
+                  console.log('Navigate to workspace note:', noteId)
+                }}
+              />
               <span className="text-gray-400 text-sm">Hello, {user?.email}</span>
             </div>
           </header>
@@ -1918,17 +1972,16 @@ function App() {
             <FitnessSection />
           )}
 
+          {view === 'learn' && (
+            <LearningSection />
+          )}
+
+          {view === 'projects' && (
+            <ProjectSection />
+          )}
+
           {view === 'recipes' && (
             <RecipesSection />
-          )}
-
-          {view === 'shadow-history' && (
-            <ShadowHistory />
-          )}
-
-
-          {view === 'insights' && (
-            <InsightInbox onToast={showToast} onNavigate={setView} />
           )}
 
           {/* GTKY now managed within Settings; reflection views removed */}
@@ -1950,16 +2003,16 @@ function App() {
             </div>
           )}
 
+          {view === 'orchestrator-lab' && (
+            <OrchestratorLab onBack={() => setView('settings')} />
+          )}
+
           {view === 'briefings' && (
-            <DailyBriefings />
+            <MorningBrief />
           )}
 
-          {view === 'context-mode' && (
-            <ContextModeSwitcher />
-          )}
-
-          {view === 'smart-insights' && (
-            <SmartInsightsDashboard />
+          {view === 'patterns' && (
+            <PatternsDashboard />
           )}
         </main>
       </div>
@@ -2011,6 +2064,47 @@ function App() {
           </button>
         </div>
       </nav>
+
+
+      {/* Background Task Notifications */}
+      <NotificationBanner
+        onNavigateToWorkspace={(noteId) => {
+          // Navigate to notes view and select the result note
+          setView('notes')
+          // You can pass the noteId to Notes component to auto-select it
+          console.log('Navigate to workspace note:', noteId)
+        }}
+        onShowToast={(message, type) => {
+          const newToast = { id: Date.now().toString(), message, type }
+          setToasts(prev => [...prev, newToast])
+          setTimeout(() => {
+            setToasts(prev => prev.filter(t => t.id !== newToast.id))
+          }, 5000)
+        }}
+      />
+
+      {/* Mini Chat Overlay for Agent Clarifications */}
+      <MiniChatOverlay />
+
+      {/* Health Alert Chat Overlay */}
+      {activeHealthAlert && (
+        <HealthAlertChat
+          alert={activeHealthAlert}
+          onClose={() => {
+            // Mark as dismissed so it doesn't reappear (persisted to localStorage)
+            if (activeHealthAlert.insightId) {
+              const newDismissed = new Set([...dismissedHealthAlertIds, activeHealthAlert.insightId!])
+              setDismissedHealthAlertIds(newDismissed)
+              // Save to localStorage with timestamp for 24-hour expiry
+              try {
+                const entries = Array.from(newDismissed).map(id => `${id}:${Date.now()}`)
+                localStorage.setItem('dismissedHealthAlertIds', JSON.stringify(entries))
+              } catch {}
+            }
+            setActiveHealthAlert(null)
+          }}
+        />
+      )}
 
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-50 space-y-2">

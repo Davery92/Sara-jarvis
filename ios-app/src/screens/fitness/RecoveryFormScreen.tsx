@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { fitnessService, RecoveryLog } from '../../services/fitness';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { getLocalDateString } from '../../utils/dateUtils';
 
 interface RecoveryFormScreenProps {
   route?: {
@@ -26,8 +27,14 @@ export default function RecoveryFormScreen({ route, navigation }: RecoveryFormSc
   const existingLog = route?.params?.log;
   const onSave = route?.params?.onSave;
 
-  const [logDate, setLogDate] = useState(existingLog?.log_date || new Date().toISOString().split('T')[0]);
-  const [sleepHours, setSleepHours] = useState(existingLog?.sleep_hours?.toString() || '');
+  const [logDate, setLogDate] = useState(existingLog?.log_date || getLocalDateString());
+  // Convert decimal hours to hours and minutes for display
+  const existingSleepHours = existingLog?.sleep_hours ? Math.floor(existingLog.sleep_hours) : null;
+  const existingSleepMinutes = existingLog?.sleep_hours
+    ? Math.round((existingLog.sleep_hours - Math.floor(existingLog.sleep_hours)) * 60)
+    : null;
+  const [sleepHours, setSleepHours] = useState(existingSleepHours?.toString() || '');
+  const [sleepMinutes, setSleepMinutes] = useState(existingSleepMinutes?.toString() || '');
   const [hrv, setHrv] = useState(existingLog?.hrv?.toString() || '');
   const [heartRate, setHeartRate] = useState(existingLog?.heart_rate?.toString() || '');
   const [sorenessLevel, setSorenessLevel] = useState(existingLog?.soreness_level?.toString() || '');
@@ -45,7 +52,12 @@ export default function RecoveryFormScreen({ route, navigation }: RecoveryFormSc
         log_date: logDate,
       };
 
-      if (sleepHours) recoveryData.sleep_hours = parseFloat(sleepHours);
+      // Convert hours and minutes to decimal hours
+      if (sleepHours || sleepMinutes) {
+        const hours = sleepHours ? parseInt(sleepHours) : 0;
+        const minutes = sleepMinutes ? parseInt(sleepMinutes) : 0;
+        recoveryData.sleep_hours = hours + (minutes / 60);
+      }
       if (hrv) recoveryData.hrv = parseInt(hrv);
       if (heartRate) recoveryData.heart_rate = parseInt(heartRate);
       if (sorenessLevel) recoveryData.soreness_level = parseInt(sorenessLevel);
@@ -101,18 +113,36 @@ export default function RecoveryFormScreen({ route, navigation }: RecoveryFormSc
           />
         </View>
 
-        {/* Sleep Hours */}
+        {/* Sleep Hours and Minutes */}
         <View style={styles.formGroup}>
-          <Text style={styles.label}>Sleep Hours</Text>
-          <TextInput
-            style={styles.input}
-            value={sleepHours}
-            onChangeText={setSleepHours}
-            placeholder="e.g., 7.5"
-            placeholderTextColor={colors.textMuted}
-            keyboardType="decimal-pad"
-          />
-          <Text style={styles.hint}>Total hours of sleep</Text>
+          <Text style={styles.label}>Sleep Duration</Text>
+          <View style={styles.sleepRow}>
+            <View style={styles.sleepInputGroup}>
+              <TextInput
+                style={[styles.input, styles.sleepInput]}
+                value={sleepHours}
+                onChangeText={setSleepHours}
+                placeholder="7"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="number-pad"
+                maxLength={2}
+              />
+              <Text style={styles.sleepLabel}>hours</Text>
+            </View>
+            <View style={styles.sleepInputGroup}>
+              <TextInput
+                style={[styles.input, styles.sleepInput]}
+                value={sleepMinutes}
+                onChangeText={setSleepMinutes}
+                placeholder="30"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="number-pad"
+                maxLength={2}
+              />
+              <Text style={styles.sleepLabel}>minutes</Text>
+            </View>
+          </View>
+          <Text style={styles.hint}>Total time asleep</Text>
         </View>
 
         {/* HRV */}
@@ -267,6 +297,23 @@ const styles = StyleSheet.create({
   },
   notesInput: {
     minHeight: 100,
+  },
+  sleepRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  sleepInputGroup: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  sleepInput: {
+    width: '100%',
+    textAlign: 'center',
+  },
+  sleepLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    marginTop: spacing.xs,
   },
   weightRow: {
     flexDirection: 'row',

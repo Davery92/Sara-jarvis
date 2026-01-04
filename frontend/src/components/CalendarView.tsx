@@ -1,10 +1,9 @@
 /**
  * Calendar View Component
- *
- * Displays user's calendar events with month/week/day views
+ * Clean, functional calendar with day/week/month views
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { APP_CONFIG } from '../config';
 
 interface CalendarEvent {
@@ -13,47 +12,71 @@ interface CalendarEvent {
   description?: string;
   starts_at: string;
   ends_at: string;
+  start_time?: string;  // Alternative field name from /calendar/events
+  end_time?: string;    // Alternative field name from /calendar/events
   location?: string;
-  created_at?: string;
-  updated_at?: string;
+  source?: string;      // 'sara' or 'ios_calendar'
+  ios_calendar_name?: string;
+  read_only?: boolean;
 }
+
+// Helper to format date as YYYY-MM-DD in local time
+const toLocalDateString = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+// Helper to parse ISO string to local date string
+const getEventDateString = (isoString: string): string => {
+  const date = new Date(isoString);
+  return toLocalDateString(date);
+};
 
 const CalendarView: React.FC = () => {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentDate, setCurrentDate] = useState(new Date());
+  const [selectedDate, setSelectedDate] = useState(new Date());
   const [view, setView] = useState<'month' | 'week' | 'day'>('week');
-  const [showEventModal, setShowEventModal] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
+  const [editMode, setEditMode] = useState(false);
   const [createForm, setCreateForm] = useState({
     title: '',
     description: '',
-    starts_at: '',
-    ends_at: '',
-    location: ''
-  });
-  const [editForm, setEditForm] = useState({
-    title: '',
-    description: '',
-    starts_at: '',
-    ends_at: '',
+    date: '',
+    startTime: '09:00',
+    endTime: '10:00',
     location: ''
   });
 
-  // Fetch calendar events
+  // Fetch events once on mount
+  useEffect(() => {
+    fetchEvents();
+  }, []);
+
   const fetchEvents = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`${APP_CONFIG.apiUrl}/events/`, {
+      // Use /calendar/events which includes iOS-synced events
+      const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events`, {
         credentials: 'include',
       });
-
+      console.log('[CALENDAR] Fetch response status:', response.status);
       if (response.ok) {
         const data = await response.json();
-        setEvents(data.events || []);
+        // /calendar/events returns array directly, normalize field names
+        const eventList = (Array.isArray(data) ? data : (data.events || [])).map((e: any) => ({
+          ...e,
+          // Normalize field names (start_time -> starts_at for display)
+          starts_at: e.starts_at || e.start_time,
+          ends_at: e.ends_at || e.end_time,
+        }));
+        console.log('[CALENDAR] Loaded', eventList.length, 'events (includes iOS synced)');
+        setEvents([...eventList]);
+      } else {
+        console.error('Fetch failed with status:', response.status, await response.text());
       }
     } catch (error) {
       console.error('Error fetching calendar events:', error);
@@ -62,216 +85,328 @@ const CalendarView: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    fetchEvents();
-  }, [currentDate]);
+  // Get events for a specific date (includes multi-day events)
+  const getEventsForDate = (date: Date): CalendarEvent[] => {
+    const dateStr = toLocalDateString(date);
+    const dateStart = new Date(date);
+    dateStart.setHours(0, 0, 0, 0);
+    const dateEnd = new Date(date);
+    dateEnd.setHours(23, 59, 59, 999);
 
-  // Create new event
-  const createEvent = async () => {
-    try {
-      const payload = {
-        title: createForm.title,
-        description: createForm.description || '',
-        starts_at: new Date(createForm.starts_at).toISOString(),
-        ends_at: new Date(createForm.ends_at).toISOString(),
-        location: createForm.location || ''
-      };
-
-      console.log('Creating event with payload:', payload);
-
-      const response = await fetch(`${APP_CONFIG.apiUrl}/events/`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (response.ok) {
-        setShowCreateModal(false);
-        setCreateForm({
-          title: '',
-          description: '',
-          starts_at: '',
-          ends_at: '',
-          location: ''
-        });
-        fetchEvents(); // Refresh events
-      } else {
-        const error = await response.json();
-        console.error('Failed to create event:', error);
-        alert(`Failed to create event: ${error.detail || 'Unknown error'}`);
-      }
-    } catch (error) {
-      console.error('Error creating event:', error);
-      alert('Error creating event');
-    }
-  };
-
-  // Update event
-  const updateEvent = async () => {
-    if (!editingEvent) return;
-
-    try {
-      const payload = {
-        title: editForm.title,
-        description: editForm.description || '',
-        starts_at: new Date(editForm.starts_at).toISOString(),
-        ends_at: new Date(editForm.ends_at).toISOString(),
-        location: editForm.location || ''
-      };
-
-      const response = await fetch(`${APP_CONFIG.apiUrl}/events/${editingEvent.id}`, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (response.ok) {
-        setShowEditModal(false);
-        setEditingEvent(null);
-        fetchEvents(); // Refresh events
-      } else {
-        const error = await response.json();
-        console.error('Failed to update event:', error);
-        alert(`Failed to update event: ${error.detail || 'Unknown error'}`);
-      }
-    } catch (error) {
-      console.error('Error updating event:', error);
-      alert('Error updating event');
-    }
-  };
-
-  // Delete event
-  const deleteEvent = async (eventId: string) => {
-    if (!confirm('Are you sure you want to delete this event?')) return;
-
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/events/${eventId}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-
-      if (response.ok) {
-        setShowEventModal(false);
-        setSelectedEvent(null);
-        fetchEvents(); // Refresh events
-      } else {
-        alert('Failed to delete event');
-      }
-    } catch (error) {
-      console.error('Error deleting event:', error);
-      alert('Error deleting event');
-    }
-  };
-
-  // Open edit modal
-  const openEditModal = (event: CalendarEvent) => {
-    setEditingEvent(event);
-    setEditForm({
-      title: event.title,
-      description: event.description || '',
-      starts_at: new Date(event.starts_at).toISOString().slice(0, 16),
-      ends_at: new Date(event.ends_at).toISOString().slice(0, 16),
-      location: event.location || ''
-    });
-    setShowEventModal(false);
-    setShowEditModal(true);
-  };
-
-  // Get events for today
-  const getTodayEvents = () => {
-    const today = new Date().toISOString().split('T')[0];
-    return events.filter(event =>
-      event.starts_at.startsWith(today)
-    );
-  };
-
-  // Get events for current week
-  const getWeekEvents = () => {
-    const startOfWeek = new Date(currentDate);
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
-
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(endOfWeek.getDate() + 7);
-
-    return events.filter(event => {
-      const eventDate = new Date(event.starts_at);
-      return eventDate >= startOfWeek && eventDate < endOfWeek;
+    return events.filter(e => {
+      const eventStart = new Date(e.starts_at);
+      const eventEnd = new Date(e.ends_at);
+      // Event spans this date if: eventStart <= dateEnd AND eventEnd >= dateStart
+      return eventStart <= dateEnd && eventEnd >= dateStart;
     });
   };
 
-  const formatTime = (datetime: string) => {
-    return new Date(datetime).toLocaleTimeString('en-US', {
+  // Check if event is a multi-day event
+  const isMultiDayEvent = (event: CalendarEvent): boolean => {
+    const start = new Date(event.starts_at);
+    const end = new Date(event.ends_at);
+    return toLocalDateString(start) !== toLocalDateString(end);
+  };
+
+  // Check if this is a continuation day (not the start day) for a multi-day event
+  const isContinuationDay = (event: CalendarEvent, date: Date): boolean => {
+    const eventStartStr = getEventDateString(event.starts_at);
+    const dateStr = toLocalDateString(date);
+    return isMultiDayEvent(event) && eventStartStr !== dateStr;
+  };
+
+  // Navigation
+  const goToToday = () => setSelectedDate(new Date());
+
+  const navigate = (direction: number) => {
+    const newDate = new Date(selectedDate);
+    if (view === 'day') {
+      newDate.setDate(newDate.getDate() + direction);
+    } else if (view === 'week') {
+      newDate.setDate(newDate.getDate() + (direction * 7));
+    } else {
+      newDate.setMonth(newDate.getMonth() + direction);
+    }
+    setSelectedDate(newDate);
+  };
+
+  // Format helpers
+  const formatTime = (iso: string) => {
+    return new Date(iso).toLocaleTimeString('en-US', {
       hour: 'numeric',
       minute: '2-digit',
       hour12: true
     });
   };
 
-  const formatDate = (datetime: string) => {
-    return new Date(datetime).toLocaleDateString('en-US', {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric'
-    });
+  // Create event
+  const handleCreateEvent = async () => {
+    if (!createForm.title || !createForm.date || !createForm.startTime || !createForm.endTime) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    try {
+      const startsAt = new Date(`${createForm.date}T${createForm.startTime}:00`);
+      const endsAt = new Date(`${createForm.date}T${createForm.endTime}:00`);
+
+      const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: createForm.title,
+          description: createForm.description,
+          start_time: startsAt.toISOString(),
+          end_time: endsAt.toISOString(),
+          location: createForm.location
+        }),
+      });
+
+      if (response.ok) {
+        setShowCreateModal(false);
+        setCreateForm({ title: '', description: '', date: '', startTime: '09:00', endTime: '10:00', location: '' });
+        fetchEvents();
+      } else {
+        const err = await response.json();
+        alert(err.detail || 'Failed to create event');
+      }
+    } catch (error) {
+      alert('Error creating event');
+    }
   };
 
-  // Week view component
-  const renderWeekView = () => {
-    const weekEvents = getWeekEvents();
-    const startOfWeek = new Date(currentDate);
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  // Delete event
+  const handleDeleteEvent = async (eventId: string) => {
+    // Don't allow deleting iOS events
+    if (selectedEvent?.read_only || selectedEvent?.source === 'ios_calendar') {
+      alert('This event is synced from iOS Calendar and cannot be deleted here. Delete it in your iOS Calendar app.');
+      return;
+    }
+    if (!confirm('Delete this event?')) return;
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events/${eventId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (response.ok) {
+        setSelectedEvent(null);
+        fetchEvents();
+      }
+    } catch (error) {
+      alert('Error deleting event');
+    }
+  };
 
-    const weekDays = Array.from({ length: 7 }, (_, i) => {
-      const day = new Date(startOfWeek);
-      day.setDate(day.getDate() + i);
-      return day;
+  // Edit event - open modal with event data
+  const openEditModal = (event: CalendarEvent) => {
+    // Don't allow editing iOS events
+    if (event.read_only || event.source === 'ios_calendar') {
+      alert('This event is synced from iOS Calendar and cannot be edited here. Edit it in your iOS Calendar app.');
+      return;
+    }
+    const startDate = new Date(event.starts_at);
+    const endDate = new Date(event.ends_at);
+    setCreateForm({
+      title: event.title,
+      description: event.description || '',
+      date: toLocalDateString(startDate),
+      startTime: startDate.toTimeString().slice(0, 5),
+      endTime: endDate.toTimeString().slice(0, 5),
+      location: event.location || ''
     });
+    (window as any).__editingEventId = event.id;
+    setEditMode(true);
+    setShowCreateModal(true);
+    setSelectedEvent(null);
+  };
 
+  // Update event
+  const handleUpdateEvent = async () => {
+    if (!selectedEvent && !editMode) return;
+    if (!createForm.title || !createForm.date || !createForm.startTime || !createForm.endTime) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    // Find the event ID from the form (we need to track it)
+    const eventId = (window as any).__editingEventId;
+    if (!eventId) {
+      alert('Error: No event selected for editing');
+      return;
+    }
+
+    try {
+      const startsAt = new Date(`${createForm.date}T${createForm.startTime}:00`);
+      const endsAt = new Date(`${createForm.date}T${createForm.endTime}:00`);
+
+      const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events/${eventId}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: createForm.title,
+          description: createForm.description,
+          start_time: startsAt.toISOString(),
+          end_time: endsAt.toISOString(),
+          location: createForm.location
+        }),
+      });
+
+      if (response.ok) {
+        setShowCreateModal(false);
+        setEditMode(false);
+        setCreateForm({ title: '', description: '', date: '', startTime: '09:00', endTime: '10:00', location: '' });
+        (window as any).__editingEventId = null;
+        fetchEvents();
+      } else {
+        const err = await response.json();
+        alert(err.detail || 'Failed to update event');
+      }
+    } catch (error) {
+      alert('Error updating event');
+    }
+  };
+
+  // Get week days for current week
+  const weekDays = useMemo(() => {
+    const start = new Date(selectedDate);
+    start.setDate(start.getDate() - start.getDay());
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      return d;
+    });
+  }, [selectedDate]);
+
+  // Get month grid (6 weeks x 7 days)
+  const monthGrid = useMemo(() => {
+    const year = selectedDate.getFullYear();
+    const month = selectedDate.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const startDate = new Date(firstDay);
+    startDate.setDate(startDate.getDate() - firstDay.getDay());
+
+    const days: Date[] = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      days.push(d);
+    }
+    return days;
+  }, [selectedDate]);
+
+  const todayStr = toLocalDateString(new Date());
+  const selectedDateStr = toLocalDateString(selectedDate);
+
+  // Check if event is from iOS
+  const isIOSEvent = (event: CalendarEvent) => event.source === 'ios_calendar' || event.read_only;
+
+  // Render event card
+  const EventCard = ({ event, compact = false, forDate }: { event: CalendarEvent; compact?: boolean; forDate?: Date }) => {
+    const isMultiDay = isMultiDayEvent(event);
+    const isContinuation = forDate ? isContinuationDay(event, forDate) : false;
+
+    // For multi-day events, show date range instead of time
+    const getTimeDisplay = () => {
+      if (isMultiDay) {
+        const startDate = new Date(event.starts_at);
+        const endDate = new Date(event.ends_at);
+        const startStr = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endStr = endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startStr} → ${endStr}`;
+      }
+      return `${formatTime(event.starts_at)} - ${formatTime(event.ends_at)}`;
+    };
+
+    return (
+      <button
+        onClick={() => setSelectedEvent(event)}
+        className={`w-full text-left rounded transition-colors ${
+          compact
+            ? `p-1 text-xs truncate ${isMultiDay ? 'bg-amber-600/30 hover:bg-amber-600/50' : isIOSEvent(event) ? 'bg-purple-600/30 hover:bg-purple-600/50' : 'bg-teal-600/30 hover:bg-teal-600/50'}`
+            : `p-3 border ${isMultiDay ? 'bg-amber-800/30 border-amber-700 hover:border-amber-500/50' : isIOSEvent(event) ? 'bg-purple-800/30 border-purple-700 hover:border-purple-500/50' : 'bg-gray-800/50 border-gray-700 hover:border-teal-500/50'}`
+        }`}
+      >
+        <div className={`font-medium text-white ${compact ? 'truncate' : ''} flex items-center gap-2`}>
+          {isContinuation && <span className="text-amber-400">↳</span>}
+          {event.title}
+          {isMultiDay && !compact && (
+            <span className="text-xs px-1.5 py-0.5 bg-amber-600/50 rounded text-amber-200">Multi-day</span>
+          )}
+          {isIOSEvent(event) && !compact && !isMultiDay && (
+            <span className="text-xs px-1.5 py-0.5 bg-purple-600/50 rounded text-purple-200">iOS</span>
+          )}
+        </div>
+        {!compact && (
+          <div className="text-sm text-gray-400 mt-1">
+            {getTimeDisplay()}
+            {event.location && <span className="ml-2">📍 {event.location}</span>}
+          </div>
+        )}
+      </button>
+    );
+  };
+
+  // Day View
+  const renderDayView = () => {
+    const dayEvents = getEventsForDate(selectedDate);
+    return (
+      <div>
+        <div className="text-center mb-4">
+          <div className="text-2xl font-bold text-white">
+            {selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+          </div>
+        </div>
+        <div className="space-y-2">
+          {dayEvents.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">No events for this day</div>
+          ) : (
+            dayEvents.map(event => <EventCard key={event.id} event={event} forDate={selectedDate} />)
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Week View
+  const renderWeekView = () => {
     return (
       <div className="grid grid-cols-7 gap-2">
         {weekDays.map((day, idx) => {
-          const dayStr = day.toISOString().split('T')[0];
-          const dayEvents = weekEvents.filter(e => e.starts_at.startsWith(dayStr));
-          const isToday = dayStr === new Date().toISOString().split('T')[0];
+          const dayStr = toLocalDateString(day);
+          const isToday = dayStr === todayStr;
+          const isSelected = dayStr === selectedDateStr;
+          const dayEvents = getEventsForDate(day);
 
           return (
             <div
               key={idx}
-              className={`border rounded-lg p-3 min-h-[200px] ${
-                isToday
-                  ? 'border-teal-500 bg-teal-500/5'
-                  : 'border-gray-700 bg-gray-800/30'
+              onClick={() => {
+                setSelectedDate(new Date(day));
+                setView('day');
+              }}
+              className={`border rounded-lg p-2 min-h-[180px] cursor-pointer transition-colors ${
+                isToday ? 'border-teal-500 bg-teal-500/10' :
+                isSelected ? 'border-blue-500 bg-blue-500/10' :
+                'border-gray-700 bg-gray-800/30 hover:bg-gray-800/50'
               }`}
             >
-              <div className="font-medium text-sm mb-2 text-center">
-                <div className={isToday ? 'text-teal-400' : 'text-gray-400'}>
+              <div className="text-center mb-2">
+                <div className={`text-xs ${isToday ? 'text-teal-400' : 'text-gray-400'}`}>
                   {day.toLocaleDateString('en-US', { weekday: 'short' })}
                 </div>
-                <div className={`text-lg ${isToday ? 'text-teal-300' : 'text-white'}`}>
+                <div className={`text-lg font-bold ${isToday ? 'text-teal-300' : 'text-white'}`}>
                   {day.getDate()}
                 </div>
               </div>
-
               <div className="space-y-1">
-                {dayEvents.map(event => (
-                  <button
-                    key={event.id}
-                    onClick={() => {
-                      setSelectedEvent(event);
-                      setShowEventModal(true);
-                    }}
-                    className="w-full text-left p-2 bg-teal-600/20 border border-teal-500/30 rounded text-xs hover:bg-teal-600/30 transition-colors"
-                  >
-                    <div className="font-medium text-white truncate">{event.title}</div>
-                    <div className="text-gray-400">{formatTime(event.starts_at)}</div>
-                  </button>
+                {dayEvents.slice(0, 3).map(event => (
+                  <EventCard key={event.id} event={event} compact forDate={day} />
                 ))}
+                {dayEvents.length > 3 && (
+                  <div className="text-xs text-gray-400 text-center">+{dayEvents.length - 3} more</div>
+                )}
               </div>
             </div>
           );
@@ -280,189 +415,183 @@ const CalendarView: React.FC = () => {
     );
   };
 
-  // Day view component (list of today's events)
-  const renderDayView = () => {
-    const todayEvents = getTodayEvents();
-
-    return (
-      <div className="space-y-4">
-        {todayEvents.length === 0 ? (
-          <div className="text-center py-12">
-            <div className="text-6xl mb-4">📅</div>
-            <p className="text-gray-400">No events scheduled for today</p>
-          </div>
-        ) : (
-          todayEvents.map(event => (
-            <button
-              key={event.id}
-              onClick={() => {
-                setSelectedEvent(event);
-                setShowEventModal(true);
-              }}
-              className="w-full text-left p-4 bg-gray-800/50 border border-gray-700 rounded-lg hover:border-teal-500/50 transition-colors"
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <h3 className="text-lg font-medium text-white mb-1">{event.title}</h3>
-                  {event.description && (
-                    <p className="text-gray-400 text-sm mb-2">{event.description}</p>
-                  )}
-                  <div className="flex items-center space-x-4 text-sm text-gray-500">
-                    <span>🕐 {formatTime(event.starts_at)}</span>
-                    {event.location && <span>📍 {event.location}</span>}
-                  </div>
-                </div>
-              </div>
-            </button>
-          ))
-        )}
+  // Month View
+  const renderMonthView = () => (
+    <div>
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+          <div key={d} className="text-center text-xs text-gray-400 py-1">{d}</div>
+        ))}
       </div>
-    );
-  };
+      <div className="grid grid-cols-7 gap-1">
+        {monthGrid.map((day, idx) => {
+          const dayStr = toLocalDateString(day);
+          const isToday = dayStr === todayStr;
+          const isCurrentMonth = day.getMonth() === selectedDate.getMonth();
+          const dayEvents = getEventsForDate(day);
+
+          return (
+            <div
+              key={idx}
+              onClick={() => {
+                setSelectedDate(new Date(day));
+                setView('day');
+              }}
+              className={`p-1 min-h-[80px] border rounded cursor-pointer transition-colors ${
+                isToday ? 'border-teal-500 bg-teal-500/10' :
+                isCurrentMonth ? 'border-gray-700 bg-gray-800/30 hover:bg-gray-800/50' :
+                'border-gray-800 bg-gray-900/30 opacity-50'
+              }`}
+            >
+              <div className={`text-sm font-medium ${isToday ? 'text-teal-300' : isCurrentMonth ? 'text-white' : 'text-gray-500'}`}>
+                {day.getDate()}
+              </div>
+              {dayEvents.length > 0 && (
+                <div className="mt-1">
+                  {dayEvents.slice(0, 2).map(event => {
+                    const isMultiDay = isMultiDayEvent(event);
+                    const isCont = isContinuationDay(event, day);
+                    return (
+                      <div
+                        key={event.id}
+                        className={`text-xs rounded px-1 truncate mb-0.5 ${isMultiDay ? 'bg-amber-600/30' : 'bg-teal-600/30'}`}
+                      >
+                        {isCont && <span className="text-amber-400">↳</span>}
+                        {event.title}
+                      </div>
+                    );
+                  })}
+                  {dayEvents.length > 2 && (
+                    <div className="text-xs text-gray-400">+{dayEvents.length - 2}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 
   return (
     <div className="calendar-view h-full">
       {/* Header */}
-      <div className="bg-card border border-card rounded-xl p-6 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-2xl font-semibold">📅 Calendar</h2>
+      <div className="bg-card border border-card rounded-xl p-4 mb-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="text-xl font-semibold">📅 Calendar</h2>
 
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors flex items-center space-x-2"
-            >
-              <span>+</span>
-              <span>New Event</span>
-            </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Navigation */}
+            <div className="flex items-center gap-1">
+              <button onClick={() => navigate(-1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">‹</button>
+              <button onClick={goToToday} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">Today</button>
+              <button onClick={() => navigate(1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">›</button>
+            </div>
 
-            {/* View toggles */}
-            <div className="flex border border-gray-700 rounded-lg overflow-hidden">
-              {['day', 'week', 'month'].map((v) => (
+            {/* View Toggle */}
+            <div className="flex border border-gray-700 rounded overflow-hidden">
+              {(['day', 'week', 'month'] as const).map(v => (
                 <button
                   key={v}
-                  onClick={() => setView(v as any)}
-                  className={`px-4 py-2 text-sm transition-colors ${
-                    view === v
-                      ? 'bg-teal-600 text-white'
-                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
-                  }`}
+                  onClick={() => setView(v)}
+                  className={`px-3 py-1 text-sm ${view === v ? 'bg-teal-600 text-white' : 'text-gray-400 hover:bg-gray-700'}`}
                 >
                   {v.charAt(0).toUpperCase() + v.slice(1)}
                 </button>
               ))}
             </div>
 
+            {/* New Event */}
             <button
-              onClick={() => setCurrentDate(new Date())}
-              className="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+              type="button"
+              onClick={() => {
+                console.log('Opening create modal, date:', selectedDateStr);
+                setCreateForm(f => ({ ...f, date: selectedDateStr }));
+                setShowCreateModal(true);
+              }}
+              className="px-3 py-1 bg-teal-600 text-white font-medium rounded hover:bg-teal-700"
             >
-              Today
+              + New Event
             </button>
           </div>
         </div>
 
-        {/* Month/Year selector */}
-        <div className="flex items-center justify-between text-gray-400">
-          <button
-            onClick={() => {
-              const newDate = new Date(currentDate);
-              newDate.setMonth(newDate.getMonth() - 1);
-              setCurrentDate(newDate);
-            }}
-            className="p-2 hover:text-white"
-          >
-            ‹
-          </button>
-
-          <span className="text-lg font-medium text-white">
-            {currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
-          </span>
-
-          <button
-            onClick={() => {
-              const newDate = new Date(currentDate);
-              newDate.setMonth(newDate.getMonth() + 1);
-              setCurrentDate(newDate);
-            }}
-            className="p-2 hover:text-white"
-          >
-            ›
-          </button>
+        {/* Current Period Display */}
+        <div className="text-center mt-2 text-lg font-medium text-white">
+          {view === 'day' && selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+          {view === 'week' && `Week of ${weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
+          {view === 'month' && selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
         </div>
       </div>
 
-      {/* Calendar content */}
-      <div className="bg-card border border-card rounded-xl p-6">
+      {/* Calendar Content */}
+      <div className="bg-card border border-card rounded-xl p-4">
         {loading ? (
           <div className="text-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mx-auto mb-4"></div>
-            <p className="text-gray-400">Loading calendar...</p>
+            <p className="text-gray-400">Loading...</p>
           </div>
-        ) : view === 'week' ? (
-          renderWeekView()
         ) : (
-          renderDayView()
+          <>
+            {view === 'day' && renderDayView()}
+            {view === 'week' && renderWeekView()}
+            {view === 'month' && renderMonthView()}
+          </>
         )}
       </div>
 
       {/* Event Detail Modal */}
-      {showEventModal && selectedEvent && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-lg w-full p-6">
-            <div className="flex items-start justify-between mb-4">
-              <h3 className="text-xl font-semibold text-white">{selectedEvent.title}</h3>
-              <button
-                onClick={() => {
-                  setShowEventModal(false);
-                  setSelectedEvent(null);
-                }}
-                className="text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
+      {selectedEvent && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedEvent(null)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-start mb-4">
+              <div className="flex items-center gap-2">
+                <h3 className="text-xl font-semibold text-white">{selectedEvent.title}</h3>
+                {isIOSEvent(selectedEvent) && (
+                  <span className="text-xs px-2 py-1 bg-purple-600/50 rounded text-purple-200">iOS Calendar</span>
+                )}
+              </div>
+              <button onClick={() => setSelectedEvent(null)} className="text-gray-400 hover:text-white">✕</button>
             </div>
 
             {selectedEvent.description && (
               <p className="text-gray-300 mb-4">{selectedEvent.description}</p>
             )}
 
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center space-x-2 text-gray-400">
-                <span>🕐</span>
-                <span>
-                  {formatDate(selectedEvent.starts_at)} at {formatTime(selectedEvent.starts_at)}
-                </span>
-              </div>
-
-              {selectedEvent.location && (
-                <div className="flex items-center space-x-2 text-gray-400">
-                  <span>📍</span>
-                  <span>{selectedEvent.location}</span>
-                </div>
+            <div className="space-y-2 text-sm text-gray-400 mb-6">
+              <div>🕐 {new Date(selectedEvent.starts_at).toLocaleString()}</div>
+              <div>🏁 {new Date(selectedEvent.ends_at).toLocaleString()}</div>
+              {selectedEvent.location && <div>📍 {selectedEvent.location}</div>}
+              {selectedEvent.ios_calendar_name && (
+                <div className="text-purple-300">📱 {selectedEvent.ios_calendar_name}</div>
               )}
-
             </div>
 
-            <div className="flex space-x-2 mt-6">
+            <div className="flex gap-2">
+              {!isIOSEvent(selectedEvent) && (
+                <>
+                  <button
+                    onClick={() => handleDeleteEvent(selectedEvent.id)}
+                    className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    onClick={() => openEditModal(selectedEvent)}
+                    className="flex-1 px-4 py-2 bg-teal-600 text-white rounded hover:bg-teal-700"
+                  >
+                    Edit
+                  </button>
+                </>
+              )}
+              {isIOSEvent(selectedEvent) && (
+                <p className="flex-1 text-sm text-gray-400 italic">
+                  Synced from iOS Calendar. Edit in your iOS Calendar app.
+                </p>
+              )}
               <button
-                onClick={() => deleteEvent(selectedEvent.id)}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-              >
-                Delete
-              </button>
-              <button
-                onClick={() => openEditModal(selectedEvent)}
-                className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
-              >
-                Edit
-              </button>
-              <button
-                onClick={() => {
-                  setShowEventModal(false);
-                  setSelectedEvent(null);
-                }}
-                className="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                onClick={() => setSelectedEvent(null)}
+                className="px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-600"
               >
                 Close
               </button>
@@ -471,206 +600,92 @@ const CalendarView: React.FC = () => {
         </div>
       )}
 
-      {/* Edit Event Modal */}
-      {showEditModal && editingEvent && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-lg w-full p-6">
-            <div className="flex items-start justify-between mb-4">
-              <h3 className="text-xl font-semibold text-white">Edit Event</h3>
-              <button
-                onClick={() => {
-                  setShowEditModal(false);
-                  setEditingEvent(null);
-                }}
-                className="text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Title *
-                </label>
-                <input
-                  type="text"
-                  value={editForm.title}
-                  onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  placeholder="Event title"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Description
-                </label>
-                <textarea
-                  value={editForm.description}
-                  onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  rows={3}
-                  placeholder="Event description"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    Start Time *
-                  </label>
-                  <input
-                    type="datetime-local"
-                    value={editForm.starts_at}
-                    onChange={(e) => setEditForm({ ...editForm, starts_at: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    End Time *
-                  </label>
-                  <input
-                    type="datetime-local"
-                    value={editForm.ends_at}
-                    onChange={(e) => setEditForm({ ...editForm, ends_at: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Location
-                </label>
-                <input
-                  type="text"
-                  value={editForm.location}
-                  onChange={(e) => setEditForm({ ...editForm, location: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  placeholder="Event location"
-                />
-              </div>
-            </div>
-
-            <div className="flex space-x-2 mt-6">
-              <button
-                onClick={() => {
-                  setShowEditModal(false);
-                  setEditingEvent(null);
-                }}
-                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={updateEvent}
-                disabled={!editForm.title || !editForm.starts_at || !editForm.ends_at}
-                className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Create Event Modal */}
+      {/* Create/Edit Event Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-lg w-full p-6">
-            <div className="flex items-start justify-between mb-4">
-              <h3 className="text-xl font-semibold text-white">Create New Event</h3>
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4" style={{ zIndex: 9999 }} onClick={() => { setShowCreateModal(false); setEditMode(false); }}>
+          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-start mb-4">
+              <h3 className="text-xl font-semibold text-white">{editMode ? 'Edit Event' : 'New Event'}</h3>
+              <button onClick={() => { setShowCreateModal(false); setEditMode(false); }} className="text-gray-400 hover:text-white">✕</button>
             </div>
 
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Title *
-                </label>
-                <input
-                  type="text"
-                  value={createForm.title}
-                  onChange={(e) => setCreateForm({ ...createForm, title: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  placeholder="Event title"
-                />
-              </div>
+              <input
+                type="text"
+                placeholder="Event title *"
+                value={createForm.title}
+                onChange={e => setCreateForm(f => ({ ...f, title: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+              />
+
+              <textarea
+                placeholder="Description"
+                value={createForm.description}
+                onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+                rows={2}
+              />
 
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Description
-                </label>
-                <textarea
-                  value={createForm.description}
-                  onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  rows={3}
-                  placeholder="Event description"
+                <label className="block text-sm text-gray-400 mb-1">Date *</label>
+                <input
+                  type="date"
+                  value={createForm.date}
+                  onChange={e => setCreateForm(f => ({ ...f, date: e.target.value }))}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    Start Time *
-                  </label>
+                  <label className="block text-sm text-gray-400 mb-1">Start *</label>
                   <input
-                    type="datetime-local"
-                    value={createForm.starts_at}
-                    onChange={(e) => setCreateForm({ ...createForm, starts_at: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                    type="time"
+                    value={createForm.startTime}
+                    onChange={e => setCreateForm(f => ({ ...f, startTime: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    End Time *
-                  </label>
+                  <label className="block text-sm text-gray-400 mb-1">End *</label>
                   <input
-                    type="datetime-local"
-                    value={createForm.ends_at}
-                    onChange={(e) => setCreateForm({ ...createForm, ends_at: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                    type="time"
+                    value={createForm.endTime}
+                    onChange={e => setCreateForm(f => ({ ...f, endTime: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Location
-                </label>
-                <input
-                  type="text"
-                  value={createForm.location}
-                  onChange={(e) => setCreateForm({ ...createForm, location: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                  placeholder="Event location"
-                />
-              </div>
+              <input
+                type="text"
+                placeholder="Location"
+                value={createForm.location}
+                onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+              />
             </div>
 
-            <div className="flex space-x-2 mt-6">
+            <div className="flex gap-2 mt-6">
               <button
-                onClick={() => setShowCreateModal(false)}
-                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                type="button"
+                onClick={() => { setShowCreateModal(false); setEditMode(false); }}
+                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-600"
               >
                 Cancel
               </button>
               <button
-                onClick={createEvent}
-                disabled={!createForm.title || !createForm.starts_at || !createForm.ends_at}
-                className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
+                onClick={() => {
+                  if (editMode) {
+                    handleUpdateEvent();
+                  } else {
+                    handleCreateEvent();
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-teal-600 text-white font-medium rounded hover:bg-teal-700"
               >
-                Create Event
+                {editMode ? 'Save Changes' : 'Create Event'}
               </button>
             </div>
           </div>

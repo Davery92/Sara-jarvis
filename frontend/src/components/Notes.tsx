@@ -281,6 +281,9 @@ export default function Notes({
   const saveNote = async () => {
     if (!editingNote) return
 
+    // Get current note to preserve folder_id
+    const noteToSave = notes.find(n => n.id === editingNote)
+
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/notes/${editingNote}`, {
         method: 'PUT',
@@ -288,7 +291,8 @@ export default function Notes({
         credentials: 'include',
         body: JSON.stringify({
           title: editNoteTitle,
-          content: editNoteContent
+          content: editNoteContent,
+          folder_id: noteToSave?.folder_id ?? null
         })
       })
       if (response.ok) {

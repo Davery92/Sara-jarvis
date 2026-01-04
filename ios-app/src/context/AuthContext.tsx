@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { authService, LoginCredentials, SignupData } from '../services/auth';
+import { apiClient } from '../services/api';
 import { User } from '../types/api';
 
 interface AuthContextType {
@@ -17,9 +18,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    checkAuth();
+  // Handle auth errors (401) from API client - clear user state to trigger login
+  const handleAuthError = useCallback(() => {
+    console.log('[AuthContext] Auth error received - clearing user state');
+    setUser(null);
   }, []);
+
+  useEffect(() => {
+    // Register auth error handler with API client
+    apiClient.setOnAuthError(handleAuthError);
+    checkAuth();
+  }, [handleAuthError]);
 
   const checkAuth = async () => {
     try {

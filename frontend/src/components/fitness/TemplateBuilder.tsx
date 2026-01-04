@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Dumbbell, Plus, X, Edit2, Trash2, Calendar as CalendarIcon } from 'lucide-react'
+import { Dumbbell, Plus, X, Edit2, Trash2, Calendar as CalendarIcon, ChevronDown, ChevronRight } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 interface Template {
@@ -35,6 +35,7 @@ export default function TemplateBuilder() {
   const [showModal, setShowModal] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<Template | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [expandedTemplates, setExpandedTemplates] = useState<Set<string>>(new Set())
 
   // Form state
   const [name, setName] = useState('')
@@ -222,58 +223,86 @@ export default function TemplateBuilder() {
           <p className="text-sm mt-1">Create your first template to start scheduling workouts</p>
         </div>
       ) : (
-        <div className="grid gap-4">
-          {templates.map((template) => (
-            <div key={template.id} className="bg-gray-800 rounded-lg p-5 hover:bg-gray-750 transition-colors">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-2">{template.name}</h3>
-                  <div className="flex flex-wrap gap-2 mb-2">
-                    {template.scheduled_days.map(day => (
-                      <span key={day} className="px-2 py-1 bg-blue-600/20 text-blue-400 text-xs rounded capitalize">
-                        {day.slice(0, 3)}
-                      </span>
-                    ))}
-                  </div>
-                  {template.notes && (
-                    <p className="text-sm text-gray-500 mt-2">{template.notes}</p>
-                  )}
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => openEditModal(template)}
-                    className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
-                  >
-                    <Edit2 className="w-4 h-4 text-gray-400" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(template.id)}
-                    className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4 text-red-400" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-2 border-t border-gray-700 pt-4">
-                <p className="text-sm font-medium text-gray-400 mb-2">Exercises:</p>
-                {template.exercises.map((ex, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-gray-900 p-3 rounded">
-                    <span className="font-medium">{ex.name}</span>
-                    <div className="flex items-center gap-4 text-sm text-gray-400">
-                      <span>{ex.sets} sets</span>
-                      <span>×</span>
-                      <span>{ex.reps} reps</span>
-                      <span className="px-2 py-1 bg-purple-600/20 text-purple-400 rounded">
-                        RPE {ex.rpe_target}
-                      </span>
+        <div className="grid gap-3">
+          {templates.map((template) => {
+            const isExpanded = expandedTemplates.has(template.id)
+            return (
+              <div key={template.id} className="bg-gray-800 rounded-lg overflow-hidden">
+                {/* Collapsed Header - Always Visible */}
+                <div
+                  className="p-4 flex items-center justify-between cursor-pointer hover:bg-gray-750 transition-colors"
+                  onClick={() => {
+                    const next = new Set(expandedTemplates)
+                    if (isExpanded) next.delete(template.id)
+                    else next.add(template.id)
+                    setExpandedTemplates(next)
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    {isExpanded ? (
+                      <ChevronDown className="w-5 h-5 text-gray-400" />
+                    ) : (
+                      <ChevronRight className="w-5 h-5 text-gray-400" />
+                    )}
+                    <div>
+                      <h3 className="font-semibold">{template.name}</h3>
+                      <div className="flex items-center gap-2 text-sm text-gray-400">
+                        <span>{template.exercises.length} exercises</span>
+                        <span>•</span>
+                        <div className="flex gap-1">
+                          {template.scheduled_days.map(day => (
+                            <span key={day} className="text-blue-400 capitalize">
+                              {day.slice(0, 2)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                ))}
+
+                  <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => openEditModal(template)}
+                      className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+                    >
+                      <Edit2 className="w-4 h-4 text-gray-400" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(template.id)}
+                      className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4 text-red-400" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Expanded Content */}
+                {isExpanded && (
+                  <div className="px-4 pb-4 border-t border-gray-700">
+                    {template.notes && (
+                      <p className="text-sm text-gray-500 mt-3 mb-3">{template.notes}</p>
+                    )}
+                    <div className="space-y-2 mt-3">
+                      {template.exercises.map((ex, idx) => (
+                        <div key={idx} className="flex items-center justify-between bg-gray-900 p-3 rounded">
+                          <span className="font-medium">{ex.name}</span>
+                          <div className="flex items-center gap-4 text-sm text-gray-400">
+                            <span>{ex.sets} × {ex.reps}</span>
+                            <span className="px-2 py-1 bg-purple-600/20 text-purple-400 rounded text-xs">
+                              RPE {ex.rpe_target}
+                            </span>
+                            {ex.starting_weight && (
+                              <span className="text-green-400">{ex.starting_weight}lbs</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -312,8 +341,10 @@ export default function TemplateBuilder() {
                     className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none"
                   >
                     <option value="">No phase</option>
-                    {phases.filter(p => p.status === 'active').map(phase => (
-                      <option key={phase.id} value={phase.id}>{phase.name}</option>
+                    {phases.map(phase => (
+                      <option key={phase.id} value={phase.id}>
+                        {phase.name}{phase.status !== 'active' ? ` (${phase.status})` : ''}
+                      </option>
                     ))}
                   </select>
                 </div>

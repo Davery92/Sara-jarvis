@@ -1,0 +1,33 @@
+[Unit]
+Description=Sara Health Watchdog - Proactive health monitoring service
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=david
+Group=david
+WorkingDirectory=/home/david/jarvis/backend
+
+# Environment
+Environment=PYTHONPATH=/home/david/jarvis/backend
+Environment=DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub
+Environment=OPENAI_BASE_URL=http://100.104.68.115:11434/v1
+Environment=OPENAI_MODEL=gpt-oss:120b
+Environment=EMBEDDING_BASE_URL=http://100.104.68.115:11434
+Environment=EMBEDDING_MODEL=bge-m3
+Environment=EMBEDDING_DIM=1024
+
+# Run the watchdog
+ExecStart=/usr/bin/python3 -m app.workers.health_watchdog
+
+# Restart policy
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=append:/home/david/jarvis/logs/health_watchdog.log
+StandardError=append:/home/david/jarvis/logs/health_watchdog.log
+
+[Install]
+WantedBy=multi-user.target

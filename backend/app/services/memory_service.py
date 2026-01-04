@@ -440,20 +440,8 @@ class MemoryService:
                 logger.info(f"No traces to consolidate for {start.date()}")
                 return {"status": "ok", "message": "No traces to consolidate"}
 
-            # Create basic summary trace (Phase 1 - keyword-based)
-            # TODO Phase 2: Use LLM to generate intelligent summary
-            key_phrases = []
-            for t in traces:
-                content_low = (t.content or "").lower()
-                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
-                    if kw in content_low:
-                        key_phrases.append(kw)
-            key_phrases = list(dict.fromkeys(key_phrases))[:8]
-
-            summary_content = (
-                f"Daily summary for {start.date()}: {len(traces)} events captured."
-                + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
-            )
+            # Generate summary using LLM with heuristic fallback
+            summary_content = await self._generate_consolidation_summary(traces, start.date())
 
             summary_id = str(uuid.uuid4())
             summary = MemoryTrace(
@@ -698,6 +686,92 @@ class MemoryService:
         finally:
             if should_close:
                 db.close()
+
+    async def _generate_consolidation_summary(self, traces, date) -> str:
+        """
+        Generate a summary of memory traces using LLM with heuristic fallback.
+
+        Uses same LLM failover pattern as memory scorer:
+        - Primary: gpt-oss:120b on primary endpoint
+        - Fallback: gpt-oss:20b on local endpoint
+        - Final fallback: keyword-based summary
+        """
+        import httpx
+
+        # Prepare trace content for summarization (limit to first 20 traces, 500 chars each)
+        combined = "\n".join([
+            f"[{t.role}] {(t.content or '')[:500]}"
+            for t in traces[:20]
+        ])
+
+        prompt = f"""Summarize these {len(traces)} memory traces from {date} into 2-3 concise sentences.
+Focus on: key decisions made, main topics discussed, tasks or commitments mentioned, and emotional themes if any.
+
+Traces:
+{combined}
+
+Provide a natural, conversational daily summary."""
+
+        # LLM endpoints with failover (same as subconscious/memory_scorer)
+        endpoints = [
+            ("http://100.104.68.115:11434", "gpt-oss:120b"),
+            ("http://10.185.1.8:11434", "gpt-oss:20b")
+        ]
+
+        for llm_url, model in endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    # Check if endpoint is available
+                    health = await client.get(f"{llm_url}/v1/models")
+                    if health.status_code != 200:
+                        continue
+
+                    response = await client.post(
+                        f"{llm_url}/v1/chat/completions",
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.3,
+                            "max_tokens": 200
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        summary = result["choices"][0]["message"]["content"].strip()
+                        logger.info(f"✅ Generated LLM summary for {date} using {model}")
+                        return summary
+
+            except Exception as e:
+                logger.warning(f"LLM summary failed for {llm_url}: {e}")
+                continue
+
+        # Fallback to keyword-based summary
+        logger.info(f"Using keyword-based summary fallback for {date}")
+        return self._keyword_summary(traces, date)
+
+    def _keyword_summary(self, traces, date) -> str:
+        """Fallback keyword-based summary when LLM is unavailable"""
+        key_phrases = []
+        keywords = [
+            "meeting", "call", "email", "note", "vector", "graph",
+            "habit", "calendar", "document", "task", "decision",
+            "idea", "question", "project", "deadline", "reminder"
+        ]
+
+        for t in traces:
+            content_low = (t.content or "").lower()
+            for kw in keywords:
+                if kw in content_low:
+                    key_phrases.append(kw)
+
+        key_phrases = list(dict.fromkeys(key_phrases))[:8]  # Dedupe, limit to 8
+
+        summary = f"Daily summary for {date}: {len(traces)} events captured."
+        if key_phrases:
+            summary += f" Key topics: {', '.join(key_phrases)}."
+
+        return summary
 
     def _auto_calculate_salience(self, content: str, role: str) -> float:
         """

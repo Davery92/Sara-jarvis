@@ -104,97 +104,27 @@ export interface AISettingsUpdate {
   embedding_dimension?: number
 }
 
-export interface VulnerabilityReport {
-  id: string
-  report_date: string
-  title: string
-  summary?: string
-  content?: string
-  vulnerabilities_count: number
-  critical_count: number
-  kev_count: number
-  created_at: string
+export interface TokenStats {
+  total_prompt_tokens: number
+  total_completion_tokens: number
+  total_tokens: number
+  total_requests: number
+  last_reset_at: string | null
+  updated_at: string | null
 }
 
-export interface ShadowSession {
-  id: string
-  user_id: string
-  device_id?: string
-  status: 'active' | 'paused' | 'wrapped' | 'committed'
-  duration_minutes?: number
-  privacy_mode: boolean
-  started_at: string
-  paused_at?: string
-  resumed_at?: string
-  ended_at?: string
-  context?: string
-  calendar_event_id?: string
-  created_at: string
-  updated_at: string
+export interface UsageBreakdownItem {
+  model: string
+  operation_type: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  request_count: number
 }
 
-export interface ShadowNote {
-  id: string
-  session_id: string
-  note_type: 'task' | 'decision' | 'question' | 'idea' | 'bookmark'
-  content: string
-  source: string
-  due_date?: string
-  priority?: string
-  timestamp: string
-}
-
-export interface ShadowSummary {
-  id: string
-  session_id: string
-  decisions: any[]
-  tasks: any[]
-  questions: any[]
-  ideas: any[]
-  refs: any[]
-  timeline: any[]
-  changeset: {
-    files: string[]
-    commits: any[]
-  }
-  full_text: string
-  committed: boolean
-  committed_note_id?: string
-  created_at: string
-}
-
-export interface ShadowSessionStatus {
-  session_id: string
-  status: string
-  device_id?: string
-  privacy_mode: boolean
-  context?: string
-  started_at: string
-  ended_at?: string
-  duration_seconds: number
-  duration_minutes_planned?: number
-  time_remaining_seconds?: number
-  event_count: number
-  event_types: Record<string, number>
-  note_counts: {
-    task: number
-    decision: number
-    question: number
-    idea: number
-    bookmark: number
-  }
-  total_notes: number
-}
-
-export interface VulnerabilityReportList {
-  id: string
-  report_date: string
-  title: string
-  summary?: string
-  vulnerabilities_count: number
-  critical_count: number
-  kev_count: number
-  created_at: string
+export interface UsageBreakdown {
+  period_days: number
+  breakdown: UsageBreakdownItem[]
 }
 
 export interface NotificationRequest {
@@ -477,24 +407,19 @@ class ApiClient {
     return response.data
   }
 
-  // Vulnerability Watch endpoints
-  async getVulnerabilityReports(): Promise<VulnerabilityReportList[]> {
-    const response = await this.client.get('/api/vulnerability-reports')
+  // Token Usage endpoints
+  async getTokenStats(): Promise<TokenStats> {
+    const response = await this.client.get('/api/token-usage/stats')
     return response.data
   }
 
-  async getVulnerabilityReport(reportId: string): Promise<VulnerabilityReport> {
-    const response = await this.client.get(`/api/vulnerability-reports/${reportId}`)
+  async getTokenBreakdown(days: number = 30): Promise<UsageBreakdown> {
+    const response = await this.client.get(`/api/token-usage/breakdown?days=${days}`)
     return response.data
   }
 
-  async getLatestVulnerabilityReport(): Promise<VulnerabilityReport> {
-    const response = await this.client.get('/api/vulnerability-reports/latest')
-    return response.data
-  }
-
-  async generateVulnerabilityReport(): Promise<any> {
-    const response = await this.client.post('/api/vulnerability-reports/generate')
+  async resetTokenStats(): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.post('/api/token-usage/reset')
     return response.data
   }
 
@@ -508,82 +433,39 @@ class ApiClient {
     return response.data
   }
 
-  // Shadow Mode endpoints
-  async getActiveShadowSession(): Promise<ShadowSession | null> {
-    try {
-      const response = await this.client.get('/shadow/active')
-      return response.data
-    } catch (error: any) {
-      if (error.response?.status === 404) {
-        return null
-      }
-      throw error
-    }
-  }
-
-  async startShadowSession(data: { duration_minutes?: number; context?: string; privacy_mode?: boolean }): Promise<any> {
-    const response = await this.client.post('/shadow/start', data)
-    return response.data
-  }
-
-  async getShadowSessionStatus(sessionId: string): Promise<ShadowSessionStatus> {
-    const response = await this.client.get(`/shadow/${sessionId}/status`)
-    return response.data
-  }
-
-  async addShadowNote(sessionId: string, data: { note_type: string; content: string; due_date?: string; priority?: string }): Promise<any> {
-    const response = await this.client.post(`/shadow/${sessionId}/note`, data)
-    return response.data
-  }
-
-  async pauseShadowSession(sessionId: string): Promise<ShadowSession> {
-    const response = await this.client.post(`/shadow/${sessionId}/pause`)
-    return response.data
-  }
-
-  async resumeShadowSession(sessionId: string): Promise<ShadowSession> {
-    const response = await this.client.post(`/shadow/${sessionId}/resume`)
-    return response.data
-  }
-
-  async wrapShadowSession(sessionId: string): Promise<any> {
-    const response = await this.client.post(`/shadow/${sessionId}/wrap`)
-    return response.data
-  }
-
-  async commitShadowSummary(sessionId: string, data: { edited_summary?: string }): Promise<any> {
-    const response = await this.client.post(`/shadow/${sessionId}/commit`, data)
-    return response.data
-  }
-
-  async getRecentShadowSessions(limit: number = 10): Promise<ShadowSession[]> {
-    const response = await this.client.get(`/shadow/recent?limit=${limit}`)
-    return response.data
-  }
-
-  async getShadowAgentStatus(): Promise<any> {
-    const response = await this.client.get('/shadow/agent/status')
-    return response.data
-  }
-
-  async getShadowSessionSummary(sessionId: string): Promise<any> {
-    const response = await this.client.get(`/shadow/${sessionId}/summary`)
-    return response.data
-  }
-
   // Food Database endpoints
   async searchFoods(query: string, limit: number = 20): Promise<any[]> {
     const response = await this.client.get(`/api/fitness/foods/search?q=${encodeURIComponent(query)}&limit=${limit}`)
     return response.data
   }
 
-  async getRecentFoods(limit: number = 5): Promise<any[]> {
-    const response = await this.client.get(`/api/fitness/foods/recent?limit=${limit}`)
-    return response.data
+  async getRecentFoods(limit: number = 20): Promise<any[]> {
+    try {
+      const response = await this.client.get(`/api/fitness/food-log/recent-foods?limit=${limit}`)
+      return response.data.recent_foods || []
+    } catch (error) {
+      console.error('Failed to fetch recent foods:', error)
+      return []
+    }
+  }
+
+  async getYesterdayFoods(): Promise<any> {
+    try {
+      const response = await this.client.get('/api/fitness/food-log/yesterday')
+      return response.data
+    } catch (error) {
+      console.error('Failed to fetch yesterday foods:', error)
+      return { meals: {}, all_foods: [] }
+    }
   }
 
   async createFood(data: any): Promise<any> {
     const response = await this.client.post('/api/fitness/foods', data)
+    return response.data
+  }
+
+  async getFoodDetails(foodId: string): Promise<any> {
+    const response = await this.client.get(`/api/fitness/foods/${foodId}/details`)
     return response.data
   }
 

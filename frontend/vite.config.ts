@@ -42,10 +42,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3000,
     strictPort: true,
-    allowedHosts: (process.env.VITE_ALLOWED_HOSTS || 'sara.avery.cloud,localhost')
-      .split(',')
-      .map(h => h.trim())
-      .filter(Boolean),
+    allowedHosts: true, // Allow all hosts
     // Allow overriding HMR host from env; otherwise let Vite infer
     hmr: process.env.VITE_HMR_HOST ? { host: process.env.VITE_HMR_HOST } : undefined
   },

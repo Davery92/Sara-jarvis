@@ -57,16 +57,36 @@ export default function FitnessScreen({ navigation }: Props) {
   const [phases, setPhases] = useState<Phase[]>([]);
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
   const [nutritionGoals, setNutritionGoals] = useState<NutritionGoals | null>(null);
+  const [activePhase, setActivePhase] = useState<Phase | null>(null);
 
   useEffect(() => {
     loadData();
-    loadNutritionGoals();
+    loadNutritionGoalsWithPhase();
   }, []);
 
-  const loadNutritionGoals = async () => {
+  const loadNutritionGoalsWithPhase = async () => {
     try {
+      // First load base goals
       const goals = await fitnessService.getNutritionGoals();
       setNutritionGoals(goals);
+
+      // Then check for active phase to override
+      try {
+        const activePhases = await fitnessService.getActivePhases();
+        if (activePhases.phases && activePhases.phases.length > 0) {
+          const phase = activePhases.phases[0];
+          setActivePhase(phase);
+          // Override goals with phase targets if they exist
+          setNutritionGoals(prev => ({
+            calories: phase.calories_target || prev?.calories || 2000,
+            protein: phase.protein_target || prev?.protein || 150,
+            carbs: phase.carbs_target || prev?.carbs || 200,
+            fats: phase.fat_target || prev?.fats || 70,
+          }));
+        }
+      } catch (phaseError) {
+        console.error('Failed to load active phase:', phaseError);
+      }
     } catch (error) {
       console.error('Failed to load nutrition goals:', error);
     }
@@ -84,8 +104,11 @@ export default function FitnessScreen({ navigation }: Props) {
   const loadData = async () => {
     try {
       setLoading(true);
-      const today = new Date().toISOString().split('T')[0];
-      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      // Use local date helper to avoid UTC timezone issues
+      const today = getLocalDateString(new Date().toISOString());
+      const weekAgoDate = new Date();
+      weekAgoDate.setDate(weekAgoDate.getDate() - 7);
+      const weekAgo = getLocalDateString(weekAgoDate.toISOString());
 
       // Load food logs for the last week to support date browsing
       const food = await fitnessService.getFoodLogs(weekAgo, today).catch(() => []);
@@ -125,7 +148,7 @@ export default function FitnessScreen({ navigation }: Props) {
   const handleEditNutritionGoals = () => {
     navigation.navigate('NutritionGoalsForm', {
       onSave: () => {
-        loadNutritionGoals();
+        loadNutritionGoalsWithPhase();
       },
     });
   };
@@ -290,8 +313,9 @@ export default function FitnessScreen({ navigation }: Props) {
           <View style={styles.summaryStatItem}>
             <Text style={styles.summaryStatValue}>
               {(() => {
-                const today = new Date().toISOString().split('T')[0];
-                return (foodLogs || []).filter(log => log.logged_at?.startsWith(today)).length;
+                const today = new Date();
+                const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                return (foodLogs || []).filter(log => log.logged_at && getLocalDateString(log.logged_at) === todayStr).length;
               })()}
             </Text>
             <Text style={styles.summaryStatLabel}>Meals</Text>
@@ -759,13 +783,13 @@ export default function FitnessScreen({ navigation }: Props) {
           <View style={styles.macroRow}>
             <View style={styles.macroHeader}>
               <Text style={styles.macroLabel}>Protein</Text>
-              <Text style={styles.macroValue}>{totalProtein} / {goalProtein}g</Text>
+              <Text style={styles.macroValue}>{Math.round(totalProtein)} / {goalProtein}g</Text>
             </View>
             <View style={styles.macroBar}>
               <View style={[styles.macroBarFill, { width: `${proteinPercent}%`, backgroundColor: '#FF6B6B' }]} />
             </View>
             <Text style={[styles.macroRemaining, remainingProtein >= 0 ? styles.remainingPositive : styles.remainingNegative]}>
-              {remainingProtein >= 0 ? `${remainingProtein}g remaining` : `${Math.abs(remainingProtein)}g over`}
+              {remainingProtein >= 0 ? `${Math.round(remainingProtein)}g remaining` : `${Math.abs(Math.round(remainingProtein))}g over`}
             </Text>
           </View>
 
@@ -773,13 +797,13 @@ export default function FitnessScreen({ navigation }: Props) {
           <View style={styles.macroRow}>
             <View style={styles.macroHeader}>
               <Text style={styles.macroLabel}>Carbs</Text>
-              <Text style={styles.macroValue}>{totalCarbs} / {goalCarbs}g</Text>
+              <Text style={styles.macroValue}>{Math.round(totalCarbs)} / {goalCarbs}g</Text>
             </View>
             <View style={styles.macroBar}>
               <View style={[styles.macroBarFill, { width: `${carbsPercent}%`, backgroundColor: '#4ECDC4' }]} />
             </View>
             <Text style={[styles.macroRemaining, remainingCarbs >= 0 ? styles.remainingPositive : styles.remainingNegative]}>
-              {remainingCarbs >= 0 ? `${remainingCarbs}g remaining` : `${Math.abs(remainingCarbs)}g over`}
+              {remainingCarbs >= 0 ? `${Math.round(remainingCarbs)}g remaining` : `${Math.abs(Math.round(remainingCarbs))}g over`}
             </Text>
           </View>
 
@@ -787,13 +811,13 @@ export default function FitnessScreen({ navigation }: Props) {
           <View style={styles.macroRow}>
             <View style={styles.macroHeader}>
               <Text style={styles.macroLabel}>Fat</Text>
-              <Text style={styles.macroValue}>{totalFat} / {goalFats}g</Text>
+              <Text style={styles.macroValue}>{Math.round(totalFat)} / {goalFats}g</Text>
             </View>
             <View style={styles.macroBar}>
               <View style={[styles.macroBarFill, { width: `${fatPercent}%`, backgroundColor: '#FFD93D' }]} />
             </View>
             <Text style={[styles.macroRemaining, remainingFat >= 0 ? styles.remainingPositive : styles.remainingNegative]}>
-              {remainingFat >= 0 ? `${remainingFat}g remaining` : `${Math.abs(remainingFat)}g over`}
+              {remainingFat >= 0 ? `${Math.round(remainingFat)}g remaining` : `${Math.abs(Math.round(remainingFat))}g over`}
             </Text>
           </View>
         </View>

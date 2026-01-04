@@ -4,22 +4,38 @@ Supports individual text embedding and batch processing.
 """
 import httpx
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
 
 class EmbeddingService:
     def __init__(self):
         self.client = httpx.AsyncClient()
 
+    def _get_current_settings(self) -> Tuple[str, str, int]:
+        """Get current settings dynamically so runtime updates work"""
+        base = (settings.embedding_base_url or "").strip().rstrip("/")
+        try:
+            p = urlparse(base)
+            if not p.scheme or not p.netloc:
+                logger.warning("Embedding base URL invalid or empty; falling back to openai_base_url")
+                base = (settings.openai_base_url or "").rstrip("/")
+                if base.endswith("/v1"):
+                    base = base[:-3].rstrip("/")
+        except Exception:
+            base = (settings.openai_base_url or "").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3].rstrip("/")
+        return base, settings.embedding_model, settings.embedding_dim
+
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding for text using BGE-M3 model"""
         try:
-            # Read settings dynamically so runtime updates work
-            base_url = settings.embedding_base_url
-            model = settings.embedding_model
-            dimension = settings.embedding_dim
+            # Get current settings dynamically for runtime updates to work
+            base_url, model, dimension = self._get_current_settings()
 
             # Use the embeddings endpoint
             response = await self.client.post(
@@ -29,7 +45,7 @@ class EmbeddingService:
                     "input": text,
                     "encoding_format": "float"
                 },
-                headers={"Authorization": "Bearer dummy"},
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 timeout=30.0
             )
             response.raise_for_status()

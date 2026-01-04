@@ -44,8 +44,10 @@ class ImportanceScorer:
             "user_rating": 0.10  # User explicit rating
         }
 
-        # Decay parameters
-        self.recency_halflife_days = 30  # Importance halves every 30 days
+        # Decay parameters - unified 14-day baseline
+        # This matches the retrieval-time recency decay for consistency
+        # Future: category-based multipliers will adjust per memory type
+        self.recency_halflife_days = 14  # Importance halves every 14 days (unified baseline)
         self.frequency_decay_days = 90   # Access frequency window
 
     def calculate_recency_factor(self, created_at: datetime) -> float:

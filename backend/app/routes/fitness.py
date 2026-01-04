@@ -74,23 +74,26 @@ class WorkoutSetLog(BaseModel):
     workout_id: Optional[str] = None  # Optional now - can be auto-generated
     exercise_name: Optional[str] = None  # For quick logging without pre-existing workout
     exercise_id: Optional[str] = None
+    template_exercise_id: Optional[str] = None  # Link to template_exercise for progression tracking
     set_index: int
-    weight: Optional[int] = None
+    weight: Optional[float] = None
     reps: Optional[int] = None
     rpe: Optional[int] = None
     notes: Optional[str] = ""
     session_date: Optional[str] = None  # YYYY-MM-DD format
     session_time: Optional[str] = None  # Full ISO timestamp
+    skipped: Optional[bool] = False  # Mark exercise as skipped
 
 
 class WorkoutSetUpdate(BaseModel):
     """Model for PATCH updates - all fields optional"""
-    weight: Optional[int] = None
+    weight: Optional[float] = None
     reps: Optional[int] = None
     rpe: Optional[int] = None
     notes: Optional[str] = None
     session_date: Optional[str] = None
     session_time: Optional[str] = None
+    skipped: Optional[bool] = None
 
 
 class FitnessChatRequest(BaseModel):
@@ -651,6 +654,266 @@ async def get_food_log_summary(
     return result.data
 
 
+@router.get("/food-log/recent-foods")
+async def get_recent_foods(
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get recently logged foods for quick re-logging.
+    Returns unique food items from detailed_items, ordered by frequency and recency.
+    Like MyFitnessPal's recent foods feature.
+    """
+    from datetime import timedelta
+    from collections import Counter
+
+    try:
+        # Get food logs from the last 30 days with detailed_items
+        thirty_days_ago = datetime.now() - timedelta(days=30)
+
+        query = text("""
+            SELECT detailed_items, logged_at
+            FROM food_log
+            WHERE user_id = :user_id
+            AND logged_at >= :since
+            AND detailed_items IS NOT NULL
+            ORDER BY logged_at DESC
+        """)
+
+        result = db.execute(query, {
+            "user_id": user_id,
+            "since": thirty_days_ago
+        })
+
+        # Extract unique foods and count frequency
+        food_frequency = Counter()
+        food_details = {}  # Store full details for each food
+        food_last_logged = {}  # Track when each food was last logged
+
+        for row in result.fetchall():
+            detailed_items = row.detailed_items
+            logged_at = row.logged_at
+
+            # Parse JSON if needed
+            if isinstance(detailed_items, str):
+                try:
+                    detailed_items = json.loads(detailed_items)
+                except:
+                    continue
+
+            if not detailed_items:
+                continue
+
+            for item in detailed_items:
+                food_name = item.get("name", "").strip()
+                if not food_name:
+                    continue
+
+                # Use food_id if available, otherwise name as key
+                food_key = item.get("food_id") or food_name.lower()
+
+                food_frequency[food_key] += 1
+
+                # Store details (keep most recent version)
+                if food_key not in food_details:
+                    food_details[food_key] = {
+                        "food_id": item.get("food_id"),
+                        "id": item.get("id") or item.get("food_id"),
+                        "name": food_name,
+                        "calories": item.get("calculated_calories") or item.get("calories"),
+                        "protein": item.get("calculated_protein") or item.get("protein"),
+                        "carbs": item.get("calculated_carbs") or item.get("carbs"),
+                        "fats": item.get("calculated_fats") or item.get("fats"),
+                        "serving_description": item.get("serving_description"),
+                        "serving_size": item.get("quantity") or item.get("serving_size") or 1,
+                        "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
+                        "source": item.get("source", "history"),
+                        "is_custom": item.get("is_custom", False)
+                    }
+                    food_last_logged[food_key] = logged_at
+
+        # Sort by frequency (descending), then by recency
+        sorted_foods = sorted(
+            food_frequency.keys(),
+            key=lambda k: (food_frequency[k], food_last_logged.get(k, datetime.min)),
+            reverse=True
+        )[:limit]
+
+        # Build response with frequency info
+        recent_foods = []
+        for food_key in sorted_foods:
+            details = food_details[food_key]
+            details["count"] = food_frequency[food_key]  # How many times logged in last 30 days
+            details["last_logged"] = food_last_logged.get(food_key).isoformat() if food_last_logged.get(food_key) else None
+            recent_foods.append(details)
+
+        return {
+            "recent_foods": recent_foods,
+            "total": len(recent_foods)
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting recent foods: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recent foods: {str(e)}")
+
+
+@router.get("/food-log/yesterday")
+async def get_yesterday_foods(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all foods logged yesterday, grouped by meal type.
+    Useful for quick re-logging of similar meals.
+    """
+    from datetime import timedelta
+
+    try:
+        # Get yesterday's date range
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_start = today - timedelta(days=1)
+        yesterday_end = today
+
+        query = text("""
+            SELECT id, meal_type, food_items, detailed_items, calories, protein, carbs, fats, logged_at
+            FROM food_log
+            WHERE user_id = :user_id
+            AND logged_at >= :start
+            AND logged_at < :end
+            ORDER BY logged_at ASC
+        """)
+
+        result = db.execute(query, {
+            "user_id": user_id,
+            "start": yesterday_start,
+            "end": yesterday_end
+        })
+
+        meals = {
+            "breakfast": [],
+            "lunch": [],
+            "dinner": [],
+            "snack": []
+        }
+
+        for row in result.fetchall():
+            meal_type = row.meal_type or "snack"
+
+            # Parse detailed_items
+            detailed_items = row.detailed_items
+            if isinstance(detailed_items, str):
+                try:
+                    detailed_items = json.loads(detailed_items)
+                except:
+                    detailed_items = []
+
+            # Parse food_items
+            food_items = row.food_items
+            if isinstance(food_items, str):
+                try:
+                    food_items = json.loads(food_items)
+                except:
+                    food_items = []
+
+            meal_entry = {
+                "log_id": row.id,
+                "meal_type": meal_type,
+                "food_items": food_items,
+                "detailed_items": detailed_items or [],
+                "calories": row.calories,
+                "protein": row.protein,
+                "carbs": row.carbs,
+                "fats": row.fats,
+                "logged_at": row.logged_at.isoformat() if row.logged_at else None
+            }
+
+            if meal_type in meals:
+                meals[meal_type].append(meal_entry)
+            else:
+                meals["snack"].append(meal_entry)
+
+        # Also extract individual foods for easy re-logging
+        all_foods = []
+        for meal_type, entries in meals.items():
+            for entry in entries:
+                # Prefer detailed_items, but fall back to food_items if detailed_items is empty
+                items_to_use = entry.get("detailed_items") or []
+                if not items_to_use:
+                    # Fall back to food_items and enrich with entry-level nutrition
+                    food_items = entry.get("food_items") or []
+                    # If there's only one food item, use the entry's nutrition
+                    if len(food_items) == 1:
+                        item = food_items[0]
+                        normalized_food = {
+                            "id": None,
+                            "food_id": None,
+                            "name": item.get("name"),
+                            "calories": entry.get("calories"),
+                            "protein": entry.get("protein"),
+                            "carbs": entry.get("carbs"),
+                            "fats": entry.get("fats"),
+                            "serving_size": item.get("quantity") or 1,
+                            "serving_unit": item.get("unit") or "serving",
+                            "serving_description": item.get("unit"),
+                            "source": "history",
+                            "is_custom": False,
+                            "meal_type": meal_type
+                        }
+                        all_foods.append(normalized_food)
+                    else:
+                        # Multiple food items without detailed nutrition - just include names
+                        for item in food_items:
+                            if item.get("name"):
+                                normalized_food = {
+                                    "id": None,
+                                    "food_id": None,
+                                    "name": item.get("name"),
+                                    "calories": None,
+                                    "protein": None,
+                                    "carbs": None,
+                                    "fats": None,
+                                    "serving_size": item.get("quantity") or 1,
+                                    "serving_unit": item.get("unit") or "serving",
+                                    "serving_description": item.get("unit"),
+                                    "source": "history",
+                                    "is_custom": False,
+                                    "meal_type": meal_type
+                                }
+                                all_foods.append(normalized_food)
+                else:
+                    for item in items_to_use:
+                        if item.get("name"):
+                            # Normalize the format for consistent frontend usage
+                            normalized_food = {
+                                "id": item.get("id") or item.get("food_id"),
+                                "food_id": item.get("food_id"),
+                                "name": item.get("name"),
+                                "calories": item.get("calculated_calories") or item.get("calories"),
+                                "protein": item.get("calculated_protein") or item.get("protein"),
+                                "carbs": item.get("calculated_carbs") or item.get("carbs"),
+                                "fats": item.get("calculated_fats") or item.get("fats"),
+                                "serving_size": item.get("quantity") or item.get("serving_size") or 1,
+                                "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
+                                "serving_description": item.get("serving_description") or item.get("selected_serving", {}).get("serving_description"),
+                                "source": item.get("source", "history"),
+                                "is_custom": item.get("is_custom", False),
+                                "meal_type": meal_type
+                            }
+                            all_foods.append(normalized_food)
+
+        return {
+            "date": yesterday_start.strftime("%Y-%m-%d"),
+            "meals": meals,
+            "all_foods": all_foods,
+            "total_foods": len(all_foods)
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting yesterday's foods: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get yesterday's foods: {str(e)}")
+
+
 # ============================================================================
 # WORKOUT LOG ENDPOINTS
 # ============================================================================
@@ -757,9 +1020,45 @@ async def log_workout_set(
     Supports two modes:
     1. Structured: Provide workout_id for pre-existing workouts
     2. Quick logging: Provide exercise_name, auto-creates workout entry
+
+    New features:
+    - skipped: Mark an exercise as skipped (logs but no weight/reps required)
+    - template_exercise_id: Link to template for progression tracking
+    - PR detection: Automatically checks and records personal records
     """
     import uuid
     from sqlalchemy import text
+    from datetime import datetime
+
+    # Handle skipped exercises
+    if log.skipped:
+        # Create a skipped entry in workout_log
+        log_id = str(uuid.uuid4())
+        exercise_label = log.exercise_name or log.exercise_id or "exercise"
+
+        db.execute(text("""
+            INSERT INTO workout_log (id, user_id, exercise_id, set_index, skipped, template_exercise_id, notes, session_date, created_at)
+            VALUES (:id, :user_id, :exercise_id, :set_index, true, :template_exercise_id, :notes, :session_date, CURRENT_TIMESTAMP)
+        """), {
+            "id": log_id,
+            "user_id": user_id,
+            "exercise_id": log.exercise_id or log.exercise_name,
+            "set_index": log.set_index,
+            "template_exercise_id": log.template_exercise_id,
+            "notes": log.notes or "Skipped",
+            "session_date": log.session_date or date.today().isoformat()
+        })
+        db.commit()
+
+        # Save to episodic memory
+        await save_to_episodic_memory(db, user_id, "fitness_workout", f"Skipped {exercise_label}")
+
+        return {
+            "success": True,
+            "set_id": log_id,
+            "message": f"Marked {exercise_label} as skipped",
+            "skipped": True
+        }
 
     # Let the WorkoutLogCreateTool handle workout creation
     # It will auto-create or reuse today's workout with consistent title format
@@ -785,8 +1084,31 @@ async def log_workout_set(
     if not result.success:
         raise HTTPException(status_code=400, detail=result.message)
 
-    # Save to episodic memory
+    # Update the workout_log entry with template_exercise_id if provided
+    if log.template_exercise_id and result.data and result.data.get("set_id"):
+        db.execute(text("""
+            UPDATE workout_log SET template_exercise_id = :template_exercise_id
+            WHERE id = :set_id
+        """), {"template_exercise_id": log.template_exercise_id, "set_id": result.data["set_id"]})
+        db.commit()
+
+    # Check for PR if we have weight and reps
+    pr_result = None
     exercise_label = log.exercise_name or log.exercise_id or "exercise"
+    if log.weight and log.reps and log.weight > 0 and log.reps > 0:
+        session_date = datetime.strptime(log.session_date, "%Y-%m-%d").date() if log.session_date else date.today()
+        pr_result = await check_and_record_pr(
+            db=db,
+            user_id=user_id,
+            exercise_name=exercise_label,
+            weight=log.weight,
+            reps=log.reps,
+            achieved_at=session_date,
+            workout_set_id=result.data.get("set_id") if result.data else None
+        )
+        db.commit()
+
+    # Save to episodic memory
     workout_content = f"Logged {exercise_label} set #{log.set_index}"
     if log.weight:
         workout_content += f" | {log.weight} lbs"
@@ -796,13 +1118,20 @@ async def log_workout_set(
         workout_content += f" (RPE: {log.rpe})"
     if log.notes:
         workout_content += f" | Notes: {log.notes}"
+    if pr_result and pr_result.get("is_pr"):
+        workout_content += f" | 🏆 NEW PR! Est. 1RM: {pr_result['estimated_1rm']} lbs"
     await save_to_episodic_memory(db, user_id, "fitness_workout", workout_content)
 
     # Update daily log
     workout_data = {"reps": log.reps}
     await update_daily_log(db, user_id, date.today(), "workout", workout_data=workout_data)
 
-    return result.data
+    # Add PR info to response
+    response_data = result.data or {}
+    if pr_result:
+        response_data["pr"] = pr_result
+
+    return response_data
 
 
 @router.patch("/workout-log/{set_id}")
@@ -1972,23 +2301,272 @@ async def text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
 
 # ============================================
+# PROGRAM MANAGEMENT APIs
+# ============================================
+
+class ProgramCreate(BaseModel):
+    name: str
+    goal: str  # cut, bulk, maintenance, recomp, strength
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    notes: Optional[str] = None
+
+
+class ProgramUpdate(BaseModel):
+    name: Optional[str] = None
+    goal: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+@router.get("/programs")
+async def list_programs(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """List all programs for user"""
+    try:
+        programs = db.execute(text("""
+            SELECT id, name, goal, start_date, end_date, is_active, notes, created_at, updated_at
+            FROM fitness_program
+            WHERE user_id = :user_id
+            ORDER BY is_active DESC, start_date DESC NULLS LAST, created_at DESC
+        """), {"user_id": user_id}).fetchall()
+
+        return {"programs": [dict(row._mapping) for row in programs]}
+    except Exception as e:
+        logger.error(f"Failed to list programs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/programs/active")
+async def get_active_program(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Get the currently active program with its phases"""
+    try:
+        program = db.execute(text("""
+            SELECT id, name, goal, start_date, end_date, is_active, notes, created_at, updated_at
+            FROM fitness_program
+            WHERE user_id = :user_id AND is_active = true
+            LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+
+        if not program:
+            return {"program": None, "phases": []}
+
+        program_dict = dict(program._mapping)
+
+        # Get phases for this program
+        phases = db.execute(text("""
+            SELECT id, name, goal, program_id, order_index, duration_weeks, start_date, end_date,
+                   calories_target, protein_target, carbs_target, fat_target,
+                   training_days_per_week, deload_week, status, notes, created_at, updated_at
+            FROM fitness_phase
+            WHERE user_id = :user_id AND program_id = :program_id
+            ORDER BY order_index ASC, start_date ASC NULLS LAST
+        """), {"user_id": user_id, "program_id": program_dict['id']}).fetchall()
+
+        return {
+            "program": program_dict,
+            "phases": [dict(row._mapping) for row in phases]
+        }
+    except Exception as e:
+        logger.error(f"Failed to get active program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/programs/{program_id}")
+async def get_program(program_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Get a specific program with its phases"""
+    try:
+        program = db.execute(text("""
+            SELECT id, name, goal, start_date, end_date, is_active, notes, created_at, updated_at
+            FROM fitness_program
+            WHERE id = :program_id AND user_id = :user_id
+        """), {"program_id": program_id, "user_id": user_id}).fetchone()
+
+        if not program:
+            raise HTTPException(status_code=404, detail="Program not found")
+
+        program_dict = dict(program._mapping)
+
+        # Get phases for this program
+        phases = db.execute(text("""
+            SELECT id, name, goal, program_id, order_index, duration_weeks, start_date, end_date,
+                   calories_target, protein_target, carbs_target, fat_target,
+                   training_days_per_week, deload_week, status, notes, created_at, updated_at
+            FROM fitness_phase
+            WHERE user_id = :user_id AND program_id = :program_id
+            ORDER BY order_index ASC, start_date ASC NULLS LAST
+        """), {"user_id": user_id, "program_id": program_id}).fetchall()
+
+        return {
+            "program": program_dict,
+            "phases": [dict(row._mapping) for row in phases]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/programs")
+async def create_program(program: ProgramCreate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Create a new training program"""
+    try:
+        program_id = str(uuid.uuid4())
+
+        db.execute(text("""
+            INSERT INTO fitness_program (id, user_id, name, goal, start_date, end_date, is_active, notes)
+            VALUES (:id, :user_id, :name, :goal, :start_date, :end_date, false, :notes)
+        """), {
+            "id": program_id,
+            "user_id": user_id,
+            "name": program.name,
+            "goal": program.goal,
+            "start_date": program.start_date,
+            "end_date": program.end_date,
+            "notes": program.notes
+        })
+        db.commit()
+
+        return {"success": True, "program_id": program_id, "message": "Program created successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/programs/{program_id}")
+async def update_program(program_id: str, program: ProgramUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Update a program"""
+    try:
+        updates = []
+        params = {"program_id": program_id, "user_id": user_id}
+
+        if program.name is not None:
+            updates.append("name = :name")
+            params["name"] = program.name
+        if program.goal is not None:
+            updates.append("goal = :goal")
+            params["goal"] = program.goal
+        if program.start_date is not None:
+            updates.append("start_date = :start_date")
+            params["start_date"] = program.start_date
+        if program.end_date is not None:
+            updates.append("end_date = :end_date")
+            params["end_date"] = program.end_date
+        if program.is_active is not None:
+            updates.append("is_active = :is_active")
+            params["is_active"] = program.is_active
+        if program.notes is not None:
+            updates.append("notes = :notes")
+            params["notes"] = program.notes
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            sql = f"UPDATE fitness_program SET {', '.join(updates)} WHERE id = :program_id AND user_id = :user_id"
+            db.execute(text(sql), params)
+            db.commit()
+
+        return {"success": True, "message": "Program updated successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/programs/{program_id}/activate")
+async def activate_program(program_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Activate a program (deactivates any other active program)"""
+    try:
+        # Deactivate all other programs
+        db.execute(text("""
+            UPDATE fitness_program SET is_active = false, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id AND is_active = true
+        """), {"user_id": user_id})
+
+        # Activate this program
+        result = db.execute(text("""
+            UPDATE fitness_program SET is_active = true, updated_at = CURRENT_TIMESTAMP
+            WHERE id = :program_id AND user_id = :user_id
+            RETURNING id
+        """), {"program_id": program_id, "user_id": user_id}).fetchone()
+
+        if not result:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Program not found")
+
+        db.commit()
+        return {"success": True, "message": "Program activated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to activate program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/programs/{program_id}")
+async def delete_program(program_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Delete a program (also deletes associated phases)"""
+    try:
+        # First clear program_id from phases (don't delete phases, just unlink)
+        db.execute(text("""
+            UPDATE fitness_phase SET program_id = NULL
+            WHERE program_id = :program_id AND user_id = :user_id
+        """), {"program_id": program_id, "user_id": user_id})
+
+        # Delete the program
+        db.execute(text("""
+            DELETE FROM fitness_program WHERE id = :program_id AND user_id = :user_id
+        """), {"program_id": program_id, "user_id": user_id})
+        db.commit()
+        return {"success": True, "message": "Program deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete program: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
 # PHASE MANAGEMENT APIs
 # ============================================
 
 class PhaseCreate(BaseModel):
     name: str
     goal: Optional[str] = None
+    program_id: Optional[str] = None
+    order_index: Optional[int] = 0
+    duration_weeks: Optional[int] = None
     parent_phase_id: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    # Nutrition targets
+    calories_target: Optional[int] = None
+    protein_target: Optional[int] = None
+    carbs_target: Optional[int] = None
+    fat_target: Optional[int] = None
+    training_days_per_week: Optional[int] = None
+    deload_week: Optional[int] = None
     notes: Optional[str] = None
+
 
 class PhaseUpdate(BaseModel):
     name: Optional[str] = None
     goal: Optional[str] = None
+    program_id: Optional[str] = None
+    order_index: Optional[int] = None
+    duration_weeks: Optional[int] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     status: Optional[str] = None
+    # Nutrition targets
+    calories_target: Optional[int] = None
+    protein_target: Optional[int] = None
+    carbs_target: Optional[int] = None
+    fat_target: Optional[int] = None
+    training_days_per_week: Optional[int] = None
+    deload_week: Optional[int] = None
     notes: Optional[str] = None
 
 @router.get("/phases")
@@ -1996,10 +2574,14 @@ async def list_phases(user_id: str = Depends(get_current_user_id), db: Session =
     """List all phases for user (hierarchical)"""
     try:
         phases = db.execute(text("""
-            SELECT id, name, goal, parent_phase_id, start_date, end_date, status, notes, created_at, updated_at
+            SELECT id, name, goal, program_id, order_index, duration_weeks,
+                   parent_phase_id, start_date, end_date,
+                   calories_target, protein_target, carbs_target, fat_target,
+                   training_days_per_week, deload_week,
+                   status, notes, created_at, updated_at
             FROM fitness_phase
             WHERE user_id = :user_id
-            ORDER BY start_date DESC NULLS LAST, created_at DESC
+            ORDER BY program_id NULLS LAST, order_index ASC, start_date DESC NULLS LAST, created_at DESC
         """), {"user_id": user_id}).fetchall()
 
         return {"phases": [dict(row._mapping) for row in phases]}
@@ -2007,22 +2589,44 @@ async def list_phases(user_id: str = Depends(get_current_user_id), db: Session =
         logger.error(f"Failed to list phases: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.post("/phases")
 async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """Create a new training phase"""
     try:
         phase_id = str(uuid.uuid4())
         db.execute(text("""
-            INSERT INTO fitness_phase (id, user_id, name, goal, parent_phase_id, start_date, end_date, status, notes)
-            VALUES (:id, :user_id, :name, :goal, :parent_phase_id, :start_date, :end_date, :status, :notes)
+            INSERT INTO fitness_phase (
+                id, user_id, name, goal, program_id, order_index, duration_weeks,
+                parent_phase_id, start_date, end_date,
+                calories_target, protein_target, carbs_target, fat_target,
+                training_days_per_week, deload_week,
+                status, notes
+            )
+            VALUES (
+                :id, :user_id, :name, :goal, :program_id, :order_index, :duration_weeks,
+                :parent_phase_id, :start_date, :end_date,
+                :calories_target, :protein_target, :carbs_target, :fat_target,
+                :training_days_per_week, :deload_week,
+                :status, :notes
+            )
         """), {
             "id": phase_id,
             "user_id": user_id,
             "name": phase.name,
             "goal": phase.goal,
+            "program_id": phase.program_id,
+            "order_index": phase.order_index or 0,
+            "duration_weeks": phase.duration_weeks,
             "parent_phase_id": phase.parent_phase_id,
             "start_date": phase.start_date,
             "end_date": phase.end_date,
+            "calories_target": phase.calories_target,
+            "protein_target": phase.protein_target,
+            "carbs_target": phase.carbs_target,
+            "fat_target": phase.fat_target,
+            "training_days_per_week": phase.training_days_per_week,
+            "deload_week": phase.deload_week,
             "status": "planned",
             "notes": phase.notes
         })
@@ -2033,6 +2637,7 @@ async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_us
         db.rollback()
         logger.error(f"Failed to create phase: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.patch("/phases/{phase_id}")
 async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
@@ -2047,6 +2652,15 @@ async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends
         if phase.goal is not None:
             updates.append("goal = :goal")
             params["goal"] = phase.goal
+        if phase.program_id is not None:
+            updates.append("program_id = :program_id")
+            params["program_id"] = phase.program_id
+        if phase.order_index is not None:
+            updates.append("order_index = :order_index")
+            params["order_index"] = phase.order_index
+        if phase.duration_weeks is not None:
+            updates.append("duration_weeks = :duration_weeks")
+            params["duration_weeks"] = phase.duration_weeks
         if phase.start_date is not None:
             updates.append("start_date = :start_date")
             params["start_date"] = phase.start_date
@@ -2056,6 +2670,24 @@ async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends
         if phase.status is not None:
             updates.append("status = :status")
             params["status"] = phase.status
+        if phase.calories_target is not None:
+            updates.append("calories_target = :calories_target")
+            params["calories_target"] = phase.calories_target
+        if phase.protein_target is not None:
+            updates.append("protein_target = :protein_target")
+            params["protein_target"] = phase.protein_target
+        if phase.carbs_target is not None:
+            updates.append("carbs_target = :carbs_target")
+            params["carbs_target"] = phase.carbs_target
+        if phase.fat_target is not None:
+            updates.append("fat_target = :fat_target")
+            params["fat_target"] = phase.fat_target
+        if phase.training_days_per_week is not None:
+            updates.append("training_days_per_week = :training_days_per_week")
+            params["training_days_per_week"] = phase.training_days_per_week
+        if phase.deload_week is not None:
+            updates.append("deload_week = :deload_week")
+            params["deload_week"] = phase.deload_week
         if phase.notes is not None:
             updates.append("notes = :notes")
             params["notes"] = phase.notes
@@ -2088,13 +2720,17 @@ async def delete_phase(phase_id: str, user_id: str = Depends(get_current_user_id
 
 @router.get("/phases/active")
 async def get_active_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """Get currently active phases"""
+    """Get currently active phases with nutrition targets"""
     try:
         phases = db.execute(text("""
-            SELECT id, name, goal, parent_phase_id, start_date, end_date, status, notes, created_at, updated_at
+            SELECT id, name, goal, program_id, order_index, duration_weeks,
+                   parent_phase_id, start_date, end_date,
+                   calories_target, protein_target, carbs_target, fat_target,
+                   training_days_per_week, deload_week,
+                   status, notes, created_at, updated_at
             FROM fitness_phase
             WHERE user_id = :user_id AND status = 'active'
-            ORDER BY start_date DESC NULLS LAST
+            ORDER BY order_index ASC, start_date DESC NULLS LAST
         """), {"user_id": user_id}).fetchall()
 
         return {"phases": [dict(row._mapping) for row in phases]}
@@ -2106,9 +2742,9 @@ async def get_active_phases(user_id: str = Depends(get_current_user_id), db: Ses
 async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """
     Activate a training phase:
-    - Creates calendar events for all templates based on scheduled days
+    - Deactivates any currently active phase
+    - Creates calendar events for all templates based on scheduled days (if dates set)
     - Creates workout_session entries in 'planned' status
-    - Links sessions to calendar events
     - Updates phase status to 'active'
     """
     try:
@@ -2117,7 +2753,7 @@ async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_
 
         # 1. Fetch phase details
         phase = db.execute(text("""
-            SELECT id, name, start_date, end_date, status
+            SELECT id, name, start_date, end_date, status, duration_weeks
             FROM fitness_phase
             WHERE id = :phase_id AND user_id = :user_id
         """), {"phase_id": phase_id, "user_id": user_id}).fetchone()
@@ -2127,116 +2763,123 @@ async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_
 
         phase_dict = dict(phase._mapping)
 
-        # Validation
-        if not phase_dict['start_date'] or not phase_dict['end_date']:
-            raise HTTPException(status_code=400, detail="Phase must have start_date and end_date to be activated")
-
         if phase_dict['status'] == 'active':
             raise HTTPException(status_code=400, detail="Phase is already active")
 
-        # 2. Fetch all templates for this phase
+        # 2. Deactivate any currently active phases for this user
+        db.execute(text("""
+            UPDATE fitness_phase
+            SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id AND status = 'active'
+        """), {"user_id": user_id})
+
+        # 3. Determine date range for calendar events
+        start_date = phase_dict.get('start_date')
+        end_date = phase_dict.get('end_date')
+        duration_weeks = phase_dict.get('duration_weeks') or 4
+
+        # If no dates set, use today + duration_weeks
+        if not start_date:
+            start_date = datetime.now().date()
+        if not end_date:
+            end_date = start_date + timedelta(weeks=duration_weeks)
+
+        # Update phase with calculated dates
+        db.execute(text("""
+            UPDATE fitness_phase
+            SET start_date = :start_date, end_date = :end_date
+            WHERE id = :phase_id AND user_id = :user_id
+        """), {"phase_id": phase_id, "user_id": user_id, "start_date": start_date, "end_date": end_date})
+
+        # 4. Fetch all templates for this phase
         templates = db.execute(text("""
             SELECT id, name, scheduled_days, exercises
             FROM fitness_template
             WHERE phase_id = :phase_id AND user_id = :user_id
         """), {"phase_id": phase_id, "user_id": user_id}).fetchall()
 
-        if not templates:
-            raise HTTPException(status_code=400, detail="Phase has no templates assigned. Add workout templates before activating.")
-
-        # Day mapping
-        day_map = {
-            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
-            'friday': 4, 'saturday': 5, 'sunday': 6
-        }
-
         created_events = []
         created_sessions = []
 
-        # 3. For each template, generate calendar events
-        for template_row in templates:
-            template = dict(template_row._mapping)
-            template_id = template['id']
-            template_name = template['name']
-            scheduled_days_json = template['scheduled_days']
+        if templates:
+            # Day mapping
+            day_map = {
+                'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+                'friday': 4, 'saturday': 5, 'sunday': 6
+            }
 
-            # Parse scheduled days
-            try:
-                scheduled_days = json.loads(scheduled_days_json) if scheduled_days_json else []
-            except:
-                scheduled_days = []
+            # 5. For each template, generate calendar events
+            for template_row in templates:
+                template = dict(template_row._mapping)
+                template_id = template['id']
+                template_name = template['name']
+                scheduled_days_json = template['scheduled_days']
 
-            if not scheduled_days:
-                logger.warning(f"Template {template_id} has no scheduled days, skipping")
-                continue
+                # Parse scheduled days
+                try:
+                    scheduled_days = json.loads(scheduled_days_json) if scheduled_days_json else []
+                except:
+                    scheduled_days = []
 
-            # Convert scheduled days to day numbers
-            scheduled_day_nums = []
-            for day in scheduled_days:
-                day_lower = day.lower().strip()
-                if day_lower in day_map:
-                    scheduled_day_nums.append(day_map[day_lower])
+                if not scheduled_days:
+                    continue
 
-            if not scheduled_day_nums:
-                logger.warning(f"Template {template_id} has invalid scheduled days, skipping")
-                continue
+                # Convert scheduled days to day numbers
+                scheduled_day_nums = [day_map[d.lower().strip()] for d in scheduled_days if d.lower().strip() in day_map]
 
-            # 4. Generate all dates between start_date and end_date that match scheduled days
-            start_date = phase_dict['start_date']
-            end_date = phase_dict['end_date']
+                if not scheduled_day_nums:
+                    continue
 
-            current_date = start_date
-            while current_date <= end_date:
-                # Check if this day of week matches any scheduled day
-                if current_date.weekday() in scheduled_day_nums:
-                    # Create calendar event
-                    event_id = str(uuid.uuid4())
-                    event_start = datetime.combine(current_date, datetime.min.time().replace(hour=9, minute=0))  # Default 9:00 AM
-                    event_end = datetime.combine(current_date, datetime.min.time().replace(hour=10, minute=30))  # Default 1.5 hours
+                # Generate all dates between start_date and end_date that match scheduled days
+                current_date = start_date
+                while current_date <= end_date:
+                    if current_date.weekday() in scheduled_day_nums:
+                        # Create calendar event
+                        event_id = str(uuid.uuid4())
+                        event_start = datetime.combine(current_date, datetime.min.time().replace(hour=9, minute=0))
+                        event_end = datetime.combine(current_date, datetime.min.time().replace(hour=10, minute=30))
 
-                    db.execute(text("""
-                        INSERT INTO event (id, user_id, title, starts_at, ends_at, description, location)
-                        VALUES (:id, :user_id, :title, :starts_at, :ends_at, :description, :location)
-                    """), {
-                        "id": event_id,
-                        "user_id": user_id,
-                        "title": f"🏋️ {template_name}",
-                        "starts_at": event_start,
-                        "ends_at": event_end,
-                        "description": f"Workout: {template_name}\nPhase: {phase_dict['name']}",
-                        "location": ""
-                    })
+                        db.execute(text("""
+                            INSERT INTO calendar_event (id, user_id, title, start_time, end_time, description, location, source)
+                            VALUES (:id, :user_id, :title, :start_time, :end_time, :description, :location, 'sara')
+                        """), {
+                            "id": event_id,
+                            "user_id": user_id,
+                            "title": f"🏋️ {template_name}",
+                            "start_time": event_start,
+                            "end_time": event_end,
+                            "description": f"Workout: {template_name}\nPhase: {phase_dict['name']}",
+                            "location": ""
+                        })
 
-                    # Create workout session
-                    session_id = str(uuid.uuid4())
-                    db.execute(text("""
-                        INSERT INTO workout_session (id, user_id, template_id, session_date, status, calendar_event_id)
-                        VALUES (:id, :user_id, :template_id, :session_date, :status, :calendar_event_id)
-                    """), {
-                        "id": session_id,
-                        "user_id": user_id,
-                        "template_id": template_id,
-                        "session_date": current_date,
-                        "status": "planned",
-                        "calendar_event_id": event_id
-                    })
+                        # Create workout session
+                        session_id = str(uuid.uuid4())
+                        db.execute(text("""
+                            INSERT INTO workout_session (id, user_id, template_id, session_date, status, calendar_event_id)
+                            VALUES (:id, :user_id, :template_id, :session_date, :status, :calendar_event_id)
+                        """), {
+                            "id": session_id,
+                            "user_id": user_id,
+                            "template_id": template_id,
+                            "session_date": current_date,
+                            "status": "planned",
+                            "calendar_event_id": event_id
+                        })
 
-                    created_events.append({
-                        "event_id": event_id,
-                        "template_name": template_name,
-                        "date": current_date.isoformat()
-                    })
+                        created_events.append({
+                            "event_id": event_id,
+                            "template_name": template_name,
+                            "date": current_date.isoformat()
+                        })
+                        created_sessions.append({
+                            "session_id": session_id,
+                            "template_id": template_id,
+                            "date": current_date.isoformat()
+                        })
 
-                    created_sessions.append({
-                        "session_id": session_id,
-                        "template_id": template_id,
-                        "date": current_date.isoformat()
-                    })
+                    current_date += timedelta(days=1)
 
-                # Move to next day
-                current_date += timedelta(days=1)
-
-        # 5. Update phase status to 'active'
+        # 6. Update phase status to 'active'
         db.execute(text("""
             UPDATE fitness_phase
             SET status = 'active', updated_at = CURRENT_TIMESTAMP
@@ -2250,14 +2893,13 @@ async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_
             "message": f"Phase '{phase_dict['name']}' activated successfully",
             "summary": {
                 "phase_name": phase_dict['name'],
-                "start_date": phase_dict['start_date'].isoformat(),
-                "end_date": phase_dict['end_date'].isoformat(),
-                "templates_count": len(templates),
+                "start_date": start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date),
+                "end_date": end_date.isoformat() if hasattr(end_date, 'isoformat') else str(end_date),
+                "templates_count": len(templates) if templates else 0,
                 "events_created": len(created_events),
                 "sessions_created": len(created_sessions)
             },
-            "created_events": created_events[:10],  # Return first 10 for preview
-            "created_sessions": created_sessions[:10]
+            "note": f"Created {len(created_events)} calendar events" if created_events else "No templates linked - add templates to this phase to auto-schedule workouts"
         }
 
     except HTTPException:
@@ -2278,6 +2920,7 @@ class TemplateCreate(BaseModel):
     scheduled_days: List[str] = []  # ["monday", "thursday", "saturday"]
     exercises: List[Dict] = []  # [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rpe_target": 7}]
     notes: Optional[str] = None
+    starting_weights: Optional[Dict[str, float]] = None  # {"Bench Press": 135.0, "Squat": 225.0}
 
 class TemplateUpdate(BaseModel):
     name: Optional[str] = None
@@ -2352,12 +2995,21 @@ async def create_template(template: TemplateCreate, user_id: str = Depends(get_c
 
 @router.get("/templates/today")
 async def get_today_template(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """Get template scheduled for today"""
+    """Get template scheduled for today - prioritizes active phase templates"""
     try:
         import json
         from datetime import datetime
 
         day_of_week = datetime.now().strftime("%A").lower()
+
+        # First, find the active phase (if any)
+        active_phase = db.execute(text("""
+            SELECT id, name FROM fitness_phase
+            WHERE user_id = :user_id AND status = 'active'
+            LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+
+        active_phase_id = active_phase.id if active_phase else None
 
         templates = db.execute(text("""
             SELECT id, phase_id, name, scheduled_days, exercises, notes
@@ -2366,16 +3018,32 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
         """), {"user_id": user_id}).fetchall()
 
         # Find templates that have today in their scheduled_days
-        matching_templates = []
+        active_phase_templates = []
+        other_templates = []
+
         for row in templates:
             template_dict = dict(row._mapping)
             scheduled_days = json.loads(template_dict.get("scheduled_days", "[]"))
             if day_of_week in [d.lower() for d in scheduled_days]:
                 template_dict["scheduled_days"] = scheduled_days
                 template_dict["exercises"] = json.loads(template_dict.get("exercises", "[]"))
-                matching_templates.append(template_dict)
 
-        return {"templates": matching_templates, "day_of_week": day_of_week}
+                # Prioritize templates from active phase
+                if active_phase_id and template_dict.get("phase_id") == active_phase_id:
+                    active_phase_templates.append(template_dict)
+                elif not template_dict.get("phase_id"):
+                    # Templates not linked to any phase (standalone)
+                    other_templates.append(template_dict)
+
+        # Return active phase templates first, then standalone templates
+        # Don't include templates from inactive phases
+        matching_templates = active_phase_templates + other_templates
+
+        return {
+            "templates": matching_templates,
+            "day_of_week": day_of_week,
+            "active_phase": {"id": active_phase.id, "name": active_phase.name} if active_phase else None
+        }
     except Exception as e:
         logger.error(f"Failed to get today's template: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2429,6 +3097,493 @@ async def delete_template(template_id: str, user_id: str = Depends(get_current_u
         db.rollback()
         logger.error(f"Failed to delete template: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# TEMPLATE EXERCISE APIs
+# ============================================
+
+class TemplateExerciseCreate(BaseModel):
+    exercise_name: str
+    order_index: Optional[int] = 0
+    target_sets: Optional[int] = 3
+    rep_range_low: Optional[int] = 8
+    rep_range_high: Optional[int] = 12
+    target_rpe: Optional[float] = None
+    rest_seconds: Optional[int] = 120
+    progression_rule: Optional[str] = "DOUBLE_PROGRESSION"  # DOUBLE_PROGRESSION, LINEAR, RPE_BASED
+    notes: Optional[str] = None
+
+
+class TemplateExerciseUpdate(BaseModel):
+    exercise_name: Optional[str] = None
+    order_index: Optional[int] = None
+    target_sets: Optional[int] = None
+    rep_range_low: Optional[int] = None
+    rep_range_high: Optional[int] = None
+    target_rpe: Optional[float] = None
+    rest_seconds: Optional[int] = None
+    progression_rule: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.get("/templates/{template_id}/exercises")
+async def list_template_exercises(
+    template_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get all exercises for a template"""
+    try:
+        # Verify user owns this template
+        template = db.execute(text("""
+            SELECT id FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id}).fetchone()
+
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        exercises = db.execute(text("""
+            SELECT id, template_id, exercise_name, order_index, target_sets,
+                   rep_range_low, rep_range_high, target_rpe, rest_seconds,
+                   progression_rule, notes, created_at, updated_at
+            FROM template_exercise
+            WHERE template_id = :template_id
+            ORDER BY order_index ASC
+        """), {"template_id": template_id}).fetchall()
+
+        return {"exercises": [dict(row._mapping) for row in exercises]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list template exercises: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/templates/{template_id}/exercises")
+async def create_template_exercise(
+    template_id: str,
+    exercise: TemplateExerciseCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Add an exercise to a template"""
+    try:
+        # Verify user owns this template
+        template = db.execute(text("""
+            SELECT id FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id}).fetchone()
+
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        exercise_id = str(uuid.uuid4())
+
+        db.execute(text("""
+            INSERT INTO template_exercise (
+                id, template_id, exercise_name, order_index, target_sets,
+                rep_range_low, rep_range_high, target_rpe, rest_seconds,
+                progression_rule, notes
+            ) VALUES (
+                :id, :template_id, :exercise_name, :order_index, :target_sets,
+                :rep_range_low, :rep_range_high, :target_rpe, :rest_seconds,
+                :progression_rule, :notes
+            )
+        """), {
+            "id": exercise_id,
+            "template_id": template_id,
+            "exercise_name": exercise.exercise_name,
+            "order_index": exercise.order_index or 0,
+            "target_sets": exercise.target_sets or 3,
+            "rep_range_low": exercise.rep_range_low or 8,
+            "rep_range_high": exercise.rep_range_high or 12,
+            "target_rpe": exercise.target_rpe,
+            "rest_seconds": exercise.rest_seconds or 120,
+            "progression_rule": exercise.progression_rule or "DOUBLE_PROGRESSION",
+            "notes": exercise.notes
+        })
+        db.commit()
+
+        return {"success": True, "exercise_id": exercise_id, "message": "Exercise added to template"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to create template exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/templates/{template_id}/exercises/{exercise_id}")
+async def update_template_exercise(
+    template_id: str,
+    exercise_id: str,
+    exercise: TemplateExerciseUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Update an exercise in a template"""
+    try:
+        # Verify user owns this template
+        template = db.execute(text("""
+            SELECT id FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id}).fetchone()
+
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        updates = []
+        params = {"exercise_id": exercise_id, "template_id": template_id}
+
+        if exercise.exercise_name is not None:
+            updates.append("exercise_name = :exercise_name")
+            params["exercise_name"] = exercise.exercise_name
+        if exercise.order_index is not None:
+            updates.append("order_index = :order_index")
+            params["order_index"] = exercise.order_index
+        if exercise.target_sets is not None:
+            updates.append("target_sets = :target_sets")
+            params["target_sets"] = exercise.target_sets
+        if exercise.rep_range_low is not None:
+            updates.append("rep_range_low = :rep_range_low")
+            params["rep_range_low"] = exercise.rep_range_low
+        if exercise.rep_range_high is not None:
+            updates.append("rep_range_high = :rep_range_high")
+            params["rep_range_high"] = exercise.rep_range_high
+        if exercise.target_rpe is not None:
+            updates.append("target_rpe = :target_rpe")
+            params["target_rpe"] = exercise.target_rpe
+        if exercise.rest_seconds is not None:
+            updates.append("rest_seconds = :rest_seconds")
+            params["rest_seconds"] = exercise.rest_seconds
+        if exercise.progression_rule is not None:
+            updates.append("progression_rule = :progression_rule")
+            params["progression_rule"] = exercise.progression_rule
+        if exercise.notes is not None:
+            updates.append("notes = :notes")
+            params["notes"] = exercise.notes
+
+        if updates:
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            sql = f"UPDATE template_exercise SET {', '.join(updates)} WHERE id = :exercise_id AND template_id = :template_id"
+            db.execute(text(sql), params)
+            db.commit()
+
+        return {"success": True, "message": "Exercise updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update template exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/templates/{template_id}/exercises/{exercise_id}")
+async def delete_template_exercise(
+    template_id: str,
+    exercise_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Remove an exercise from a template"""
+    try:
+        # Verify user owns this template
+        template = db.execute(text("""
+            SELECT id FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id}).fetchone()
+
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        db.execute(text("""
+            DELETE FROM template_exercise
+            WHERE id = :exercise_id AND template_id = :template_id
+        """), {"exercise_id": exercise_id, "template_id": template_id})
+        db.commit()
+
+        return {"success": True, "message": "Exercise removed from template"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete template exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/templates/{template_id}/exercises/reorder")
+async def reorder_template_exercises(
+    template_id: str,
+    exercise_ids: List[str],
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Reorder exercises in a template"""
+    try:
+        # Verify user owns this template
+        template = db.execute(text("""
+            SELECT id FROM fitness_template WHERE id = :template_id AND user_id = :user_id
+        """), {"template_id": template_id, "user_id": user_id}).fetchone()
+
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Update order_index for each exercise
+        for idx, exercise_id in enumerate(exercise_ids):
+            db.execute(text("""
+                UPDATE template_exercise
+                SET order_index = :order_index, updated_at = CURRENT_TIMESTAMP
+                WHERE id = :exercise_id AND template_id = :template_id
+            """), {"order_index": idx, "exercise_id": exercise_id, "template_id": template_id})
+
+        db.commit()
+        return {"success": True, "message": "Exercises reordered successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to reorder exercises: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# EXERCISE PR (Personal Record) APIs
+# ============================================
+
+class ExercisePRCreate(BaseModel):
+    exercise_name: str
+    weight: float
+    reps: int
+    achieved_at: date
+    workout_set_id: Optional[str] = None
+
+
+@router.get("/prs")
+async def list_exercise_prs(
+    exercise_name: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get all PRs, optionally filtered by exercise"""
+    try:
+        if exercise_name:
+            prs = db.execute(text("""
+                SELECT id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id, created_at
+                FROM exercise_pr
+                WHERE user_id = :user_id AND exercise_name = :exercise_name
+                ORDER BY estimated_1rm DESC, achieved_at DESC
+            """), {"user_id": user_id, "exercise_name": exercise_name}).fetchall()
+        else:
+            # Get best PR for each exercise
+            prs = db.execute(text("""
+                SELECT DISTINCT ON (exercise_name)
+                    id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id, created_at
+                FROM exercise_pr
+                WHERE user_id = :user_id
+                ORDER BY exercise_name, estimated_1rm DESC
+            """), {"user_id": user_id}).fetchall()
+
+        return {"prs": [dict(row._mapping) for row in prs]}
+    except Exception as e:
+        logger.error(f"Failed to list PRs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/prs/{exercise_name}")
+async def get_exercise_pr_history(
+    exercise_name: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get PR history for a specific exercise"""
+    try:
+        prs = db.execute(text("""
+            SELECT id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id, created_at
+            FROM exercise_pr
+            WHERE user_id = :user_id AND exercise_name = :exercise_name
+            ORDER BY achieved_at DESC
+        """), {"user_id": user_id, "exercise_name": exercise_name}).fetchall()
+
+        return {"prs": [dict(row._mapping) for row in prs]}
+    except Exception as e:
+        logger.error(f"Failed to get PR history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def calculate_estimated_1rm(weight: float, reps: int) -> float:
+    """Calculate estimated 1RM using Brzycki formula"""
+    if reps == 1:
+        return weight
+    if reps > 12:
+        reps = 12  # Cap at 12 for accuracy
+    return round(weight * (36 / (37 - reps)), 2)
+
+
+async def check_and_record_pr(
+    db: Session,
+    user_id: str,
+    exercise_name: str,
+    weight: float,
+    reps: int,
+    achieved_at: date,
+    workout_set_id: Optional[str] = None
+) -> Optional[dict]:
+    """Check if this is a new PR and record it if so"""
+    try:
+        estimated_1rm = calculate_estimated_1rm(weight, reps)
+
+        # Check current best PR for this exercise
+        current_best = db.execute(text("""
+            SELECT MAX(estimated_1rm) as best_1rm
+            FROM exercise_pr
+            WHERE user_id = :user_id AND exercise_name = :exercise_name
+        """), {"user_id": user_id, "exercise_name": exercise_name}).fetchone()
+
+        is_pr = current_best is None or current_best.best_1rm is None or estimated_1rm > current_best.best_1rm
+
+        if is_pr:
+            pr_id = str(uuid.uuid4())
+            db.execute(text("""
+                INSERT INTO exercise_pr (id, user_id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id)
+                VALUES (:id, :user_id, :exercise_name, :weight, :reps, :estimated_1rm, :achieved_at, :workout_set_id)
+            """), {
+                "id": pr_id,
+                "user_id": user_id,
+                "exercise_name": exercise_name,
+                "weight": weight,
+                "reps": reps,
+                "estimated_1rm": estimated_1rm,
+                "achieved_at": achieved_at,
+                "workout_set_id": workout_set_id
+            })
+
+            return {
+                "is_pr": True,
+                "pr_id": pr_id,
+                "estimated_1rm": estimated_1rm,
+                "previous_best": current_best.best_1rm if current_best and current_best.best_1rm else None
+            }
+
+        return {"is_pr": False, "estimated_1rm": estimated_1rm}
+    except Exception as e:
+        logger.error(f"Failed to check/record PR: {e}")
+        return None
+
+
+# ============================================
+# WEIGHT TREND APIs
+# ============================================
+
+class WeightEntryCreate(BaseModel):
+    date: date
+    raw_weight: float
+
+
+@router.get("/weight/trend")
+async def get_weight_trend(
+    days: int = 30,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get weight trend data for the specified number of days"""
+    try:
+        weights = db.execute(text("""
+            SELECT id, date, raw_weight, trend_weight, weekly_delta, created_at
+            FROM weight_trend
+            WHERE user_id = :user_id
+            AND date >= CURRENT_DATE - INTERVAL ':days days'
+            ORDER BY date ASC
+        """.replace(":days", str(days))), {"user_id": user_id}).fetchall()
+
+        return {"weights": [dict(row._mapping) for row in weights]}
+    except Exception as e:
+        logger.error(f"Failed to get weight trend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/weight")
+async def log_weight(
+    entry: WeightEntryCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Log a weight entry and update trend"""
+    try:
+        # Get recent weights for trend calculation (7-day exponential moving average)
+        recent = db.execute(text("""
+            SELECT raw_weight, trend_weight, date
+            FROM weight_trend
+            WHERE user_id = :user_id AND date < :date
+            ORDER BY date DESC
+            LIMIT 7
+        """), {"user_id": user_id, "date": entry.date}).fetchall()
+
+        # Calculate trend using exponential smoothing (alpha = 0.1)
+        alpha = 0.1
+        if recent and recent[0].trend_weight:
+            trend_weight = round(alpha * entry.raw_weight + (1 - alpha) * float(recent[0].trend_weight), 2)
+        else:
+            trend_weight = entry.raw_weight
+
+        # Calculate weekly delta
+        weekly_delta = None
+        if len(recent) >= 7:
+            week_ago_weight = recent[6].raw_weight
+            weekly_delta = round(entry.raw_weight - float(week_ago_weight), 2)
+
+        weight_id = str(uuid.uuid4())
+
+        # Upsert (in case logging for same date twice)
+        db.execute(text("""
+            INSERT INTO weight_trend (id, user_id, date, raw_weight, trend_weight, weekly_delta)
+            VALUES (:id, :user_id, :date, :raw_weight, :trend_weight, :weekly_delta)
+            ON CONFLICT (user_id, date)
+            DO UPDATE SET
+                raw_weight = EXCLUDED.raw_weight,
+                trend_weight = EXCLUDED.trend_weight,
+                weekly_delta = EXCLUDED.weekly_delta
+        """), {
+            "id": weight_id,
+            "user_id": user_id,
+            "date": entry.date,
+            "raw_weight": entry.raw_weight,
+            "trend_weight": trend_weight,
+            "weekly_delta": weekly_delta
+        })
+        db.commit()
+
+        return {
+            "success": True,
+            "raw_weight": entry.raw_weight,
+            "trend_weight": trend_weight,
+            "weekly_delta": weekly_delta
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to log weight: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/weight/latest")
+async def get_latest_weight(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get the most recent weight entry"""
+    try:
+        weight = db.execute(text("""
+            SELECT id, date, raw_weight, trend_weight, weekly_delta, created_at
+            FROM weight_trend
+            WHERE user_id = :user_id
+            ORDER BY date DESC
+            LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+
+        if weight:
+            return dict(weight._mapping)
+        return {"message": "No weight entries found"}
+    except Exception as e:
+        logger.error(f"Failed to get latest weight: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # FITNESS SETTINGS APIs
@@ -2558,6 +3713,47 @@ async def create_or_update_recovery_log(
                 "weight_unit": recovery_data.weight_unit,
                 "notes": recovery_data.notes
             }).fetchone()
+
+        # If body_weight was logged, also sync to weight_trend table for dashboard
+        if recovery_data.body_weight:
+            # Check if weight_trend entry exists for this date
+            existing_weight = db.execute(text("""
+                SELECT id FROM weight_trend WHERE user_id = :user_id AND date = :date
+            """), {"user_id": user_id, "date": log_date}).fetchone()
+
+            # Get previous weight for trend calculation
+            prev_weight = db.execute(text("""
+                SELECT trend_weight FROM weight_trend
+                WHERE user_id = :user_id AND date < :date
+                ORDER BY date DESC LIMIT 1
+            """), {"user_id": user_id, "date": log_date}).fetchone()
+
+            prev_trend = prev_weight.trend_weight if prev_weight else recovery_data.body_weight
+            alpha = 0.1  # Smoothing factor
+            trend_weight = round(alpha * recovery_data.body_weight + (1 - alpha) * float(prev_trend), 2)
+
+            if existing_weight:
+                db.execute(text("""
+                    UPDATE weight_trend
+                    SET raw_weight = :raw_weight, trend_weight = :trend_weight, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = :user_id AND date = :date
+                """), {
+                    "user_id": user_id,
+                    "date": log_date,
+                    "raw_weight": recovery_data.body_weight,
+                    "trend_weight": trend_weight
+                })
+            else:
+                db.execute(text("""
+                    INSERT INTO weight_trend (id, user_id, date, raw_weight, trend_weight)
+                    VALUES (:id, :user_id, :date, :raw_weight, :trend_weight)
+                """), {
+                    "id": str(uuid.uuid4()),
+                    "user_id": user_id,
+                    "date": log_date,
+                    "raw_weight": recovery_data.body_weight,
+                    "trend_weight": trend_weight
+                })
 
         db.commit()
 

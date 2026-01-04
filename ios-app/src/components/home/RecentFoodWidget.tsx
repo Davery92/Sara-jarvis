@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { fitnessService, FoodLog } from '../../services/fitness';
+import { getLocalDateString } from '../../utils/dateUtils';
 
 export default function RecentFoodWidget() {
   const [foodLogs, setFoodLogs] = useState<FoodLog[]>([]);
@@ -14,12 +15,12 @@ export default function RecentFoodWidget() {
   const fetchRecentFood = async () => {
     try {
       setLoading(true);
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       const logs = await fitnessService.getFoodLogs(today, today);
 
       // Filter to only show food logged today (in case API returns other dates)
       const todayLogs = logs.filter((log) => {
-        const logDate = new Date(log.logged_at || log.created_at).toISOString().split('T')[0];
+        const logDate = getLocalDateString(new Date(log.logged_at || log.created_at));
         return logDate === today;
       });
 

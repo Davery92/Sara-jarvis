@@ -1,9 +1,11 @@
 import apiClient from './api';
-import { Message } from '../types/api';
+import { Message, MessageContent } from '../types/api';
+import { ImageAttachment } from './imagePicker';
 
 export interface SendMessageParams {
   messages: Message[];  // Changed from single message to full conversation history
   conversationId?: string;
+  images?: ImageAttachment[];  // Optional images to attach to the last message
 }
 
 export interface ChatResponse {
@@ -18,14 +20,36 @@ class ChatService {
   async sendMessage(
     params: SendMessageParams,
     onChunk: (chunk: string) => void,
-    onComplete: (conversationId: string) => void,
+    onComplete: (conversationId: string, episodeId?: string) => void,
     onError: (error: Error) => void
   ): Promise<void> {
     // Format messages for API - send full conversation history
-    const formattedMessages = params.messages.map(msg => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    const formattedMessages = params.messages.map((msg, index) => {
+      let content: MessageContent = msg.content;
+
+      // If this is the last message and we have images, format as multimodal
+      if (index === params.messages.length - 1 && params.images && params.images.length > 0) {
+        const textContent = typeof msg.content === 'string'
+          ? msg.content
+          : (msg.content as any[]).find(c => c.type === 'text')?.text || '';
+
+        content = [
+          // Add images first
+          ...params.images.map(img => ({
+            type: 'image' as const,
+            data: img.base64,
+            media_type: img.type,
+          })),
+          // Then add text
+          { type: 'text' as const, text: textContent },
+        ];
+      }
+
+      return {
+        role: msg.role,
+        content,
+      };
+    });
 
     const requestBody: any = { messages: formattedMessages };
     if (params.conversationId) {
@@ -36,9 +60,9 @@ class ChatService {
       await apiClient.streamChat(
         formattedMessages,
         onChunk,
-        (conversationId) => {
+        (conversationId, episodeId) => {
           // Use the conversation_id from backend if provided, otherwise use the one we sent
-          onComplete(conversationId || params.conversationId || '');
+          onComplete(conversationId || params.conversationId || '', episodeId);
         },
         onError,
         params.conversationId  // Pass session_id to maintain conversation history

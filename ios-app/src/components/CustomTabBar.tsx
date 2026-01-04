@@ -8,7 +8,9 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
     <View style={styles.tabBar}>
       {state.routes.map((route, index) => {
         const { options } = descriptors[route.key];
-        const label = options.tabBarLabel ?? options.title ?? route.name;
+        // Ensure label is always a string - tabBarLabel can be a function or React element
+        const rawLabel = options.tabBarLabel ?? options.title ?? route.name;
+        const label = typeof rawLabel === 'string' ? rawLabel : route.name;
         const isFocused = state.index === index;
 
         // Get the icon from options

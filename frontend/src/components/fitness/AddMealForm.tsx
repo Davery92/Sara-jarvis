@@ -28,12 +28,22 @@ interface AddMealFormProps {
   }
 }
 
+// Format date as local datetime string for datetime-local input (YYYY-MM-DDTHH:mm)
+function formatLocalDateTime(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day}T${hours}:${minutes}`
+}
+
 export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFormProps) {
   const [mealType, setMealType] = useState(editEntry?.meal_type || 'breakfast')
   const [loggedAt, setLoggedAt] = useState(
     editEntry?.logged_at
-      ? new Date(editEntry.logged_at).toISOString().slice(0, 16)
-      : new Date().toISOString().slice(0, 16)
+      ? formatLocalDateTime(new Date(editEntry.logged_at))
+      : formatLocalDateTime(new Date())
   )
   const [notes, setNotes] = useState(editEntry?.notes || '')
   const [selectedFoods, setSelectedFoods] = useState<SelectedFoodItem[]>(editEntry?.detailed_items || [])
@@ -84,9 +94,10 @@ export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFo
 
       onSuccess()
       onClose()
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to save meal:', error)
-      alert('Failed to save meal. Please try again.')
+      const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error'
+      alert(`Failed to save meal: ${typeof errorMessage === 'object' ? JSON.stringify(errorMessage) : errorMessage}`)
     } finally {
       setIsSubmitting(false)
     }

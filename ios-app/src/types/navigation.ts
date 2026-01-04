@@ -39,10 +39,38 @@ export type AuthStackParamList = {
   ForgotPassword: undefined;
 };
 
+// Health Alert data passed when opening chat from notification
+export type HealthAlertContext = {
+  severity: string;
+  insightId?: string;
+  title?: string;
+  body?: string;
+};
+
+// Nudge context passed when opening chat from notification (meal reminders, morning check-ins, etc.)
+export type NudgeContext = {
+  nudgeType: string;  // 'morning_checkin', 'missed_meal', 'bedtime', etc.
+  title: string;
+  message: string;
+  actionSuggestion?: string;
+};
+
+// Quick reply context when user replies from notification
+export type QuickReplyContext = {
+  message: string;
+  nudgeType?: string;
+  title?: string;
+};
+
 // Main Tab Navigator
 export type MainTabParamList = {
   Home: undefined;
-  Chat: undefined;
+  Chat: {
+    healthAlert?: HealthAlertContext;
+    nudge?: NudgeContext;
+    quickReply?: QuickReplyContext;
+  } | undefined;
+  Learning: undefined;
   Notes: undefined;
   Fitness: undefined;
   More: undefined;
@@ -50,10 +78,9 @@ export type MainTabParamList = {
   Documents: undefined;
   Calendar: undefined;
   Briefings: undefined;
-  ContextMode: undefined;
-  SmartInsights: undefined;
   Health: undefined;
   Settings: undefined;
+  Projects: undefined;
 };
 
 // Screen Props Types

@@ -1,0 +1,282 @@
+"""Calendar events routes."""
+import uuid
+import logging
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List, Optional
+
+from app.db.session import get_db
+from app.models.user import User
+from app.tools.calendar import CalendarEvent  # Use existing model with extend_existing
+from app.schemas.calendar import (
+    CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
+    IOSCalendarSyncRequest, IOSCalendarSyncResponse
+)
+from app.core.deps import get_current_user
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/calendar", tags=["Calendar"])
+
+
+@router.get("/events", response_model=List[CalendarEventResponse])
+async def list_calendar_events(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all calendar events."""
+    query = db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id)
+
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(CalendarEvent.start_time >= start_dt)
+        except:
+            pass
+
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(CalendarEvent.start_time <= end_dt)
+        except:
+            pass
+
+    events = query.order_by(CalendarEvent.start_time).all()
+
+    return [
+        CalendarEventResponse(
+            id=event.id,
+            title=event.title,
+            description=event.description,
+            start_time=event.start_time.isoformat(),
+            end_time=event.end_time.isoformat(),
+            location=event.location or None,
+            all_day=event.all_day,
+            reminder_minutes=event.reminder_minutes,
+            is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+            source=getattr(event, 'source', 'sara') or 'sara',
+            ios_event_id=getattr(event, 'ios_event_id', None),
+            ios_calendar_id=getattr(event, 'ios_calendar_id', None),
+            ios_calendar_name=getattr(event, 'ios_calendar_name', None),
+            read_only=getattr(event, 'read_only', False) or False,
+            created_at=event.created_at.isoformat(),
+            updated_at=event.updated_at.isoformat()
+        )
+        for event in events
+    ]
+
+
+@router.post("/events", response_model=CalendarEventResponse)
+async def create_calendar_event(
+    event_data: CalendarEventCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a calendar event."""
+    start_dt = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+    end_dt = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+
+    event = CalendarEvent(
+        user_id=current_user.id,
+        title=event_data.title,
+        description=event_data.description or "",
+        start_time=start_dt,
+        end_time=end_dt,
+        location=event_data.location or "",
+        all_day=event_data.all_day or False,
+        reminder_minutes=event_data.reminder_minutes
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return CalendarEventResponse(
+        id=event.id,
+        title=event.title,
+        description=event.description,
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
+        location=event.location or None,
+        all_day=event.all_day,
+        reminder_minutes=event.reminder_minutes,
+        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        source=getattr(event, 'source', 'sara') or 'sara',
+        ios_event_id=getattr(event, 'ios_event_id', None),
+        ios_calendar_id=getattr(event, 'ios_calendar_id', None),
+        ios_calendar_name=getattr(event, 'ios_calendar_name', None),
+        read_only=getattr(event, 'read_only', False) or False,
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
+    )
+
+
+@router.put("/events/{event_id}", response_model=CalendarEventResponse)
+async def update_calendar_event(
+    event_id: str,
+    event_data: CalendarEventUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update a calendar event."""
+    event = db.query(CalendarEvent).filter(
+        CalendarEvent.id == event_id,
+        CalendarEvent.user_id == current_user.id
+    ).first()
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event_data.title is not None:
+        event.title = event_data.title
+    if event_data.description is not None:
+        event.description = event_data.description
+    if event_data.start_time is not None:
+        event.start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+    if event_data.end_time is not None:
+        event.end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+    if event_data.location is not None:
+        event.location = event_data.location
+    if event_data.all_day is not None:
+        event.all_day = event_data.all_day
+    if event_data.reminder_minutes is not None:
+        event.reminder_minutes = event_data.reminder_minutes
+    if event_data.is_completed is not None:
+        event.is_completed = event_data.is_completed
+
+    event.updated_at = datetime.now()
+    db.commit()
+    db.refresh(event)
+
+    return CalendarEventResponse(
+        id=event.id,
+        title=event.title,
+        description=event.description,
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
+        location=event.location or None,
+        all_day=event.all_day,
+        reminder_minutes=event.reminder_minutes,
+        is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        source=getattr(event, 'source', 'sara') or 'sara',
+        ios_event_id=getattr(event, 'ios_event_id', None),
+        ios_calendar_id=getattr(event, 'ios_calendar_id', None),
+        ios_calendar_name=getattr(event, 'ios_calendar_name', None),
+        read_only=getattr(event, 'read_only', False) or False,
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
+    )
+
+
+@router.delete("/events/{event_id}")
+async def delete_calendar_event(
+    event_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a calendar event."""
+    event = db.query(CalendarEvent).filter(
+        CalendarEvent.id == event_id,
+        CalendarEvent.user_id == current_user.id
+    ).first()
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    db.delete(event)
+    db.commit()
+
+    return {"message": "Event deleted successfully"}
+
+
+# iOS Calendar Sync endpoints
+@router.post("/ios-sync", response_model=IOSCalendarSyncResponse)
+async def sync_ios_calendar_events(
+    sync_request: IOSCalendarSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Sync events from iOS calendar to Sara."""
+    synced = 0
+    errors = 0
+    processed_keys = set()
+
+    for event_data in sync_request.events:
+        try:
+            start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+            end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+
+            event_key = f"{event_data.ios_event_id}_{start_time.isoformat()}"
+
+            if event_key in processed_keys:
+                continue
+            processed_keys.add(event_key)
+
+            existing_event = db.query(CalendarEvent).filter(
+                CalendarEvent.user_id == current_user.id,
+                CalendarEvent.ios_event_id == event_data.ios_event_id,
+                CalendarEvent.start_time == start_time
+            ).first()
+
+            if existing_event:
+                existing_event.title = event_data.title
+                existing_event.description = event_data.description or ""
+                existing_event.end_time = end_time
+                existing_event.location = event_data.location or ""
+                existing_event.all_day = event_data.all_day
+                existing_event.ios_calendar_id = event_data.ios_calendar_id
+                existing_event.ios_calendar_name = event_data.ios_calendar_name
+                existing_event.updated_at = datetime.now()
+                db.flush()
+            else:
+                new_event = CalendarEvent(
+                    id=str(uuid.uuid4()),
+                    user_id=current_user.id,
+                    title=event_data.title,
+                    description=event_data.description or "",
+                    start_time=start_time,
+                    end_time=end_time,
+                    location=event_data.location or "",
+                    all_day=event_data.all_day,
+                    source="ios_calendar",
+                    ios_event_id=event_data.ios_event_id,
+                    ios_calendar_id=event_data.ios_calendar_id,
+                    ios_calendar_name=event_data.ios_calendar_name,
+                    read_only=True,
+                    is_completed=False
+                )
+                db.add(new_event)
+                db.flush()
+
+            synced += 1
+        except Exception as e:
+            logger.error(f"Error syncing iOS event {event_data.ios_event_id}: {e}")
+            db.rollback()
+            errors += 1
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error committing iOS calendar sync: {e}")
+        db.rollback()
+        errors += synced
+        synced = 0
+
+    return IOSCalendarSyncResponse(synced=synced, errors=errors)
+
+
+@router.delete("/ios-sync")
+async def clear_ios_calendar_events(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove all iOS-synced calendar events."""
+    deleted = db.query(CalendarEvent).filter(
+        CalendarEvent.user_id == current_user.id,
+        CalendarEvent.source == "ios_calendar"
+    ).delete()
+
+    db.commit()
+    return {"message": f"Deleted {deleted} iOS calendar events"}

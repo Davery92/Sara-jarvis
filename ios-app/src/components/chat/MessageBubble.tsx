@@ -3,6 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Message } from '../../types/api';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import SimpleMarkdown from './SimpleMarkdown';
+import StarRating from './StarRating';
 
 interface MessageBubbleProps {
   message: Message;
@@ -11,6 +12,7 @@ interface MessageBubbleProps {
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+  const canRate = isAssistant && message.episode_id && message.content.length > 50;
 
   return (
     <View style={[styles.container, isUser && styles.userContainer]}>
@@ -28,6 +30,11 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           <Text style={[styles.text, isUser && styles.userText]}>
             {message.content}
           </Text>
+        )}
+
+        {/* Star rating for assistant messages */}
+        {canRate && (
+          <StarRating episodeId={message.episode_id!} size={16} />
         )}
 
         {/* Timestamp */}

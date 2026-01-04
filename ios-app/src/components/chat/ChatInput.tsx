@@ -8,12 +8,17 @@ import {
   KeyboardAvoidingView,
   Platform,
   Animated,
+  Image,
+  ScrollView,
+  ActionSheetIOS,
+  Alert,
 } from 'react-native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { voiceService } from '../../services/voice';
+import { imagePickerService, ImageAttachment } from '../../services/imagePicker';
 
 interface ChatInputProps {
-  onSend: (message: string) => void;
+  onSend: (message: string, images?: ImageAttachment[]) => void;
   onVoiceMessage?: (audioUri: string) => void;
   disabled?: boolean;
   placeholder?: string;
@@ -35,16 +40,73 @@ export default function ChatInput({
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
   const scaleAnim = useState(new Animated.Value(1))[0];
 
   // Show recording indicator for both manual and continuous modes
   const showRecording = isRecording || isListeningContinuous;
 
   const handleSend = () => {
-    if (message.trim() && !disabled) {
-      onSend(message.trim());
+    if ((message.trim() || attachedImages.length > 0) && !disabled) {
+      onSend(message.trim(), attachedImages.length > 0 ? attachedImages : undefined);
       setMessage('');
+      setAttachedImages([]);
     }
+  };
+
+  const handleAddImage = () => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Cancel', 'Choose from Gallery', 'Take a Photo'],
+          cancelButtonIndex: 0,
+        },
+        async (buttonIndex) => {
+          if (buttonIndex === 1) {
+            const image = await imagePickerService.pickFromGallery();
+            if (image) {
+              setAttachedImages(prev => [...prev, image]);
+            }
+          } else if (buttonIndex === 2) {
+            const image = await imagePickerService.takePhoto();
+            if (image) {
+              setAttachedImages(prev => [...prev, image]);
+            }
+          }
+        }
+      );
+    } else {
+      // Android fallback - show Alert with options
+      Alert.alert(
+        'Add Image',
+        'Choose an option',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Choose from Gallery',
+            onPress: async () => {
+              const image = await imagePickerService.pickFromGallery();
+              if (image) {
+                setAttachedImages(prev => [...prev, image]);
+              }
+            },
+          },
+          {
+            text: 'Take a Photo',
+            onPress: async () => {
+              const image = await imagePickerService.takePhoto();
+              if (image) {
+                setAttachedImages(prev => [...prev, image]);
+              }
+            },
+          },
+        ]
+      );
+    }
+  };
+
+  const removeImage = (index: number) => {
+    setAttachedImages(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleVoicePressIn = async () => {
@@ -121,7 +183,39 @@ export default function ChatInput({
             </Text>
           </View>
         )}
+
+        {/* Attached Images Preview */}
+        {attachedImages.length > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.imagePreviewContainer}
+            contentContainerStyle={styles.imagePreviewContent}
+          >
+            {attachedImages.map((img, index) => (
+              <View key={index} style={styles.imagePreviewWrapper}>
+                <Image source={{ uri: img.uri }} style={styles.imagePreview} />
+                <TouchableOpacity
+                  style={styles.removeImageButton}
+                  onPress={() => removeImage(index)}
+                >
+                  <Text style={styles.removeImageText}>×</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+
         <View style={styles.inputContainer}>
+          {/* Add image button */}
+          <TouchableOpacity
+            style={styles.imageButton}
+            onPress={handleAddImage}
+            disabled={disabled}
+          >
+            <Text style={styles.imageButtonText}>📎</Text>
+          </TouchableOpacity>
+
           <TextInput
             style={styles.input}
             value={message}
@@ -134,7 +228,7 @@ export default function ChatInput({
             onSubmitEditing={handleSend}
             blurOnSubmit={false}
           />
-          {voiceEnabled && onVoiceMessage && !message.trim() && !continuousVoiceMode ? (
+          {voiceEnabled && onVoiceMessage && !message.trim() && attachedImages.length === 0 && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.voiceButton,
@@ -150,14 +244,14 @@ export default function ChatInput({
                 {isRecording ? '🎙️' : '🎤'}
               </Text>
             </TouchableOpacity>
-          ) : message.trim() && !continuousVoiceMode ? (
+          ) : (message.trim() || attachedImages.length > 0) && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                (!message.trim() || disabled) && styles.sendButtonDisabled,
+                ((!message.trim() && attachedImages.length === 0) || disabled) && styles.sendButtonDisabled,
               ]}
               onPress={handleSend}
-              disabled={!message.trim() || disabled}
+              disabled={(!message.trim() && attachedImages.length === 0) || disabled}
             >
               <Text style={styles.sendButtonText}>➤</Text>
             </TouchableOpacity>
@@ -269,5 +363,52 @@ const styles = StyleSheet.create({
   },
   voiceButtonText: {
     fontSize: 20,
+  },
+  imageButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.background,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.xs,
+  },
+  imageButtonText: {
+    fontSize: 18,
+  },
+  imagePreviewContainer: {
+    marginBottom: spacing.sm,
+    maxHeight: 80,
+  },
+  imagePreviewContent: {
+    paddingHorizontal: spacing.xs,
+  },
+  imagePreviewWrapper: {
+    marginRight: spacing.sm,
+    position: 'relative',
+  },
+  imagePreview: {
+    width: 60,
+    height: 60,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  removeImageButton: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  removeImageText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: 'bold',
+    lineHeight: 18,
   },
 });

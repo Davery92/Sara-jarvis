@@ -54,7 +54,7 @@ class FitnessSummaryTool(BaseTool):
             nutrition_sql = text("""
                 SELECT
                     meal_type,
-                    food_name,
+                    food_items,
                     calories,
                     protein,
                     carbs,
@@ -78,9 +78,24 @@ class FitnessSummaryTool(BaseTool):
             total_fats = 0
 
             for row in nutrition_result.fetchall():
+                # Parse food_items JSON to get food names
+                food_items = row.food_items
+                if isinstance(food_items, str):
+                    try:
+                        food_items = json.loads(food_items)
+                    except:
+                        food_items = []
+
+                # Extract food names from items
+                if isinstance(food_items, list):
+                    food_names = [item.get('name', str(item)) if isinstance(item, dict) else str(item) for item in food_items]
+                    food_display = ", ".join(food_names) if food_names else "Unknown"
+                else:
+                    food_display = str(food_items) if food_items else "Unknown"
+
                 meal = {
                     "meal_type": row.meal_type,
-                    "food": row.food_name,
+                    "food": food_display,
                     "calories": row.calories or 0,
                     "protein": row.protein or 0,
                     "carbs": row.carbs or 0,

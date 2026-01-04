@@ -59,13 +59,16 @@ class IntelligencePipeline:
         
         # Start deep processing worker (30+ second tasks)
         asyncio.create_task(self.deep_worker("deep-worker-1"))
-        
+
         # Start nightly dream worker (conversation processing at 2 AM Eastern)
         asyncio.create_task(self.nightly_dream_worker("nightly-dream-worker"))
-        
+
         # Start contextual awareness worker (30-minute monitoring)
         asyncio.create_task(self.contextual_awareness_worker("awareness-worker"))
-        
+
+        # Start outbox processor (Postgres -> Neo4j sync with guaranteed delivery)
+        asyncio.create_task(self.outbox_worker("outbox-processor-1"))
+
         logger.info("✅ Intelligence pipeline workers started")
     
     async def queue_fast_processing(self, content_id: str, content_type: ContentType, 
@@ -185,16 +188,33 @@ class IntelligencePipeline:
     async def contextual_awareness_worker(self, worker_id: str):
         """Contextual awareness worker - monitors context every 30 minutes and maintains living context note"""
         logger.info(f"🔮 Contextual awareness worker {worker_id} started")
-        
-        # Import contextual awareness service here to avoid circular imports  
+
+        # Import contextual awareness service here to avoid circular imports
         from app.services.contextual_awareness_service import contextual_awareness_service
-        
+
         # Start the contextual awareness monitoring
         try:
             await contextual_awareness_service.start_awareness_monitoring()
         except Exception as e:
             logger.error(f"❌ Contextual awareness monitoring failed: {e}")
-    
+
+    async def outbox_worker(self, worker_id: str):
+        """Outbox processor worker - syncs Postgres to Neo4j with guaranteed delivery.
+
+        This is the bridge between Postgres (source of truth) and Neo4j (enriched view).
+        Uses the transactional outbox pattern to ensure eventual consistency.
+        """
+        logger.info(f"📬 Outbox worker {worker_id} started")
+
+        # Import outbox processor here to avoid circular imports
+        from app.services.outbox_processor import outbox_processor
+
+        # Start the outbox processor
+        try:
+            await outbox_processor.start()
+        except Exception as e:
+            logger.error(f"❌ Outbox processor failed: {e}")
+
     async def perform_fast_analysis(self, task: IntelligenceTask):
         """Perform fast intelligence analysis (2-5 seconds)"""
         try:

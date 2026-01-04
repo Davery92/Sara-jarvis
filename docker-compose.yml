@@ -24,6 +24,7 @@ services:
       - VITE_ASSISTANT_NAME=Sara
       - VITE_DOMAIN=${VITE_DOMAIN-sara.avery.cloud}
       - VITE_API_DOMAIN=${VITE_API_DOMAIN-sara-api.avery.cloud}
+      - VITE_ALLOWED_HOSTS=sara.avery.cloud,localhost,10.185.1.180
     depends_on:
       - backend
 
@@ -37,17 +38,18 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-gemini}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-https://generativelanguage.googleapis.com/v1beta/openai}
-      - OPENAI_MODEL=gemini-2.5-flash
-      - OPENAI_API_KEY=${GEMINI_API_KEY}
-      - FAST_MODEL_URL=http://10.185.1.8:11434/v1
-      - FAST_MODEL=granite4
+      - OPENAI_MODEL=${OPENAI_MODEL-gemini-3-flash-preview}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-REDACTED_GEMINI_KEY}
+      - FAST_MODEL_URL=https://generativelanguage.googleapis.com/v1beta/openai
+      - FAST_MODEL=gemini-3-flash-preview
+      - FAST_MODEL_API_KEY=REDACTED_GEMINI_KEY
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000"]
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","https://sara-api.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
@@ -62,11 +64,30 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=sara-graph-secret
       - USDA_API_KEY=REDACTED_USDA_KEY
+      - FATSECRET_CLIENT_ID=REDACTED_FATSECRET_ID
+      - FATSECRET_CLIENT_SECRET=REDACTED_FATSECRET_SECRET
+      - GITHUB_APP_ID=2419118
+      - GITHUB_CLIENT_ID=REDACTED_GITHUB_CLIENT
+      - GITHUB_CLIENT_SECRET=REDACTED_GITHUB_SECRET
+      - GITHUB_WEBHOOK_SECRET=REDACTED_GITHUB_WEBHOOK
+    volumes:
+      - backend_data:/app/data
     depends_on:
       db:
         condition: service_started
       minio:
         condition: service_started
+
+  pi-dashboard:
+    build: ./pi-dashboard
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=https://sara-api.avery.cloud
+      - VITE_ASSISTANT_NAME=Sara
+    depends_on:
+      - backend
 
   db:
     image: pgvector/pgvector:pg16
@@ -124,6 +145,7 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  backend_data:
   neo4j_data:
   neo4j_logs:
   neo4j_import:

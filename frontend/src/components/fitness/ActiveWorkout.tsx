@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { X, Check, PlayCircle, ChevronLeft, ChevronRight, Trophy, Timer, TrendingUp } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
+import { formatSleepHours } from '../../utils/formatters'
 
 interface Exercise {
   name: string
@@ -245,7 +246,7 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
               )}
               {session.recovery_data.sleep_hours && (
                 <div className="px-2 py-1 rounded bg-blue-600/20 text-blue-400">
-                  Sleep: {session.recovery_data.sleep_hours}h
+                  Sleep: {formatSleepHours(session.recovery_data.sleep_hours)}
                 </div>
               )}
             </div>

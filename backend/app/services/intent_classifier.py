@@ -345,3 +345,176 @@ async def get_semantic_classifier() -> SemanticIntentClassifier:
 def get_keyword_classifier() -> KeywordIntentClassifier:
     """Get the keyword intent classifier (fast fallback)"""
     return _keyword_classifier
+
+
+# ============================================================================
+# Tool Intent Classifier - Maps messages to tool categories for token savings
+# ============================================================================
+
+class ToolIntentClassifier:
+    """
+    Fast keyword-based classifier that determines which tool categories to load.
+
+    This reduces token usage by only sending relevant tools to the LLM.
+    For example, a simple "hello" needs no tools, while "log 500 calories"
+    only needs fitness tools.
+    """
+
+    # Intent patterns - more specific patterns checked first
+    INTENT_PATTERNS = {
+        'FITNESS': [
+            'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
+            'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
+            'lunch', 'dinner', 'snack', 'gym', 'lift', 'run', 'cardio', 'recovery',
+            'sleep', 'steps', 'burned', 'nutrition', 'fasting', 'diet',
+            'program', 'training program', 'phase', 'training phase', 'template',
+            'workout template', 'mesocycle', 'block', 'hypertrophy', 'strength program',
+            'deload', 'periodization', 'training block'
+        ],
+        'NOTES': [
+            'note', 'notes', 'write down', 'save this', 'folder', 'jot down',
+            'document', 'record this', 'keep track', 'knowledge garden'
+        ],
+        'TIME': [
+            'remind', 'reminder', 'timer', 'calendar', 'schedule', 'alarm',
+            'appointment', 'event', 'meeting', 'tomorrow', 'next week', 'when is'
+        ],
+        'AGENTS': [
+            'hand off', 'handoff', 'have your agents', 'background task',
+            'research this in the background', 'look into this for me',
+            'agents research', 'agent task', 'delegate this', 'deep research',
+            'thorough research', 'investigate this', 'dig into this',
+            'your agent', 'the agent', 'start the agent', 'kick it off',
+            'kick off', 'run the agent', 'agent build', 'agent research',
+            'build a report', 'build me a report', 'full report',
+            'your agents research', 'agents look into', 'agents investigate'
+        ],
+        'WEB': [
+            'search', 'look up', 'find out', 'google', 'look for',
+            'research', 'news about', 'latest on', 'who is', 'what is'
+        ],
+        'MEMORY': [
+            'remember', 'recall', 'earlier', 'yesterday', 'last time',
+            'before', 'previously', 'did i', 'did we', 'have i', 'have we',
+            'what did', 'when did', 'told you', 'mentioned'
+        ],
+        'HOME': [
+            'lights', 'thermostat', 'home assistant', 'turn on', 'turn off',
+            'temperature', 'fan', 'switch', 'door', 'lock', 'garage',
+            'automation', 'sensor', 'smart home'
+        ],
+        'CHESS': [
+            'chess', 'checkmate', 'chess opening', 'chess endgame', 'chess tactics',
+            'pawn', 'knight move', 'bishop move', 'rook move', 'castling',
+            'chess game', 'play chess', 'chess match', 'chess position'
+        ],
+        'LEARNING': [
+            'learn', 'study', 'topic', 'course', 'teach', 'explain how',
+            'understand', 'lesson', 'tutorial', 'quiz'
+        ],
+        'PROJECTS': [
+            'project', 'commit', 'pull request', 'branch', 'deploy',
+            'repository', 'sprint', 'ticket', 'jira', 'github', 'task'
+        ],
+        'MORNING_BRIEF': [
+            'morning brief', 'daily brief', 'briefing', "what's on today",
+            "what do i have", 'agenda', 'my day'
+        ],
+        'CONVERSATIONAL': [
+            'hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'goodbye',
+            'good morning', 'good night', 'good evening', 'good afternoon',
+            "how are you", "what's up", 'howdy', 'yo', 'sup', 'ok', 'okay',
+            'sounds good', 'got it', 'nice', 'great', 'awesome', 'cool'
+        ],
+    }
+
+    # Map intents to tool categories
+    INTENT_TO_TOOL_CATEGORIES = {
+        'CONVERSATIONAL': [],  # No tools needed for greetings
+        'FITNESS': ['fitness'],
+        'NOTES': ['notes'],
+        'TIME': ['time'],
+        'WEB': ['web'],
+        'MEMORY': ['memory', 'knowledge_graph'],
+        'HOME': ['home'],
+        'CHESS': ['chess'],
+        'LEARNING': ['learning', 'web'],
+        'PROJECTS': ['projects'],
+        'MORNING_BRIEF': ['morning_brief', 'time'],
+        'AGENTS': ['agents', 'web'],  # Agent handoff with web search capability
+        'GENERAL': ['notes', 'memory', 'web'],  # Fallback for unclear intent
+    }
+
+    def classify(self, message: str) -> str:
+        """
+        Returns intent category based on keyword matching.
+
+        Args:
+            message: The user's message text
+
+        Returns:
+            Intent category string (e.g., 'FITNESS', 'NOTES', 'CONVERSATIONAL')
+        """
+        import re
+        message_lower = message.lower()
+
+        # Check each intent pattern
+        for intent, keywords in self.INTENT_PATTERNS.items():
+            for keyword in keywords:
+                # Use word boundary matching for short keywords
+                if len(keyword) <= 3:
+                    if re.search(rf'\b{re.escape(keyword)}\b', message_lower):
+                        return intent
+                else:
+                    if keyword in message_lower:
+                        return intent
+
+        # Default logic for unmatched messages
+        # Questions default to GENERAL (may need tools)
+        if '?' in message:
+            return 'GENERAL'
+
+        # Short messages without keywords are likely conversational
+        if len(message.split()) <= 5:
+            return 'CONVERSATIONAL'
+
+        # Longer statements default to GENERAL
+        return 'GENERAL'
+
+    def get_tool_categories(self, intent: str) -> List[str]:
+        """
+        Returns tool categories to load for given intent.
+
+        Args:
+            intent: The classified intent string
+
+        Returns:
+            List of tool category strings to load
+        """
+        return self.INTENT_TO_TOOL_CATEGORIES.get(intent, ['notes', 'memory', 'web'])
+
+    def classify_with_categories(self, message: str) -> Tuple[str, List[str]]:
+        """
+        Convenience method that returns both intent and categories.
+
+        Args:
+            message: The user's message text
+
+        Returns:
+            Tuple of (intent, list of tool categories)
+        """
+        intent = self.classify(message)
+        categories = self.get_tool_categories(intent)
+        return intent, categories
+
+
+# Singleton instance
+_tool_intent_classifier: Optional[ToolIntentClassifier] = None
+
+
+def get_tool_intent_classifier() -> ToolIntentClassifier:
+    """Get or create the tool intent classifier singleton"""
+    global _tool_intent_classifier
+    if _tool_intent_classifier is None:
+        _tool_intent_classifier = ToolIntentClassifier()
+    return _tool_intent_classifier

@@ -1,0 +1,724 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Modal,
+  ScrollView,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  Platform,
+  KeyboardAvoidingView,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { fitnessService, FoodItem } from '../../services/fitness';
+import { IngredientItem } from '../../types/api';
+import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import BarcodeScanner from './BarcodeScanner';
+
+interface Props {
+  visible: boolean;
+  onClose: () => void;
+  onAddIngredient: (ingredient: IngredientItem) => void;
+}
+
+export default function IngredientSearchModal({
+  visible,
+  onClose,
+  onAddIngredient,
+}: Props) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<FoodItem[]>([]);
+  const [selectedFood, setSelectedFood] = useState<FoodItem | null>(null);
+  const [quantity, setQuantity] = useState('1');
+  const [unit, setUnit] = useState('serving');
+  const [searching, setSearching] = useState(false);
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
+  const [barcodeError, setBarcodeError] = useState<string | null>(null);
+
+  // Manual entry fields
+  const [manualName, setManualName] = useState('');
+  const [manualQuantity, setManualQuantity] = useState('1');
+  const [manualUnit, setManualUnit] = useState('serving');
+  const [manualCalories, setManualCalories] = useState('');
+  const [manualProtein, setManualProtein] = useState('');
+  const [manualCarbs, setManualCarbs] = useState('');
+  const [manualFats, setManualFats] = useState('');
+
+  useEffect(() => {
+    if (searchQuery.length >= 2) {
+      const timeoutId = setTimeout(() => {
+        handleSearch();
+      }, 500);
+      return () => clearTimeout(timeoutId);
+    } else {
+      setSearchResults([]);
+    }
+  }, [searchQuery]);
+
+  const handleSearch = async () => {
+    if (searchQuery.length < 2) return;
+
+    setSearching(true);
+    try {
+      const foodResults = await fitnessService.searchFoods(searchQuery, 20);
+      setSearchResults(foodResults);
+    } catch (error) {
+      console.error('Failed to search foods:', error);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleSelectFood = (food: FoodItem) => {
+    setSelectedFood(food);
+    setUnit(food.serving_unit);
+    setSearchQuery(food.name);
+    setSearchResults([]);
+    setBarcodeError(null);
+  };
+
+  const handleBarcodeScanned = async (barcode: string) => {
+    setShowBarcodeScanner(false);
+    setSearching(true);
+    setBarcodeError(null);
+
+    try {
+      const food = await fitnessService.lookupBarcode(barcode);
+
+      if (food) {
+        handleSelectFood(food);
+      } else {
+        setBarcodeError(`No product found for barcode: ${barcode}`);
+      }
+    } catch (error: any) {
+      console.error('Barcode lookup error:', error);
+      setBarcodeError('Failed to look up barcode. Please try again.');
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleClose = () => {
+    resetForm();
+    onClose();
+  };
+
+  const resetForm = () => {
+    setSearchQuery('');
+    setSelectedFood(null);
+    setQuantity('1');
+    setUnit('serving');
+    setSearchResults([]);
+    setShowManualEntry(false);
+    setShowBarcodeScanner(false);
+    setBarcodeError(null);
+    resetManualFields();
+  };
+
+  const resetManualFields = () => {
+    setManualName('');
+    setManualQuantity('1');
+    setManualUnit('serving');
+    setManualCalories('');
+    setManualProtein('');
+    setManualCarbs('');
+    setManualFats('');
+  };
+
+  const handleAddFromSearch = () => {
+    if (!selectedFood) {
+      Alert.alert('Error', 'Please select a food item');
+      return;
+    }
+
+    const qty = parseFloat(quantity);
+    if (isNaN(qty) || qty <= 0) {
+      Alert.alert('Error', 'Please enter a valid quantity');
+      return;
+    }
+
+    // Calculate scaled nutrition
+    const ingredient: IngredientItem = {
+      name: selectedFood.name,
+      quantity: qty,
+      unit: unit,
+      calories: selectedFood.calories ? Math.round(selectedFood.calories * qty) : undefined,
+      protein: selectedFood.protein ? parseFloat((selectedFood.protein * qty).toFixed(1)) : undefined,
+      carbs: selectedFood.carbs ? parseFloat((selectedFood.carbs * qty).toFixed(1)) : undefined,
+      fats: selectedFood.fats ? parseFloat((selectedFood.fats * qty).toFixed(1)) : undefined,
+    };
+
+    onAddIngredient(ingredient);
+    handleClose();
+  };
+
+  const handleAddManual = () => {
+    if (!manualName.trim()) {
+      Alert.alert('Error', 'Please enter an ingredient name');
+      return;
+    }
+
+    const qty = parseFloat(manualQuantity);
+    if (isNaN(qty) || qty <= 0) {
+      Alert.alert('Error', 'Please enter a valid quantity');
+      return;
+    }
+
+    const ingredient: IngredientItem = {
+      name: manualName.trim(),
+      quantity: qty,
+      unit: manualUnit,
+      calories: manualCalories ? parseFloat(manualCalories) : undefined,
+      protein: manualProtein ? parseFloat(manualProtein) : undefined,
+      carbs: manualCarbs ? parseFloat(manualCarbs) : undefined,
+      fats: manualFats ? parseFloat(manualFats) : undefined,
+    };
+
+    onAddIngredient(ingredient);
+    handleClose();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      onRequestClose={handleClose}
+      presentationStyle="pageSheet"
+    >
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <SafeAreaView edges={['top']} style={styles.safeArea}>
+          <View style={styles.header}>
+            <Text style={styles.title}>Add Ingredient</Text>
+            <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
+              <Text style={styles.closeButton}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+
+        <ScrollView
+          style={styles.content}
+          contentContainerStyle={styles.contentContainer}
+          keyboardShouldPersistTaps="handled"
+        >
+          {!showManualEntry ? (
+            <>
+              {/* Search Input with Barcode Button */}
+              <View style={styles.searchRow}>
+                <View style={styles.searchContainer}>
+                  <TextInput
+                    style={styles.searchInput}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    placeholder="Search for ingredient..."
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  {searching && (
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.primary}
+                      style={styles.searchLoader}
+                    />
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={styles.barcodeButton}
+                  onPress={() => setShowBarcodeScanner(true)}
+                >
+                  <Text style={styles.barcodeButtonText}>📷</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Barcode Error Message */}
+              {barcodeError && (
+                <View style={styles.errorContainer}>
+                  <Text style={styles.errorText}>{barcodeError}</Text>
+                </View>
+              )}
+
+              {/* Search Results Dropdown */}
+              {searchResults.length > 0 && (
+                <View style={styles.resultsContainer}>
+                  <ScrollView
+                    style={styles.resultsList}
+                    nestedScrollEnabled={true}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {searchResults.map((food) => (
+                      <TouchableOpacity
+                        key={food.id}
+                        style={styles.resultItem}
+                        onPress={() => handleSelectFood(food)}
+                      >
+                        <View style={styles.resultInfo}>
+                          <Text style={styles.resultName}>{food.name}</Text>
+                          {food.brand && (
+                            <Text style={styles.resultBrand}>{food.brand}</Text>
+                          )}
+                          <Text style={styles.resultDetails}>
+                            {food.calories || '?'} cal • {food.protein || '?'}g protein •{' '}
+                            {food.source === 'user'
+                              ? '⭐ Custom'
+                              : food.source === 'fatsecret'
+                              ? '🟢 FatSecret'
+                              : '🇺🇸 USDA'}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Selected Food */}
+              {selectedFood && (
+                <View style={styles.selectedFoodContainer}>
+                  <View style={styles.selectedFoodHeader}>
+                    <Text style={styles.selectedFoodName}>{selectedFood.name}</Text>
+                    {selectedFood.brand && (
+                      <Text style={styles.selectedFoodBrand}>{selectedFood.brand}</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.nutritionGrid}>
+                    <View style={styles.nutritionItem}>
+                      <Text style={styles.nutritionValue}>
+                        {selectedFood.calories || '?'}
+                      </Text>
+                      <Text style={styles.nutritionLabel}>Calories</Text>
+                    </View>
+                    <View style={styles.nutritionItem}>
+                      <Text style={styles.nutritionValue}>
+                        {selectedFood.protein || '?'}g
+                      </Text>
+                      <Text style={styles.nutritionLabel}>Protein</Text>
+                    </View>
+                    <View style={styles.nutritionItem}>
+                      <Text style={styles.nutritionValue}>
+                        {selectedFood.carbs || '?'}g
+                      </Text>
+                      <Text style={styles.nutritionLabel}>Carbs</Text>
+                    </View>
+                    <View style={styles.nutritionItem}>
+                      <Text style={styles.nutritionValue}>
+                        {selectedFood.fats || '?'}g
+                      </Text>
+                      <Text style={styles.nutritionLabel}>Fat</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.quantityContainer}>
+                    <Text style={styles.label}>Quantity</Text>
+                    <View style={styles.quantityRow}>
+                      <TextInput
+                        style={styles.quantityInput}
+                        value={quantity}
+                        onChangeText={setQuantity}
+                        keyboardType="decimal-pad"
+                      />
+                      <TextInput
+                        style={styles.unitInput}
+                        value={unit}
+                        onChangeText={setUnit}
+                      />
+                    </View>
+                  </View>
+
+                  {/* Add Button */}
+                  <TouchableOpacity
+                    style={styles.addButton}
+                    onPress={handleAddFromSearch}
+                  >
+                    <Text style={styles.addButtonText}>Add Ingredient</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Manual Entry Button */}
+              <TouchableOpacity
+                style={styles.manualEntryButton}
+                onPress={() => setShowManualEntry(true)}
+              >
+                <Text style={styles.manualEntryText}>
+                  ✏️ Can't find it? Enter manually
+                </Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            /* Manual Entry Form */
+            <View style={styles.manualForm}>
+              <Text style={styles.sectionTitle}>Manual Entry</Text>
+
+              <Text style={styles.label}>Ingredient Name *</Text>
+              <TextInput
+                style={styles.input}
+                value={manualName}
+                onChangeText={setManualName}
+                placeholder="e.g., Chicken Breast"
+                placeholderTextColor={colors.textMuted}
+              />
+
+              <View style={styles.row}>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Quantity *</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualQuantity}
+                    onChangeText={setManualQuantity}
+                    keyboardType="decimal-pad"
+                    placeholder="1"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Unit</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualUnit}
+                    onChangeText={setManualUnit}
+                    placeholder="serving, cup, oz"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+              </View>
+
+              <Text style={styles.sectionTitle}>Nutrition (optional)</Text>
+
+              <View style={styles.row}>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Calories</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualCalories}
+                    onChangeText={setManualCalories}
+                    keyboardType="numeric"
+                    placeholder="0"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Protein (g)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualProtein}
+                    onChangeText={setManualProtein}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+              </View>
+
+              <View style={styles.row}>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Carbs (g)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualCarbs}
+                    onChangeText={setManualCarbs}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>Fat (g)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={manualFats}
+                    onChangeText={setManualFats}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+              </View>
+
+              {/* Add Button */}
+              <TouchableOpacity
+                style={styles.addButton}
+                onPress={handleAddManual}
+              >
+                <Text style={styles.addButtonText}>Add Ingredient</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.backToSearchButton}
+                onPress={() => {
+                  setShowManualEntry(false);
+                  resetManualFields();
+                }}
+              >
+                <Text style={styles.backToSearchText}>← Back to Search</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {/* Barcode Scanner Modal */}
+      <BarcodeScanner
+        visible={showBarcodeScanner}
+        onClose={() => setShowBarcodeScanner(false)}
+        onBarcodeScanned={handleBarcodeScanned}
+      />
+    </Modal>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  safeArea: {
+    backgroundColor: colors.background,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.surface,
+  },
+  title: {
+    fontSize: fontSizes.xl,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  closeButtonContainer: {
+    padding: spacing.sm,
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  closeButton: {
+    fontSize: fontSizes.xxl,
+    color: colors.textSecondary,
+  },
+  content: {
+    flex: 1,
+  },
+  contentContainer: {
+    padding: spacing.md,
+    gap: spacing.md,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  searchContainer: {
+    flex: 1,
+    position: 'relative',
+  },
+  barcodeButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    width: 52,
+    height: 52,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  barcodeButtonText: {
+    fontSize: 24,
+  },
+  errorContainer: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+  },
+  errorText: {
+    color: '#ef4444',
+    fontSize: fontSizes.sm,
+    textAlign: 'center',
+  },
+  searchInput: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    fontSize: fontSizes.md,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.surface,
+  },
+  searchLoader: {
+    position: 'absolute',
+    right: spacing.md,
+    top: spacing.md,
+  },
+  resultsContainer: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    maxHeight: 300,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  resultsList: {
+    maxHeight: 300,
+  },
+  resultItem: {
+    padding: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.background,
+  },
+  resultInfo: {
+    gap: spacing.xs,
+  },
+  resultName: {
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  resultBrand: {
+    fontSize: fontSizes.sm,
+    color: colors.textSecondary,
+  },
+  resultDetails: {
+    fontSize: fontSizes.xs,
+    color: colors.textMuted,
+  },
+  selectedFoodContainer: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    gap: spacing.md,
+  },
+  selectedFoodHeader: {
+    gap: spacing.xs,
+  },
+  selectedFoodName: {
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  selectedFoodBrand: {
+    fontSize: fontSizes.sm,
+    color: colors.textSecondary,
+  },
+  nutritionGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingVertical: spacing.md,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.background,
+  },
+  nutritionItem: {
+    alignItems: 'center',
+  },
+  nutritionValue: {
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  nutritionLabel: {
+    fontSize: fontSizes.xs,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+  },
+  quantityContainer: {
+    gap: spacing.xs,
+  },
+  label: {
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  quantityRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  quantityInput: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    padding: spacing.md,
+    fontSize: fontSizes.md,
+    color: colors.text,
+    textAlign: 'center',
+  },
+  unitInput: {
+    flex: 2,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    padding: spacing.md,
+    fontSize: fontSizes.md,
+    color: colors.text,
+  },
+  addButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+    minHeight: 48,
+    justifyContent: 'center',
+  },
+  addButtonText: {
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  manualEntryButton: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderStyle: 'dashed',
+  },
+  manualEntryText: {
+    fontSize: fontSizes.sm,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  manualForm: {
+    gap: spacing.md,
+  },
+  sectionTitle: {
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+    color: colors.text,
+    marginTop: spacing.sm,
+  },
+  input: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    fontSize: fontSizes.md,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.surface,
+  },
+  row: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  halfWidth: {
+    flex: 1,
+    gap: spacing.xs,
+  },
+  backToSearchButton: {
+    padding: spacing.sm,
+    alignItems: 'center',
+  },
+  backToSearchText: {
+    fontSize: fontSizes.sm,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+});

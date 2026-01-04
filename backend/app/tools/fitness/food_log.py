@@ -25,7 +25,7 @@ class FoodLogCreateTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "MANUAL food logging tool - use ONLY when the user provides specific nutrition values (calories, protein, carbs, fats) or when food_search_and_log tool is not appropriate. For natural language food descriptions, use food_search_and_log instead for automatic USDA nutrition lookup."
+        return "MANUAL food logging tool - use ONLY when the user provides specific nutrition values (calories, protein, carbs, fats) or when food_search_and_log tool is not appropriate. For natural language food descriptions, use food_search_and_log instead for automatic FatSecret nutrition lookup."
 
     @property
     def parameters(self) -> Dict[str, Any]:

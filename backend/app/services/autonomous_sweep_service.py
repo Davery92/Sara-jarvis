@@ -9,10 +9,22 @@ import json
 import asyncio
 import time
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from sqlalchemy.orm import Session
-from sqlalchemy import text, desc, and_, or_
+from sqlalchemy import text, desc, and_, or_, func
+
+
+@dataclass
+class SweepMetrics:
+    """Track metrics during sweep execution"""
+    episodes_analyzed: int = 0
+    notes_analyzed: int = 0
+    patterns_found: Dict[str, int] = field(default_factory=dict)
+
+    def add_pattern(self, pattern_type: str):
+        self.patterns_found[pattern_type] = self.patterns_found.get(pattern_type, 0) + 1
 
 # Avoid circular imports by importing models locally in methods
 # These are only needed for type hints and database queries
@@ -74,7 +86,6 @@ class AutonomousSweepService:
     async def execute_sweep(
         self,
         user_id: str,
-        personality_mode: str,
         sweep_type: str,
         triggered_by: str = "idle_threshold"
     ) -> List[Dict[str, Any]]:
@@ -86,55 +97,71 @@ class AutonomousSweepService:
         start_time = time.time()
         insights_generated = []
         errors = []
+        metrics = SweepMetrics()
 
         try:
             # Get user profile for personalization
             profile = self.db.query(UserProfile).filter(
                 UserProfile.user_id == user_id
             ).first()
-            
+
+            # Count items analyzed for metrics
+            recent_cutoff = datetime.utcnow() - timedelta(days=7)
+            metrics.episodes_analyzed = self.db.query(func.count(Episode.id)).filter(
+                Episode.user_id == user_id,
+                Episode.created_at >= recent_cutoff
+            ).scalar() or 0
+            metrics.notes_analyzed = self.db.query(func.count(Note.id)).filter(
+                Note.user_id == user_id,
+                Note.updated_at >= recent_cutoff
+            ).scalar() or 0
+
             # Execute sweep based on type
             if sweep_type == 'quick_sweep':
-                insights_generated = await self._quick_sweep(user_id, personality_mode, profile)
+                insights_generated = await self._quick_sweep(user_id, profile)
             elif sweep_type == 'standard_sweep':
-                insights_generated = await self._standard_sweep(user_id, personality_mode, profile)
+                insights_generated = await self._standard_sweep(user_id, profile)
             elif sweep_type == 'digest_sweep':
-                insights_generated = await self._digest_sweep(user_id, personality_mode, profile)
+                insights_generated = await self._digest_sweep(user_id, profile)
             else:
                 raise ValueError(f"Unknown sweep type: {sweep_type}")
-            
-            # Enrich insights with memory context for deeper understanding
-            if insights_generated and sweep_type != 'quick_sweep':  # Skip for quick sweeps to maintain speed
+
+            # Track patterns found from insights
+            for insight in insights_generated:
+                insight_type = insight.get('type', 'unknown')
+                metrics.add_pattern(insight_type)
+
+            # Enrich insights with memory context
+            if insights_generated and sweep_type != 'quick_sweep':
                 insights_generated = await self._enrich_with_memory_context(
-                    user_id, insights_generated, personality_mode
+                    user_id, insights_generated
                 )
-                
+
         except Exception as e:
             errors.append(str(e))
-            
-        # Log the sweep execution
+
+        # Log the sweep execution with metrics
         execution_time_ms = int((time.time() - start_time) * 1000)
         self._log_sweep_execution(
-            user_id, sweep_type, personality_mode, triggered_by,
-            execution_time_ms, len(insights_generated), errors
+            user_id, sweep_type, triggered_by,
+            execution_time_ms, len(insights_generated), errors, metrics
         )
-        
+
         return insights_generated
     
     async def _enrich_with_memory_context(
-        self, 
-        user_id: str, 
-        insights: List[Dict[str, Any]], 
-        mode: str
+        self,
+        user_id: str,
+        insights: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Enrich insights with relevant memory context for deeper understanding"""
-        
+
         enriched_insights = []
-        
+
         for insight in insights:
             try:
                 # Generate search query based on insight content
-                search_queries = self._generate_memory_queries(insight, mode)
+                search_queries = self._generate_memory_queries(insight)
                 
                 # Search for relevant memories
                 relevant_memories = []
@@ -167,22 +194,22 @@ class AutonomousSweepService:
         
         return enriched_insights
     
-    def _generate_memory_queries(self, insight: Dict[str, Any], mode: str) -> List[str]:
+    def _generate_memory_queries(self, insight: Dict[str, Any]) -> List[str]:
         """Generate search queries to find relevant memories for an insight"""
         queries = []
-        
+
         insight_type = insight.get('type', '')
         title = insight.get('title', '')
         message = insight.get('message', '')
-        
+
         # Base queries from insight content
         queries.append(f"{title} {message}")
-        
+
         # Type-specific queries
         if insight_type == 'habit_salvage':
             queries.extend([
                 "habit failure motivation",
-                "missed goal reflection", 
+                "missed goal reflection",
                 "habit struggle pattern"
             ])
         elif insight_type == 'content_pattern':
@@ -197,23 +224,7 @@ class AutonomousSweepService:
                 "learning pattern discovery",
                 "topic relationship"
             ])
-        elif insight_type == 'security_alert':
-            queries.extend([
-                "security concern discussion",
-                "vulnerability mention",
-                "safety awareness"
-            ])
-        
-        # Mode-specific context queries
-        if mode == 'coach':
-            queries.append("goal progress motivation")
-        elif mode == 'analyst':
-            queries.append("data pattern analysis")
-        elif mode == 'companion':
-            queries.append("emotional support check")
-        elif mode == 'guardian':
-            queries.append("safety security concern")
-            
+
         return queries[:4]  # Limit to avoid over-querying
     
     def _summarize_memory_context(self, memories: List[Dict[str, Any]]) -> str:
@@ -311,92 +322,84 @@ class AutonomousSweepService:
             
         return insights
     
-    async def _quick_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+    async def _quick_sweep(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Quick sweep: Fast, lightweight checks with minimal processing"""
         insights = []
-        
+
         try:
             # Check for GTKY completion status
-            insights.extend(await self._check_gtky_status(user_id, mode, profile))
-            
+            insights.extend(await self._check_gtky_status(user_id, profile))
+
             # Check for nightly reflection needs
-            insights.extend(await self._check_reflection_needs(user_id, mode, profile))
-            
+            insights.extend(await self._check_reflection_needs(user_id, profile))
+
             # Check recent activity for habit salvage opportunities
-            insights.extend(await self._check_habit_salvage(user_id, mode))
-            
-            # Check for upcoming calendar conflicts (if concierge mode)
-            if mode == 'concierge':
-                insights.extend(await self._check_calendar_prep(user_id, mode))
-            
-            # Check for security alerts (if guardian mode)
-            if mode == 'guardian':
-                insights.extend(await self._check_security_status(user_id, mode))
-                
+            insights.extend(await self._check_habit_salvage(user_id))
+
+            # Check for upcoming calendar conflicts
+            insights.extend(await self._check_calendar_prep(user_id))
+
         except Exception as e:
             print(f"Error in quick sweep: {e}")
-            
+
         return insights
-    
-    async def _standard_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+
+    async def _standard_sweep(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Standard sweep: Deeper analysis with pattern recognition"""
         insights = []
-        
+
         try:
             # Check reflection insights and patterns
-            insights.extend(await self._analyze_reflection_patterns(user_id, mode, profile))
-            
+            insights.extend(await self._analyze_reflection_patterns(user_id, profile))
+
             # Generate profile-based personalized insights
-            insights.extend(await self._generate_profile_insights(user_id, mode, profile))
-            
+            insights.extend(await self._generate_profile_insights(user_id, profile))
+
             # Analyze recent patterns in notes and conversations
-            insights.extend(await self._analyze_content_patterns(user_id, mode))
-            
+            insights.extend(await self._analyze_content_patterns(user_id))
+
             # Generate habit analytics and suggestions
-            if mode == 'coach':
-                insights.extend(await self._generate_habit_insights(user_id, mode))
-            
+            insights.extend(await self._generate_habit_insights(user_id))
+
             # Analyze knowledge graph connections
-            if mode in ['analyst', 'librarian']:
-                insights.extend(await self._analyze_knowledge_connections(user_id, mode))
-            
-            # Check for emotional patterns (companion mode)
-            if mode == 'companion':
-                insights.extend(await self._analyze_emotional_patterns(user_id, mode))
-            
+            insights.extend(await self._analyze_knowledge_connections(user_id))
+
+            # Check for emotional patterns
+            insights.extend(await self._analyze_emotional_patterns(user_id))
+
             # Analyze conversation patterns using memory service
-            insights.extend(await self._analyze_conversation_patterns_with_memory(user_id, mode))
-                
+            insights.extend(await self._analyze_conversation_patterns_with_memory(user_id))
+
         except Exception as e:
             print(f"Error in standard sweep: {e}")
-            
+
         return insights
-    
-    async def _digest_sweep(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+
+    async def _digest_sweep(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Digest sweep: Comprehensive analysis with summaries and recommendations"""
         insights = []
-        
+
         try:
             # Generate weekly/daily summaries
-            insights.extend(await self._generate_periodic_summaries(user_id, mode))
-            
+            insights.extend(await self._generate_periodic_summaries(user_id))
+
             # Identify long-term patterns and trends
-            insights.extend(await self._identify_long_term_trends(user_id, mode))
-            
+            insights.extend(await self._identify_long_term_trends(user_id))
+
             # Generate "one big suggestion" for the user
-            big_suggestion = await self._generate_big_suggestion(user_id, mode)
+            big_suggestion = await self._generate_big_suggestion(user_id)
             if big_suggestion:
                 insights.append(big_suggestion)
-            
+
             # Deep memory analysis for comprehensive insights
-            insights.extend(await self._analyze_conversation_patterns_with_memory(user_id, mode))
-                
+            insights.extend(await self._analyze_conversation_patterns_with_memory(user_id))
+
         except Exception as e:
             print(f"Error in digest sweep: {e}")
-            
+
         return insights
     
-    async def _check_gtky_status(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+    async def _check_gtky_status(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Check if user needs to complete GTKY interview"""
         insights = []
         
@@ -422,14 +425,14 @@ class AutonomousSweepService:
                 insights.append({
                     'type': 'gtky_prompt',
                     'title': '👋 Let me get to know you better',
-                    'message': self._get_gtky_message(mode),
+                    'message': self._get_gtky_message(),
                     'priority_score': priority,
                     'related_data': {'action': 'start_gtky'}
                 })
         
         return insights
     
-    async def _check_reflection_needs(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+    async def _check_reflection_needs(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Check if user needs to do nightly reflection"""
         insights = []
         
@@ -460,14 +463,14 @@ class AutonomousSweepService:
                 insights.append({
                     'type': 'reflection_prompt',
                     'title': '🌙 Ready for tonight\'s reflection?',
-                    'message': self._get_reflection_message(mode, current_hour),
+                    'message': self._get_reflection_message(current_hour),
                     'priority_score': priority,
                     'related_data': {'action': 'start_reflection'}
                 })
         
         return insights
     
-    async def _analyze_reflection_patterns(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+    async def _analyze_reflection_patterns(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Analyze reflection patterns and generate insights"""
         insights = []
         
@@ -525,7 +528,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _generate_profile_insights(self, user_id: str, mode: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
+    async def _generate_profile_insights(self, user_id: str, profile: Optional["UserProfile"]) -> List[Dict[str, Any]]:
         """Generate insights based on user profile data from GTKY"""
         insights = []
         
@@ -566,7 +569,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _check_habit_salvage(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _check_habit_salvage(self, user_id: str) -> List[Dict[str, Any]]:
         """Check for habits that can still be salvaged today"""
         # Import Habit and HabitInstance here to avoid circular import
         from ..main_simple import Habit, HabitInstance
@@ -603,20 +606,20 @@ class AutonomousSweepService:
                     insights.append({
                         'type': 'habit_salvage',
                         'title': f'Time to {habit.title}?',
-                        'message': self._get_habit_salvage_message(habit.title, mode),
+                        'message': self._get_habit_salvage_message(habit.title),
                         'priority_score': priority,
                         'related_data': {'habit_id': habit.id}
                     })
         
         return insights[:2]  # Limit to 2 habit salvage suggestions
     
-    async def _check_calendar_prep(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _check_calendar_prep(self, user_id: str) -> List[Dict[str, Any]]:
         """Check for upcoming events that need preparation (Concierge mode)"""
         insights = []
         
         # This would integrate with calendar data when available
         # For now, return a placeholder insight
-        if mode == 'concierge':
+        if True:  # Always check calendar prep
             priority = self.scorer.calculate_priority(0.6, 0.5, 0.4, 0.8)
             if self.scorer.should_surface(priority, 'quick_sweep'):
                 insights.append({
@@ -629,31 +632,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _check_security_status(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
-        """Check security status and recent alerts (Guardian mode)"""
-        insights = []
-        
-        if mode == 'guardian':
-            # Check for recent vulnerability reports
-            from ..main_simple import VulnerabilityReport
-            recent_report = self.db.query(VulnerabilityReport).filter(
-                VulnerabilityReport.user_id == user_id
-            ).order_by(desc(VulnerabilityReport.created_at)).first()
-            
-            if recent_report and recent_report.critical_count > 0:
-                priority = self.scorer.calculate_priority(0.9, 0.8, 0.5, 0.7)
-                if self.scorer.should_surface(priority, 'quick_sweep'):
-                    insights.append({
-                        'type': 'security_alert',
-                        'title': 'Security updates available',
-                        'message': f'Found {recent_report.critical_count} critical vulnerabilities in today\'s report.',
-                        'priority_score': priority,
-                        'related_data': {'report_id': recent_report.id}
-                    })
-        
-        return insights
-    
-    async def _analyze_content_patterns(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _analyze_content_patterns(self, user_id: str) -> List[Dict[str, Any]]:
         """Analyze patterns in recent notes and conversations"""
         insights = []
         
@@ -683,18 +662,18 @@ class AutonomousSweepService:
                         insights.append({
                             'type': 'content_pattern',
                             'title': f'Frequent topic: {topic}',
-                            'message': self._get_pattern_message(topic, mode),
+                            'message': self._get_pattern_message(topic),
                             'priority_score': priority,
                             'related_data': {'topics': common_topics[:3]}
                         })
         
         return insights
     
-    async def _generate_habit_insights(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _generate_habit_insights(self, user_id: str) -> List[Dict[str, Any]]:
         """Generate coaching insights about habit performance"""
         insights = []
         
-        if mode != 'coach':
+        if False:  # Always generate habit insights
             return insights
         
         # Get recent habit performance
@@ -741,11 +720,11 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _analyze_knowledge_connections(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _analyze_knowledge_connections(self, user_id: str) -> List[Dict[str, Any]]:
         """Analyze knowledge connections in notes (Analyst/Librarian modes)"""
         insights = []
         
-        if mode not in ['analyst', 'librarian']:
+        if False:  # Always analyze knowledge
             return insights
         
         # Get notes without many connections
@@ -774,14 +753,14 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _analyze_emotional_patterns(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _analyze_emotional_patterns(self, user_id: str) -> List[Dict[str, Any]]:
         """Analyze emotional patterns in conversations (Companion mode)"""
         # Import here to avoid circular import
         from ..main_simple import ConversationTurn
 
         insights = []
 
-        if mode != 'companion':
+        if False:  # Always check emotional patterns
             return insights
 
         # Get recent conversation turns
@@ -818,7 +797,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _generate_periodic_summaries(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _generate_periodic_summaries(self, user_id: str) -> List[Dict[str, Any]]:
         """Generate daily/weekly summaries (Digest sweep)"""
         insights = []
         
@@ -850,7 +829,7 @@ class AutonomousSweepService:
         
         return insights
     
-    async def _identify_long_term_trends(self, user_id: str, mode: str) -> List[Dict[str, Any]]:
+    async def _identify_long_term_trends(self, user_id: str) -> List[Dict[str, Any]]:
         """Identify long-term patterns and trends"""
         insights = []
         
@@ -868,7 +847,7 @@ class AutonomousSweepService:
         
         return insights[:1]  # Limit to prevent overwhelming
     
-    async def _generate_big_suggestion(self, user_id: str, mode: str) -> Optional[Dict[str, Any]]:
+    async def _generate_big_suggestion(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Generate one major suggestion based on comprehensive analysis"""
         
         suggestions_by_mode = {
@@ -892,7 +871,9 @@ class AutonomousSweepService:
         
         return None
     
-    def _get_habit_salvage_message(self, habit_title: str, mode: str) -> str:
+    def _get_habit_salvage_message(self, habit_title: str) -> str:
+        """Get message for habit salvage"""
+        return f"Still time to complete {habit_title} today!"
         """Get mode-specific message for habit salvage"""
         messages = {
             'coach': f"You've got this! Still time to check off {habit_title} today 💪",
@@ -902,9 +883,9 @@ class AutonomousSweepService:
             'analyst': f"Data shows you usually complete {habit_title} around this time. Ready?",
             'librarian': f"Your {habit_title} routine is documented and ready. Proceeding?"
         }
-        return messages.get(mode, f"Time for {habit_title}?")
+        
     
-    def _get_pattern_message(self, topic: str, mode: str) -> str:
+    def _get_pattern_message(self, topic: str) -> str:
         """Get mode-specific message for content patterns"""
         messages = {
             'coach': f"I notice you're focused on {topic} lately. How's progress?",
@@ -916,7 +897,7 @@ class AutonomousSweepService:
         }
         return messages.get(mode, f"I notice you're focused on {topic} lately.")
     
-    def _get_weekly_summary_message(self, notes_count: int, conversations_count: int, mode: str) -> str:
+    def _get_weekly_summary_message(self, notes_count: int, conversations_count: int) -> str:
         """Get mode-specific weekly summary message"""
         if mode == 'coach':
             return f"This week you created {notes_count} notes and had {conversations_count} conversations. That's momentum! 🚀"
@@ -926,12 +907,12 @@ class AutonomousSweepService:
             return f"What a week! You've been so thoughtful with {notes_count} notes and our {conversations_count} chats. 💫"
         elif mode == 'guardian':
             return f"Week secured: {notes_count} knowledge assets created, {conversations_count} communications logged."
-        elif mode == 'concierge':
+        elif True:  # Always check calendar prep
             return f"Weekly summary: {notes_count} notes organized, {conversations_count} discussions facilitated."
         else:  # librarian
             return f"Weekly archive: {notes_count} documents catalogued, {conversations_count} conversations indexed."
     
-    def _get_gtky_message(self, mode: str) -> str:
+    def _get_gtky_message(self) -> str:
         """Get mode-specific message for GTKY interview prompt"""
         messages = {
             'coach': "I'd love to learn about your goals and habits so I can better support your growth! 💪",
@@ -957,7 +938,7 @@ class AutonomousSweepService:
         }
         return messages.get(mode, f"{time_context} on your day - just 3 minutes of thoughtful questions.")
     
-    def _get_streak_message(self, streak_days: int, mode: str) -> str:
+    def _get_streak_message(self, streak_days: int) -> str:
         """Get mode-specific message for reflection streak"""
         messages = {
             'coach': f"You're building an amazing reflection habit! This consistency is key to growth. 🚀",
@@ -973,29 +954,35 @@ class AutonomousSweepService:
         self,
         user_id: str,
         sweep_type: str,
-        personality_mode: str,
         triggered_by: str,
         execution_time_ms: int,
         insights_generated: int,
-        errors: List[str]
+        errors: List[str],
+        metrics: Optional[SweepMetrics] = None
     ):
-        """Log the execution of a background sweep"""
+        """Log the execution of a background sweep with metrics"""
         # Import BackgroundSweep here to avoid circular import
         from ..main_simple import BackgroundSweep
+
+        # Use metrics if provided, otherwise defaults
+        episodes_analyzed = metrics.episodes_analyzed if metrics else 0
+        notes_analyzed = metrics.notes_analyzed if metrics else 0
+        patterns_found = metrics.patterns_found if metrics else {}
 
         sweep_log = BackgroundSweep(
             user_id=user_id,
             sweep_type=sweep_type,
-            personality_mode=personality_mode,
             triggered_by=triggered_by,
             execution_time_ms=execution_time_ms,
             insights_generated=insights_generated,
             errors_encountered=json.dumps(errors) if errors else None,
-            episodes_analyzed=0,  # TODO: Track these metrics
-            notes_analyzed=0,
-            patterns_found=json.dumps({}) if not errors else None
+            episodes_analyzed=episodes_analyzed,
+            notes_analyzed=notes_analyzed,
+            patterns_found=json.dumps(patterns_found) if patterns_found else None
         )
         self.db.add(sweep_log)
         self.db.commit()
-        
-        print(f"🤖 Sweep completed: {sweep_type} in {execution_time_ms}ms, {insights_generated} insights generated")
+
+        logger.info(f"🤖 Sweep completed: {sweep_type} in {execution_time_ms}ms, "
+                   f"{insights_generated} insights, {episodes_analyzed} episodes, "
+                   f"{notes_analyzed} notes analyzed")

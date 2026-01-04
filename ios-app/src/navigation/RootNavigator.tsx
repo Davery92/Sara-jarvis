@@ -13,6 +13,7 @@ import NutritionGoalsFormScreen from '../screens/fitness/NutritionGoalsFormScree
 import RecipeFormScreen from '../screens/recipes/RecipeFormScreen';
 import { RootStackParamList } from '../types/navigation';
 import { colors } from '../styles/theme';
+import { navigationRef, onNavigatorReady } from '../services/navigation';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -33,7 +34,7 @@ export default function RootNavigator() {
   console.log('[RootNavigator] Rendering navigator, isAuthenticated:', isAuthenticated);
 
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef} onReady={onNavigatorReady}>
       <Stack.Navigator>
         {isAuthenticated ? (
           <>
