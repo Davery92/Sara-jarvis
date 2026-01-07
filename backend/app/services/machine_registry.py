@@ -77,11 +77,24 @@ class MachineRegistryService:
         db: Session,
         device_id: str,
         activity_level: str,
-        last_activity_at: Optional[datetime] = None
+        last_activity_at: Optional[datetime] = None,
+        keyboard_events: int = 0,
+        mouse_events: int = 0,
+        active_window: Optional[str] = None,
+        active_app: Optional[str] = None
     ) -> Optional[Machine]:
         """
         Update machine heartbeat and activity level.
         Called every 10 seconds by the agent.
+
+        Args:
+            device_id: Unique device identifier
+            activity_level: idle, low, medium, high
+            last_activity_at: Timestamp of last user activity
+            keyboard_events: Keyboard events in this heartbeat period
+            mouse_events: Mouse events in this heartbeat period
+            active_window: Current active window title
+            active_app: Current active application name
         """
         now = datetime.utcnow()
 
@@ -94,8 +107,25 @@ class MachineRegistryService:
         machine.last_heartbeat_at = now
         machine.activity_level = activity_level
         machine.is_online = True
+
         if last_activity_at:
             machine.last_activity_at = last_activity_at
+        elif keyboard_events > 0 or mouse_events > 0:
+            # If there was activity, update last_activity_at
+            machine.last_activity_at = now
+
+        # Update activity metrics
+        machine.keyboard_events_recent = keyboard_events
+        machine.mouse_events_recent = mouse_events
+        machine.keyboard_events_total = (machine.keyboard_events_total or 0) + keyboard_events
+        machine.mouse_events_total = (machine.mouse_events_total or 0) + mouse_events
+
+        # Update active window/app
+        if active_window is not None:
+            machine.active_window = active_window
+        if active_app is not None:
+            machine.active_app = active_app
+
         machine.updated_at = now
 
         db.commit()

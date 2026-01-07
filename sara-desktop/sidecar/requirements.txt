@@ -1,0 +1,24 @@
+# Sara Desktop Sidecar Dependencies
+
+# Wake word detection
+# Note: Using tensorflow-cpu as tflite-runtime doesn't support Python 3.12 on Linux
+tensorflow-cpu>=2.15.0
+openwakeword>=0.6.0
+pyaudio>=0.2.14
+
+# Activity monitoring
+pynput>=1.7.6
+
+# Screenshot capture
+mss>=9.0.0
+Pillow>=10.0.0
+
+# Backend communication
+websockets>=12.0
+httpx>=0.26.0
+
+# Utilities
+numpy>=1.24.0
+
+# For packaging
+pyinstaller>=6.0.0

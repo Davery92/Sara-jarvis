@@ -39,6 +39,7 @@ from app.services.intent_classifier import get_tool_intent_classifier
 from app.services.body_state_calibration import calibration_service
 from app.services.sara_journal_service import sara_journal
 from app.services.context_router import get_context_router
+from app.services.workout_session_service import workout_session_service
 from app.core import config
 from app.core.prompt_template import render_prompt_template
 from app.core.auth import (
@@ -6071,6 +6072,30 @@ try:
 except Exception as e:
     logger.error(f"❌ Pattern Correlation routes failed to load: {e}")
 
+# Include Vision API routes (screenshot analysis, vision models)
+try:
+    from app.routes.vision import router as vision_router
+    app.include_router(vision_router, tags=["Vision"])
+    logger.info("✅ Vision API routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Vision API routes failed to load: {e}")
+
+# Include Device Commands routes (cross-device command routing)
+try:
+    from app.routes.device_commands import router as device_commands_router
+    app.include_router(device_commands_router, tags=["Device Commands"])
+    logger.info("✅ Device Commands routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Device Commands routes failed to load: {e}")
+
+# Include User Settings routes
+try:
+    from app.routes.settings import router as settings_router
+    app.include_router(settings_router, tags=["Settings"])
+    logger.info("✅ User Settings routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ User Settings routes failed to load: {e}")
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -8087,6 +8112,16 @@ async def startup_event():
         await llm_failover_client.start()
         logger.info("🔄 LLM failover client started with health checks")
 
+        # Health check: Test embedding generation at startup
+        try:
+            test_embedding = await llm_failover_client.get_embedding("startup health check")
+            if test_embedding and len(test_embedding) > 0:
+                logger.info(f"✅ Embedding service healthy ({len(test_embedding)} dimensions)")
+            else:
+                logger.error("🚨 CRITICAL: Embedding service returned empty result - memory search will be degraded!")
+        except Exception as emb_err:
+            logger.error(f"🚨 CRITICAL: Embedding service failed at startup - memory search will be degraded! Error: {emb_err}")
+
         # Initialize token usage tracking
         from app.services.token_usage_service import init_token_tracking, queue_token_usage
         from app.core.llm import set_token_usage_callback
@@ -8820,7 +8855,16 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     except Exception as e:
         logger.warning(f"⚠️ Journal context retrieval failed (non-critical): {e}")
 
-    # Inject memory context, insights, cognitive context, body state, and journal into system message
+    # Retrieve active workout session context (real-time coaching)
+    workout_context = ""
+    try:
+        workout_context = await workout_session_service.get_workout_context(current_user.id, db)
+        if workout_context:
+            logger.info(f"🏋️ Retrieved active workout context: {len(workout_context)} chars")
+    except Exception as e:
+        logger.warning(f"⚠️ Workout context retrieval failed (non-critical): {e}")
+
+    # Inject memory context, insights, cognitive context, body state, journal, and workout into system message
     enhanced_content = system_message.content
     if memory_context:
         enhanced_content += memory_context
@@ -8837,8 +8881,11 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     if journal_context:
         enhanced_content += f"\n\n{journal_context}"
         logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
+    if workout_context:
+        enhanced_content += f"\n\n{workout_context}"
+        logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
 
-    if memory_context or insight_context or cognitive_context or body_state_context or journal_context:
+    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context:
         system_message = ChatMessage(role="system", content=enhanced_content)
 
     all_messages = [system_message] + request.messages
@@ -9119,6 +9166,19 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
             except Exception as e:
                 logger.warning(f"⚠️ Journal context injection failed (non-critical): {e}")
+
+            # ACTIVE WORKOUT SESSION: Inject workout coaching context
+            try:
+                workout_context = await workout_session_service.get_workout_context(current_user.id, db)
+                if workout_context:
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + f"\n\n{workout_context}"
+                    )
+                    logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
+            except Exception as e:
+                logger.warning(f"⚠️ Workout context injection failed (non-critical): {e}")
 
             # Check if user's message is calibration feedback for body state estimation
             try:
@@ -9500,7 +9560,7 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.21"}
+    return {"downloads": downloads, "version": "1.0.23"}
 
 
 @app.get("/api/downloads/{filename}")

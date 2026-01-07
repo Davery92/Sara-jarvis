@@ -743,6 +743,109 @@ export default function Settings() {
               </div>
             </div>
 
+            {/* Desktop Agent Settings */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Desktop Agent & Vision</h3>
+              <p className="text-gray-400 text-sm mb-4">
+                Configure the desktop agent's vision model for screenshot analysis and cross-device features.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label htmlFor="vision_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    Vision Model
+                  </label>
+                  <input
+                    type="text"
+                    id="vision_model"
+                    defaultValue="qwen3-vl:latest"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="qwen3-vl:latest"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Ollama vision model for screenshot analysis</p>
+                </div>
+
+                <div>
+                  <label htmlFor="vision_endpoint" className="block text-sm font-medium text-gray-300 mb-2">
+                    Vision Endpoint
+                  </label>
+                  <input
+                    type="url"
+                    id="vision_endpoint"
+                    defaultValue="http://10.185.1.8:11434"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="http://10.185.1.8:11434"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Ollama server for vision model</p>
+                </div>
+
+                <div>
+                  <label htmlFor="screenshot_interval" className="block text-sm font-medium text-gray-300 mb-2">
+                    Screenshot Interval (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    id="screenshot_interval"
+                    defaultValue={30}
+                    min={10}
+                    max={300}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">How often the desktop agent captures screenshots</p>
+                </div>
+
+                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Screenshot Capture</div>
+                    <div className="text-xs text-gray-400">Enable periodic screenshot capture</div>
+                  </div>
+                  <label className="inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      defaultChecked={true}
+                    />
+                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                      <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 peer-checked:translate-x-4"></span>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Wake Word Detection</div>
+                    <div className="text-xs text-gray-400">Listen for "Hey Sara" on desktop</div>
+                  </div>
+                  <label className="inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      defaultChecked={true}
+                    />
+                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                      <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 peer-checked:translate-x-4"></span>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">Cross-Device Commands</div>
+                    <div className="text-xs text-gray-400">Route commands to active device</div>
+                  </div>
+                  <label className="inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      defaultChecked={true}
+                    />
+                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                      <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 peer-checked:translate-x-4"></span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
             {/* Token Usage Statistics */}
             <div className="border-t border-gray-700 pt-6">
               <h3 className="text-lg font-medium text-white mb-4">Token Usage Statistics</h3>

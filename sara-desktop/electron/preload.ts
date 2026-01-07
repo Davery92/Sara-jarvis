@@ -55,4 +55,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onOpenSettings: (callback: () => void) => {
     ipcRenderer.on('open-settings', () => callback())
   },
+
+  // Open URL in default browser
+  openUrl: (url: string) => ipcRenderer.send('open-url', url),
+
+  // Sidecar management
+  getSidecarStatus: (): Promise<{ running: boolean }> =>
+    ipcRenderer.invoke('sidecar-status'),
+  restartSidecar: (): Promise<boolean> =>
+    ipcRenderer.invoke('restart-sidecar'),
 })

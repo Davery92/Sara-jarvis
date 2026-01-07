@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import { sidecarManager } from './sidecar'
 
 // Simple file-based settings store (zero dependencies)
 class SimpleStore {
@@ -584,13 +585,21 @@ ipcMain.on('update-timer', (_, timerData: { id: string; remainingSeconds: number
 })
 
 // App lifecycle
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Initialize settings store (must be after app is ready)
   store.init()
 
   createWindow()
   createTray()
   resetActivityTimer()
+
+  // Start the Python sidecar for wake word, activity, screenshots
+  try {
+    await sidecarManager.start()
+    console.log('[Main] Sidecar started')
+  } catch (error) {
+    console.error('[Main] Failed to start sidecar:', error)
+  }
 
   // Auto-start on login (can be toggled in settings)
   const autoStart = store.get('autoStart', true) as boolean
@@ -617,6 +626,25 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   isQuitting = true
+  // Stop the sidecar gracefully
+  await sidecarManager.stop()
+})
+
+// IPC handler for opening URLs in default browser
+ipcMain.on('open-url', (_, url: string) => {
+  shell.openExternal(url)
+})
+
+// IPC handler for sidecar status
+ipcMain.handle('sidecar-status', () => {
+  return {
+    running: sidecarManager.isRunning()
+  }
+})
+
+// IPC handler to restart sidecar
+ipcMain.handle('restart-sidecar', async () => {
+  return await sidecarManager.restart()
 })

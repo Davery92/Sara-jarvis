@@ -1,7 +1,7 @@
 {
   "name": "sara-desktop",
-  "version": "1.0.22",
-  "description": "Sara Desktop Companion - Floating voice assistant",
+  "version": "1.0.23",
+  "description": "Sara Desktop Companion - Floating voice assistant with wake word, activity tracking, and cross-device commands",
   "author": "Sara AI <sara@avery.cloud>",
   "type": "commonjs",
   "main": "dist-electron/main.js",
@@ -10,9 +10,11 @@
     "dev:vite": "vite",
     "dev:electron": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json && electron .",
     "build": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json && vite build",
-    "build:win": "npm run build && electron-builder --win",
-    "build:mac": "npm run build && electron-builder --mac",
-    "build:all": "npm run build && electron-builder --win --mac",
+    "build:sidecar": "bash scripts/build-sidecar.sh",
+    "build:sidecar:win": "powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1",
+    "build:win": "npm run build && npm run build:sidecar:win && electron-builder --win",
+    "build:mac": "npm run build && npm run build:sidecar && electron-builder --mac",
+    "build:all": "npm run build && npm run build:sidecar && electron-builder --win --mac",
     "preview": "vite preview"
   },
   "build": {
@@ -30,6 +32,10 @@
       {
         "from": "models",
         "to": "models"
+      },
+      {
+        "from": "release/sidecar",
+        "to": "sidecar"
       }
     ],
     "win": {
