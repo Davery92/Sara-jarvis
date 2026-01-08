@@ -102,7 +102,7 @@ class BackendClient:
                     params={
                         "device_id": self.config.device_id,
                         "hostname": self.config.hostname,
-                        "platform": self.config.platform,
+                        "platform": self.config.platform_name,
                         "os_version": self.config.os_version,
                         "agent_version": "1.0.0"
                     },
