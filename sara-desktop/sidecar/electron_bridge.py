@@ -85,7 +85,7 @@ class ElectronBridge:
             self._server.close()
             await self._server.wait_closed()
 
-    async def _handle_client(self, websocket, path):
+    async def _handle_client(self, websocket):
         """Handle a client connection."""
         self._clients.add(websocket)
         logger.info(f"Electron client connected (total: {len(self._clients)})")

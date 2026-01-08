@@ -103,14 +103,38 @@ class WakeWordDetector:
 
             self._pyaudio = pyaudio.PyAudio()
 
-            # Find input device
+            # Find best input device - prefer built-in mic over external/bluetooth
             device_index = None
+            fallback_device = None
+            preferred_keywords = ["built-in", "macbook", "internal", "default"]
+            avoid_keywords = ["iphone", "airpods", "bluetooth", "hdmi", "display"]
+
             for i in range(self._pyaudio.get_device_count()):
                 info = self._pyaudio.get_device_info_by_index(i)
                 if info["maxInputChannels"] > 0:
-                    device_index = i
-                    logger.info(f"Using audio device: {info['name']}")
-                    break
+                    name_lower = info["name"].lower()
+
+                    # Skip devices we want to avoid
+                    if any(avoid in name_lower for avoid in avoid_keywords):
+                        logger.debug(f"Skipping audio device: {info['name']}")
+                        continue
+
+                    # Prefer built-in/internal devices
+                    if any(pref in name_lower for pref in preferred_keywords):
+                        device_index = i
+                        logger.info(f"Using preferred audio device: {info['name']}")
+                        break
+
+                    # Keep first valid device as fallback
+                    if fallback_device is None:
+                        fallback_device = i
+
+            # Use fallback if no preferred device found
+            if device_index is None:
+                device_index = fallback_device
+                if device_index is not None:
+                    info = self._pyaudio.get_device_info_by_index(device_index)
+                    logger.info(f"Using fallback audio device: {info['name']}")
 
             if device_index is None:
                 logger.error("No audio input device found")
