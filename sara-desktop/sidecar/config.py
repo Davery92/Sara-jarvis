@@ -3,6 +3,7 @@ Configuration for Sara Desktop Sidecar
 """
 import os
 import platform
+import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,32 @@ def get_default_device_id() -> str:
     """Generate a unique device ID based on machine info."""
     machine_id = platform.node() or "unknown"
     return f"{platform.system().lower()}-{machine_id}-{uuid.getnode()}"
+
+
+def get_models_dir() -> Path:
+    """Get the models directory, handling PyInstaller bundles."""
+    # Check for PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        exe_dir = Path(sys.executable).parent
+
+        # Check various locations
+        candidates = [
+            exe_dir / "models",  # Same dir as executable
+            exe_dir.parent / "models",  # Parent dir (for app bundles)
+            exe_dir.parent / "Resources" / "models",  # macOS app bundle
+            Path.home() / ".sara" / "models",  # User's home directory
+        ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        # Default to home directory (will be created)
+        return Path.home() / ".sara" / "models"
+    else:
+        # Running as script
+        return Path(__file__).parent.parent / "models"
 
 
 class SidecarConfig:
@@ -54,7 +81,7 @@ class SidecarConfig:
         self.heartbeat_interval: int = 10  # seconds
 
         # Paths
-        self.models_dir: Path = Path(__file__).parent.parent / "models"
+        self.models_dir: Path = get_models_dir()
         self.settings_file: Path = Path.home() / ".sara" / "sidecar-settings.json"
 
     def get_wake_word_model_path(self) -> Path:
