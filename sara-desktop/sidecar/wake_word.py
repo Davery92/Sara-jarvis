@@ -105,7 +105,7 @@ class WakeWordDetector:
 
             # Find best input device - prefer AirPods/external, then built-in
             # Priority order matters - first match in priority list wins
-            priority_keywords = ["airpods", "bluetooth"]  # Highest priority
+            priority_keywords = ["airpod", "bluetooth"]  # Highest priority (matches airpod, airpods)
             acceptable_keywords = ["built-in", "macbook", "internal", "default"]
             avoid_keywords = ["iphone", "hdmi", "display"]
 
