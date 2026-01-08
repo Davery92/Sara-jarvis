@@ -67,7 +67,7 @@ class SidecarConfig:
 
         # Wake word
         self.wake_word_model: str = os.getenv("SARA_WAKE_WORD_MODEL", "hey_sara.onnx")
-        self.wake_word_threshold: float = 0.5
+        self.wake_word_threshold: float = float(os.getenv("SARA_WAKE_WORD_THRESHOLD", "0.7"))
 
         # Screenshot
         self.screenshot_interval: int = int(os.getenv("SARA_SCREENSHOT_INTERVAL", "30"))
@@ -101,6 +101,8 @@ class SidecarConfig:
                         self.backend_url = settings["backend_url"]
                     if "screenshot_interval" in settings:
                         self.screenshot_interval = settings["screenshot_interval"]
+                    if "wake_word_threshold" in settings:
+                        self.wake_word_threshold = float(settings["wake_word_threshold"])
             except Exception:
                 pass
 

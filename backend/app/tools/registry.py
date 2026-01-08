@@ -60,6 +60,11 @@ from app.tools.fitness.program_tools import (
 )
 from app.tools.fitness.workout_suggest import WorkoutSuggestTool
 from app.tools.fitness.summary import FitnessSummaryTool
+from app.tools.fitness.workout_mode import (
+    WorkoutModeLogTool,
+    WorkoutModeStartTool,
+    WorkoutModeCompleteTool
+)
 from app.tools.chess import (
     ChessStartGameTool,
     ChessMoveTool,
@@ -334,6 +339,11 @@ class ToolRegistry:
 
             # Fitness Summary (for regular Sara)
             FitnessSummaryTool(),
+
+            # Workout Mode Tools (real-time coaching during active workout)
+            WorkoutModeLogTool(),
+            WorkoutModeStartTool(),
+            WorkoutModeCompleteTool(),
 
             # Chess Tools
             ChessStartGameTool(),

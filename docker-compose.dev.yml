@@ -44,15 +44,16 @@ services:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
       - REDIS_URL=redis://redis:6379/0
-      # AI Provider: gemini
-      - AI_PROVIDER=${AI_PROVIDER-gemini}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-https://generativelanguage.googleapis.com/v1beta/openai}
-      - OPENAI_MODEL=gemini-3-flash-preview
-      - OPENAI_API_KEY=${GEMINI_API_KEY}
+      # AI Provider - defaults to local gpt-oss, can be overridden via settings
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
-      - FAST_MODEL_URL=https://generativelanguage.googleapis.com/v1beta/openai
-      - FAST_MODEL=gemini-3-flash-preview
-      - FAST_MODEL_API_KEY=${GEMINI_API_KEY}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://100.104.68.115:11434/v1}
+      - FAST_MODEL=${FAST_MODEL-gpt-oss:20b}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
@@ -82,6 +83,8 @@ services:
       - ./backend:/app
       # Mount shadow-agent for installer downloads
       - ./shadow-agent:/shadow-agent
+      # Mount data directory for audio files (morning briefs, etc.)
+      - ./data:/home/david/jarvis/data
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__

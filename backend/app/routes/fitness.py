@@ -28,6 +28,7 @@ from app.tools.fitness import (
 from app.prompts.fitness_system_prompt import get_fitness_system_prompt
 from app.main_simple import SimpleLLMClient
 from app.tools.registry import ToolRegistry
+from app.services.workout_session_service import workout_session_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -2930,37 +2931,67 @@ class TemplateUpdate(BaseModel):
     notes: Optional[str] = None
 
 @router.get("/templates")
-async def list_templates(phase_id: Optional[str] = None, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """List all templates (optionally filtered by phase)"""
+async def list_templates(
+    phase_id: Optional[str] = None,
+    active_only: bool = True,  # Default to showing only active phase templates
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List all templates (optionally filtered by phase, defaults to active phase)"""
     try:
+        import json
+        from datetime import datetime
+
+        # Get today's day name for sorting
+        today = datetime.now().strftime("%A").lower()
+
         sql = """
-            SELECT id, phase_id, name, scheduled_days, exercises, order_in_phase, notes, created_at, updated_at
-            FROM fitness_template
-            WHERE user_id = :user_id
+            SELECT t.id, t.phase_id, t.name, t.scheduled_days, t.exercises,
+                   t.order_in_phase, t.notes, t.created_at, t.updated_at
+            FROM fitness_template t
+            WHERE t.user_id = :user_id
         """
         params = {"user_id": user_id}
 
         if phase_id:
-            sql += " AND phase_id = :phase_id"
+            sql += " AND t.phase_id = :phase_id"
             params["phase_id"] = phase_id
+        elif active_only:
+            # Filter to only templates from active phase
+            sql += """ AND t.phase_id IN (
+                SELECT id FROM fitness_phase
+                WHERE user_id = :user_id AND status = 'active'
+            )"""
 
-        sql += " ORDER BY order_in_phase, created_at"
+        sql += " ORDER BY t.created_at DESC"
 
         templates = db.execute(text(sql), params).fetchall()
 
-        # Parse JSON fields
+        # Parse JSON fields and sort with today's workout first
         result = []
+        today_templates = []
+        other_templates = []
+
         for row in templates:
             template_dict = dict(row._mapping)
             if template_dict.get("scheduled_days"):
-                import json
                 template_dict["scheduled_days"] = json.loads(template_dict["scheduled_days"])
             if template_dict.get("exercises"):
-                import json
                 template_dict["exercises"] = json.loads(template_dict["exercises"])
-            result.append(template_dict)
 
-        return {"templates": result}
+            # Check if this is today's workout
+            scheduled = template_dict.get("scheduled_days", [])
+            if today in [d.lower() for d in scheduled]:
+                template_dict["is_today"] = True
+                today_templates.append(template_dict)
+            else:
+                template_dict["is_today"] = False
+                other_templates.append(template_dict)
+
+        # Today's workouts first, then others
+        result = today_templates + other_templates
+
+        return {"templates": result, "today": today}
     except Exception as e:
         logger.error(f"Failed to list templates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -4689,5 +4720,253 @@ async def get_exercise_history(
 
     except Exception as e:
         logger.error(f"Failed to get exercise history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# ACTIVE WORKOUT SESSION ENDPOINTS (Real-time Sara Coaching)
+# =============================================================================
+
+class StartWorkoutRequest(BaseModel):
+    """Request body for starting a workout session"""
+    template_id: str
+
+
+class LogSetRequest(BaseModel):
+    """Request body for logging a set during active workout"""
+    weight: Optional[float] = None
+    reps: Optional[int] = None
+    rpe: Optional[int] = None
+    rpe_feeling: Optional[str] = None  # "light", "moderate", "hard", "failed"
+    notes: Optional[str] = None
+
+
+class RestTimerRequest(BaseModel):
+    """Request body for rest timer actions"""
+    action: str  # "start" or "stop"
+    duration: Optional[int] = None  # seconds, only for "start"
+
+
+@router.post("/workout-session/start")
+async def start_active_workout(
+    request: StartWorkoutRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Start an active workout session for real-time Sara coaching.
+
+    - Ends any existing active session (marks as abandoned)
+    - Creates new session with workout snapshot including weight suggestions
+    - Returns session with full exercise plan
+    """
+    try:
+        result = await workout_session_service.start_workout(
+            user_id=user_id,
+            template_id=request.template_id,
+            db=db
+        )
+        return {"session": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workout-session/active")
+async def get_active_workout(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the user's current active workout session.
+
+    Returns null if no active session exists.
+    Used by iOS app to restore workout state on app launch.
+    """
+    try:
+        session = await workout_session_service.get_active_session(user_id, db)
+        return {"session": session}
+    except Exception as e:
+        logger.error(f"Failed to get active workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/log-set")
+async def log_workout_set(
+    request: LogSetRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Log a set during an active workout session.
+
+    - Automatically determines current exercise from session state
+    - Updates session progress (current_set_index, total_volume, etc.)
+    - Auto-advances to next exercise when all sets complete
+    - Returns coaching feedback and next set info
+
+    Supports flexible input:
+    - Explicit: weight=185, reps=8, rpe=8
+    - Feeling-based: rpe_feeling="light" (Sara suggests weight increase)
+    - Minimal: Just "done" - uses expected values from snapshot
+    """
+    try:
+        result = await workout_session_service.log_set(
+            user_id=user_id,
+            weight=request.weight,
+            reps=request.reps,
+            rpe=request.rpe,
+            rpe_feeling=request.rpe_feeling,
+            notes=request.notes,
+            db=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to log workout set: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/skip")
+async def skip_current_exercise(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Skip the current exercise and move to the next one.
+
+    Used when user wants to skip an exercise (equipment busy, injury, etc.)
+    """
+    try:
+        result = await workout_session_service.skip_exercise(user_id, db)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to skip exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/rest-timer")
+async def manage_rest_timer(
+    request: RestTimerRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Start or stop the rest timer for active workout.
+
+    Actions:
+    - "start": Start timer with specified duration (default 120s for compounds)
+    - "stop": Cancel the rest timer
+    """
+    try:
+        if request.action == "start":
+            result = await workout_session_service.start_rest_timer(
+                user_id=user_id,
+                duration_seconds=request.duration or 120,
+                db=db
+            )
+        elif request.action == "stop":
+            # Stop timer by setting null values
+            update_query = text("""
+                UPDATE active_workout_session
+                SET rest_timer_started_at = NULL, rest_timer_duration_seconds = NULL
+                WHERE user_id = :user_id AND status = 'active'
+            """)
+            db.execute(update_query, {"user_id": user_id})
+            db.commit()
+            result = {"message": "Rest timer stopped"}
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action. Use 'start' or 'stop'")
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to manage rest timer: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workout-session/rest-timer")
+async def get_rest_timer_status(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current rest timer status.
+
+    Returns remaining seconds and whether timer is active.
+    Used by iOS app for countdown display.
+    """
+    try:
+        result = await workout_session_service.get_rest_timer_status(user_id, db)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get rest timer status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/complete")
+async def complete_active_workout(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Complete the active workout session.
+
+    - Sets status to 'completed' and records completion time
+    - Returns workout summary (total volume, sets, duration, PRs)
+    """
+    try:
+        result = await workout_session_service.complete_workout(user_id, db)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to complete workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/abandon")
+async def abandon_active_workout(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Abandon the active workout session.
+
+    Used when user wants to quit workout early without completing.
+    Sets status to 'abandoned'.
+    """
+    try:
+        result = await workout_session_service.abandon_workout(user_id, db)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to abandon workout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workout-session/context")
+async def get_workout_context(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the workout context string for Sara's system prompt.
+
+    Returns formatted context about current workout state.
+    Used internally by chat_stream for context injection.
+    """
+    try:
+        context = await workout_session_service.get_workout_context(user_id, db)
+        return {"context": context}
+    except Exception as e:
+        logger.error(f"Failed to get workout context: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

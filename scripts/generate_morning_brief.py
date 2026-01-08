@@ -2,10 +2,11 @@
 """
 Morning Brief Generation Script
 
-Generates morning briefs for all active users at 5 AM.
+Generates morning briefs for all active users at 6 AM.
 Run via cron:
-    0 5 * * * DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub" python3 /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
+    0 6 * * * /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
 
+Push notification is sent automatically when brief is ready (via notification_service).
 """
 
 import asyncio
@@ -44,8 +45,7 @@ from app.services.morning_brief_service import morning_brief_service
 def get_active_users(session) -> list:
     """Get list of active user IDs."""
     result = session.execute(text("""
-        SELECT id FROM users
-        WHERE is_active = true OR is_active IS NULL
+        SELECT id FROM app_user
     """))
     return [str(row.id) for row in result.fetchall()]
 

@@ -105,8 +105,14 @@ class LLMClientWithFailover:
         self.base_url = self.primary_url
         self.headers = self._get_headers(self.primary_url)
 
-    def _get_headers(self, base_url: str) -> Dict[str, str]:
-        """Get appropriate headers based on provider"""
+    def _get_headers(self, base_url: str, skip_auth_if_empty: bool = False) -> Dict[str, str]:
+        """Get appropriate headers based on provider
+
+        Args:
+            base_url: The API endpoint URL
+            skip_auth_if_empty: If True, skip auth header when api_key is empty/None
+                               (useful for local Ollama endpoints that don't need auth)
+        """
         if is_anthropic_provider(base_url):
             return {
                 "x-api-key": self.api_key,
@@ -114,6 +120,9 @@ class LLMClientWithFailover:
                 "content-type": "application/json"
             }
         else:
+            # Skip auth header for local endpoints when api_key is empty
+            if skip_auth_if_empty and not self.api_key:
+                return {}
             return {"Authorization": f"Bearer {self.api_key}"}
 
     async def start(self):
@@ -497,9 +506,10 @@ class LLMClientWithFailover:
         if not emb_base.endswith("/v1"):
             emb_base = emb_base + "/v1"
 
+        # Local Ollama endpoints don't require auth - skip header if api_key is empty
         embedding_client = httpx.AsyncClient(
             base_url=emb_base,
-            headers=self._get_headers(emb_base),
+            headers=self._get_headers(emb_base, skip_auth_if_empty=True),
             timeout=60.0
         )
 

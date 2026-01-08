@@ -24,9 +24,13 @@ import ChatInput from '../../components/chat/ChatInput';
 import { colors, spacing } from '../../styles/theme';
 import { apiClient } from '../../services/api';
 
-type Props = MainTabScreenProps<'Chat'>;
+type Props = MainTabScreenProps<'Chat'> | { isEmbedded?: boolean };
 
-export default function ChatScreen({ navigation, route }: Props) {
+export default function ChatScreen(props: Props) {
+  // Handle both standalone and embedded modes
+  const isEmbedded = 'isEmbedded' in props && props.isEmbedded;
+  const navigation = 'navigation' in props ? props.navigation : undefined;
+  const route = 'route' in props ? props.route : undefined;
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -52,6 +56,7 @@ export default function ChatScreen({ navigation, route }: Props) {
 
   // Handle health alert from push notification
   useEffect(() => {
+    if (!route || !navigation) return;
     const healthAlert = route.params?.healthAlert;
     if (!healthAlert) return;
 
@@ -65,10 +70,11 @@ export default function ChatScreen({ navigation, route }: Props) {
 
     // Clear the params
     navigation.setParams({ healthAlert: undefined });
-  }, [route.params?.healthAlert, navigation]);
+  }, [route?.params?.healthAlert, navigation]);
 
   // Handle nudge from push notification (meal reminders, morning check-ins, etc.)
   useEffect(() => {
+    if (!route || !navigation) return;
     const nudge = route.params?.nudge;
     if (!nudge) return;
 
@@ -82,10 +88,11 @@ export default function ChatScreen({ navigation, route }: Props) {
 
     // Clear the params
     navigation.setParams({ nudge: undefined });
-  }, [route.params?.nudge, navigation]);
+  }, [route?.params?.nudge, navigation]);
 
   // Handle quick reply from notification action button
   useEffect(() => {
+    if (!route || !navigation) return;
     const quickReply = route.params?.quickReply;
     if (!quickReply) return;
 
@@ -99,7 +106,7 @@ export default function ChatScreen({ navigation, route }: Props) {
 
     // Clear the params
     navigation.setParams({ quickReply: undefined });
-  }, [route.params?.quickReply, navigation]);
+  }, [route?.params?.quickReply, navigation]);
 
   // Load conversation history on mount
   useEffect(() => {

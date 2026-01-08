@@ -11,6 +11,7 @@ import ReminderFormScreen from '../screens/calendar/ReminderFormScreen';
 import NoteEditorScreen from '../screens/notes/NoteEditorScreen';
 import NutritionGoalsFormScreen from '../screens/fitness/NutritionGoalsFormScreen';
 import RecipeFormScreen from '../screens/recipes/RecipeFormScreen';
+import WorkoutModeScreen from '../screens/fitness/WorkoutModeScreen';
 import { RootStackParamList } from '../types/navigation';
 import { colors } from '../styles/theme';
 import { navigationRef, onNavigatorReady } from '../services/navigation';
@@ -85,6 +86,15 @@ export default function RootNavigator() {
               options={{
                 presentation: 'modal',
                 headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="WorkoutMode"
+              component={WorkoutModeScreen}
+              options={{
+                presentation: 'fullScreenModal',
+                headerShown: false,
+                gestureEnabled: false,  // Prevent accidental swipe-to-close
               }}
             />
           </>

@@ -8,6 +8,7 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MainTabScreenProps } from '../../types/navigation';
@@ -28,13 +29,16 @@ import RecoveryCard from '../../components/fitness/RecoveryCard';
 import WorkoutLogModal from '../../components/fitness/WorkoutLogModal';
 import WorkoutEditModal from '../../components/fitness/WorkoutEditModal';
 import FoodLogModal from '../../components/fitness/FoodLogModal';
+import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { Ionicons } from '@expo/vector-icons';
 
 type Props = MainTabScreenProps<'Fitness'>;
 
 type ViewMode = 'dashboard' | 'nutrition' | 'workout' | 'recovery' | 'habits' | 'programs';
 
 export default function FitnessScreen({ navigation }: Props) {
+  const { isActive: hasActiveWorkout, startWorkout } = useWorkoutMode();
   const [viewMode, setViewMode] = useState<ViewMode>('dashboard');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,6 +47,7 @@ export default function FitnessScreen({ navigation }: Props) {
   const [selectedWorkout, setSelectedWorkout] = useState<WorkoutSession | null>(null);
   const [showFoodModal, setShowFoodModal] = useState(false);
   const [selectedMealType, setSelectedMealType] = useState('snack');
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -438,6 +443,19 @@ export default function FitnessScreen({ navigation }: Props) {
     </ScrollView>
   );
 
+  const handleStartWorkout = async (templateId: string) => {
+    setShowTemplatePicker(false);
+    const session = await startWorkout(templateId);
+    if (session) {
+      // Small delay to allow context state to propagate before navigation
+      setTimeout(() => {
+        navigation.navigate('WorkoutMode' as any);
+      }, 50);
+    } else {
+      Alert.alert('Error', 'Failed to start workout. Please try again.');
+    }
+  };
+
   const renderWorkoutView = () => (
     <ScrollView
       style={styles.content}
@@ -447,9 +465,30 @@ export default function FitnessScreen({ navigation }: Props) {
         <TouchableOpacity onPress={() => setViewMode('dashboard')}>
           <Text style={styles.backButton}>← Back</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.addButton} onPress={handleLogWorkout}>
-          <Text style={styles.addButtonText}>+ Log Workout</Text>
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          <TouchableOpacity
+            style={[styles.startWorkoutButton, hasActiveWorkout && styles.resumeWorkoutButton]}
+            onPress={() => {
+              if (hasActiveWorkout) {
+                navigation.navigate('WorkoutMode' as any);
+              } else {
+                setShowTemplatePicker(true);
+              }
+            }}
+          >
+            <Ionicons
+              name={hasActiveWorkout ? 'play' : 'barbell'}
+              size={16}
+              color="#fff"
+            />
+            <Text style={styles.startWorkoutButtonText}>
+              {hasActiveWorkout ? 'Resume' : 'Start Workout'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addButton} onPress={handleLogWorkout}>
+            <Text style={styles.addButtonText}>+ Log</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <Text style={styles.sectionTitle}>Workout Logs ({workoutLogs.length})</Text>
@@ -939,6 +978,58 @@ export default function FitnessScreen({ navigation }: Props) {
         initialMealType={selectedMealType}
       />
 
+      {/* Template Picker Modal */}
+      <Modal
+        visible={showTemplatePicker}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowTemplatePicker(false)}
+      >
+        <View style={styles.templatePickerOverlay}>
+          <View style={styles.templatePicker}>
+            <Text style={styles.templatePickerTitle}>Select Workout</Text>
+            <ScrollView style={styles.templateList}>
+              {templates.map((template: any) => (
+                <TouchableOpacity
+                  key={template.id}
+                  style={[
+                    styles.templateItem,
+                    template.is_today && styles.templateItemToday
+                  ]}
+                  onPress={() => handleStartWorkout(template.id)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Text style={styles.templateName}>{template.name}</Text>
+                      {template.is_today && (
+                        <View style={styles.todayBadge}>
+                          <Text style={styles.todayBadgeText}>TODAY</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.templateExercises}>
+                      {template.exercises?.length || 0} exercises
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color={template.is_today ? '#22c55e' : '#666'} />
+                </TouchableOpacity>
+              ))}
+              {templates.length === 0 && (
+                <Text style={styles.emptyText}>
+                  No workout templates yet. Create one in Programs!
+                </Text>
+              )}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.templatePickerCancel}
+              onPress={() => setShowTemplatePicker(false)}
+            >
+              <Text style={styles.templatePickerCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* Navigation Tabs */}
       <View style={styles.tabs}>
         <TouchableOpacity
@@ -1050,6 +1141,95 @@ const styles = StyleSheet.create({
   addButtonText: {
     color: colors.text,
     fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  startWorkoutButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#22c55e',
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    gap: 6,
+  },
+  resumeWorkoutButton: {
+    backgroundColor: '#3b82f6',
+  },
+  startWorkoutButtonText: {
+    color: '#fff',
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  templatePickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  templatePicker: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    width: '85%',
+    maxHeight: '70%',
+  },
+  templatePickerTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  templateList: {
+    maxHeight: 400,
+  },
+  templateItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    padding: spacing.md,
+    borderRadius: borderRadius.md,
+    marginBottom: spacing.sm,
+  },
+  templateItemToday: {
+    backgroundColor: '#1a2e1a',
+    borderWidth: 1,
+    borderColor: '#22c55e',
+  },
+  todayBadge: {
+    backgroundColor: '#22c55e',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  todayBadgeText: {
+    color: '#000',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  templateName: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  templateExercises: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 2,
+  },
+  templatePickerCancel: {
+    marginTop: spacing.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  templatePickerCancelText: {
+    color: colors.primary,
+    fontSize: fontSizes.md,
     fontWeight: '600',
   },
   editButton: {

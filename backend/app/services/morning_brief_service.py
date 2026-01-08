@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class FitnessRecoveryBrief:
+    """Complete fitness and recovery data for morning brief."""
+    recovery_text: str
+    nutrition_text: str
+    workout_recap_text: str
+    today_plan_text: str
+    insights_text: str
+    recovery_tts: str
+    nutrition_tts: str
+    workout_recap_tts: str
+    today_plan_tts: str
+    insights_tts: str
+    readiness_score: int
+    has_data: bool = True
+
+
+@dataclass
 class DreamInsightBrief:
     """Dream insight for morning brief."""
     id: str
@@ -432,7 +449,8 @@ Synthesized summary:"""
         weather_summary: str,
         calendar_summary: str,
         insights_summary: str = "",
-        health_digest: str = ""
+        health_digest: str = "",
+        fitness_brief: Optional[FitnessRecoveryBrief] = None
     ) -> str:
         """Compose the full morning brief text."""
         today_date = date.today().strftime("%B %d, %Y")
@@ -446,8 +464,55 @@ Synthesized summary:"""
             "",
         ]
 
-        # Add health digest if we have data
-        if health_digest:
+        # FITNESS SECTIONS FIRST (per user preference)
+        if fitness_brief and fitness_brief.has_data:
+            # 1. Recovery Status (FIRST)
+            if fitness_brief.recovery_text:
+                sections.extend([
+                    fitness_brief.recovery_text,
+                    "",
+                    "---",
+                    "",
+                ])
+
+            # 2. Yesterday's Nutrition
+            if fitness_brief.nutrition_text:
+                sections.extend([
+                    fitness_brief.nutrition_text,
+                    "",
+                    "---",
+                    "",
+                ])
+
+            # 3. Yesterday's Workout
+            if fitness_brief.workout_recap_text:
+                sections.extend([
+                    fitness_brief.workout_recap_text,
+                    "",
+                    "---",
+                    "",
+                ])
+
+            # 4. Today's Plan
+            if fitness_brief.today_plan_text:
+                sections.extend([
+                    fitness_brief.today_plan_text,
+                    "",
+                    "---",
+                    "",
+                ])
+
+            # 5. Smart Insights (data-driven analysis)
+            if fitness_brief.insights_text:
+                sections.extend([
+                    fitness_brief.insights_text,
+                    "",
+                    "---",
+                    "",
+                ])
+
+        # Add health digest if we have data (may overlap with fitness - can be removed if redundant)
+        if health_digest and not (fitness_brief and fitness_brief.recovery_text):
             sections.extend([
                 health_digest,
                 "",
@@ -484,7 +549,8 @@ Synthesized summary:"""
         weekday: str,
         news_summary: str,
         weather_tts: str,
-        calendar_events: List[Dict]
+        calendar_events: List[Dict],
+        fitness_brief: Optional[FitnessRecoveryBrief] = None
     ) -> str:
         """Compose text optimized for TTS (more conversational)."""
         parts = [
@@ -493,6 +559,33 @@ Synthesized summary:"""
             weather_tts,
             "",
         ]
+
+        # FITNESS SECTIONS (full TTS as requested by user)
+        if fitness_brief and fitness_brief.has_data:
+            # 1. Recovery Status
+            if fitness_brief.recovery_tts:
+                parts.append(fitness_brief.recovery_tts)
+                parts.append("")
+
+            # 2. Yesterday's Nutrition
+            if fitness_brief.nutrition_tts:
+                parts.append(fitness_brief.nutrition_tts)
+                parts.append("")
+
+            # 3. Yesterday's Workout
+            if fitness_brief.workout_recap_tts:
+                parts.append(fitness_brief.workout_recap_tts)
+                parts.append("")
+
+            # 4. Today's Plan
+            if fitness_brief.today_plan_tts:
+                parts.append(fitness_brief.today_plan_tts)
+                parts.append("")
+
+            # 5. Smart Insights
+            if fitness_brief.insights_tts:
+                parts.append(fitness_brief.insights_tts)
+                parts.append("")
 
         # Calendar
         if calendar_events:
@@ -553,19 +646,68 @@ Synthesized summary:"""
             logger.error(f"Error generating TTS audio: {e}")
             return None
 
-    async def send_notification(self, user_id: str, weekday: str) -> bool:
-        """Send NTFY notification that brief is ready."""
+    async def send_notification(self, user_id: str, weekday: str, db: Session = None) -> bool:
+        """Send iOS push notification that brief is ready."""
         try:
-            return await notification_service.send_notification(
-                user_id=user_id,
-                title="Morning Brief Ready",
-                message=f"Your {weekday} briefing is ready with tech news, weather, and your schedule.",
-                priority=NotificationPriority.NORMAL,
-                tags=["sunrise", "brief"],
-                topic="sara"  # Main topic
-            )
+            import httpx
+            from sqlalchemy import text
+            from sqlalchemy.orm import Session
+            from app.core.database import SessionLocal
+
+            # Get database session if not provided
+            close_db = False
+            if db is None:
+                db = SessionLocal()
+                close_db = True
+
+            try:
+                # Get user's push tokens
+                result = db.execute(text("""
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = :user_id
+                """), {"user_id": user_id})
+                tokens = [row[0] for row in result.fetchall()]
+
+                if not tokens:
+                    logger.warning(f"No push tokens found for user {user_id}")
+                    return False
+
+                # Build Expo push messages
+                messages = []
+                for token in tokens:
+                    messages.append({
+                        "to": token,
+                        "sound": "default",
+                        "title": "Morning Brief Ready",
+                        "body": f"Your {weekday} briefing is ready with tech news, weather, and your schedule.",
+                        "data": {"screen": "MorningBrief"},
+                        "priority": "high",
+                    })
+
+                # Send to Expo push notification service
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://exp.host/--/api/v2/push/send",
+                        json=messages,
+                        headers={
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
+                        return True
+                    else:
+                        logger.error(f"Push notification failed: {response.text}")
+                        return False
+
+            finally:
+                if close_db:
+                    db.close()
+
         except Exception as e:
-            logger.error(f"Error sending notification: {e}")
+            logger.error(f"Error sending iOS push notification: {e}")
             return False
 
     async def generate_brief(self, user_id: str, db: Session) -> MorningBrief:
@@ -594,6 +736,11 @@ Synthesized summary:"""
         if health_data:
             logger.info(f"Including health digest with {len(health_data.get('metrics', {}))} metrics in morning brief")
 
+        # Build comprehensive fitness and recovery brief
+        fitness_brief = await self.build_fitness_recovery_brief(user_id, db)
+        if fitness_brief.has_data:
+            logger.info(f"Including fitness brief with readiness score {fitness_brief.readiness_score}/100")
+
         # Get weather TTS format if available
         weather_tts = ""
         if weather_data:
@@ -606,14 +753,17 @@ Synthesized summary:"""
             except:
                 weather_tts = weather_summary
 
-        # Compose full brief with insights and health digest
+        # Compose full brief with insights, health digest, and fitness sections
         full_text = self._compose_full_brief(
             weekday, news_summary, weather_summary, calendar_summary,
-            insights_summary, health_digest
+            insights_summary, health_digest, fitness_brief
         )
 
-        # Compose TTS text
-        tts_text = self._compose_tts_text(weekday, news_summary, weather_tts or weather_summary, calendar_events)
+        # Compose TTS text with fitness sections
+        tts_text = self._compose_tts_text(
+            weekday, news_summary, weather_tts or weather_summary,
+            calendar_events, fitness_brief
+        )
 
         # Generate TTS audio
         audio_dir = BRIEFINGS_BASE_PATH / user_id / brief_date
@@ -639,8 +789,8 @@ Synthesized summary:"""
         # Save to database
         await self._save_brief_to_db(brief, db)
 
-        # Send notification
-        await self.send_notification(user_id, weekday)
+        # Send iOS push notification
+        await self.send_notification(user_id, weekday, db)
 
         logger.info(f"Morning brief generated successfully for {user_id}")
         return brief
@@ -736,6 +886,934 @@ Synthesized summary:"""
         except Exception as e:
             logger.error(f"Error getting today's brief: {e}")
             return None
+
+    async def build_fitness_recovery_brief(self, user_id: str, db: Session) -> FitnessRecoveryBrief:
+        """
+        Build comprehensive fitness and recovery brief for morning briefing.
+        Includes: recovery status, yesterday's nutrition, yesterday's workout, today's plan, smart insights.
+        """
+        try:
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+            today_str = today.strftime("%Y-%m-%d")
+            yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+            # Build all sections
+            recovery_result = await self._build_recovery_status_section(user_id, db, today_str)
+            nutrition_result = await self._build_nutrition_recap_section(user_id, db, yesterday_str)
+            workout_result = await self._build_workout_recap_section(user_id, db, yesterday_str)
+            today_plan_result = await self._build_today_plan_section(user_id, db, today_str)
+            insights_result = await self._build_smart_insights_section(user_id, db, yesterday_str)
+
+            return FitnessRecoveryBrief(
+                recovery_text=recovery_result["text"],
+                nutrition_text=nutrition_result["text"],
+                workout_recap_text=workout_result["text"],
+                today_plan_text=today_plan_result["text"],
+                insights_text=insights_result["text"],
+                recovery_tts=recovery_result["tts"],
+                nutrition_tts=nutrition_result["tts"],
+                workout_recap_tts=workout_result["tts"],
+                today_plan_tts=today_plan_result["tts"],
+                insights_tts=insights_result["tts"],
+                readiness_score=recovery_result.get("readiness_score", 100),
+                has_data=True
+            )
+
+        except Exception as e:
+            logger.error(f"Error building fitness recovery brief: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return FitnessRecoveryBrief(
+                recovery_text="",
+                nutrition_text="",
+                workout_recap_text="",
+                today_plan_text="",
+                insights_text="",
+                recovery_tts="",
+                nutrition_tts="",
+                workout_recap_tts="",
+                today_plan_tts="",
+                insights_tts="",
+                readiness_score=100,
+                has_data=False
+            )
+
+    async def _build_recovery_status_section(self, user_id: str, db: Session, today_str: str) -> Dict:
+        """Build recovery status section with readiness score."""
+        try:
+            # Get today's recovery data
+            recovery = db.execute(text("""
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = :user_id AND log_date = :today
+            """), {"user_id": user_id, "today": today_str}).fetchone()
+
+            # Get 7-day averages for comparison
+            seven_days_ago = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+            averages = db.execute(text("""
+                SELECT
+                    AVG(sleep_hours) as avg_sleep,
+                    AVG(hrv) as avg_hrv,
+                    AVG(heart_rate) as avg_hr,
+                    AVG(soreness_level) as avg_soreness,
+                    AVG(body_weight) as avg_weight
+                FROM daily_recovery_log
+                WHERE user_id = :user_id AND log_date >= :seven_days_ago
+            """), {"user_id": user_id, "seven_days_ago": seven_days_ago}).fetchone()
+
+            if not recovery:
+                return {
+                    "text": "",
+                    "tts": "No recovery data logged for today. Consider logging your sleep and soreness when you wake up.",
+                    "readiness_score": 100
+                }
+
+            # Calculate readiness score (0-100)
+            readiness_score = 100
+            factors = []
+
+            # Sleep factor (30% weight) - target 7-8 hrs
+            if recovery.sleep_hours:
+                if recovery.sleep_hours < 6:
+                    readiness_score -= 30
+                    factors.append(f"only {recovery.sleep_hours:.1f} hours of sleep")
+                elif recovery.sleep_hours < 7:
+                    readiness_score -= 15
+                    factors.append(f"{recovery.sleep_hours:.1f} hours of sleep")
+                elif recovery.sleep_hours > 9:
+                    readiness_score -= 5  # Oversleep can indicate issues
+
+            # HRV factor (25% weight) - compare to baseline
+            if recovery.hrv and averages and averages.avg_hrv:
+                hrv_diff = recovery.hrv - averages.avg_hrv
+                if hrv_diff < -15:  # Significantly below baseline
+                    readiness_score -= 25
+                    factors.append(f"HRV {abs(hrv_diff):.0f}ms below baseline")
+                elif hrv_diff < -8:
+                    readiness_score -= 12
+                    factors.append(f"HRV slightly below baseline")
+
+            # Resting HR factor (20% weight) - elevated HR = poor recovery
+            if recovery.heart_rate and averages and averages.avg_hr:
+                hr_diff = recovery.heart_rate - averages.avg_hr
+                if hr_diff > 10:  # Elevated
+                    readiness_score -= 20
+                    factors.append(f"elevated resting HR ({recovery.heart_rate} bpm)")
+                elif hr_diff > 5:
+                    readiness_score -= 10
+
+            # Soreness factor (15% weight)
+            if recovery.soreness_level:
+                if recovery.soreness_level >= 8:
+                    readiness_score -= 15
+                    factors.append(f"high soreness ({recovery.soreness_level}/10)")
+                elif recovery.soreness_level >= 6:
+                    readiness_score -= 10
+                    factors.append(f"moderate soreness ({recovery.soreness_level}/10)")
+                elif recovery.soreness_level >= 4:
+                    readiness_score -= 5
+
+            # Cap score
+            readiness_score = max(0, min(100, readiness_score))
+
+            # Determine status message
+            if readiness_score >= 85:
+                status_msg = "Well recovered - good to push it today"
+            elif readiness_score >= 70:
+                status_msg = "Moderate recovery - train but listen to your body"
+            elif readiness_score >= 50:
+                status_msg = "Low recovery - consider lighter weights"
+            else:
+                status_msg = "Poor recovery - rest day recommended"
+
+            # Build markdown text
+            lines = ["## Recovery Status"]
+
+            # Metrics table
+            sleep_trend = ""
+            if averages and averages.avg_sleep and recovery.sleep_hours:
+                diff = recovery.sleep_hours - averages.avg_sleep
+                sleep_trend = " ↑" if diff > 0.3 else " ↓" if diff < -0.3 else ""
+
+            lines.append(f"- **Sleep**: {recovery.sleep_hours:.1f} hrs{sleep_trend}" +
+                        (f" (7-day avg: {averages.avg_sleep:.1f})" if averages and averages.avg_sleep else ""))
+
+            if recovery.hrv:
+                hrv_trend = ""
+                if averages and averages.avg_hrv:
+                    diff = recovery.hrv - averages.avg_hrv
+                    hrv_trend = " ↑" if diff > 5 else " ↓" if diff < -5 else ""
+                lines.append(f"- **HRV**: {recovery.hrv:.0f} ms{hrv_trend}" +
+                            (f" (avg: {averages.avg_hrv:.0f})" if averages and averages.avg_hrv else ""))
+
+            if recovery.heart_rate:
+                hr_trend = ""
+                if averages and averages.avg_hr:
+                    diff = recovery.heart_rate - averages.avg_hr
+                    hr_trend = " ↑" if diff > 3 else " ↓" if diff < -3 else ""
+                lines.append(f"- **Resting HR**: {recovery.heart_rate:.0f} bpm{hr_trend}" +
+                            (f" (avg: {averages.avg_hr:.0f})" if averages and averages.avg_hr else ""))
+
+            lines.append(f"- **Soreness**: {recovery.soreness_level}/10" if recovery.soreness_level else "- **Soreness**: Not logged")
+
+            if recovery.body_weight:
+                weight_unit = recovery.weight_unit or "lbs"
+                weight_trend = ""
+                if averages and averages.avg_weight:
+                    diff = recovery.body_weight - averages.avg_weight
+                    weight_trend = " ↑" if diff > 1 else " ↓" if diff < -1 else ""
+                lines.append(f"- **Body Weight**: {recovery.body_weight:.1f} {weight_unit}{weight_trend}")
+
+            lines.append(f"\n**Readiness Score: {readiness_score}/100** - {status_msg}")
+
+            # Build TTS
+            tts_parts = ["Let's start with your recovery status."]
+
+            if recovery.sleep_hours:
+                hrs = int(recovery.sleep_hours)
+                mins = int((recovery.sleep_hours - hrs) * 60)
+                if mins > 0:
+                    tts_parts.append(f"You got {hrs} hours and {mins} minutes of sleep last night")
+                else:
+                    tts_parts.append(f"You got {hrs} hours of sleep last night")
+                if recovery.sleep_hours >= 7 and recovery.sleep_hours <= 8:
+                    tts_parts[-1] += ", right in your target range."
+                elif recovery.sleep_hours < 7:
+                    tts_parts[-1] += ", which is a bit low."
+                else:
+                    tts_parts[-1] += "."
+
+            if recovery.hrv:
+                tts_parts.append(f"Your HRV is {int(recovery.hrv)} milliseconds")
+                if averages and averages.avg_hrv:
+                    diff = recovery.hrv - averages.avg_hrv
+                    if diff > 5:
+                        tts_parts[-1] += f", which is {int(abs(diff))} points above your baseline. That's a good sign."
+                    elif diff < -5:
+                        tts_parts[-1] += f", which is {int(abs(diff))} points below your baseline."
+                    else:
+                        tts_parts[-1] += ", right around your baseline."
+                else:
+                    tts_parts[-1] += "."
+
+            if recovery.heart_rate:
+                tts_parts.append(f"Resting heart rate is {int(recovery.heart_rate)} beats per minute.")
+
+            if recovery.soreness_level:
+                if recovery.soreness_level <= 3:
+                    tts_parts.append(f"Soreness is low at {recovery.soreness_level} out of 10.")
+                elif recovery.soreness_level <= 6:
+                    tts_parts.append(f"Soreness is moderate at {recovery.soreness_level} out of 10.")
+                else:
+                    tts_parts.append(f"Soreness is high at {recovery.soreness_level} out of 10.")
+
+            if recovery.body_weight:
+                weight_unit = recovery.weight_unit or "lbs"
+                weight_str = f"{recovery.body_weight:.1f}".rstrip('0').rstrip('.')
+                tts_parts.append(f"Body weight is {weight_str} {weight_unit}.")
+
+            tts_parts.append(f"Overall, your readiness score is {readiness_score} out of 100. {status_msg}.")
+
+            return {
+                "text": "\n".join(lines),
+                "tts": " ".join(tts_parts),
+                "readiness_score": readiness_score
+            }
+
+        except Exception as e:
+            logger.error(f"Error building recovery section: {e}")
+            return {"text": "", "tts": "", "readiness_score": 100}
+
+    def _parse_nutrition_from_program_notes(self, notes: str) -> Dict:
+        """Parse nutrition targets from fitness program notes."""
+        import re
+        result = {}
+
+        if not notes:
+            return result
+
+        # Parse calorie range like "2,400-2,600 kcal" or "2400 calories"
+        cal_match = re.search(r'([\d,]+)(?:\s*-\s*([\d,]+))?\s*(?:kcal|calories?|cals?)', notes, re.IGNORECASE)
+        if cal_match:
+            low = int(cal_match.group(1).replace(',', ''))
+            high = int(cal_match.group(2).replace(',', '')) if cal_match.group(2) else low
+            result["calories"] = (low + high) // 2
+
+        # Parse protein like "200g+ protein" or "180-200g protein"
+        protein_match = re.search(r'([\d]+)(?:\s*-\s*([\d]+))?g?\+?\s*protein', notes, re.IGNORECASE)
+        if protein_match:
+            low = int(protein_match.group(1))
+            high = int(protein_match.group(2)) if protein_match.group(2) else low
+            # If it's "200g+" style, use the number as-is
+            result["protein"] = (low + high) // 2 if protein_match.group(2) else low
+
+        # Parse carbs like "250g carbs"
+        carbs_match = re.search(r'([\d]+)(?:\s*-\s*([\d]+))?g?\s*carbs?', notes, re.IGNORECASE)
+        if carbs_match:
+            low = int(carbs_match.group(1))
+            high = int(carbs_match.group(2)) if carbs_match.group(2) else low
+            result["carbs"] = (low + high) // 2
+
+        # Parse fats like "80g fat"
+        fats_match = re.search(r'([\d]+)(?:\s*-\s*([\d]+))?g?\s*fats?', notes, re.IGNORECASE)
+        if fats_match:
+            low = int(fats_match.group(1))
+            high = int(fats_match.group(2)) if fats_match.group(2) else low
+            result["fats"] = (low + high) // 2
+
+        return result
+
+    async def _build_nutrition_recap_section(self, user_id: str, db: Session, yesterday_str: str) -> Dict:
+        """Build yesterday's nutrition recap section."""
+        try:
+            # Get yesterday's food logs
+            food_logs = db.execute(text("""
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = :user_id AND DATE(logged_at) = :yesterday
+                ORDER BY logged_at
+            """), {"user_id": user_id, "yesterday": yesterday_str}).fetchall()
+
+            # First try to get nutrition targets from active fitness program
+            active_program = db.execute(text("""
+                SELECT name, notes FROM fitness_program
+                WHERE user_id = :user_id AND is_active = true
+                ORDER BY created_at DESC LIMIT 1
+            """), {"user_id": user_id}).fetchone()
+
+            goals_dict = None
+            program_name = None
+
+            if active_program and active_program.notes:
+                program_name = active_program.name
+                parsed = self._parse_nutrition_from_program_notes(active_program.notes)
+                if parsed.get("calories") and parsed.get("protein"):
+                    goals_dict = {
+                        "calories": parsed.get("calories", 2000),
+                        "protein": parsed.get("protein", 150),
+                        "carbs": parsed.get("carbs", 200),
+                        "fats": parsed.get("fats", 65)
+                    }
+                    logger.info(f"Using nutrition targets from active program '{program_name}': {goals_dict}")
+
+            # Fall back to fitness_goals table
+            if not goals_dict:
+                goals = db.execute(text("""
+                    SELECT calories, protein, carbs, fats
+                    FROM fitness_goals
+                    WHERE user_id = :user_id
+                """), {"user_id": user_id}).fetchone()
+
+                if not goals:
+                    goals_dict = {"calories": 2000, "protein": 150, "carbs": 200, "fats": 65}
+                else:
+                    goals_dict = {"calories": goals.calories or 2000, "protein": goals.protein or 150,
+                                 "carbs": goals.carbs or 200, "fats": goals.fats or 65}
+
+            if not food_logs:
+                return {
+                    "text": "",
+                    "tts": "No meals were logged yesterday. Tracking your nutrition helps me give you better guidance."
+                }
+
+            # Sum up totals
+            total_calories = sum(f.calories or 0 for f in food_logs)
+            total_protein = sum(f.protein or 0 for f in food_logs)
+            total_carbs = sum(f.carbs or 0 for f in food_logs)
+            total_fats = sum(f.fats or 0 for f in food_logs)
+            meal_count = len(food_logs)
+
+            # Calculate percentages
+            cal_pct = (total_calories / goals_dict["calories"] * 100) if goals_dict["calories"] else 0
+            protein_pct = (total_protein / goals_dict["protein"] * 100) if goals_dict["protein"] else 0
+            carbs_pct = (total_carbs / goals_dict["carbs"] * 100) if goals_dict["carbs"] else 0
+            fats_pct = (total_fats / goals_dict["fats"] * 100) if goals_dict["fats"] else 0
+
+            # Generate summary
+            summaries = []
+            if protein_pct >= 95:
+                summaries.append("hit protein goal")
+            elif protein_pct >= 80:
+                summaries.append(f"close on protein ({int(goals_dict['protein'] - total_protein)}g short)")
+            else:
+                summaries.append(f"low on protein ({int(goals_dict['protein'] - total_protein)}g short)")
+
+            cal_diff = total_calories - goals_dict["calories"]
+            if abs(cal_diff) < 100:
+                summaries.append("calories on target")
+            elif cal_diff > 0:
+                summaries.append(f"{int(cal_diff)} cal surplus")
+            else:
+                summaries.append(f"{int(abs(cal_diff))} cal deficit")
+
+            summary_text = "; ".join(summaries)
+
+            # Build markdown
+            lines = ["## Yesterday's Nutrition"]
+            lines.append(f"- **Calories**: {int(total_calories)} / {int(goals_dict['calories'])} ({int(cal_pct)}%)")
+            lines.append(f"- **Protein**: {int(total_protein)}g / {int(goals_dict['protein'])}g ({int(protein_pct)}%)")
+            lines.append(f"- **Carbs**: {int(total_carbs)}g / {int(goals_dict['carbs'])}g ({int(carbs_pct)}%)")
+            lines.append(f"- **Fats**: {int(total_fats)}g / {int(goals_dict['fats'])}g ({int(fats_pct)}%)")
+            lines.append(f"\n*{meal_count} meals logged. {summary_text.capitalize()}.*")
+
+            # Build TTS
+            tts_parts = ["Looking at yesterday's nutrition."]
+            tts_parts.append(f"You logged {meal_count} meals totaling {int(total_calories)} calories.")
+
+            cal_diff = total_calories - goals_dict["calories"]
+            if abs(cal_diff) < 100:
+                tts_parts.append(f"That's right on your {int(goals_dict['calories'])} calorie target.")
+            elif cal_diff > 0:
+                tts_parts.append(f"That's about {int(cal_diff)} calories over your {int(goals_dict['calories'])} target.")
+            else:
+                tts_parts.append(f"That's about {int(abs(cal_diff))} calories under your {int(goals_dict['calories'])} target.")
+
+            if protein_pct >= 95:
+                tts_parts.append(f"Protein was {int(total_protein)} grams, hitting your goal nicely.")
+            else:
+                tts_parts.append(f"Protein was {int(total_protein)} grams out of your {int(goals_dict['protein'])} gram goal.")
+
+            tts_parts.append(f"Carbs came in at {int(total_carbs)} grams and fats at {int(total_fats)} grams.")
+
+            return {
+                "text": "\n".join(lines),
+                "tts": " ".join(tts_parts)
+            }
+
+        except Exception as e:
+            logger.error(f"Error building nutrition section: {e}")
+            return {"text": "", "tts": ""}
+
+    async def _build_workout_recap_section(self, user_id: str, db: Session, yesterday_str: str) -> Dict:
+        """Build yesterday's workout recap section (summary level)."""
+        try:
+            # Get yesterday's workout logs
+            workout_data = db.execute(text("""
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = :user_id
+                  AND session_date = :yesterday
+                  AND skipped = false
+                ORDER BY created_at
+            """), {"user_id": user_id, "yesterday": yesterday_str}).fetchall()
+
+            if not workout_data:
+                return {
+                    "text": "",
+                    "tts": "Yesterday was a rest day. No workout logged."
+                }
+
+            # Calculate summary stats
+            total_volume = sum((w.weight or 0) * (w.reps or 0) for w in workout_data)
+            total_sets = len(workout_data)
+            exercises = list(set(w.exercise_id for w in workout_data if w.exercise_id))
+            avg_rpe = sum(w.rpe or 0 for w in workout_data if w.rpe) / max(1, len([w for w in workout_data if w.rpe]))
+
+            # Try to determine workout name from template or exercise pattern
+            workout_name = self._infer_workout_name(exercises)
+
+            # Estimate duration from session times if available
+            times = [w.session_time for w in workout_data if w.session_time]
+            duration_str = ""
+            if len(times) >= 2:
+                # Convert to minutes
+                first_time = times[0]
+                last_time = times[-1]
+                if hasattr(first_time, 'hour'):
+                    duration_mins = (last_time.hour * 60 + last_time.minute) - (first_time.hour * 60 + first_time.minute)
+                    if duration_mins > 0:
+                        duration_str = f" in about {duration_mins} minutes"
+
+            # Infer muscle groups
+            muscle_groups = self._infer_muscle_groups(exercises)
+
+            # Build markdown
+            lines = ["## Yesterday's Training"]
+            lines.append(f"**{workout_name}**")
+            lines.append(f"- Total Volume: {int(total_volume):,} lbs")
+            lines.append(f"- Sets: {total_sets}")
+            lines.append(f"- Exercises: {len(exercises)}")
+            if avg_rpe > 0:
+                lines.append(f"- Average RPE: {avg_rpe:.1f}/10")
+            if muscle_groups:
+                lines.append(f"- Muscles: {', '.join(muscle_groups)}")
+
+            # Build TTS
+            tts_parts = ["Now for yesterday's training."]
+            tts_parts.append(f"You completed {workout_name}{duration_str}.")
+            tts_parts.append(f"Total volume was {int(total_volume):,} pounds across {total_sets} sets.")
+            if muscle_groups:
+                tts_parts.append(f"You worked {', '.join(muscle_groups[:-1])}" +
+                               (f" and {muscle_groups[-1]}." if len(muscle_groups) > 1 else "."))
+
+            return {
+                "text": "\n".join(lines),
+                "tts": " ".join(tts_parts)
+            }
+
+        except Exception as e:
+            logger.error(f"Error building workout recap section: {e}")
+            return {"text": "", "tts": ""}
+
+    def _infer_workout_name(self, exercises: List[str]) -> str:
+        """Infer workout name from exercise list."""
+        exercises_lower = [e.lower() for e in exercises]
+
+        # Check for common patterns
+        push_indicators = ["bench", "press", "fly", "dip", "pushdown", "tricep"]
+        pull_indicators = ["row", "pull", "curl", "lat", "deadlift", "shrug"]
+        leg_indicators = ["squat", "leg", "lunge", "calf", "hamstring", "quad"]
+
+        push_count = sum(1 for e in exercises_lower for p in push_indicators if p in e)
+        pull_count = sum(1 for e in exercises_lower for p in pull_indicators if p in e)
+        leg_count = sum(1 for e in exercises_lower for p in leg_indicators if p in e)
+
+        if leg_count > push_count and leg_count > pull_count:
+            return "Leg Day"
+        elif push_count > pull_count:
+            return "Push Day"
+        elif pull_count > push_count:
+            return "Pull Day"
+        else:
+            return "Workout Session"
+
+    def _infer_muscle_groups(self, exercises: List[str]) -> List[str]:
+        """Infer muscle groups from exercise list."""
+        exercises_lower = [e.lower() for e in exercises]
+        groups = []
+
+        muscle_keywords = {
+            "chest": ["bench", "fly", "chest", "pec"],
+            "back": ["row", "pull", "lat", "back"],
+            "shoulders": ["press", "shoulder", "delt", "lateral", "rear delt"],
+            "triceps": ["tricep", "pushdown", "skull", "dip"],
+            "biceps": ["curl", "bicep"],
+            "legs": ["squat", "leg", "lunge", "calf"],
+            "quads": ["squat", "leg press", "extension", "lunge"],
+            "hamstrings": ["deadlift", "curl", "hamstring", "rdl"],
+            "glutes": ["hip thrust", "glute", "deadlift"]
+        }
+
+        for group, keywords in muscle_keywords.items():
+            for e in exercises_lower:
+                if any(k in e for k in keywords):
+                    if group not in groups:
+                        groups.append(group)
+                    break
+
+        return groups[:4]  # Limit to 4 groups
+
+    async def _build_today_plan_section(self, user_id: str, db: Session, today_str: str) -> Dict:
+        """Build today's workout plan section."""
+        try:
+            today = date.today()
+            day_of_week = today.strftime("%A").lower()
+
+            # Find active phase
+            active_phase = db.execute(text("""
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = :user_id AND status = 'active'
+                LIMIT 1
+            """), {"user_id": user_id}).fetchone()
+
+            if not active_phase:
+                return {
+                    "text": "",
+                    "tts": "No active training program. Enjoy your rest day or set up a workout plan."
+                }
+
+            # Find today's scheduled template
+            templates = db.execute(text("""
+                SELECT id, name, exercises, scheduled_days, notes
+                FROM fitness_template
+                WHERE user_id = :user_id AND phase_id = :phase_id
+            """), {"user_id": user_id, "phase_id": active_phase.id}).fetchall()
+
+            today_template = None
+            for t in templates:
+                if t.scheduled_days:
+                    days = json.loads(t.scheduled_days or "[]")
+                    if day_of_week in [d.lower() for d in days]:
+                        today_template = t
+                        break
+
+            if not today_template:
+                return {
+                    "text": "## Today's Plan\n**Rest Day** - No workout scheduled. Focus on recovery.",
+                    "tts": "Today is a rest day. No workout scheduled. Focus on recovery and stay hydrated."
+                }
+
+            # Parse exercises
+            exercises = json.loads(today_template.exercises or "[]")
+            exercise_names = [e.get("name", "") for e in exercises if e.get("name")]
+
+            # Build markdown
+            lines = ["## Today's Plan"]
+            lines.append(f"**{today_template.name}**")
+            if exercise_names:
+                lines.append(f"- Exercises: {', '.join(exercise_names[:5])}" +
+                           (" ..." if len(exercise_names) > 5 else ""))
+            if today_template.notes:
+                lines.append(f"- Notes: {today_template.notes}")
+
+            # Build TTS
+            tts_parts = [f"For today, you have {today_template.name} scheduled."]
+            if exercise_names:
+                if len(exercise_names) <= 3:
+                    tts_parts.append(f"Key exercises include {', '.join(exercise_names)}.")
+                else:
+                    tts_parts.append(f"You've got {len(exercise_names)} exercises planned including {', '.join(exercise_names[:3])}.")
+
+            return {
+                "text": "\n".join(lines),
+                "tts": " ".join(tts_parts)
+            }
+
+        except Exception as e:
+            logger.error(f"Error building today's plan section: {e}")
+            return {"text": "", "tts": ""}
+
+    # ========== SMART INSIGHTS METHODS ==========
+
+    async def _get_extended_baselines(self, user_id: str, db: Session) -> Dict:
+        """Get 7-day, 30-day, and 90-day baselines for recovery metrics."""
+        try:
+            today = date.today()
+            baselines = {}
+
+            for period_name, days in [("7d", 7), ("30d", 30), ("90d", 90)]:
+                start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+                result = db.execute(text("""
+                    SELECT
+                        AVG(sleep_hours) as avg_sleep,
+                        AVG(hrv) as avg_hrv,
+                        AVG(heart_rate) as avg_hr,
+                        AVG(soreness_level) as avg_soreness,
+                        COUNT(*) as data_points
+                    FROM daily_recovery_log
+                    WHERE user_id = :user_id AND log_date >= :start_date
+                """), {"user_id": user_id, "start_date": start_date}).fetchone()
+
+                if result and result.data_points and result.data_points > 0:
+                    baselines[period_name] = {
+                        "sleep": result.avg_sleep,
+                        "hrv": result.avg_hrv,
+                        "hr": result.avg_hr,
+                        "soreness": result.avg_soreness,
+                        "data_points": result.data_points
+                    }
+
+            return baselines
+        except Exception as e:
+            logger.error(f"Error getting extended baselines: {e}")
+            return {}
+
+    async def _check_for_prs(self, user_id: str, db: Session, yesterday_str: str) -> Optional[str]:
+        """Check if any PRs were hit yesterday."""
+        try:
+            # Get yesterday's exercises with their max weights
+            yesterday_lifts = db.execute(text("""
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = :user_id
+                  AND session_date = :yesterday
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            """), {"user_id": user_id, "yesterday": yesterday_str}).fetchall()
+
+            if not yesterday_lifts:
+                return None
+
+            prs = []
+            for lift in yesterday_lifts:
+                # Get all-time max for this exercise (before yesterday)
+                all_time = db.execute(text("""
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = :user_id
+                      AND exercise_id = :exercise_id
+                      AND session_date < :yesterday
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                """), {"user_id": user_id, "exercise_id": lift.exercise_id, "yesterday": yesterday_str}).fetchone()
+
+                if all_time and all_time.max_weight:
+                    if lift.max_weight > all_time.max_weight:
+                        prs.append(f"{lift.exercise_id} at {int(lift.max_weight)} lbs")
+                elif lift.max_weight:  # First time doing this exercise
+                    prs.append(f"{lift.exercise_id} at {int(lift.max_weight)} lbs (first time!)")
+
+            if prs:
+                if len(prs) == 1:
+                    return f"New PR on {prs[0]}!"
+                else:
+                    return f"New PRs on {', '.join(prs[:2])}!"
+            return None
+
+        except Exception as e:
+            logger.error(f"Error checking for PRs: {e}")
+            return None
+
+    async def _check_fatigue_indicators(self, user_id: str, db: Session) -> Optional[str]:
+        """Check for fatigue indicators that might suggest a deload."""
+        try:
+            today = date.today()
+            two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+
+            # Check consecutive training days
+            recent_workouts = db.execute(text("""
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = :user_id
+                  AND session_date >= :two_weeks_ago
+                  AND skipped = false
+                ORDER BY session_date DESC
+            """), {"user_id": user_id, "two_weeks_ago": two_weeks_ago}).fetchall()
+
+            consecutive_days = 0
+            if recent_workouts:
+                prev_date = today
+                for row in recent_workouts:
+                    if row.session_date:
+                        workout_date = row.session_date if isinstance(row.session_date, date) else datetime.strptime(str(row.session_date), "%Y-%m-%d").date()
+                        if (prev_date - workout_date).days <= 1:
+                            consecutive_days += 1
+                            prev_date = workout_date
+                        else:
+                            break
+
+            # Check HRV trend (declining over 7+ days is concerning)
+            hrv_trend = db.execute(text("""
+                SELECT log_date, hrv
+                FROM daily_recovery_log
+                WHERE user_id = :user_id
+                  AND hrv IS NOT NULL
+                  AND log_date >= :two_weeks_ago
+                ORDER BY log_date DESC
+                LIMIT 10
+            """), {"user_id": user_id, "two_weeks_ago": two_weeks_ago}).fetchall()
+
+            hrv_declining = False
+            if len(hrv_trend) >= 5:
+                # Simple trend: compare first half avg to second half avg
+                recent_avg = sum(r.hrv for r in hrv_trend[:len(hrv_trend)//2]) / (len(hrv_trend)//2)
+                older_avg = sum(r.hrv for r in hrv_trend[len(hrv_trend)//2:]) / (len(hrv_trend) - len(hrv_trend)//2)
+                if recent_avg < older_avg * 0.9:  # 10% decline
+                    hrv_declining = True
+
+            # Generate insight
+            if consecutive_days >= 5 and hrv_declining:
+                return f"You've trained {consecutive_days} days in a row and your HRV is trending down. Consider a rest day or deload."
+            elif consecutive_days >= 6:
+                return f"You've trained {consecutive_days} days straight. A rest day might help your gains."
+            elif hrv_declining:
+                return "Your HRV has been declining lately. Listen to your body and prioritize recovery."
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error checking fatigue indicators: {e}")
+            return None
+
+    async def _check_nutrition_patterns(self, user_id: str, db: Session) -> Optional[str]:
+        """Check for nutrition patterns and streaks."""
+        try:
+            today = date.today()
+            two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+
+            # Get daily nutrition totals for past 2 weeks
+            daily_nutrition = db.execute(text("""
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = :user_id
+                  AND logged_at >= :two_weeks_ago
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            """), {"user_id": user_id, "two_weeks_ago": two_weeks_ago}).fetchall()
+
+            if len(daily_nutrition) < 3:
+                return None
+
+            # First try to get goals from active fitness program
+            cal_goal = None
+            protein_goal = None
+
+            active_program = db.execute(text("""
+                SELECT notes FROM fitness_program
+                WHERE user_id = :user_id AND is_active = true
+                ORDER BY created_at DESC LIMIT 1
+            """), {"user_id": user_id}).fetchone()
+
+            if active_program and active_program.notes:
+                parsed = self._parse_nutrition_from_program_notes(active_program.notes)
+                cal_goal = parsed.get("calories")
+                protein_goal = parsed.get("protein")
+
+            # Fall back to fitness_goals table
+            if not cal_goal or not protein_goal:
+                goals = db.execute(text("""
+                    SELECT calories, protein FROM fitness_goals WHERE user_id = :user_id
+                """), {"user_id": user_id}).fetchone()
+
+                if not goals:
+                    return None
+
+                cal_goal = cal_goal or goals.calories or 2000
+                protein_goal = protein_goal or goals.protein or 150
+
+            # Check protein streak
+            protein_streak = 0
+            for day in daily_nutrition:
+                if day.total_protein and day.total_protein >= protein_goal * 0.95:
+                    protein_streak += 1
+                else:
+                    break
+
+            # Check calorie deficit streak
+            deficit_streak = 0
+            for day in daily_nutrition:
+                if day.total_calories and day.total_calories < cal_goal:
+                    deficit_streak += 1
+                else:
+                    break
+
+            # Check calorie surplus streak
+            surplus_streak = 0
+            for day in daily_nutrition:
+                if day.total_calories and day.total_calories > cal_goal:
+                    surplus_streak += 1
+                else:
+                    break
+
+            # Generate insight (prioritize most impressive streak)
+            insights = []
+            if protein_streak >= 5:
+                insights.append(f"Great consistency - you've hit your protein goal {protein_streak} days in a row!")
+            if deficit_streak >= 4:
+                insights.append(f"You've been in a caloric deficit for {deficit_streak} days. Stay consistent!")
+            if surplus_streak >= 4:
+                insights.append(f"You've been in a surplus for {surplus_streak} days - good for building.")
+
+            return insights[0] if insights else None
+
+        except Exception as e:
+            logger.error(f"Error checking nutrition patterns: {e}")
+            return None
+
+    async def _check_progression(self, user_id: str, db: Session) -> Optional[str]:
+        """Check for progressive overload on key lifts."""
+        try:
+            today = date.today()
+            four_weeks_ago = (today - timedelta(days=28)).strftime("%Y-%m-%d")
+            eight_weeks_ago = (today - timedelta(days=56)).strftime("%Y-%m-%d")
+
+            # Key compound lifts to track
+            key_lifts = ["bench press", "squat", "deadlift", "overhead press", "barbell row"]
+
+            progressions = []
+            stalls = []
+
+            for lift_pattern in key_lifts:
+                # Get recent max (last 4 weeks)
+                recent = db.execute(text("""
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = :user_id
+                      AND LOWER(exercise_id) LIKE :pattern
+                      AND session_date >= :four_weeks_ago
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                """), {"user_id": user_id, "pattern": f"%{lift_pattern}%", "four_weeks_ago": four_weeks_ago}).fetchone()
+
+                # Get older max (4-8 weeks ago)
+                older = db.execute(text("""
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = :user_id
+                      AND LOWER(exercise_id) LIKE :pattern
+                      AND session_date >= :eight_weeks_ago
+                      AND session_date < :four_weeks_ago
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                """), {"user_id": user_id, "pattern": f"%{lift_pattern}%",
+                       "eight_weeks_ago": eight_weeks_ago, "four_weeks_ago": four_weeks_ago}).fetchone()
+
+                if recent and recent.max_weight and older and older.max_weight:
+                    diff = recent.max_weight - older.max_weight
+                    if diff >= 5:  # At least 5 lbs increase
+                        lift_name = lift_pattern.replace(" ", " ").title()
+                        progressions.append(f"{lift_name} up {int(diff)} lbs")
+                    elif diff <= -5:  # Regression
+                        stalls.append(lift_pattern.title())
+
+            # Generate insight
+            if progressions:
+                return f"Progress check: {progressions[0]} from last month. Keep it up!"
+            elif stalls:
+                return f"{stalls[0]} has stalled - consider changing rep scheme or adding volume."
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error checking progression: {e}")
+            return None
+
+    async def _build_smart_insights_section(self, user_id: str, db: Session, yesterday_str: str) -> Dict:
+        """Build smart insights section with data-driven analysis."""
+        try:
+            insights = []
+
+            # Check for PRs (highest priority)
+            pr_insight = await self._check_for_prs(user_id, db, yesterday_str)
+            if pr_insight:
+                insights.append(("pr", pr_insight))
+
+            # Check fatigue indicators
+            fatigue_insight = await self._check_fatigue_indicators(user_id, db)
+            if fatigue_insight:
+                insights.append(("fatigue", fatigue_insight))
+
+            # Check nutrition patterns
+            nutrition_insight = await self._check_nutrition_patterns(user_id, db)
+            if nutrition_insight:
+                insights.append(("nutrition", nutrition_insight))
+
+            # Check progression
+            progression_insight = await self._check_progression(user_id, db)
+            if progression_insight:
+                insights.append(("progression", progression_insight))
+
+            if not insights:
+                return {"text": "", "tts": ""}
+
+            # Build markdown - limit to 2-3 most important insights
+            lines = ["## Insights"]
+            for insight_type, insight_text in insights[:3]:
+                emoji = {"pr": "🏆", "fatigue": "⚠️", "nutrition": "🍽️", "progression": "📈"}.get(insight_type, "💡")
+                lines.append(f"{emoji} {insight_text}")
+
+            # Build TTS
+            tts_parts = ["Here are some insights based on your data."]
+            for _, insight_text in insights[:2]:  # Limit TTS to 2 insights
+                tts_parts.append(insight_text)
+
+            return {
+                "text": "\n".join(lines),
+                "tts": " ".join(tts_parts)
+            }
+
+        except Exception as e:
+            logger.error(f"Error building smart insights section: {e}")
+            return {"text": "", "tts": ""}
 
     async def generate_recovery_section(self, user_id: str, db: Session) -> tuple[str, Optional[str]]:
         """

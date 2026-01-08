@@ -130,7 +130,10 @@
       "Bash(sudo systemctl enable:*)",
       "Bash(sudo systemctl start:*)",
       "Bash(sudo -S systemctl enable:*)",
-      "Bash(sudo -S systemctl start:*)"
+      "Bash(sudo -S systemctl start:*)",
+      "Bash(crontab -l:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(sudo -S apt install:*)"
     ],
     "deny": [],
     "ask": [],

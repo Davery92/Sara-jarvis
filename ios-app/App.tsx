@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from './src/context/AuthContext';
 import { TimerProvider } from './src/context/TimerContext';
 import { BackgroundTasksProvider } from './src/context/BackgroundTasksContext';
+import { WorkoutModeProvider } from './src/context/WorkoutModeContext';
 import RootNavigator from './src/navigation/RootNavigator';
 import AuthenticatedOverlays from './src/components/AuthenticatedOverlays';
 
@@ -19,9 +20,11 @@ export default function App() {
       <AuthProvider>
         <TimerProvider>
           <BackgroundTasksProvider>
-            <RootNavigator />
-            <AuthenticatedOverlays />
-            <StatusBar style="dark" />
+            <WorkoutModeProvider>
+              <RootNavigator />
+              <AuthenticatedOverlays />
+              <StatusBar style="dark" />
+            </WorkoutModeProvider>
           </BackgroundTasksProvider>
         </TimerProvider>
       </AuthProvider>

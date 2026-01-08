@@ -4,6 +4,7 @@ import MiniChat from './components/MiniChat'
 import SettingsModal from './components/SettingsModal'
 import NoteViewer from './components/NoteViewer'
 import TimerFloat from './components/TimerFloat'
+import { sidecarBridge } from './services/sidecarBridge'
 
 export type Mode = 'wakeWord' | 'pushToTalk' | 'silent'
 export type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking'
@@ -59,8 +60,26 @@ function App() {
           setShowSettings(true)
         })
       }
+
+      // Connect to sidecar and listen for wake word
+      sidecarBridge.on('wake_word_detected', () => {
+        console.log('[App] Wake word detected!')
+        // Open chat window when wake word is heard
+        window.electronAPI?.showChat()
+        setChatOpen(true)
+        setVoiceState('listening')
+      })
+
+      // Listen for activity updates
+      sidecarBridge.on('activity_update', (msg) => {
+        console.log('[App] Activity update:', msg)
+      })
     }
     init()
+
+    return () => {
+      sidecarBridge.disconnect()
+    }
   }, [viewType])
 
   // Handle circle click - toggle chat open/closed

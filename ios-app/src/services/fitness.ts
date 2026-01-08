@@ -259,6 +259,58 @@ export interface CreateCustomFoodParams {
   sodium?: number;
 }
 
+// Active Workout Session Types (Real-time Sara Coaching)
+export interface ActiveWorkoutExercise {
+  name: string;
+  sets: number;
+  reps: string;  // e.g., "6-8" or "10"
+  rpe_target?: number;
+  suggested_weight?: number;
+  progression_note?: string;
+  last_session?: {
+    weights: number[];
+    reps: number[];
+    avg_rpe: number;
+  };
+  completed_sets?: number;
+}
+
+export interface ActiveWorkoutSnapshot {
+  template_name: string;
+  exercises: ActiveWorkoutExercise[];
+}
+
+export interface ActiveWorkoutSession {
+  id: string;
+  user_id: string;
+  template_id?: string;
+  status: 'active' | 'paused' | 'completed' | 'abandoned';
+  started_at: string;
+  completed_at?: string;
+  current_exercise_index: number;
+  current_set_index: number;
+  workout_snapshot: ActiveWorkoutSnapshot;
+  rest_timer_started_at?: string;
+  rest_timer_duration_seconds?: number;
+  total_sets_completed: number;
+  total_volume: number;
+  notes?: string;
+}
+
+export interface LogSetParams {
+  weight?: number;
+  reps?: number;
+  rpe?: number;
+  rpe_feeling?: 'light' | 'moderate' | 'hard' | 'failed';
+  notes?: string;
+}
+
+export interface RestTimerStatus {
+  is_active: boolean;
+  remaining_seconds?: number;
+  total_seconds?: number;
+}
+
 export interface IngredientItem {
   food_name: string;
   quantity: number;
@@ -603,6 +655,102 @@ class FitnessService {
       }
       throw error;
     }
+  }
+
+  // ==========================================================================
+  // ACTIVE WORKOUT SESSION (Real-time Sara Coaching)
+  // ==========================================================================
+
+  /**
+   * Start a new workout session from a template
+   */
+  async startWorkoutSession(templateId: string): Promise<{ session: ActiveWorkoutSession }> {
+    return apiClient.post('/api/fitness/workout-session/start', { template_id: templateId });
+  }
+
+  /**
+   * Get the current active workout session (if any)
+   */
+  async getActiveWorkoutSession(): Promise<{ session: ActiveWorkoutSession | null }> {
+    return apiClient.get('/api/fitness/workout-session/active');
+  }
+
+  /**
+   * Log a set during an active workout session
+   */
+  async logWorkoutSet(params: LogSetParams): Promise<{
+    success: boolean;
+    logged?: { exercise: string; set_number: number; weight: number; reps: number };
+    coaching_feedback?: string;
+    next_set?: {
+      exercise?: string;
+      set_number?: number;
+      suggested_weight?: number;
+      workout_complete?: boolean;
+      exercise_complete?: boolean;
+      next_exercise?: string;
+    };
+    total_sets_completed?: number;
+    total_volume?: number;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/log-set', params);
+  }
+
+  /**
+   * Skip the current exercise and move to the next
+   */
+  async skipExercise(): Promise<{
+    success: boolean;
+    skipped_exercise?: string;
+    next_exercise?: string;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/skip');
+  }
+
+  /**
+   * Start or stop the rest timer
+   */
+  async manageRestTimer(action: 'start' | 'stop', duration?: number): Promise<{
+    message: string;
+    started_at?: string;
+    duration_seconds?: number;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/rest-timer', {
+      action,
+      duration,
+    });
+  }
+
+  /**
+   * Get the current rest timer status
+   */
+  async getRestTimerStatus(): Promise<RestTimerStatus> {
+    return apiClient.get('/api/fitness/workout-session/rest-timer');
+  }
+
+  /**
+   * Complete the current workout session
+   */
+  async completeWorkoutSession(): Promise<{
+    success: boolean;
+    summary?: {
+      duration_minutes: number;
+      total_sets: number;
+      total_volume: number;
+      exercises_completed: number;
+    };
+  }> {
+    return apiClient.post('/api/fitness/workout-session/complete');
+  }
+
+  /**
+   * Abandon the current workout session
+   */
+  async abandonWorkoutSession(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/abandon');
   }
 }
 

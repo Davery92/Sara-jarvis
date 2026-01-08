@@ -30,6 +30,9 @@ export type RootStackParamList = {
     recipe?: any;
     onSave?: () => void;
   };
+  WorkoutMode: {
+    templateId?: string;  // If provided, starts workout with this template
+  } | undefined;
 };
 
 // Auth Stack Navigator
