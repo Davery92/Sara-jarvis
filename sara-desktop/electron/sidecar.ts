@@ -131,9 +131,22 @@ export class SidecarManager {
 
     console.log(`[Sidecar] Starting: ${command} ${args.join(' ')}`)
 
+    // Determine working directory
+    let cwd: string
+    if (app.isPackaged) {
+      // In packaged app, use the sidecar directory in resources
+      const resourcesPath = process.resourcesPath || path.join(__dirname, '..')
+      cwd = path.join(resourcesPath, 'sidecar')
+    } else {
+      // In development, use the sidecar source directory
+      cwd = path.join(__dirname, '..', 'sidecar')
+    }
+
+    console.log(`[Sidecar] Working directory: ${cwd}`)
+
     try {
       this.process = spawn(command, args, {
-        cwd: path.join(__dirname, '..', 'sidecar'),
+        cwd: fs.existsSync(cwd) ? cwd : undefined,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
