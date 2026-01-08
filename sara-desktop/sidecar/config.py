@@ -5,7 +5,6 @@ import os
 import platform
 import uuid
 from pathlib import Path
-from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -15,62 +14,48 @@ def get_default_device_id() -> str:
     return f"{platform.system().lower()}-{machine_id}-{uuid.getnode()}"
 
 
-@dataclass
 class SidecarConfig:
     """Configuration for the sidecar service"""
 
-    # Backend connection
-    backend_url: str = field(
-        default_factory=lambda: os.getenv("SARA_BACKEND_URL", "https://sara-api.avery.cloud")
-    )
-    backend_ws_url: str = field(
-        default_factory=lambda: os.getenv(
+    def __init__(self):
+        # Backend connection
+        self.backend_url: str = os.getenv("SARA_BACKEND_URL", "https://sara-api.avery.cloud")
+        self.backend_ws_url: str = os.getenv(
             "SARA_BACKEND_WS",
             "wss://sara-api.avery.cloud/api/devices/ws"
         )
-    )
 
-    # Device identification
-    device_id: str = field(default_factory=get_default_device_id)
-    hostname: str = field(default_factory=platform.node)
-    platform: str = field(default_factory=lambda: platform.system().lower())
-    os_version: str = field(default_factory=platform.version)
+        # Device identification
+        self.device_id: str = get_default_device_id()
+        self.hostname: str = platform.node()
+        self.platform_name: str = platform.system().lower()
+        self.os_version: str = platform.version()
 
-    # Authentication (loaded from settings file or environment)
-    auth_token: Optional[str] = field(
-        default_factory=lambda: os.getenv("SARA_AUTH_TOKEN")
-    )
+        # Authentication (loaded from settings file or environment)
+        self.auth_token: Optional[str] = os.getenv("SARA_AUTH_TOKEN")
 
-    # Electron bridge
-    electron_ws_port: int = field(
-        default_factory=lambda: int(os.getenv("SARA_ELECTRON_WS_PORT", "9876"))
-    )
-    electron_ws_host: str = "127.0.0.1"
+        # Electron bridge
+        self.electron_ws_port: int = int(os.getenv("SARA_ELECTRON_WS_PORT", "9876"))
+        self.electron_ws_host: str = "127.0.0.1"
 
-    # Wake word
-    wake_word_model: str = field(
-        default_factory=lambda: os.getenv("SARA_WAKE_WORD_MODEL", "hey_sara.onnx")
-    )
-    wake_word_threshold: float = 0.5
+        # Wake word
+        self.wake_word_model: str = os.getenv("SARA_WAKE_WORD_MODEL", "hey_sara.onnx")
+        self.wake_word_threshold: float = 0.5
 
-    # Screenshot
-    screenshot_interval: int = field(
-        default_factory=lambda: int(os.getenv("SARA_SCREENSHOT_INTERVAL", "30"))
-    )
-    screenshot_enabled: bool = True
+        # Screenshot
+        self.screenshot_interval: int = int(os.getenv("SARA_SCREENSHOT_INTERVAL", "30"))
+        self.screenshot_enabled: bool = True
 
-    # Activity monitoring
-    activity_report_interval: int = 5  # seconds
-    idle_threshold: int = 60  # seconds without input = idle
+        # Activity monitoring
+        self.activity_report_interval: int = 5  # seconds
+        self.idle_threshold: int = 60  # seconds without input = idle
 
-    # Heartbeat
-    heartbeat_interval: int = 10  # seconds
+        # Heartbeat
+        self.heartbeat_interval: int = 10  # seconds
 
-    # Paths
-    models_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "models")
-    settings_file: Path = field(
-        default_factory=lambda: Path.home() / ".sara" / "sidecar-settings.json"
-    )
+        # Paths
+        self.models_dir: Path = Path(__file__).parent.parent / "models"
+        self.settings_file: Path = Path.home() / ".sara" / "sidecar-settings.json"
 
     def get_wake_word_model_path(self) -> Path:
         """Get the full path to the wake word model."""
