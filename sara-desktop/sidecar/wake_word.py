@@ -103,11 +103,11 @@ class WakeWordDetector:
 
             self._pyaudio = pyaudio.PyAudio()
 
-            # Find best input device - prefer built-in mic over external/bluetooth
+            # Find best input device - prefer AirPods/external, then built-in
             device_index = None
             fallback_device = None
-            preferred_keywords = ["built-in", "macbook", "internal", "default"]
-            avoid_keywords = ["iphone", "airpods", "bluetooth", "hdmi", "display"]
+            preferred_keywords = ["airpods", "bluetooth", "built-in", "macbook", "internal", "default"]
+            avoid_keywords = ["iphone", "hdmi", "display"]  # Only avoid these
 
             for i in range(self._pyaudio.get_device_count()):
                 info = self._pyaudio.get_device_info_by_index(i)
