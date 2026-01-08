@@ -104,11 +104,13 @@ class WakeWordDetector:
             self._pyaudio = pyaudio.PyAudio()
 
             # Find best input device - prefer AirPods/external, then built-in
-            device_index = None
-            fallback_device = None
-            preferred_keywords = ["airpods", "bluetooth", "built-in", "macbook", "internal", "default"]
-            avoid_keywords = ["iphone", "hdmi", "display"]  # Only avoid these
+            # Priority order matters - first match in priority list wins
+            priority_keywords = ["airpods", "bluetooth"]  # Highest priority
+            acceptable_keywords = ["built-in", "macbook", "internal", "default"]
+            avoid_keywords = ["iphone", "hdmi", "display"]
 
+            # Collect all valid devices with their priority
+            devices = []
             for i in range(self._pyaudio.get_device_count()):
                 info = self._pyaudio.get_device_info_by_index(i)
                 if info["maxInputChannels"] > 0:
@@ -119,22 +121,27 @@ class WakeWordDetector:
                         logger.debug(f"Skipping audio device: {info['name']}")
                         continue
 
-                    # Prefer built-in/internal devices
-                    if any(pref in name_lower for pref in preferred_keywords):
-                        device_index = i
-                        logger.info(f"Using preferred audio device: {info['name']}")
-                        break
+                    # Determine priority (lower = better)
+                    priority = 100  # Default low priority
+                    for idx, keyword in enumerate(priority_keywords):
+                        if keyword in name_lower:
+                            priority = idx
+                            break
+                    else:
+                        for idx, keyword in enumerate(acceptable_keywords):
+                            if keyword in name_lower:
+                                priority = 10 + idx
+                                break
 
-                    # Keep first valid device as fallback
-                    if fallback_device is None:
-                        fallback_device = i
+                    devices.append((priority, i, info["name"]))
 
-            # Use fallback if no preferred device found
-            if device_index is None:
-                device_index = fallback_device
-                if device_index is not None:
-                    info = self._pyaudio.get_device_info_by_index(device_index)
-                    logger.info(f"Using fallback audio device: {info['name']}")
+            # Sort by priority and pick best
+            if devices:
+                devices.sort(key=lambda x: x[0])
+                device_index = devices[0][1]
+                logger.info(f"Using audio device: {devices[0][2]} (priority {devices[0][0]})")
+            else:
+                device_index = None
 
             if device_index is None:
                 logger.error("No audio input device found")
