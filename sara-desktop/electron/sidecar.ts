@@ -10,6 +10,7 @@
 import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import { app } from 'electron'
 
 export class SidecarManager {
@@ -18,6 +19,56 @@ export class SidecarManager {
   private maxRestarts = 5
   private restartDelay = 5000
   private isQuitting = false
+  private authToken: string | null = null
+
+  /**
+   * Get the sidecar settings file path.
+   */
+  private getSidecarSettingsPath(): string {
+    return path.join(os.homedir(), '.sara', 'sidecar-settings.json')
+  }
+
+  /**
+   * Write auth token to sidecar settings file.
+   */
+  private writeSidecarSettings(): void {
+    if (!this.authToken) return
+
+    const settingsPath = this.getSidecarSettingsPath()
+    const settingsDir = path.dirname(settingsPath)
+
+    // Ensure directory exists
+    if (!fs.existsSync(settingsDir)) {
+      fs.mkdirSync(settingsDir, { recursive: true })
+    }
+
+    // Read existing settings or create new
+    let settings: Record<string, unknown> = {}
+    if (fs.existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      } catch {
+        settings = {}
+      }
+    }
+
+    // Update auth token
+    settings.auth_token = this.authToken
+
+    // Write back
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+    console.log('[Sidecar] Wrote auth token to settings file')
+  }
+
+  /**
+   * Set the auth token for backend communication.
+   */
+  setAuthToken(token: string | null): void {
+    this.authToken = token
+    if (token) {
+      this.writeSidecarSettings()
+    }
+  }
 
   /**
    * Get the path to the sidecar executable.

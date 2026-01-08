@@ -531,6 +531,8 @@ ipcMain.handle('get-auth-token', () => {
 ipcMain.handle('set-auth-token', (_, token: string | null) => {
   if (token) {
     store.set('authToken', token)
+    // Also update sidecar with the new token
+    sidecarManager.setAuthToken(token)
   } else {
     store.delete('authToken')
   }
@@ -595,6 +597,11 @@ app.whenReady().then(async () => {
 
   // Start the Python sidecar for wake word, activity, screenshots
   try {
+    // Pass auth token to sidecar if available
+    const authToken = store.get('authToken', null) as string | null
+    if (authToken) {
+      sidecarManager.setAuthToken(authToken)
+    }
     await sidecarManager.start()
     console.log('[Main] Sidecar started')
   } catch (error) {

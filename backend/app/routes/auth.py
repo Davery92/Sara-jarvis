@@ -139,3 +139,19 @@ async def get_me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         created_at=current_user.created_at.isoformat()
     )
+
+
+@router.get("/token")
+async def get_token(request: Request, current_user: User = Depends(get_current_user)):
+    """Get the current access token (for sidecar configuration)."""
+    token = request.cookies.get("access_token")
+    if not token:
+        # Check Authorization header
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
+    if not token:
+        raise HTTPException(status_code=401, detail="No token found")
+
+    return {"access_token": token, "user_id": current_user.id}

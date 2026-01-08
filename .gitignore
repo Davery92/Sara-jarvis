@@ -52,3 +52,14 @@ minio_data/
 dist/
 build/
 *.egg-info/
+
+# Sidecar venv
+sara-desktop/sidecar/.venv/
+sara-desktop/sidecar/venv/
+
+# Large build files
+backend/static/downloads/*.zip
+
+# Data files
+data/
+
