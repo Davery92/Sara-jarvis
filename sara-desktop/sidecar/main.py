@@ -16,13 +16,17 @@ from typing import Optional
 
 from config import config
 
+# Ensure log directory exists
+log_dir = config.settings_file.parent
+log_dir.mkdir(parents=True, exist_ok=True)
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(config.settings_file.parent / "sidecar.log", mode="a")
+        logging.FileHandler(log_dir / "sidecar.log", mode="a")
     ]
 )
 logger = logging.getLogger("sidecar")
