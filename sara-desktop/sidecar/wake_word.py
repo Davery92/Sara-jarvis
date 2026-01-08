@@ -109,6 +109,13 @@ class WakeWordDetector:
             acceptable_keywords = ["built-in", "macbook", "internal", "default"]
             avoid_keywords = ["iphone", "hdmi", "display"]
 
+            # Log all available input devices for debugging
+            logger.info("Available audio input devices:")
+            for i in range(self._pyaudio.get_device_count()):
+                info = self._pyaudio.get_device_info_by_index(i)
+                if info["maxInputChannels"] > 0:
+                    logger.info(f"  [{i}] {info['name']}")
+
             # Collect all valid devices with their priority
             devices = []
             for i in range(self._pyaudio.get_device_count()):
