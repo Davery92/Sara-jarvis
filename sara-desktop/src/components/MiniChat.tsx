@@ -198,6 +198,11 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth, autoSta
 
   // Auto-start voice when opened via wake word
   useEffect(() => {
+    console.log('[MiniChat] Voice autostart check:', {
+      autoStartVoice,
+      isAuthenticated,
+      voiceStarted: voiceStartedRef.current
+    })
     if (autoStartVoice && isAuthenticated && !voiceStartedRef.current) {
       voiceStartedRef.current = true
       console.log('[MiniChat] Auto-starting voice recording (wake word triggered)')

@@ -89,15 +89,19 @@ class SidecarService:
                 on_wake_word=self._on_wake_word
             )
 
-            # Start all services as tasks
-            self._tasks = [
-                asyncio.create_task(self._electron_bridge.start()),
+            # Start electron bridge FIRST so clients can connect while wake word loads
+            logger.info("Starting Electron bridge first...")
+            self._tasks = [asyncio.create_task(self._electron_bridge.start())]
+            await asyncio.sleep(0.5)  # Give it time to start listening
+
+            # Then start other services
+            self._tasks.extend([
                 asyncio.create_task(self._backend_client.connect()),
                 asyncio.create_task(self._activity_monitor.start()),
                 asyncio.create_task(self._screenshot_service.start()),
                 asyncio.create_task(self._wake_word.start()),
                 asyncio.create_task(self._heartbeat_loop()),
-            ]
+            ])
 
             logger.info("All services started successfully")
 

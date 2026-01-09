@@ -125,10 +125,13 @@ function connectToSidecar() {
 
     sidecarWs.on('error', (err: Error) => {
       console.error('[Main] Sidecar connection error:', err.message)
+      // Retry on error (connection failures don't trigger 'close')
+      sidecarWs = null
+      setTimeout(connectToSidecar, 2000)
     })
   } catch (e) {
     console.error('[Main] Failed to connect to sidecar:', e)
-    setTimeout(connectToSidecar, 5000)
+    setTimeout(connectToSidecar, 2000)
   }
 }
 
