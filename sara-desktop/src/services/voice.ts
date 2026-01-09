@@ -29,6 +29,23 @@ class VoiceService {
 
   async initialize(): Promise<boolean> {
     try {
+      console.log('[Voice] Requesting microphone access...')
+
+      // Check if getUserMedia is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error('[Voice] getUserMedia not supported')
+        return false
+      }
+
+      // List available devices for debugging
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const audioInputs = devices.filter(d => d.kind === 'audioinput')
+        console.log('[Voice] Available audio inputs:', audioInputs.map(d => d.label || d.deviceId))
+      } catch (e) {
+        console.warn('[Voice] Could not enumerate devices:', e)
+      }
+
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -36,6 +53,8 @@ class VoiceService {
           autoGainControl: true,
         },
       })
+
+      console.log('[Voice] Got media stream, tracks:', this.stream.getAudioTracks().map(t => t.label))
 
       this.audioContext = new AudioContext()
       const source = this.audioContext.createMediaStreamSource(this.stream)
@@ -47,33 +66,58 @@ class VoiceService {
       return true
     } catch (error) {
       console.error('[Voice] Initialization error:', error)
+      if (error instanceof DOMException) {
+        console.error('[Voice] DOMException name:', error.name, 'message:', error.message)
+      }
       return false
     }
   }
 
   async startRecording(): Promise<void> {
+    console.log('[Voice] startRecording called, stream exists:', !!this.stream)
+
     if (!this.stream) {
       const initialized = await this.initialize()
       if (!initialized) {
+        console.error('[Voice] Failed to initialize, cannot start recording')
         throw new Error('Failed to initialize audio')
       }
     }
 
     this.audioChunks = []
 
-    this.mediaRecorder = new MediaRecorder(this.stream!, {
-      mimeType: 'audio/webm;codecs=opus',
-    })
+    // Check supported mime types
+    const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg']
+    let selectedMime = ''
+    for (const mime of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mime)) {
+        selectedMime = mime
+        break
+      }
+    }
+    console.log('[Voice] Selected mime type:', selectedMime || 'default')
+
+    try {
+      this.mediaRecorder = new MediaRecorder(this.stream!, selectedMime ? { mimeType: selectedMime } : undefined)
+    } catch (e) {
+      console.error('[Voice] MediaRecorder creation failed:', e)
+      throw e
+    }
 
     this.mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         this.audioChunks.push(event.data)
+        console.log('[Voice] Got audio chunk, size:', event.data.size)
       }
+    }
+
+    this.mediaRecorder.onerror = (event) => {
+      console.error('[Voice] MediaRecorder error:', event)
     }
 
     this.mediaRecorder.start(100) // Collect data every 100ms
     this.setState('listening')
-    console.log('[Voice] Recording started')
+    console.log('[Voice] Recording started, state:', this.mediaRecorder.state)
   }
 
   async startContinuousRecording(onComplete: () => void): Promise<void> {
