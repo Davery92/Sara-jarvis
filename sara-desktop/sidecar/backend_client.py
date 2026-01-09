@@ -136,10 +136,8 @@ class BackendClient:
                         self.on_command(data)
 
             elif msg_type == "config":
-                # Update configuration
-                if "screenshot_interval" in data:
-                    self.config.screenshot_interval = data["screenshot_interval"]
-                    logger.info(f"Screenshot interval updated: {data['screenshot_interval']}s")
+                # Configuration from backend - ignore screenshot_interval, use local config
+                logger.debug(f"Received config from backend: {data}")
 
             elif msg_type == "heartbeat_ack":
                 # Heartbeat acknowledged
