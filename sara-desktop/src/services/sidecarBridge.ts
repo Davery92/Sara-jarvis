@@ -17,8 +17,8 @@ export class SidecarBridge {
   private url: string
   private handlers: Map<string, MessageHandler[]> = new Map()
   private reconnectTimeout: number | null = null
-  private reconnectDelay = 1000
-  private maxReconnectDelay = 30000
+  private reconnectDelay = 250
+  private maxReconnectDelay = 5000
   private isConnecting = false
 
   constructor(port: number = 9876) {
@@ -222,10 +222,7 @@ export class SidecarBridge {
 // Singleton instance
 export const sidecarBridge = new SidecarBridge()
 
-// Auto-connect when in Electron environment
+// Auto-connect when in Electron environment - connect immediately
 if (typeof window !== 'undefined') {
-  // Wait a bit for sidecar to start
-  setTimeout(() => {
-    sidecarBridge.connect()
-  }, 2000)
+  sidecarBridge.connect()
 }
