@@ -174,6 +174,7 @@ class SidecarService:
     async def _handle_electron_message(self, data: dict):
         """Handle messages from Electron via the bridge."""
         msg_type = data.get("type")
+        logger.info(f"Received Electron message: {msg_type}")
 
         if msg_type == "get_audio_devices_request":
             # Get list of audio devices and send back

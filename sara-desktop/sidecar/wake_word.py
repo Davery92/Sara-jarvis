@@ -57,23 +57,28 @@ class WakeWordDetector:
 
     def get_audio_devices(self) -> list:
         """Get list of available audio input devices."""
-        import pyaudio
-        pa = pyaudio.PyAudio()
-        devices = []
-
         try:
-            for i in range(pa.get_device_count()):
-                info = pa.get_device_info_by_index(i)
-                if info["maxInputChannels"] > 0:
-                    devices.append({
-                        "index": i,
-                        "name": info["name"],
-                        "is_current": info["name"] == self._current_device_name
-                    })
-        finally:
-            pa.terminate()
+            import pyaudio
+            pa = pyaudio.PyAudio()
+            devices = []
 
-        return devices
+            try:
+                for i in range(pa.get_device_count()):
+                    info = pa.get_device_info_by_index(i)
+                    if info["maxInputChannels"] > 0:
+                        devices.append({
+                            "index": i,
+                            "name": info["name"],
+                            "is_current": info["name"] == self._current_device_name
+                        })
+                logger.info(f"Found {len(devices)} audio input devices")
+            finally:
+                pa.terminate()
+
+            return devices
+        except Exception as e:
+            logger.error(f"Error getting audio devices: {e}")
+            return []
 
     def set_preferred_device(self, device_index: int = None, device_name: str = None):
         """Set preferred audio device. Will restart audio capture."""
