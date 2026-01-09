@@ -70,7 +70,7 @@ class SidecarConfig:
         self.wake_word_threshold: float = float(os.getenv("SARA_WAKE_WORD_THRESHOLD", "0.7"))
 
         # Screenshot
-        self.screenshot_interval: int = int(os.getenv("SARA_SCREENSHOT_INTERVAL", "30"))
+        self.screenshot_interval: int = int(os.getenv("SARA_SCREENSHOT_INTERVAL", "300"))  # 5 minutes
         self.screenshot_enabled: bool = True
 
         # Activity monitoring
