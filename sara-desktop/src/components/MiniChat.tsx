@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { apiClient } from '../services/api'
+import { voiceService } from '../services/voice'
 
 interface Message {
   id: string
@@ -12,16 +13,20 @@ interface MiniChatProps {
   onClose: () => void
   isAuthenticated: boolean
   onNeedAuth: () => void
+  autoStartVoice?: boolean
 }
 
-export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniChatProps) {
+export default function MiniChat({ onClose, isAuthenticated, onNeedAuth, autoStartVoice }: MiniChatProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [activeTool, setActiveTool] = useState<string | null>(null)
   const [toolsUsed, setToolsUsed] = useState<Set<string>>(new Set())
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const voiceStartedRef = useRef(false)
 
   // Check for new timers and show floating windows
   const checkForTimers = useCallback(async () => {
@@ -138,8 +143,92 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
     inputRef.current?.focus()
   }, [])
 
-  const handleSend = useCallback(async () => {
-    if (!input.trim() || isLoading) return
+  // Voice recording functions
+  const startVoiceRecording = useCallback(async () => {
+    if (isRecording || isLoading) return
+
+    console.log('[MiniChat] Starting voice recording...')
+    setIsRecording(true)
+
+    try {
+      await voiceService.startContinuousRecording(async () => {
+        // Called when silence is detected
+        console.log('[MiniChat] Silence detected, stopping recording')
+        await stopVoiceRecording()
+      })
+    } catch (error) {
+      console.error('[MiniChat] Voice recording error:', error)
+      setIsRecording(false)
+    }
+  }, [isRecording, isLoading])
+
+  const stopVoiceRecording = useCallback(async () => {
+    if (!isRecording) return
+
+    console.log('[MiniChat] Stopping voice recording...')
+    setIsRecording(false)
+    setIsTranscribing(true)
+
+    try {
+      const audioBlob = await voiceService.stopRecording()
+      if (audioBlob && audioBlob.size > 0) {
+        console.log('[MiniChat] Transcribing audio...')
+        const transcription = await voiceService.transcribe(audioBlob)
+
+        if (transcription && transcription.trim()) {
+          console.log('[MiniChat] Transcription:', transcription)
+          setInput(transcription)
+          // Auto-send after transcription
+          setIsTranscribing(false)
+          // Need to send manually since setInput is async
+          handleSendWithText(transcription)
+        } else {
+          console.log('[MiniChat] Empty transcription')
+          setIsTranscribing(false)
+        }
+      } else {
+        console.log('[MiniChat] No audio recorded')
+        setIsTranscribing(false)
+      }
+    } catch (error) {
+      console.error('[MiniChat] Transcription error:', error)
+      setIsTranscribing(false)
+    }
+  }, [isRecording])
+
+  // Auto-start voice when opened via wake word
+  useEffect(() => {
+    if (autoStartVoice && isAuthenticated && !voiceStartedRef.current) {
+      voiceStartedRef.current = true
+      console.log('[MiniChat] Auto-starting voice recording (wake word triggered)')
+      // Small delay to ensure component is ready
+      setTimeout(() => {
+        startVoiceRecording()
+      }, 500)
+    }
+  }, [autoStartVoice, isAuthenticated, startVoiceRecording])
+
+  // Listen for start-voice event (when chat is already open and wake word detected)
+  useEffect(() => {
+    if (window.electronAPI?.onStartVoice) {
+      window.electronAPI.onStartVoice(() => {
+        console.log('[MiniChat] Received start-voice event from main process')
+        if (isAuthenticated && !isRecording && !isTranscribing) {
+          startVoiceRecording()
+        }
+      })
+    }
+  }, [isAuthenticated, isRecording, isTranscribing, startVoiceRecording])
+
+  // Cleanup voice on unmount
+  useEffect(() => {
+    return () => {
+      voiceService.cleanup()
+    }
+  }, [])
+
+  const handleSendWithText = useCallback(async (text: string) => {
+    if (!text.trim() || isLoading) return
 
     if (!isAuthenticated) {
       onNeedAuth()
@@ -149,11 +238,11 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input.trim(),
+      content: text.trim(),
       timestamp: new Date(),
     }
 
-    const userQuery = input.trim()
+    const userQuery = text.trim()
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setIsLoading(true)
@@ -224,7 +313,12 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       })
       setIsLoading(false)
     }
-  }, [input, isLoading, isAuthenticated, onNeedAuth])
+  }, [isLoading, isAuthenticated, onNeedAuth, checkForTimers, tryShowNote])
+
+  // Wrapper for text input send
+  const handleSend = useCallback(() => {
+    handleSendWithText(input)
+  }, [input, handleSendWithText])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -232,6 +326,15 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       handleSend()
     }
   }
+
+  // Toggle voice recording
+  const toggleVoice = useCallback(() => {
+    if (isRecording) {
+      stopVoiceRecording()
+    } else {
+      startVoiceRecording()
+    }
+  }, [isRecording, startVoiceRecording, stopVoiceRecording])
 
   return (
     <div className="no-drag w-full h-screen bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl flex flex-col overflow-hidden">
@@ -309,8 +412,39 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
           >
             Log in to chat with Sara
           </button>
+        ) : isRecording ? (
+          <div className="flex items-center justify-center gap-3 py-2">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+              <span className="text-white text-sm">Listening...</span>
+            </div>
+            <button
+              onClick={toggleVoice}
+              className="bg-red-600 hover:bg-red-500 text-white rounded-xl px-4 py-2 transition-colors"
+            >
+              Stop
+            </button>
+          </div>
+        ) : isTranscribing ? (
+          <div className="flex items-center justify-center gap-2 py-2">
+            <svg className="w-5 h-5 animate-spin text-indigo-400" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            <span className="text-gray-400 text-sm">Processing speech...</span>
+          </div>
         ) : (
           <div className="flex gap-2">
+            <button
+              onClick={toggleVoice}
+              disabled={isLoading}
+              className="bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded-xl px-3 py-2 transition-colors border border-gray-700"
+              title="Voice input"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+              </svg>
+            </button>
             <input
               ref={inputRef}
               type="text"

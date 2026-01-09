@@ -24,8 +24,9 @@ declare global {
       setAuthToken: (token: string | null) => Promise<void>
       activityDetected: () => void
       onVisibilityChanged: (callback: (visible: boolean) => void) => void
-      showChat: () => void
+      showChat: (options?: { voice?: boolean }) => void
       hideChat: () => void
+      onStartVoice: (callback: () => void) => void
       showNote: (noteData: NoteData) => void
       closeNote: () => void
       showTimer: (timerData: TimerData) => void

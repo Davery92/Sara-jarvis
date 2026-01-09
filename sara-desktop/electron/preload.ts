@@ -27,8 +27,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Chat window controls
-  showChat: () => ipcRenderer.send('show-chat'),
+  showChat: (options?: { voice?: boolean }) => ipcRenderer.send('show-chat', options),
   hideChat: () => ipcRenderer.send('hide-chat'),
+  onStartVoice: (callback: () => void) => {
+    ipcRenderer.on('start-voice', () => callback())
+  },
 
   // Note window controls
   showNote: (noteData: { id: string; title: string; content: string }) =>

@@ -96,84 +96,141 @@ class WakeWordDetector:
         if self._audio_thread:
             self._audio_thread.join(timeout=2.0)
 
+    def _get_audio_devices(self, pyaudio_instance):
+        """Get sorted list of audio devices by priority."""
+        # Priority order matters - first match in priority list wins
+        priority_keywords = ["airpod", "bluetooth"]  # Highest priority (matches airpod, airpods)
+        acceptable_keywords = ["built-in", "macbook", "internal", "default"]
+        avoid_keywords = ["iphone", "hdmi", "display"]
+
+        # Log all available input devices for debugging
+        logger.info("Available audio input devices:")
+        for i in range(pyaudio_instance.get_device_count()):
+            info = pyaudio_instance.get_device_info_by_index(i)
+            if info["maxInputChannels"] > 0:
+                logger.info(f"  [{i}] {info['name']}")
+
+        # Collect all valid devices with their priority
+        devices = []
+        for i in range(pyaudio_instance.get_device_count()):
+            info = pyaudio_instance.get_device_info_by_index(i)
+            if info["maxInputChannels"] > 0:
+                name_lower = info["name"].lower()
+
+                # Skip devices we want to avoid
+                if any(avoid in name_lower for avoid in avoid_keywords):
+                    logger.debug(f"Skipping audio device: {info['name']}")
+                    continue
+
+                # Determine priority (lower = better)
+                priority = 100  # Default low priority
+                for idx, keyword in enumerate(priority_keywords):
+                    if keyword in name_lower:
+                        priority = idx
+                        break
+                else:
+                    for idx, keyword in enumerate(acceptable_keywords):
+                        if keyword in name_lower:
+                            priority = 10 + idx
+                            break
+
+                devices.append((priority, i, info["name"]))
+
+        # Sort by priority
+        devices.sort(key=lambda x: x[0])
+        return devices
+
+    def _open_audio_stream(self, pyaudio_instance, device_index):
+        """Open audio stream with given device."""
+        import pyaudio
+        return pyaudio_instance.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=SAMPLE_RATE,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=CHUNK_SIZE
+        )
+
     def _audio_capture_loop(self):
-        """Capture audio in a separate thread."""
+        """Capture audio in a separate thread with device fallback."""
         try:
             import pyaudio
+            import time
 
             self._pyaudio = pyaudio.PyAudio()
-
-            # Find best input device - prefer AirPods/external, then built-in
-            # Priority order matters - first match in priority list wins
-            priority_keywords = ["airpod", "bluetooth"]  # Highest priority (matches airpod, airpods)
-            acceptable_keywords = ["built-in", "macbook", "internal", "default"]
-            avoid_keywords = ["iphone", "hdmi", "display"]
-
-            # Log all available input devices for debugging
-            logger.info("Available audio input devices:")
-            for i in range(self._pyaudio.get_device_count()):
-                info = self._pyaudio.get_device_info_by_index(i)
-                if info["maxInputChannels"] > 0:
-                    logger.info(f"  [{i}] {info['name']}")
-
-            # Collect all valid devices with their priority
-            devices = []
-            for i in range(self._pyaudio.get_device_count()):
-                info = self._pyaudio.get_device_info_by_index(i)
-                if info["maxInputChannels"] > 0:
-                    name_lower = info["name"].lower()
-
-                    # Skip devices we want to avoid
-                    if any(avoid in name_lower for avoid in avoid_keywords):
-                        logger.debug(f"Skipping audio device: {info['name']}")
-                        continue
-
-                    # Determine priority (lower = better)
-                    priority = 100  # Default low priority
-                    for idx, keyword in enumerate(priority_keywords):
-                        if keyword in name_lower:
-                            priority = idx
-                            break
-                    else:
-                        for idx, keyword in enumerate(acceptable_keywords):
-                            if keyword in name_lower:
-                                priority = 10 + idx
-                                break
-
-                    devices.append((priority, i, info["name"]))
-
-            # Sort by priority and pick best
-            if devices:
-                devices.sort(key=lambda x: x[0])
-                device_index = devices[0][1]
-                logger.info(f"Using audio device: {devices[0][2]} (priority {devices[0][0]})")
-            else:
-                device_index = None
-
-            if device_index is None:
-                logger.error("No audio input device found")
-                return
-
-            self._stream = self._pyaudio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=SAMPLE_RATE,
-                input=True,
-                input_device_index=device_index,
-                frames_per_buffer=CHUNK_SIZE
-            )
-
-            logger.info("Audio stream opened, listening for wake word...")
+            current_device_name = None
+            consecutive_errors = 0
+            max_consecutive_errors = 5
 
             while self._running:
-                try:
-                    audio_data = self._stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                    # Convert to numpy array
-                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                    self._audio_queue.put(audio_array)
-                except Exception as e:
-                    if self._running:
-                        logger.error(f"Audio capture error: {e}")
+                # Get available devices (re-scan each time to detect new/removed devices)
+                devices = self._get_audio_devices(self._pyaudio)
+
+                if not devices:
+                    logger.error("No audio input device found, waiting...")
+                    time.sleep(2)
+                    # Re-initialize PyAudio to detect new devices
+                    self._pyaudio.terminate()
+                    self._pyaudio = pyaudio.PyAudio()
+                    continue
+
+                # Try to open best available device
+                stream_opened = False
+                for priority, device_index, device_name in devices:
+                    try:
+                        if self._stream:
+                            try:
+                                self._stream.stop_stream()
+                                self._stream.close()
+                            except Exception:
+                                pass
+                            self._stream = None
+
+                        self._stream = self._open_audio_stream(self._pyaudio, device_index)
+                        current_device_name = device_name
+                        logger.info(f"Using audio device: {device_name} (priority {priority})")
+                        stream_opened = True
+                        consecutive_errors = 0
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to open device {device_name}: {e}")
+                        continue
+
+                if not stream_opened:
+                    logger.error("Failed to open any audio device, waiting...")
+                    time.sleep(2)
+                    continue
+
+                logger.info("Audio stream opened, listening for wake word...")
+
+                # Read audio until error or stopped
+                while self._running:
+                    try:
+                        audio_data = self._stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                        # Convert to numpy array
+                        audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                        self._audio_queue.put(audio_array)
+                        consecutive_errors = 0
+                    except Exception as e:
+                        if self._running:
+                            consecutive_errors += 1
+                            logger.error(f"Audio capture error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+
+                            if consecutive_errors >= max_consecutive_errors:
+                                logger.warning(f"Device {current_device_name} may have disconnected, switching...")
+                                # Re-initialize PyAudio to detect device changes
+                                try:
+                                    self._stream.stop_stream()
+                                    self._stream.close()
+                                except Exception:
+                                    pass
+                                self._stream = None
+                                self._pyaudio.terminate()
+                                self._pyaudio = pyaudio.PyAudio()
+                                break  # Break inner loop to re-select device
+
+                            time.sleep(0.1)
 
         except Exception as e:
             logger.exception(f"Audio thread error: {e}")

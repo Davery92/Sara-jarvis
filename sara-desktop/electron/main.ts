@@ -146,10 +146,14 @@ function createWindow() {
   })
 }
 
-function createChatWindow() {
+function createChatWindow(voiceMode: boolean = false) {
   if (chatWindow) {
     chatWindow.show()
     chatWindow.focus()
+    // If voice mode requested on existing window, send event to start voice
+    if (voiceMode) {
+      chatWindow.webContents.send('start-voice')
+    }
     return
   }
 
@@ -176,11 +180,14 @@ function createChatWindow() {
 
   chatWindow.setMenu(null)
 
-  // Load the chat view
+  // Load the chat view with optional voice parameter
+  const voiceParam = voiceMode ? '&voice=true' : ''
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    chatWindow.loadURL('http://localhost:5173?view=chat')
+    chatWindow.loadURL(`http://localhost:5173?view=chat${voiceParam}`)
   } else {
-    chatWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { view: 'chat' } })
+    const query: Record<string, string> = { view: 'chat' }
+    if (voiceMode) query.voice = 'true'
+    chatWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query })
   }
 
   // Open DevTools for debugging
@@ -232,8 +239,8 @@ function repositionChatWindow() {
   }
 }
 
-function showChatWindow() {
-  createChatWindow()
+function showChatWindow(voiceMode: boolean = false) {
+  createChatWindow(voiceMode)
 }
 
 function hideChatWindow() {
@@ -543,8 +550,8 @@ ipcMain.on('activity-detected', () => {
 })
 
 // Chat window controls
-ipcMain.on('show-chat', () => {
-  showChatWindow()
+ipcMain.on('show-chat', (_, options?: { voice?: boolean }) => {
+  showChatWindow(options?.voice)
 })
 
 ipcMain.on('hide-chat', () => {

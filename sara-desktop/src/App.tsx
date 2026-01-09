@@ -21,6 +21,12 @@ function getViewType(): ViewType {
   return 'circle'
 }
 
+// Check if voice should auto-start (wake word triggered)
+function shouldAutoStartVoice(): boolean {
+  const params = new URLSearchParams(window.location.search)
+  return params.get('voice') === 'true'
+}
+
 function App() {
   const viewType = getViewType()
   const [mode, setMode] = useState<Mode>('wakeWord')
@@ -64,8 +70,8 @@ function App() {
       // Connect to sidecar and listen for wake word
       sidecarBridge.on('wake_word_detected', () => {
         console.log('[App] Wake word detected!')
-        // Open chat window when wake word is heard
-        window.electronAPI?.showChat()
+        // Open chat window with voice mode when wake word is heard
+        window.electronAPI?.showChat({ voice: true })
         setChatOpen(true)
         setVoiceState('listening')
       })
@@ -136,12 +142,14 @@ function App() {
 
   if (viewType === 'chat') {
     // Chat window - just render the chat (fully interactive, no drag)
+    const autoStartVoice = shouldAutoStartVoice()
     return (
       <div className="chat-window w-full h-full">
         <MiniChat
           onClose={handleChatClose}
           isAuthenticated={isAuthenticated}
           onNeedAuth={() => setShowSettings(true)}
+          autoStartVoice={autoStartVoice}
         />
         {showSettings && (
           <SettingsModal
