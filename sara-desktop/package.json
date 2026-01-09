@@ -63,8 +63,11 @@
       "allowToChangeInstallationDirectory": true
     }
   },
-  "dependencies": {},
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
   "devDependencies": {
+    "@types/ws": "^8.5.10",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import WebSocket from 'ws'
 import { sidecarManager } from './sidecar'
 
 // Simple file-based settings store (zero dependencies)
@@ -79,6 +80,73 @@ const TIMER_WIDTH = 200
 const TIMER_HEIGHT = 80
 const SETTINGS_WIDTH = 400
 const SETTINGS_HEIGHT = 500
+
+// Sidecar WebSocket connection for main process
+let sidecarWs: WebSocket | null = null
+let audioDevices: Array<{ index: number; name: string; is_current: boolean }> = []
+let currentAudioDevice: string | null = null
+
+function connectToSidecar() {
+  if (sidecarWs?.readyState === WebSocket.OPEN) return
+
+  try {
+    sidecarWs = new WebSocket('ws://127.0.0.1:9876')
+
+    sidecarWs.on('open', () => {
+      console.log('[Main] Connected to sidecar')
+      // Request audio devices
+      sidecarWs?.send(JSON.stringify({ type: 'get_audio_devices' }))
+    })
+
+    sidecarWs.on('message', (data: WebSocket.RawData) => {
+      try {
+        const msg = JSON.parse(data.toString())
+        if (msg.type === 'audio_devices') {
+          audioDevices = msg.devices || []
+          currentAudioDevice = msg.current_device
+          console.log('[Main] Got audio devices:', audioDevices.length)
+          rebuildTrayMenu()
+        } else if (msg.type === 'audio_device_changed') {
+          currentAudioDevice = msg.device_name
+          // Refresh device list
+          sidecarWs?.send(JSON.stringify({ type: 'get_audio_devices' }))
+        }
+      } catch (e) {
+        console.error('[Main] Failed to parse sidecar message:', e)
+      }
+    })
+
+    sidecarWs.on('close', () => {
+      console.log('[Main] Sidecar connection closed')
+      sidecarWs = null
+      // Retry connection
+      setTimeout(connectToSidecar, 5000)
+    })
+
+    sidecarWs.on('error', (err: Error) => {
+      console.error('[Main] Sidecar connection error:', err.message)
+    })
+  } catch (e) {
+    console.error('[Main] Failed to connect to sidecar:', e)
+    setTimeout(connectToSidecar, 5000)
+  }
+}
+
+function setAudioDevice(deviceIndex: number, deviceName: string) {
+  if (sidecarWs?.readyState === WebSocket.OPEN) {
+    sidecarWs.send(JSON.stringify({
+      type: 'set_audio_device',
+      device_index: deviceIndex,
+      device_name: deviceName
+    }))
+  }
+}
+
+function refreshAudioDevices() {
+  if (sidecarWs?.readyState === WebSocket.OPEN) {
+    sidecarWs.send(JSON.stringify({ type: 'get_audio_devices' }))
+  }
+}
 
 function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
@@ -404,14 +472,30 @@ function createSettingsWindow() {
   })
 }
 
-function createTray() {
-  try {
-    const iconPath = path.join(__dirname, '../assets/icons/tray.png')
-    const trayIcon = nativeImage.createFromPath(iconPath)
-    tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon)
-  } catch {
-    tray = new Tray(nativeImage.createEmpty())
-  }
+function rebuildTrayMenu() {
+  if (!tray) return
+
+  // Build microphone submenu from audio devices
+  const micSubmenu: Electron.MenuItemConstructorOptions[] = audioDevices.length > 0
+    ? audioDevices.map((device) => ({
+        label: device.name,
+        type: 'radio' as const,
+        checked: device.name === currentAudioDevice,
+        click: () => {
+          console.log('[Main] Switching to audio device:', device.name)
+          setAudioDevice(device.index, device.name)
+        },
+      }))
+    : [{ label: 'No devices found', enabled: false }]
+
+  // Add refresh option
+  micSubmenu.push({ type: 'separator' })
+  micSubmenu.push({
+    label: 'Refresh Devices',
+    click: () => {
+      refreshAudioDevices()
+    },
+  })
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -459,6 +543,10 @@ function createTray() {
         },
       ],
     },
+    {
+      label: 'Microphone',
+      submenu: micSubmenu,
+    },
     { type: 'separator' },
     {
       label: 'Settings',
@@ -476,8 +564,20 @@ function createTray() {
     },
   ])
 
-  tray.setToolTip('Sara - Your AI Assistant')
   tray.setContextMenu(contextMenu)
+}
+
+function createTray() {
+  try {
+    const iconPath = path.join(__dirname, '../assets/icons/tray.png')
+    const trayIcon = nativeImage.createFromPath(iconPath)
+    tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon)
+  } catch {
+    tray = new Tray(nativeImage.createEmpty())
+  }
+
+  tray.setToolTip('Sara - Your AI Assistant')
+  rebuildTrayMenu()
 
   tray.on('click', () => {
     if (mainWindow?.isVisible()) {
@@ -611,6 +711,12 @@ app.whenReady().then(async () => {
     }
     await sidecarManager.start()
     console.log('[Main] Sidecar started')
+
+    // Connect to sidecar WebSocket for audio device management
+    // Give sidecar a moment to start its WebSocket server
+    setTimeout(() => {
+      connectToSidecar()
+    }, 3000)
   } catch (error) {
     console.error('[Main] Failed to start sidecar:', error)
   }

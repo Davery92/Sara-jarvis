@@ -49,6 +49,43 @@ class WakeWordDetector:
         self._last_detection = 0
         self._cooldown_seconds = 2.0
 
+        # Manual device selection
+        self._preferred_device_index: Optional[int] = None
+        self._preferred_device_name: Optional[str] = None
+        self._current_device_name: Optional[str] = None
+        self._restart_requested = False
+
+    def get_audio_devices(self) -> list:
+        """Get list of available audio input devices."""
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        devices = []
+
+        try:
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if info["maxInputChannels"] > 0:
+                    devices.append({
+                        "index": i,
+                        "name": info["name"],
+                        "is_current": info["name"] == self._current_device_name
+                    })
+        finally:
+            pa.terminate()
+
+        return devices
+
+    def set_preferred_device(self, device_index: int = None, device_name: str = None):
+        """Set preferred audio device. Will restart audio capture."""
+        logger.info(f"Setting preferred device: index={device_index}, name={device_name}")
+        self._preferred_device_index = device_index
+        self._preferred_device_name = device_name
+        self._restart_requested = True
+
+    def get_current_device(self) -> Optional[str]:
+        """Get the currently active device name."""
+        return self._current_device_name
+
     async def start(self):
         """Start wake word detection."""
         logger.info("Starting wake word detection...")
@@ -159,11 +196,24 @@ class WakeWordDetector:
             import time
 
             self._pyaudio = pyaudio.PyAudio()
-            current_device_name = None
             consecutive_errors = 0
             max_consecutive_errors = 5
 
             while self._running:
+                # Check for restart request (device change)
+                if self._restart_requested:
+                    self._restart_requested = False
+                    if self._stream:
+                        try:
+                            self._stream.stop_stream()
+                            self._stream.close()
+                        except Exception:
+                            pass
+                        self._stream = None
+                    # Re-initialize PyAudio
+                    self._pyaudio.terminate()
+                    self._pyaudio = pyaudio.PyAudio()
+
                 # Get available devices (re-scan each time to detect new/removed devices)
                 devices = self._get_audio_devices(self._pyaudio)
 
@@ -175,9 +225,25 @@ class WakeWordDetector:
                     self._pyaudio = pyaudio.PyAudio()
                     continue
 
-                # Try to open best available device
+                # If preferred device is set, try it first
+                target_device = None
+                if self._preferred_device_index is not None or self._preferred_device_name:
+                    for priority, device_index, device_name in devices:
+                        if self._preferred_device_index is not None and device_index == self._preferred_device_index:
+                            target_device = (priority, device_index, device_name)
+                            break
+                        if self._preferred_device_name and self._preferred_device_name.lower() in device_name.lower():
+                            target_device = (priority, device_index, device_name)
+                            break
+
+                # Try to open target device or fall back to priority list
                 stream_opened = False
-                for priority, device_index, device_name in devices:
+                devices_to_try = [target_device] + devices if target_device else devices
+
+                for item in devices_to_try:
+                    if item is None:
+                        continue
+                    priority, device_index, device_name = item
                     try:
                         if self._stream:
                             try:
@@ -188,7 +254,7 @@ class WakeWordDetector:
                             self._stream = None
 
                         self._stream = self._open_audio_stream(self._pyaudio, device_index)
-                        current_device_name = device_name
+                        self._current_device_name = device_name
                         logger.info(f"Using audio device: {device_name} (priority {priority})")
                         stream_opened = True
                         consecutive_errors = 0
@@ -204,8 +270,8 @@ class WakeWordDetector:
 
                 logger.info("Audio stream opened, listening for wake word...")
 
-                # Read audio until error or stopped
-                while self._running:
+                # Read audio until error, stopped, or restart requested
+                while self._running and not self._restart_requested:
                     try:
                         audio_data = self._stream.read(CHUNK_SIZE, exception_on_overflow=False)
                         # Convert to numpy array

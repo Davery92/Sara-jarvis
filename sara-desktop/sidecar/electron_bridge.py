@@ -136,6 +136,25 @@ class ElectronBridge:
                 # Health check
                 await websocket.send(json.dumps({"type": "pong"}))
 
+            elif msg_type == "get_audio_devices":
+                # Request list of audio input devices
+                if self.on_message:
+                    await self._call_handler({
+                        "type": "get_audio_devices_request",
+                        "websocket": websocket
+                    })
+
+            elif msg_type == "set_audio_device":
+                # Set preferred audio device
+                device_index = data.get("device_index")
+                device_name = data.get("device_name")
+                if self.on_message:
+                    await self._call_handler({
+                        "type": "set_audio_device_request",
+                        "device_index": device_index,
+                        "device_name": device_name
+                    })
+
             else:
                 # Forward unknown messages to handler
                 if self.on_message:
@@ -219,6 +238,17 @@ class ElectronBridge:
             "type": "speak",
             "text": text
         })
+
+    async def send_audio_devices(self, websocket, devices: list, current_device: str = None):
+        """Send audio devices list to a specific client."""
+        try:
+            await websocket.send(json.dumps({
+                "type": "audio_devices",
+                "devices": devices,
+                "current_device": current_device
+            }))
+        except Exception as e:
+            logger.error(f"Failed to send audio devices: {e}")
 
     @property
     def client_count(self) -> int:

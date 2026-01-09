@@ -65,7 +65,8 @@ class SidecarService:
             # Create instances
             self._electron_bridge = ElectronBridge(
                 host=config.electron_ws_host,
-                port=config.electron_ws_port
+                port=config.electron_ws_port,
+                on_message=self._handle_electron_message
             )
 
             self._backend_client = BackendClient(
@@ -169,6 +170,48 @@ class SidecarService:
                 "type": "activity_update",
                 "activity": activity
             })
+
+    async def _handle_electron_message(self, data: dict):
+        """Handle messages from Electron via the bridge."""
+        msg_type = data.get("type")
+
+        if msg_type == "get_audio_devices_request":
+            # Get list of audio devices and send back
+            websocket = data.get("websocket")
+            if self._wake_word and websocket:
+                devices = self._wake_word.get_audio_devices()
+                current = self._wake_word.get_current_device()
+                await self._electron_bridge.send_audio_devices(websocket, devices, current)
+
+        elif msg_type == "set_audio_device_request":
+            # Set preferred audio device
+            device_index = data.get("device_index")
+            device_name = data.get("device_name")
+            if self._wake_word:
+                self._wake_word.set_preferred_device(device_index, device_name)
+                # Notify Electron of the change
+                await self._electron_bridge.send_message({
+                    "type": "audio_device_changed",
+                    "device_index": device_index,
+                    "device_name": device_name
+                })
+
+        elif msg_type == "auth_token_update":
+            # Update auth token
+            token = data.get("token")
+            if token:
+                config.auth_token = token
+                config.save_settings()
+                if self._backend_client:
+                    self._backend_client.config.auth_token = token
+
+        elif msg_type == "screenshot_request":
+            # Take screenshot on demand
+            if self._screenshot_service:
+                await self._screenshot_service.capture_and_upload(
+                    analyze=data.get("analyze", False),
+                    analyze_prompt=data.get("analyze_prompt")
+                )
 
     async def _handle_command(self, command: dict):
         """Handle a command received from backend."""
