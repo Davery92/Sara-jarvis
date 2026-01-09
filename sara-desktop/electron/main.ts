@@ -87,9 +87,11 @@ let audioDevices: Array<{ index: number; name: string; is_current: boolean }> = 
 let currentAudioDevice: string | null = null
 
 function connectToSidecar() {
+  console.log('[Main] connectToSidecar called, current state:', sidecarWs?.readyState)
   if (sidecarWs?.readyState === WebSocket.OPEN) return
 
   try {
+    console.log('[Main] Creating WebSocket connection to sidecar...')
     sidecarWs = new WebSocket('ws://127.0.0.1:9876')
 
     sidecarWs.on('open', () => {
@@ -717,7 +719,9 @@ app.whenReady().then(async () => {
 
     // Connect to sidecar WebSocket for audio device management
     // Give sidecar a moment to start its WebSocket server
+    console.log('[Main] Scheduling sidecar WebSocket connection in 3 seconds...')
     setTimeout(() => {
+      console.log('[Main] Timer fired, connecting to sidecar...')
       connectToSidecar()
     }, 3000)
   } catch (error) {
