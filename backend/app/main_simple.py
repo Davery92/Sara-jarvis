@@ -132,10 +132,13 @@ CORS_ORIGINS = _parsed_env_origins or [
     "http://sara.avery.cloud",
     "http://localhost:3000",
     "http://localhost:3001",
+    "http://localhost:3002",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
     "http://10.185.1.180:3000",
     "http://10.185.1.180:3001",
+    "http://10.185.1.180:3002",
     "http://10.185.1.188:3000",
     "http://10.185.1.180",
     "http://10.185.1.188",
@@ -186,6 +189,16 @@ ALLOWED_MIME_TYPES = [
     "text/markdown",
     "text/csv"
 ]
+
+# Startup health tracking - monitors critical service status
+STARTUP_HEALTH = {
+    "database": {"status": "unknown", "message": None},
+    "embedding_service": {"status": "unknown", "message": None, "dimension": None},
+    "llm_service": {"status": "unknown", "message": None},
+    "neo4j": {"status": "unknown", "message": None},
+    "startup_time": None,
+    "critical_failures": []
+}
 
 # Database setup
 if DATABASE_URL.startswith("sqlite"):
@@ -1429,7 +1442,8 @@ class SimpleLLMClient:
                         func = tc.get("function", {})
                         try:
                             args = json.loads(func.get("arguments", "{}"))
-                        except:
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.debug(f"Failed to parse function arguments: {e}")
                             args = {}
                         content_blocks.append({
                             "type": "tool_use",
@@ -1907,8 +1921,8 @@ class SimpleLLMClient:
                 try:
                     error_body = e.response.read()
                     logger.error(f"Error response body: {error_body}")
-                except:
-                    pass
+                except Exception as read_err:
+                    logger.debug(f"Could not read error response body: {read_err}")
 
             # Don't retry on rate limit errors - fail fast
             if "429" in str(e) or "Too Many Requests" in str(e):
@@ -2344,8 +2358,8 @@ class SimpleLLMClient:
                             tool_call["function"]["arguments"] = first_obj
                             logger.info(f"✅ Fixed malformed JSON by extracting first object: {first_obj}")
                             fixed = True
-                    except:
-                        pass
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(f"JSON fix attempt (first object) failed: {e}")
 
                 # Pattern 2: Trailing garbage after valid JSON
                 if not fixed:
@@ -2360,8 +2374,8 @@ class SimpleLLMClient:
                             tool_call["function"]["arguments"] = fixed_json
                             logger.info(f"✅ Fixed malformed JSON with regex extraction: {fixed_json}")
                             fixed = True
-                    except:
-                        pass
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(f"JSON fix attempt (regex extraction) failed: {e}")
 
                 if not fixed:
                     logger.error(f"❌ Could not fix malformed arguments for {function_name}")
@@ -3167,14 +3181,15 @@ class SimpleLLMClient:
                 try:
                     emotional_data = json.loads(episode['emotional_tone']) if episode['emotional_tone'] else {}
                     topics_data = json.loads(episode['topics']) if episode['topics'] else []
-                except:
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"Failed to parse episode metadata: {e}")
                     emotional_data = {}
                     topics_data = []
                 
                 # Format timestamp
                 try:
                     time_str = episode['created_at'].strftime('%Y-%m-%d %H:%M')
-                except:
+                except (AttributeError, TypeError):
                     time_str = "Recent"
                 
                 # Create rich context header
@@ -5239,7 +5254,8 @@ class DreamingService:
                         emotion_data = json.loads(episode.emotional_tone)
                         emotions.append(emotion_data.get("primary_emotion", "neutral"))
                         content_samples.append(episode.content[:100])
-                    except:
+                    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                        logger.debug(f"Failed to parse episode emotions: {e}")
                         continue
             
             if len(emotions) < 3:
@@ -5290,7 +5306,8 @@ Generate a 2-3 sentence insight about this emotional pattern and what it might i
                         if isinstance(topics_data, list):
                             all_topics.extend(topics_data)
                         content_samples.append(episode.content[:100])
-                    except:
+                    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                        logger.debug(f"Failed to parse episode topics: {e}")
                         continue
             
             if len(all_topics) < 3:
@@ -5375,15 +5392,16 @@ Generate a 2-3 sentence insight about this focus area and potential implications
                 topics = json.loads(episode.topics)
                 if not topics:
                     continue
-                    
+
                 # Use primary topic as cluster key
                 primary_topic = topics[0] if isinstance(topics, list) else str(topics)
-                
+
                 if primary_topic not in clusters:
                     clusters[primary_topic] = []
                 clusters[primary_topic].append(episode)
-                
-            except:
+
+            except (json.JSONDecodeError, TypeError, IndexError) as e:
+                logger.debug(f"Failed to parse episode topics for clustering: {e}")
                 continue
         
         return clusters
@@ -5402,8 +5420,8 @@ Generate a 2-3 sentence insight about this focus area and potential implications
                         ep_topics = json.loads(episode.topics)
                         if isinstance(ep_topics, list):
                             topics.update(ep_topics)
-                    except:
-                        pass
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Failed to parse episode topics: {e}")
                 sample_content.append(episode.content[:80])
                 date_range.append(episode.created_at)
             
@@ -6436,8 +6454,8 @@ async def get_subconscious_state(db: Session = Depends(get_db), current_user: di
                 if state.get(field) and isinstance(state[field], str):
                     try:
                         state[field] = json.loads(state[field])
-                    except:
-                        pass
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Failed to parse JSON field {field}: {e}")
             # Format timestamps
             for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
                 if state.get(field):
@@ -6673,7 +6691,8 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for pi-dashboard/state: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated. Use device token or login.")
 
     # Get subconscious state
@@ -6689,8 +6708,8 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
             if state.get(field) and isinstance(state[field], str):
                 try:
                     state[field] = json.loads(state[field])
-                except:
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"Failed to parse JSON field {field}: {e}")
         for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
             if state.get(field):
                 state[field] = state[field].isoformat() if hasattr(state[field], 'isoformat') else str(state[field])
@@ -6824,7 +6843,8 @@ async def pi_dashboard_acknowledge_nudge(nudge_id: str, request: Request, db: Se
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
@@ -6914,7 +6934,8 @@ async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = Fi
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for voice/transcribe: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
@@ -6954,8 +6975,8 @@ async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = Fi
         # Clean up temp file
         try:
             os.remove(temp_audio_path)
-        except:
-            pass
+        except OSError as e:
+            logger.debug(f"Failed to remove temp audio file: {e}")
 
         if response.status_code == 200:
             result = response.json()
@@ -6996,7 +7017,8 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for voice/chat: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
@@ -7025,12 +7047,13 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                 # Create system prompt
                 system_prompt = get_system_prompt(ASSISTANT_NAME, user.email)
 
-                # Intent classification for lazy context
+                # Intent classification for lazy context (with conversation context)
                 tool_classifier = get_tool_intent_classifier()
                 context_router = get_context_router()
-                user_intent = tool_classifier.classify(message)
+                # Use conversation-aware classification
+                user_intent, tool_categories = tool_classifier.classify_with_context(message, conversation_id)
                 context_decision = context_router.decide(intent=user_intent, message=message, turn_count=1)
-                logger.info(f"[Pi Dashboard Voice] Intent={user_intent}, {context_decision.reason}")
+                logger.info(f"[Pi Dashboard Voice] Intent={user_intent}, tools={tool_categories}, {context_decision.reason}")
 
                 # Lazy memory retrieval
                 if context_decision.inject_memory:
@@ -7049,8 +7072,7 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                     except Exception as e:
                         logger.warning(f"[Pi Dashboard Voice] Memory retrieval failed: {e}")
 
-                # Get tools based on intent
-                tool_categories = tool_classifier.get_tool_categories(user_intent)
+                # Get tools based on intent (already determined by classify_with_context)
                 tools = []
                 if tool_categories:
                     tools = tool_registry.get_tools_by_categories(tool_categories)
@@ -7137,7 +7159,8 @@ async def pi_dashboard_voice_speak(request: Request, db: Session = Depends(get_d
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for voice/speak: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
@@ -7228,7 +7251,8 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for pi-dashboard/fast: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
@@ -7240,10 +7264,11 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
 
         logger.info(f"[Pi Dashboard Fast] Request from user {user_id}: {message[:50]}...")
 
-        # Classify intent
+        # Classify intent with context awareness
         tool_classifier = get_tool_intent_classifier()
-        intent = tool_classifier.classify(message)
-        logger.info(f"[Pi Dashboard Fast] Classified intent: {intent}")
+        conversation_id = body.get("conversation_id", f"pi-fast-{user_id}")
+        intent, tool_categories = tool_classifier.classify_with_context(message, conversation_id)
+        logger.info(f"[Pi Dashboard Fast] Classified intent: {intent}, tools: {tool_categories}")
 
         # Only handle HOME, TIME, FITNESS intents with fast worker
         FAST_WORKER_INTENTS = ['HOME', 'TIME', 'FITNESS']
@@ -7251,8 +7276,7 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
             logger.info(f"[Pi Dashboard Fast] Intent {intent} not handled by fast worker")
             return {"handled": False, "reason": f"Intent '{intent}' requires full Sara"}
 
-        # Get tools for this intent
-        tool_categories = tool_classifier.get_tool_categories(intent)
+        # Get tools for this intent (already determined by classify_with_context)
         tools = tool_registry.get_tools_by_categories(tool_categories)
         logger.info(f"[Pi Dashboard Fast] Loaded {len(tools)} tools for {intent}: {tool_categories}")
 
@@ -7304,7 +7328,8 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
                     tool_name = func.get("name")
                     try:
                         tool_args = json.loads(func.get("arguments", "{}"))
-                    except:
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Failed to parse tool arguments for {tool_name}: {e}")
                         tool_args = {}
 
                     # Execute the tool
@@ -8101,78 +8126,144 @@ def load_settings_from_db():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize services on application startup"""
-    try:
-        # Load persisted settings FIRST before initializing services
-        load_settings_from_db()
+    """Initialize services on application startup with health validation"""
+    import asyncio
+    from datetime import datetime
 
-        # Start LLM failover client with health checks
+    STARTUP_HEALTH["startup_time"] = datetime.utcnow().isoformat()
+    STARTUP_HEALTH["critical_failures"] = []
+
+    # 1. CRITICAL: Validate database connection
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        STARTUP_HEALTH["database"]["status"] = "healthy"
+        logger.info("✅ Database connection verified")
+    except Exception as db_err:
+        STARTUP_HEALTH["database"]["status"] = "failed"
+        STARTUP_HEALTH["database"]["message"] = str(db_err)
+        STARTUP_HEALTH["critical_failures"].append("database")
+        logger.error(f"🚨 CRITICAL: Database connection failed! Error: {db_err}")
+        # Don't continue if database is unavailable - nothing will work
+        raise RuntimeError(f"Database connection failed: {db_err}")
+
+    # 2. Load persisted settings (non-critical but important)
+    try:
+        load_settings_from_db()
+    except Exception as settings_err:
+        logger.warning(f"⚠️ Could not load persisted settings (using defaults): {settings_err}")
+
+    # 3. CRITICAL: Start LLM failover client
+    try:
         from app.core.llm import get_llm_client
         llm_failover_client = get_llm_client()
         await llm_failover_client.start()
+        STARTUP_HEALTH["llm_service"]["status"] = "healthy"
         logger.info("🔄 LLM failover client started with health checks")
+    except Exception as llm_err:
+        STARTUP_HEALTH["llm_service"]["status"] = "degraded"
+        STARTUP_HEALTH["llm_service"]["message"] = str(llm_err)
+        STARTUP_HEALTH["critical_failures"].append("llm_service")
+        logger.error(f"🚨 CRITICAL: LLM service failed to start - chat will be unavailable! Error: {llm_err}")
 
-        # Health check: Test embedding generation at startup
-        try:
-            test_embedding = await llm_failover_client.get_embedding("startup health check")
-            if test_embedding and len(test_embedding) > 0:
-                logger.info(f"✅ Embedding service healthy ({len(test_embedding)} dimensions)")
-            else:
-                logger.error("🚨 CRITICAL: Embedding service returned empty result - memory search will be degraded!")
-        except Exception as emb_err:
-            logger.error(f"🚨 CRITICAL: Embedding service failed at startup - memory search will be degraded! Error: {emb_err}")
+    # 4. CRITICAL: Validate embedding service
+    try:
+        test_embedding = await llm_failover_client.get_embedding("startup health check")
+        if test_embedding and len(test_embedding) > 0:
+            STARTUP_HEALTH["embedding_service"]["status"] = "healthy"
+            STARTUP_HEALTH["embedding_service"]["dimension"] = len(test_embedding)
+            logger.info(f"✅ Embedding service healthy ({len(test_embedding)} dimensions)")
+        else:
+            STARTUP_HEALTH["embedding_service"]["status"] = "degraded"
+            STARTUP_HEALTH["embedding_service"]["message"] = "Empty embedding result"
+            STARTUP_HEALTH["critical_failures"].append("embedding_service")
+            logger.error("🚨 CRITICAL: Embedding service returned empty result - memory search DISABLED!")
+    except Exception as emb_err:
+        STARTUP_HEALTH["embedding_service"]["status"] = "failed"
+        STARTUP_HEALTH["embedding_service"]["message"] = str(emb_err)
+        STARTUP_HEALTH["critical_failures"].append("embedding_service")
+        logger.error(f"🚨 CRITICAL: Embedding service failed - memory search DISABLED! Error: {emb_err}")
 
-        # Initialize token usage tracking
+    # 5. Initialize token usage tracking (non-critical)
+    try:
         from app.services.token_usage_service import init_token_tracking, queue_token_usage
         from app.core.llm import set_token_usage_callback
         init_token_tracking(SessionLocal)
         set_token_usage_callback(queue_token_usage)
-        # Also set callback on the main SimpleLLMClient used for chat
         llm_client.set_token_usage_callback(queue_token_usage)
         logger.info("📊 Token usage tracking initialized")
+    except Exception as token_err:
+        logger.warning(f"⚠️ Token usage tracking failed to initialize: {token_err}")
 
-        # Initialize Neo4j service when enabled
-        if GRAPH_BACKEND == "neo4j":
+    # 6. Initialize Neo4j service when enabled (degraded if fails)
+    if GRAPH_BACKEND == "neo4j":
+        try:
             from app.services.neo4j_service import neo4j_service
             await neo4j_service.connect()
+            STARTUP_HEALTH["neo4j"]["status"] = "healthy"
             logger.info("✅ Neo4j knowledge graph service initialized")
-        
-        # Initialize intelligence pipeline
+        except Exception as neo4j_err:
+            STARTUP_HEALTH["neo4j"]["status"] = "failed"
+            STARTUP_HEALTH["neo4j"]["message"] = str(neo4j_err)
+            logger.error(f"⚠️ Neo4j failed to connect - knowledge graph features degraded: {neo4j_err}")
+    else:
+        STARTUP_HEALTH["neo4j"]["status"] = "disabled"
+
+    # 7. Initialize intelligence pipeline (non-critical)
+    try:
         from app.services.intelligence_pipeline import intelligence_pipeline
         await intelligence_pipeline.start_workers()
         logger.info("🧠 Intelligence pipeline workers started")
-        
-        # Start notification scheduler for pre-generating NTFY messages
+    except Exception as intel_err:
+        logger.warning(f"⚠️ Intelligence pipeline failed to start: {intel_err}")
+
+    # 8. Start notification scheduler (non-critical)
+    try:
         await notification_scheduler.start()
-        
-        # Initialize nightly dream service
+    except Exception as notif_err:
+        logger.warning(f"⚠️ Notification scheduler failed to start: {notif_err}")
+
+    # 9. Initialize nightly dream service (non-critical)
+    try:
         from app.services.nightly_dream_service import NightlyDreamService
         dream_service = NightlyDreamService()
-        # Start the dream scheduler as a background task
-        import asyncio
         asyncio.create_task(dream_service.start_dream_scheduler())
         logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
+    except Exception as dream_err:
+        logger.warning(f"⚠️ Nightly dream service failed to start: {dream_err}")
 
-        # Start memory consolidation scheduler (hot graph-in-Postgres)
+    # 10. Start memory consolidation scheduler (non-critical)
+    try:
         await memory_consolidation_scheduler.start()
+    except Exception as mem_err:
+        logger.warning(f"⚠️ Memory consolidation scheduler failed to start: {mem_err}")
 
-        # Start Daily Brief scheduler for background layer updates
-        if DAILY_BRIEF_AVAILABLE:
+    # 11. Start Daily Brief scheduler (non-critical)
+    if DAILY_BRIEF_AVAILABLE:
+        try:
             from app.services.daily_brief import daily_brief_scheduler
             daily_brief_scheduler.set_db_factory(SessionLocal)
             await daily_brief_scheduler.start()
             logger.info("📋 Daily Brief scheduler started - hourly consolidation, daily context updates, weekly synthesis")
+        except Exception as brief_err:
+            logger.warning(f"⚠️ Daily Brief scheduler failed to start: {brief_err}")
 
-        # Start nightly importance rescoring job (3 AM daily)
-        try:
-            from app.services.nightly_rescoring_job import schedule_nightly_rescoring
-            await schedule_nightly_rescoring()
-            logger.info("🔄 Nightly importance rescoring scheduled - 3 AM daily")
-        except Exception as e:
-            logger.warning(f"⚠️ Nightly rescoring scheduler failed to start: {e}")
+    # 12. Start nightly importance rescoring job (non-critical)
+    try:
+        from app.services.nightly_rescoring_job import schedule_nightly_rescoring
+        await schedule_nightly_rescoring()
+        logger.info("🔄 Nightly importance rescoring scheduled - 3 AM daily")
+    except Exception as rescore_err:
+        logger.warning(f"⚠️ Nightly rescoring scheduler failed to start: {rescore_err}")
 
-    except Exception as e:
-        logger.warning(f"⚠️ Services initialization failed (will use fallback): {e}")
+    # Log startup health summary
+    critical_count = len(STARTUP_HEALTH["critical_failures"])
+    if critical_count > 0:
+        logger.error(f"🚨 STARTUP COMPLETE WITH {critical_count} CRITICAL FAILURES: {STARTUP_HEALTH['critical_failures']}")
+        logger.error("   Some features will be unavailable or degraded. Check logs above for details.")
+    else:
+        logger.info("✅ STARTUP COMPLETE - All critical services healthy")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -8208,12 +8299,27 @@ async def root():
 @app.get("/health")
 async def health():
     from app.services.solo_mode_service import solo_mode_service
-    
+
+    # Determine overall status based on critical service health
+    critical_failures = STARTUP_HEALTH.get("critical_failures", [])
+    if critical_failures:
+        overall_status = "degraded"
+    else:
+        overall_status = "healthy"
+
     response = {
-        "status": "healthy", 
-        "assistant": ASSISTANT_NAME
+        "status": overall_status,
+        "assistant": ASSISTANT_NAME,
+        "services": {
+            "database": STARTUP_HEALTH["database"]["status"],
+            "embedding": STARTUP_HEALTH["embedding_service"]["status"],
+            "llm": STARTUP_HEALTH["llm_service"]["status"],
+            "neo4j": STARTUP_HEALTH["neo4j"]["status"]
+        },
+        "startup_time": STARTUP_HEALTH.get("startup_time"),
+        "critical_failures": critical_failures
     }
-    
+
     # Add Jarvis mode information
     if solo_mode_service.is_solo_mode():
         response.update({
@@ -8227,7 +8333,7 @@ async def health():
             "user": "multi-tenant",
             "solo_mode": False
         })
-    
+
     return response
 
 @app.get("/api/health/llm-status")
@@ -9047,7 +9153,9 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
             tool_classifier = get_tool_intent_classifier()
             context_router = get_context_router()
-            user_intent = tool_classifier.classify(last_user_message)
+            # Use conversation-aware classification to preserve tool context across turns
+            session_id = request.conversation_id or str(current_user.id)
+            user_intent, tool_categories = tool_classifier.classify_with_context(last_user_message, session_id)
             turn_count = len(request.messages)
             context_decision = context_router.decide(
                 intent=user_intent,
@@ -9272,8 +9380,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             async def process_chat():
                 try:
                     # INTENT-BASED TOOL LOADING
-                    # Use already-classified intent from context routing to load only relevant tools
-                    tool_categories = tool_classifier.get_tool_categories(user_intent)
+                    # tool_categories was already determined by classify_with_context above
+                    # which includes conversation context preservation
 
                     if tool_categories:
                         tools = tool_registry.get_tools_by_categories(tool_categories)
@@ -9331,8 +9439,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Stream events as they come in
             while True:
                 try:
-                    # Wait for next event with timeout
-                    event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+                    # Wait for next event with timeout (5s to allow tool execution without excessive heartbeats)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=5.0)
                     
                     if event.get("type") == "done":
                         break
@@ -9437,8 +9545,8 @@ async def transcribe_audio(
         # Clean up temp file
         try:
             os.remove(temp_audio_path)
-        except:
-            pass
+        except OSError as e:
+            logger.debug(f"Failed to remove temp audio file: {e}")
 
         return {"transcription": transcription}
 
@@ -9560,7 +9668,7 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.23"}
+    return {"downloads": downloads, "version": "1.0.30"}
 
 
 @app.get("/api/downloads/{filename}")
@@ -9612,7 +9720,8 @@ async def search_notes_api(
         try:
             current_user = await get_current_user(request, db)
             user_id = current_user.id
-        except:
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for search-notes: {auth_err}")
             raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Normalize query for fuzzy matching
@@ -10114,14 +10223,21 @@ async def upload_document(
             if processed_chunks:
                 # Generate embeddings for chunks
                 chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
-                
-                # Save chunks to PostgreSQL
+
+                # Save chunks to PostgreSQL (skip chunks with failed embeddings)
+                saved_chunks = 0
+                skipped_chunks = 0
                 for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
+                    if embedding is None:
+                        # Skip chunks where embedding failed - don't pollute search with zero vectors
+                        skipped_chunks += 1
+                        continue
+
                     if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
                         embedding_data = embedding
                     else:
-                        embedding_data = json.dumps(embedding) if embedding else None
-                    
+                        embedding_data = json.dumps(embedding)
+
                     chunk = DocumentChunk(
                         document_id=document.id,
                         user_id=current_user.id,
@@ -10130,9 +10246,13 @@ async def upload_document(
                         embedding=embedding_data
                     )
                     db.add(chunk)
-                
+                    saved_chunks += 1
+
                 db.commit()
-                logger.info(f"📄 Legacy chunking completed: {len(processed_chunks)} chunks")
+                if skipped_chunks > 0:
+                    logger.warning(f"📄 Legacy chunking: {saved_chunks} chunks saved, {skipped_chunks} skipped (embedding failures)")
+                else:
+                    logger.info(f"📄 Legacy chunking completed: {saved_chunks} chunks")
         
         except Exception as chunk_error:
             logger.warning(f"⚠️ Legacy chunking failed (Neo4j processing continues): {chunk_error}")
@@ -10891,7 +11011,8 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
             # Test embedding service
             embedding_test = await embedding_service.generate_embedding("test")
             embedding_health = len(embedding_test) == EMBEDDING_DIM
-        except:
+        except Exception as e:
+            logger.debug(f"Embedding health check failed: {e}")
             embedding_health = False
             
         # Database health

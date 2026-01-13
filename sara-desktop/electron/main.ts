@@ -1,8 +1,23 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, systemPreferences, session } from 'electron'
 import path from 'path'
 import fs from 'fs'
-import WebSocket from 'ws'
-import { sidecarManager } from './sidecar'
+import { spawn, ChildProcess } from 'child_process'
+
+// Early debug logging to file (for troubleshooting packaged app startup)
+const debugLogPath = path.join(process.env.APPDATA || process.env.HOME || '.', 'sara-debug.log')
+function debugLog(msg: string) {
+  try {
+    const timestamp = new Date().toISOString()
+    fs.appendFileSync(debugLogPath, `[${timestamp}] ${msg}\n`)
+  } catch (e) {
+    // Silently fail if we can't write
+  }
+}
+debugLog('=== Sara starting ===')
+debugLog(`Process argv: ${process.argv.join(' ')}`)
+debugLog(`__dirname: ${__dirname}`)
+debugLog(`app.isPackaged: ${app?.isPackaged}`)
+debugLog(`NODE_ENV: ${process.env.NODE_ENV}`)
 
 // Simple file-based settings store (zero dependencies)
 class SimpleStore {
@@ -64,6 +79,101 @@ let settingsWindow: BrowserWindow | null = null  // Settings window
 let timerWindows: Map<string, BrowserWindow> = new Map()  // Floating timer windows
 let tray: Tray | null = null
 let isQuitting = false
+let sidecarProcess: ChildProcess | null = null
+
+// Sidecar management
+function startSidecar() {
+  if (sidecarProcess) {
+    console.log('[Main] Sidecar already running')
+    return
+  }
+
+  // Get the path to the sidecar executable
+  let sidecarPath: string
+  let useCompiledBinary = false
+
+  if (app.isPackaged) {
+    // In packaged app, use compiled sidecar executable
+    const isWindows = process.platform === 'win32'
+    const binaryName = isWindows ? 'sidecar.exe' : 'sidecar'
+    sidecarPath = path.join(process.resourcesPath, 'sidecar', binaryName)
+    useCompiledBinary = true
+  } else {
+    // In development, use Python script directly
+    sidecarPath = path.join(__dirname, '..', 'sidecar', 'main.py')
+  }
+
+  // Check if sidecar exists
+  if (!fs.existsSync(sidecarPath)) {
+    console.log('[Main] Sidecar not found at:', sidecarPath)
+    debugLog(`Sidecar not found at: ${sidecarPath}`)
+    return
+  }
+
+  console.log('[Main] Starting sidecar from:', sidecarPath)
+  debugLog(`Starting sidecar from: ${sidecarPath}`)
+
+  // Get auth token and API URL from store
+  const authToken = store.get('authToken', '') as string
+  const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
+
+  // Spawn process - compiled binary or Python script
+  if (useCompiledBinary) {
+    // Run compiled executable directly
+    sidecarProcess = spawn(sidecarPath, [], {
+      env: {
+        ...process.env,
+        SARA_AUTH_TOKEN: authToken,
+        SARA_BACKEND_URL: apiUrl,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } else {
+    // Run Python script in development
+    sidecarProcess = spawn('python3', [sidecarPath], {
+      env: {
+        ...process.env,
+        SARA_AUTH_TOKEN: authToken,
+        SARA_BACKEND_URL: apiUrl,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  }
+
+  sidecarProcess.stdout?.on('data', (data) => {
+    console.log('[Sidecar]', data.toString().trim())
+  })
+
+  sidecarProcess.stderr?.on('data', (data) => {
+    console.error('[Sidecar Error]', data.toString().trim())
+  })
+
+  sidecarProcess.on('close', (code) => {
+    console.log(`[Main] Sidecar exited with code ${code}`)
+    debugLog(`Sidecar exited with code ${code}`)
+    sidecarProcess = null
+
+    // Restart sidecar if it crashed and we're not quitting
+    if (!isQuitting && code !== 0) {
+      console.log('[Main] Restarting sidecar in 5 seconds...')
+      setTimeout(startSidecar, 5000)
+    }
+  })
+
+  sidecarProcess.on('error', (err) => {
+    console.error('[Main] Failed to start sidecar:', err)
+    debugLog(`Failed to start sidecar: ${err.message}`)
+    sidecarProcess = null
+  })
+}
+
+function stopSidecar() {
+  if (sidecarProcess) {
+    console.log('[Main] Stopping sidecar...')
+    sidecarProcess.kill()
+    sidecarProcess = null
+  }
+}
 
 // Activity monitoring
 let activityTimeout: NodeJS.Timeout | null = null
@@ -71,7 +181,8 @@ const INACTIVITY_TIMEOUT = 10 * 60 * 1000 // 10 minutes
 let isVisible = true
 
 // Window sizes
-const CIRCLE_SIZE = 100
+const CIRCLE_WIDTH = 220  // Wide to fit quick action buttons (40+16+100+16+40=212)
+const CIRCLE_HEIGHT = 120  // Tall enough for smoke ring
 const CHAT_WIDTH = 320
 const CHAT_HEIGHT = 450
 const NOTE_WIDTH = 500
@@ -81,88 +192,23 @@ const TIMER_HEIGHT = 80
 const SETTINGS_WIDTH = 400
 const SETTINGS_HEIGHT = 500
 
-// Sidecar WebSocket connection for main process
-let sidecarWs: WebSocket | null = null
-let audioDevices: Array<{ index: number; name: string; is_current: boolean }> = []
-let currentAudioDevice: string | null = null
-
-function connectToSidecar() {
-  console.log('[Main] connectToSidecar called, current state:', sidecarWs?.readyState)
-  if (sidecarWs?.readyState === WebSocket.OPEN) return
-
-  try {
-    console.log('[Main] Creating WebSocket connection to sidecar...')
-    sidecarWs = new WebSocket('ws://127.0.0.1:9876')
-
-    sidecarWs.on('open', () => {
-      console.log('[Main] Connected to sidecar')
-      // Request audio devices
-      sidecarWs?.send(JSON.stringify({ type: 'get_audio_devices' }))
-    })
-
-    sidecarWs.on('message', (data: WebSocket.RawData) => {
-      try {
-        const msg = JSON.parse(data.toString())
-        if (msg.type === 'audio_devices') {
-          audioDevices = msg.devices || []
-          currentAudioDevice = msg.current_device
-          console.log('[Main] Got audio devices:', audioDevices.length)
-          rebuildTrayMenu()
-        } else if (msg.type === 'audio_device_changed') {
-          currentAudioDevice = msg.device_name
-          // Refresh device list
-          sidecarWs?.send(JSON.stringify({ type: 'get_audio_devices' }))
-        }
-      } catch (e) {
-        console.error('[Main] Failed to parse sidecar message:', e)
-      }
-    })
-
-    sidecarWs.on('close', () => {
-      console.log('[Main] Sidecar connection closed')
-      sidecarWs = null
-      // Retry connection
-      setTimeout(connectToSidecar, 5000)
-    })
-
-    sidecarWs.on('error', (err: Error) => {
-      console.error('[Main] Sidecar connection error:', err.message)
-      // Retry on error (connection failures don't trigger 'close')
-      sidecarWs = null
-      setTimeout(connectToSidecar, 2000)
-    })
-  } catch (e) {
-    console.error('[Main] Failed to connect to sidecar:', e)
-    setTimeout(connectToSidecar, 2000)
-  }
-}
-
-function setAudioDevice(deviceIndex: number, deviceName: string) {
-  if (sidecarWs?.readyState === WebSocket.OPEN) {
-    sidecarWs.send(JSON.stringify({
-      type: 'set_audio_device',
-      device_index: deviceIndex,
-      device_name: deviceName
-    }))
-  }
-}
-
-function refreshAudioDevices() {
-  if (sidecarWs?.readyState === WebSocket.OPEN) {
-    sidecarWs.send(JSON.stringify({ type: 'get_audio_devices' }))
-  }
-}
-
 function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
 
   // Get saved position or default to bottom-right corner
-  const savedX = store.get('windowX', width - 120) as number
-  const savedY = store.get('windowY', height - 120) as number
+  // Use sensible defaults for the new wider window
+  const defaultX = width - CIRCLE_WIDTH - 20
+  const defaultY = height - CIRCLE_HEIGHT - 20
+  let savedX = store.get('windowX', defaultX) as number
+  let savedY = store.get('windowY', defaultY) as number
+
+  // Clamp to screen bounds in case saved position is off-screen
+  savedX = Math.max(0, Math.min(savedX, width - CIRCLE_WIDTH))
+  savedY = Math.max(0, Math.min(savedY, height - CIRCLE_HEIGHT))
 
   mainWindow = new BrowserWindow({
-    width: CIRCLE_SIZE,
-    height: CIRCLE_SIZE,
+    width: CIRCLE_WIDTH,
+    height: CIRCLE_HEIGHT,
     x: savedX,
     y: savedY,
     frame: false,
@@ -185,7 +231,8 @@ function createWindow() {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173?view=circle')
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { view: 'circle' } })
+    // In packaged app, index.html is at the same level as main.js
+    mainWindow.loadFile(path.join(__dirname, 'index.html'), { query: { view: 'circle' } })
   }
 
   // Open DevTools for debugging (press F12 or Ctrl+Shift+I)
@@ -219,14 +266,12 @@ function createWindow() {
   })
 }
 
-function createChatWindow(voiceMode: boolean = false) {
+function createChatWindow() {
   if (chatWindow) {
+    // Force reload to ensure fresh JS bundle is loaded (fixes caching issues)
+    chatWindow.webContents.reloadIgnoringCache()
     chatWindow.show()
     chatWindow.focus()
-    // If voice mode requested on existing window, send event to start voice
-    if (voiceMode) {
-      chatWindow.webContents.send('start-voice')
-    }
     return
   }
 
@@ -253,14 +298,17 @@ function createChatWindow(voiceMode: boolean = false) {
 
   chatWindow.setMenu(null)
 
-  // Load the chat view with optional voice parameter
-  const voiceParam = voiceMode ? '&voice=true' : ''
+  // Load the chat view with auth parameter
+  // Pass auth state directly to avoid race condition in renderer
+  const authToken = store.get('authToken', null) as string | null
+  const hasAuth = authToken ? 'true' : 'false'
+
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    chatWindow.loadURL(`http://localhost:5173?view=chat${voiceParam}`)
+    const authParam = `&authenticated=${hasAuth}`
+    chatWindow.loadURL(`http://localhost:5173?view=chat${authParam}`)
   } else {
-    const query: Record<string, string> = { view: 'chat' }
-    if (voiceMode) query.voice = 'true'
-    chatWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query })
+    const query: Record<string, string> = { view: 'chat', authenticated: hasAuth }
+    chatWindow.loadFile(path.join(__dirname, 'index.html'), { query })
   }
 
   // Open DevTools for debugging
@@ -279,14 +327,14 @@ function getChatWindowPosition(): { x: number, y: number } {
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
 
   if (!mainWindow) {
-    return { x: screenW - CHAT_WIDTH - 20, y: screenH - CHAT_HEIGHT - CIRCLE_SIZE - 20 }
+    return { x: screenW - CHAT_WIDTH - 20, y: screenH - CHAT_HEIGHT - CIRCLE_HEIGHT - 20 }
   }
 
   const [circleX, circleY] = mainWindow.getPosition()
 
   // Position chat so its bottom-right corner is near the circle's top-left
   // This creates a "speech bubble" effect where chat appears above/left of circle
-  let x = circleX + CIRCLE_SIZE - CHAT_WIDTH  // Align right edges
+  let x = circleX + CIRCLE_WIDTH - CHAT_WIDTH  // Align right edges
   let y = circleY - CHAT_HEIGHT - 10  // Position above circle with 10px gap
 
   // Clamp to screen bounds
@@ -298,7 +346,7 @@ function getChatWindowPosition(): { x: number, y: number } {
     y = circleY
     x = circleX - CHAT_WIDTH - 10
     if (x < 10) {
-      x = circleX + CIRCLE_SIZE + 10  // Position to the right instead
+      x = circleX + CIRCLE_WIDTH + 10  // Position to the right instead
     }
   }
 
@@ -312,8 +360,8 @@ function repositionChatWindow() {
   }
 }
 
-function showChatWindow(voiceMode: boolean = false) {
-  createChatWindow(voiceMode)
+function showChatWindow() {
+  createChatWindow()
 }
 
 function hideChatWindow() {
@@ -359,7 +407,7 @@ function createNoteWindow(noteId: string, title: string, content: string) {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     noteWindow.loadURL(`http://localhost:5173?view=note&data=${noteData}`)
   } else {
-    noteWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
+    noteWindow.loadFile(path.join(__dirname, 'index.html'), {
       query: { view: 'note', data: noteData }
     })
   }
@@ -411,7 +459,7 @@ function createTimerWindow(timerId: string, name: string, remainingSeconds: numb
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     timerWindow.loadURL(`http://localhost:5173?view=timer&data=${timerData}`)
   } else {
-    timerWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
+    timerWindow.loadFile(path.join(__dirname, 'index.html'), {
       query: { view: 'timer', data: timerData }
     })
   }
@@ -467,7 +515,7 @@ function createSettingsWindow() {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     settingsWindow.loadURL('http://localhost:5173?view=settings')
   } else {
-    settingsWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
+    settingsWindow.loadFile(path.join(__dirname, 'index.html'), {
       query: { view: 'settings' }
     })
   }
@@ -480,28 +528,6 @@ function createSettingsWindow() {
 function rebuildTrayMenu() {
   if (!tray) return
 
-  // Build microphone submenu from audio devices
-  const micSubmenu: Electron.MenuItemConstructorOptions[] = audioDevices.length > 0
-    ? audioDevices.map((device) => ({
-        label: device.name,
-        type: 'radio' as const,
-        checked: device.name === currentAudioDevice,
-        click: () => {
-          console.log('[Main] Switching to audio device:', device.name)
-          setAudioDevice(device.index, device.name)
-        },
-      }))
-    : [{ label: 'No devices found', enabled: false }]
-
-  // Add refresh option
-  micSubmenu.push({ type: 'separator' })
-  micSubmenu.push({
-    label: 'Refresh Devices',
-    click: () => {
-      refreshAudioDevices()
-    },
-  })
-
   const contextMenu = Menu.buildFromTemplate([
     {
       label: 'Show Sara',
@@ -511,46 +537,10 @@ function rebuildTrayMenu() {
       },
     },
     {
-      label: 'Mode',
-      submenu: [
-        {
-          label: 'Wake Word',
-          type: 'radio',
-          checked: store.get('mode', 'wakeWord') === 'wakeWord',
-          click: () => {
-            console.log('[Main] Mode changed to wakeWord')
-            store.set('mode', 'wakeWord')
-            hideChatWindow()
-            mainWindow?.webContents.send('mode-changed', 'wakeWord')
-          },
-        },
-        {
-          label: 'Push to Talk',
-          type: 'radio',
-          checked: store.get('mode') === 'pushToTalk',
-          click: () => {
-            console.log('[Main] Mode changed to pushToTalk')
-            store.set('mode', 'pushToTalk')
-            hideChatWindow()
-            mainWindow?.webContents.send('mode-changed', 'pushToTalk')
-          },
-        },
-        {
-          label: 'Silent (Text)',
-          type: 'radio',
-          checked: store.get('mode') === 'silent',
-          click: () => {
-            console.log('[Main] Mode changed to silent')
-            store.set('mode', 'silent')
-            showChatWindow()
-            mainWindow?.webContents.send('mode-changed', 'silent')
-          },
-        },
-      ],
-    },
-    {
-      label: 'Microphone',
-      submenu: micSubmenu,
+      label: 'Open Chat',
+      click: () => {
+        showChatWindow()
+      },
     },
     { type: 'separator' },
     {
@@ -620,14 +610,6 @@ function resetActivityTimer() {
 }
 
 // IPC Handlers
-ipcMain.handle('get-mode', () => {
-  return store.get('mode', 'wakeWord')
-})
-
-ipcMain.handle('set-mode', (_, mode: string) => {
-  store.set('mode', mode)
-})
-
 ipcMain.handle('get-api-url', () => {
   return store.get('apiUrl', 'https://sara-api.avery.cloud')
 })
@@ -643,8 +625,6 @@ ipcMain.handle('get-auth-token', () => {
 ipcMain.handle('set-auth-token', (_, token: string | null) => {
   if (token) {
     store.set('authToken', token)
-    // Also update sidecar with the new token
-    sidecarManager.setAuthToken(token)
   } else {
     store.delete('authToken')
   }
@@ -655,8 +635,8 @@ ipcMain.on('activity-detected', () => {
 })
 
 // Chat window controls
-ipcMain.on('show-chat', (_, options?: { voice?: boolean }) => {
-  showChatWindow(options?.voice)
+ipcMain.on('show-chat', () => {
+  showChatWindow()
 })
 
 ipcMain.on('hide-chat', () => {
@@ -699,34 +679,34 @@ ipcMain.on('update-timer', (_, timerData: { id: string; remainingSeconds: number
 })
 
 // App lifecycle
+debugLog('Setting up app.whenReady...')
 app.whenReady().then(async () => {
+  debugLog('app.whenReady fired!')
+  // Clear Chromium's HTTP cache to ensure fresh JS loads after rebuilds
+  // This fixes the issue where old JavaScript bundles are served from cache
+  await session.defaultSession.clearCache()
+  debugLog('Session cache cleared')
+  console.log('[Main] Cleared session cache')
+
   // Initialize settings store (must be after app is ready)
   store.init()
+
+  // Request microphone permission on macOS (required for getUserMedia in renderer)
+  if (process.platform === 'darwin') {
+    const micStatus = systemPreferences.getMediaAccessStatus('microphone')
+    console.log('[Main] Microphone permission status:', micStatus)
+    if (micStatus !== 'granted') {
+      const granted = await systemPreferences.askForMediaAccess('microphone')
+      console.log('[Main] Microphone permission granted:', granted)
+    }
+  }
 
   createWindow()
   createTray()
   resetActivityTimer()
 
-  // Start the Python sidecar for wake word, activity, screenshots
-  try {
-    // Pass auth token to sidecar if available
-    const authToken = store.get('authToken', null) as string | null
-    if (authToken) {
-      sidecarManager.setAuthToken(authToken)
-    }
-    await sidecarManager.start()
-    console.log('[Main] Sidecar started')
-
-    // Connect to sidecar WebSocket for audio device management
-    // Give sidecar a moment to start its WebSocket server
-    console.log('[Main] Scheduling sidecar WebSocket connection in 3 seconds...')
-    setTimeout(() => {
-      console.log('[Main] Timer fired, connecting to sidecar...')
-      connectToSidecar()
-    }, 3000)
-  } catch (error) {
-    console.error('[Main] Failed to start sidecar:', error)
-  }
+  // Start the sidecar (activity monitoring, screenshots)
+  startSidecar()
 
   // Auto-start on login (can be toggled in settings)
   const autoStart = store.get('autoStart', true) as boolean
@@ -734,11 +714,6 @@ app.whenReady().then(async () => {
     openAtLogin: autoStart,
     openAsHidden: true,
   })
-
-  // If mode was saved as silent, show chat window
-  if (store.get('mode') === 'silent') {
-    showChatWindow()
-  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -753,10 +728,9 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', async () => {
+app.on('before-quit', () => {
   isQuitting = true
-  // Stop the sidecar gracefully
-  await sidecarManager.stop()
+  stopSidecar()
 })
 
 // IPC handler for opening URLs in default browser
@@ -764,14 +738,17 @@ ipcMain.on('open-url', (_, url: string) => {
   shell.openExternal(url)
 })
 
-// IPC handler for sidecar status
-ipcMain.handle('sidecar-status', () => {
-  return {
-    running: sidecarManager.isRunning()
+// IPC handlers for microphone permission (macOS)
+ipcMain.handle('request-mic-permission', async () => {
+  if (process.platform === 'darwin') {
+    return await systemPreferences.askForMediaAccess('microphone')
   }
+  return true // Non-macOS platforms don't need explicit permission
 })
 
-// IPC handler to restart sidecar
-ipcMain.handle('restart-sidecar', async () => {
-  return await sidecarManager.restart()
+ipcMain.handle('get-mic-permission', () => {
+  if (process.platform === 'darwin') {
+    return systemPreferences.getMediaAccessStatus('microphone')
+  }
+  return 'granted'
 })

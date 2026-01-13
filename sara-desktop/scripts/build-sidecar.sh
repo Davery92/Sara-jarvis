@@ -31,12 +31,8 @@ source "$VENV_DIR/bin/activate"
 echo "Installing dependencies..."
 pip install --upgrade pip
 
-# Install openwakeword without deps first (tflite-runtime not available for Python 3.12)
-pip install --no-deps openwakeword
-
-# Install other dependencies (tensorflow-cpu replaces tflite-runtime)
-pip install onnxruntime tqdm scipy scikit-learn numpy requests tensorflow-cpu \
-    pyaudio pynput mss Pillow websockets httpx pyinstaller
+# Install sidecar dependencies (no voice/wake word features)
+pip install pynput mss Pillow websockets httpx numpy pyinstaller
 
 # Build with PyInstaller
 echo "Building executable..."

@@ -142,6 +142,21 @@ export interface NotificationResponse {
   sent_at: string
 }
 
+export interface Device {
+  device_id: string
+  friendly_name: string | null
+  hostname: string | null
+  platform: string | null
+  is_online: boolean
+  activity_level: string
+  last_activity_at: string | null
+  last_heartbeat_at: string | null
+}
+
+export interface DeviceListResponse {
+  devices: Device[]
+}
+
 class ApiClient {
   private client: AxiosInstance
 
@@ -574,6 +589,22 @@ class ApiClient {
   async getPattern(patternId: string): Promise<any> {
     const response = await this.client.get(`/api/patterns/${patternId}`)
     return response.data
+  }
+
+  // Device Management endpoints
+  async getDevices(): Promise<DeviceListResponse> {
+    const response = await this.client.get('/api/devices/list')
+    return response.data
+  }
+
+  async updateDeviceName(deviceId: string, friendlyName: string): Promise<void> {
+    await this.client.patch(`/api/devices/${encodeURIComponent(deviceId)}/name`, {
+      friendly_name: friendlyName
+    })
+  }
+
+  async removeDevice(deviceId: string): Promise<void> {
+    await this.client.delete(`/api/devices/${encodeURIComponent(deviceId)}`)
   }
 }
 

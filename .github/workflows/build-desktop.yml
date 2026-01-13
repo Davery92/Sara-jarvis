@@ -1,0 +1,139 @@
+name: Build Desktop App
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    paths:
+      - 'sara-desktop/**'
+    branches:
+      - main
+
+jobs:
+  build-sidecar:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: sidecar-win.exe
+            pyinstaller-target: sidecar.exe
+          - os: macos-latest
+            artifact: sidecar-mac
+            pyinstaller-target: sidecar
+          - os: macos-13  # Intel Mac
+            artifact: sidecar-mac-x64
+            pyinstaller-target: sidecar
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install sidecar dependencies
+        working-directory: sara-desktop/sidecar
+        run: |
+          pip install --upgrade pip
+          pip install pynput mss Pillow websockets httpx numpy pyinstaller
+
+      - name: Build sidecar executable
+        working-directory: sara-desktop/sidecar
+        run: |
+          pyinstaller --clean --onefile --name sidecar main.py
+
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: sara-desktop/sidecar/dist/${{ matrix.pyinstaller-target }}
+
+  build-electron:
+    needs: build-sidecar
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            build-cmd: build:win
+            sidecar-artifact: sidecar-win.exe
+            sidecar-name: sidecar.exe
+          - os: macos-latest
+            build-cmd: build:mac
+            sidecar-artifact: sidecar-mac
+            sidecar-name: sidecar
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download sidecar
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.sidecar-artifact }}
+          path: sara-desktop/release/sidecar
+
+      - name: Make sidecar executable (Unix)
+        if: runner.os != 'Windows'
+        run: chmod +x sara-desktop/release/sidecar/sidecar
+
+      - name: Install dependencies
+        working-directory: sara-desktop
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: sara-desktop
+        run: npm run ${{ matrix.build-cmd }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows artifacts
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            sara-desktop/release/*.exe
+            sara-desktop/release/*.zip
+
+      - name: Upload macOS artifacts
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: sara-desktop/release/*.zip
+
+  package:
+    needs: build-electron
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: downloads/
+
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+          path: downloads/
+
+      - name: List downloads
+        run: ls -la downloads/
+
+      - name: Upload all downloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-downloads
+          path: downloads/

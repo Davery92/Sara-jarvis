@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app.db.session import get_db
 from app.services.temporal_intelligence import get_temporal_intelligence, IntelligenceReport
-from app.auth import get_current_user
+from app.main_simple import get_current_user
 
 router = APIRouter(prefix="/api/reports", tags=["intelligence"])
 

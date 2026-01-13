@@ -19,6 +19,7 @@ class Machine(Base):
 
     # Machine info
     hostname = Column(String, nullable=True)
+    friendly_name = Column(String, nullable=True)  # User-defined name like "David's MacBook"
     platform = Column(String, nullable=True)  # windows, darwin, linux
     os_version = Column(String, nullable=True)
 

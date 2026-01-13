@@ -2,7 +2,6 @@
 Sara Desktop Sidecar - Main Entry Point
 
 Background service that provides:
-- Wake word detection using OpenWakeWord
 - Activity monitoring (keyboard, mouse, active window)
 - Screenshot capture (interval + on-demand)
 - WebSocket connection to backend for commands
@@ -40,7 +39,6 @@ class SidecarService:
         self._tasks = []
 
         # Component instances (lazy loaded)
-        self._wake_word = None
         self._activity_monitor = None
         self._screenshot_service = None
         self._backend_client = None
@@ -56,7 +54,6 @@ class SidecarService:
 
         # Import and initialize components
         try:
-            from wake_word import WakeWordDetector
             from activity_monitor import ActivityMonitor
             from screenshot import ScreenshotService
             from backend_client import BackendClient
@@ -83,13 +80,7 @@ class SidecarService:
                 interval=config.screenshot_interval
             )
 
-            self._wake_word = WakeWordDetector(
-                model_path=config.get_wake_word_model_path(),
-                threshold=config.wake_word_threshold,
-                on_wake_word=self._on_wake_word
-            )
-
-            # Start electron bridge FIRST so clients can connect while wake word loads
+            # Start electron bridge FIRST so clients can connect
             logger.info("Starting Electron bridge first...")
             self._tasks = [asyncio.create_task(self._electron_bridge.start())]
             await asyncio.sleep(0.5)  # Give it time to start listening
@@ -99,7 +90,6 @@ class SidecarService:
                 asyncio.create_task(self._backend_client.connect()),
                 asyncio.create_task(self._activity_monitor.start()),
                 asyncio.create_task(self._screenshot_service.start()),
-                asyncio.create_task(self._wake_word.start()),
                 asyncio.create_task(self._heartbeat_loop()),
             ])
 
@@ -126,8 +116,6 @@ class SidecarService:
             task.cancel()
 
         # Stop components
-        if self._wake_word:
-            await self._wake_word.stop()
         if self._activity_monitor:
             await self._activity_monitor.stop()
         if self._screenshot_service:
@@ -151,21 +139,6 @@ class SidecarService:
 
             await asyncio.sleep(config.heartbeat_interval)
 
-    async def _on_wake_word(self):
-        """Called when wake word is detected."""
-        logger.info("Wake word detected!")
-
-        # Notify Electron to start listening
-        if self._electron_bridge:
-            await self._electron_bridge.send_message({
-                "type": "wake_word_detected",
-                "timestamp": asyncio.get_event_loop().time()
-            })
-
-        # Also tell backend (which may route to other devices)
-        if self._backend_client:
-            await self._backend_client.send_event("wake_word_detected", {})
-
     async def _on_activity_update(self, activity: dict):
         """Called when activity metrics are updated."""
         # Forward to Electron for UI updates
@@ -180,28 +153,7 @@ class SidecarService:
         msg_type = data.get("type")
         logger.info(f"Received Electron message: {msg_type}")
 
-        if msg_type == "get_audio_devices_request":
-            # Get list of audio devices and send back
-            websocket = data.get("websocket")
-            if self._wake_word and websocket:
-                devices = self._wake_word.get_audio_devices()
-                current = self._wake_word.get_current_device()
-                await self._electron_bridge.send_audio_devices(websocket, devices, current)
-
-        elif msg_type == "set_audio_device_request":
-            # Set preferred audio device
-            device_index = data.get("device_index")
-            device_name = data.get("device_name")
-            if self._wake_word:
-                self._wake_word.set_preferred_device(device_index, device_name)
-                # Notify Electron of the change
-                await self._electron_bridge.send_message({
-                    "type": "audio_device_changed",
-                    "device_index": device_index,
-                    "device_name": device_name
-                })
-
-        elif msg_type == "auth_token_update":
+        if msg_type == "auth_token_update":
             # Update auth token
             token = data.get("token")
             if token:
@@ -277,13 +229,6 @@ class SidecarService:
                     "type": "show_notification",
                     "title": payload.get("title"),
                     "message": payload.get("message")
-                })
-
-        elif cmd_type == "start_listening":
-            # Wake word triggered from another device
-            if self._electron_bridge:
-                await self._electron_bridge.send_message({
-                    "type": "start_listening"
                 })
 
         else:

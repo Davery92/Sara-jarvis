@@ -399,3 +399,110 @@ async def device_heartbeat(
         server_time=datetime.utcnow(),
         screenshot_interval=machine.screenshot_interval_seconds
     )
+
+
+# =================== Device Management Endpoints ===================
+
+
+class UpdateDeviceNameRequest(BaseModel):
+    """Request to update device friendly name"""
+    friendly_name: str
+
+
+class DeviceListItem(BaseModel):
+    """Device info for list display"""
+    device_id: str
+    friendly_name: Optional[str]
+    hostname: Optional[str]
+    platform: Optional[str]
+    is_online: bool
+    activity_level: str
+    last_activity_at: Optional[datetime]
+    last_heartbeat_at: Optional[datetime]
+
+
+@router.get("/list")
+async def list_user_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List all devices for the current user with online status and friendly names.
+    Used by the webapp settings page for device management.
+    """
+    devices = await machine_registry_service.get_user_machines(
+        db, str(current_user.id), include_offline=True
+    )
+
+    return {
+        "devices": [
+            {
+                "device_id": d.device_id,
+                "friendly_name": d.friendly_name,
+                "hostname": d.hostname,
+                "platform": d.platform,
+                "is_online": d.is_online,
+                "activity_level": d.activity_level or "idle",
+                "last_activity_at": d.last_activity_at.isoformat() if d.last_activity_at else None,
+                "last_heartbeat_at": d.last_heartbeat_at.isoformat() if d.last_heartbeat_at else None,
+            }
+            for d in devices
+        ]
+    }
+
+
+@router.patch("/{device_id}/name")
+async def update_device_name(
+    device_id: str,
+    body: UpdateDeviceNameRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update the friendly name of a device.
+    """
+    # Verify the device belongs to this user
+    machine = await machine_registry_service.get_machine_by_device_id(db, device_id)
+    if not machine or machine.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    updated = await machine_registry_service.update_friendly_name(
+        db, device_id, body.friendly_name
+    )
+
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update device name")
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "friendly_name": body.friendly_name
+    }
+
+
+@router.delete("/{device_id}")
+async def remove_device(
+    device_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove a device from the registry.
+    """
+    from sqlalchemy import delete, and_
+    from app.models.machine import Machine
+
+    # Delete only if it belongs to this user
+    stmt = delete(Machine).where(
+        and_(
+            Machine.device_id == device_id,
+            Machine.user_id == str(current_user.id)
+        )
+    )
+    result = db.execute(stmt)
+    db.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    return {"success": True, "device_id": device_id}

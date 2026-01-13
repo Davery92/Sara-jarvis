@@ -257,6 +257,28 @@ class MachineRegistryService:
         db.commit()
         return result.rowcount
 
+    async def update_friendly_name(
+        self,
+        db: Session,
+        device_id: str,
+        friendly_name: str
+    ) -> Optional[Machine]:
+        """
+        Update the user-defined friendly name for a device.
+        """
+        stmt = select(Machine).where(Machine.device_id == device_id)
+        machine = db.execute(stmt).scalar_one_or_none()
+
+        if not machine:
+            return None
+
+        machine.friendly_name = friendly_name
+        machine.updated_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(machine)
+        return machine
+
     async def update_machine_config(
         self,
         db: Session,

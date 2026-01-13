@@ -15,32 +15,6 @@ def get_default_device_id() -> str:
     return f"{platform.system().lower()}-{machine_id}-{uuid.getnode()}"
 
 
-def get_models_dir() -> Path:
-    """Get the models directory, handling PyInstaller bundles."""
-    # Check for PyInstaller bundle
-    if getattr(sys, 'frozen', False):
-        # Running as compiled executable
-        exe_dir = Path(sys.executable).parent
-
-        # Check various locations
-        candidates = [
-            exe_dir / "models",  # Same dir as executable
-            exe_dir.parent / "models",  # Parent dir (for app bundles)
-            exe_dir.parent / "Resources" / "models",  # macOS app bundle
-            Path.home() / ".sara" / "models",  # User's home directory
-        ]
-
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-
-        # Default to home directory (will be created)
-        return Path.home() / ".sara" / "models"
-    else:
-        # Running as script
-        return Path(__file__).parent.parent / "models"
-
-
 class SidecarConfig:
     """Configuration for the sidecar service"""
 
@@ -65,10 +39,6 @@ class SidecarConfig:
         self.electron_ws_port: int = int(os.getenv("SARA_ELECTRON_WS_PORT", "9876"))
         self.electron_ws_host: str = "127.0.0.1"
 
-        # Wake word
-        self.wake_word_model: str = os.getenv("SARA_WAKE_WORD_MODEL", "hey_sara.onnx")
-        self.wake_word_threshold: float = float(os.getenv("SARA_WAKE_WORD_THRESHOLD", "0.7"))
-
         # Screenshot
         self.screenshot_interval: int = int(os.getenv("SARA_SCREENSHOT_INTERVAL", "300"))  # 5 minutes
         self.screenshot_enabled: bool = True
@@ -81,12 +51,7 @@ class SidecarConfig:
         self.heartbeat_interval: int = 10  # seconds
 
         # Paths
-        self.models_dir: Path = get_models_dir()
         self.settings_file: Path = Path.home() / ".sara" / "sidecar-settings.json"
-
-    def get_wake_word_model_path(self) -> Path:
-        """Get the full path to the wake word model."""
-        return self.models_dir / self.wake_word_model
 
     def load_settings(self):
         """Load settings from settings file if it exists."""
@@ -101,8 +66,6 @@ class SidecarConfig:
                         self.backend_url = settings["backend_url"]
                     if "screenshot_interval" in settings:
                         self.screenshot_interval = settings["screenshot_interval"]
-                    if "wake_word_threshold" in settings:
-                        self.wake_word_threshold = float(settings["wake_word_threshold"])
             except Exception:
                 pass
 

@@ -1,17 +1,48 @@
 """
 Emotion Analysis API Endpoints
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.auth import get_current_user_id
 from app.services.emotion_trend_analyzer import get_emotion_trend_analyzer
 from typing import Optional
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def get_current_user_id(request: Request, db: Session = Depends(get_db)) -> str:
+    """Get current user ID from JWT token (cookie or Authorization header)"""
+    from jose import jwt, JWTError
+    from app.core.config import settings
+
+    # Try to get token from cookie first (for web UI)
+    access_token = request.cookies.get("access_token")
+
+    # If no cookie, try Authorization header (for programmatic access like iOS app)
+    if not access_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            access_token = auth_header[7:]  # Remove "Bearer " prefix
+
+    if not access_token:
+        # Fall back to SOLO_USER_ID for unauthenticated requests
+        solo_user_id = os.getenv("SOLO_USER_ID")
+        if solo_user_id:
+            return solo_user_id
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        payload = jwt.decode(access_token, settings.jwt_secret, algorithms=["HS256"])
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 @router.get("/emotions/summary")
