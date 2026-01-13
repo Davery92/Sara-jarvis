@@ -1,23 +1,51 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, systemPreferences, session } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { spawn, ChildProcess } from 'child_process'
 
-// Early debug logging to file (for troubleshooting packaged app startup)
-const debugLogPath = path.join(process.env.APPDATA || process.env.HOME || '.', 'sara-debug.log')
-function debugLog(msg: string) {
-  try {
-    const timestamp = new Date().toISOString()
-    fs.appendFileSync(debugLogPath, `[${timestamp}] ${msg}\n`)
-  } catch (e) {
-    // Silently fail if we can't write
+let sidecarProcess: ChildProcess | null = null
+
+function startSidecar(store: SimpleStore) {
+  if (sidecarProcess) return
+
+  let sidecarPath: string
+  if (app.isPackaged) {
+    sidecarPath = path.join(process.resourcesPath, 'sidecar', 'main.py')
+  } else {
+    sidecarPath = path.join(__dirname, '..', 'sidecar', 'main.py')
+  }
+
+  if (!fs.existsSync(sidecarPath)) {
+    console.log('[Main] Sidecar not found at:', sidecarPath)
+    return
+  }
+
+  console.log('[Main] Starting sidecar from:', sidecarPath)
+
+  const authToken = store.get('authToken', '') as string
+  const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
+  const isWindows = process.platform === 'win32'
+  const pythonCmd = isWindows ? 'python' : 'python3'
+
+  sidecarProcess = spawn(pythonCmd, [sidecarPath], {
+    env: { ...process.env, SARA_AUTH_TOKEN: authToken, SARA_BACKEND_URL: apiUrl },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  sidecarProcess.stdout?.on('data', (data) => console.log('[Sidecar]', data.toString().trim()))
+  sidecarProcess.stderr?.on('data', (data) => console.error('[Sidecar]', data.toString().trim()))
+  sidecarProcess.on('close', (code) => {
+    console.log(`[Main] Sidecar exited with code ${code}`)
+    sidecarProcess = null
+  })
+}
+
+function stopSidecar() {
+  if (sidecarProcess) {
+    sidecarProcess.kill()
+    sidecarProcess = null
   }
 }
-debugLog('=== Sara starting ===')
-debugLog(`Process argv: ${process.argv.join(' ')}`)
-debugLog(`__dirname: ${__dirname}`)
-debugLog(`app.isPackaged: ${app?.isPackaged}`)
-debugLog(`NODE_ENV: ${process.env.NODE_ENV}`)
 
 // Simple file-based settings store (zero dependencies)
 class SimpleStore {
@@ -79,87 +107,6 @@ let settingsWindow: BrowserWindow | null = null  // Settings window
 let timerWindows: Map<string, BrowserWindow> = new Map()  // Floating timer windows
 let tray: Tray | null = null
 let isQuitting = false
-let sidecarProcess: ChildProcess | null = null
-
-// Sidecar management
-function startSidecar() {
-  if (sidecarProcess) {
-    console.log('[Main] Sidecar already running')
-    return
-  }
-
-  // Get the path to the sidecar main.py
-  let sidecarPath: string
-  if (app.isPackaged) {
-    // In packaged app, sidecar Python files are in resources
-    sidecarPath = path.join(process.resourcesPath, 'sidecar', 'main.py')
-  } else {
-    // In development, sidecar is relative to electron directory
-    sidecarPath = path.join(__dirname, '..', 'sidecar', 'main.py')
-  }
-
-  // Check if sidecar exists
-  if (!fs.existsSync(sidecarPath)) {
-    console.log('[Main] Sidecar not found at:', sidecarPath)
-    debugLog(`Sidecar not found at: ${sidecarPath}`)
-    return
-  }
-
-  console.log('[Main] Starting sidecar from:', sidecarPath)
-  debugLog(`Starting sidecar from: ${sidecarPath}`)
-
-  // Get auth token and API URL from store
-  const authToken = store.get('authToken', '') as string
-  const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
-
-  // Determine Python command based on platform
-  const isWindows = process.platform === 'win32'
-  const pythonCmd = isWindows ? 'python' : 'python3'
-
-  // Spawn Python process
-  sidecarProcess = spawn(pythonCmd, [sidecarPath], {
-    env: {
-      ...process.env,
-      SARA_AUTH_TOKEN: authToken,
-      SARA_BACKEND_URL: apiUrl,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-
-  sidecarProcess.stdout?.on('data', (data) => {
-    console.log('[Sidecar]', data.toString().trim())
-  })
-
-  sidecarProcess.stderr?.on('data', (data) => {
-    console.error('[Sidecar Error]', data.toString().trim())
-  })
-
-  sidecarProcess.on('close', (code) => {
-    console.log(`[Main] Sidecar exited with code ${code}`)
-    debugLog(`Sidecar exited with code ${code}`)
-    sidecarProcess = null
-
-    // Restart sidecar if it crashed and we're not quitting
-    if (!isQuitting && code !== 0) {
-      console.log('[Main] Restarting sidecar in 5 seconds...')
-      setTimeout(startSidecar, 5000)
-    }
-  })
-
-  sidecarProcess.on('error', (err) => {
-    console.error('[Main] Failed to start sidecar:', err)
-    debugLog(`Failed to start sidecar: ${err.message}`)
-    sidecarProcess = null
-  })
-}
-
-function stopSidecar() {
-  if (sidecarProcess) {
-    console.log('[Main] Stopping sidecar...')
-    sidecarProcess.kill()
-    sidecarProcess = null
-  }
-}
 
 // Activity monitoring
 let activityTimeout: NodeJS.Timeout | null = null
@@ -167,8 +114,8 @@ const INACTIVITY_TIMEOUT = 10 * 60 * 1000 // 10 minutes
 let isVisible = true
 
 // Window sizes
-const CIRCLE_WIDTH = 220  // Wide to fit quick action buttons (40+16+100+16+40=212)
-const CIRCLE_HEIGHT = 120  // Tall enough for smoke ring
+const CIRCLE_WIDTH = 240  // Smoke ring (100) + 2 side buttons (40 each) + gaps + padding
+const CIRCLE_HEIGHT = 120 // Smoke ring (100) + padding
 const CHAT_WIDTH = 320
 const CHAT_HEIGHT = 450
 const NOTE_WIDTH = 500
@@ -182,15 +129,19 @@ function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
 
   // Get saved position or default to bottom-right corner
-  // Use sensible defaults for the new wider window
-  const defaultX = width - CIRCLE_WIDTH - 20
-  const defaultY = height - CIRCLE_HEIGHT - 20
-  let savedX = store.get('windowX', defaultX) as number
-  let savedY = store.get('windowY', defaultY) as number
+  let savedX = store.get('windowX', width - CIRCLE_WIDTH - 20) as number
+  let savedY = store.get('windowY', height - CIRCLE_HEIGHT - 20) as number
 
-  // Clamp to screen bounds in case saved position is off-screen
-  savedX = Math.max(0, Math.min(savedX, width - CIRCLE_WIDTH))
-  savedY = Math.max(0, Math.min(savedY, height - CIRCLE_HEIGHT))
+  // Validate position is on-screen (handle multi-monitor changes, corrupted settings, etc.)
+  if (savedX < 0 || savedX > width - 50 || savedY < 0 || savedY > height - 50) {
+    console.log('[Main] Saved position off-screen, resetting to default')
+    savedX = width - CIRCLE_WIDTH - 20
+    savedY = height - CIRCLE_HEIGHT - 20
+    store.set('windowX', savedX)
+    store.set('windowY', savedY)
+  }
+
+  console.log('[Main] Creating circle window at', savedX, savedY, 'size', CIRCLE_WIDTH, 'x', CIRCLE_HEIGHT)
 
   mainWindow = new BrowserWindow({
     width: CIRCLE_WIDTH,
@@ -214,12 +165,23 @@ function createWindow() {
   mainWindow.setMenu(null)
 
   // Load the app (circle view)
+  const indexPath = path.join(__dirname, '../dist/index.html')
+  console.log('[Main] Loading circle view from:', indexPath)
+
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173?view=circle')
   } else {
-    // In packaged app, index.html is in ../dist/ relative to dist-electron/
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { view: 'circle' } })
+    mainWindow.loadFile(indexPath, { query: { view: 'circle' } })
   }
+
+  // Debug: Log when page loads
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('[Main] Circle window finished loading')
+  })
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.error('[Main] Circle window failed to load:', errorCode, errorDescription)
+  })
 
   // Open DevTools for debugging (press F12 or Ctrl+Shift+I)
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -254,8 +216,6 @@ function createWindow() {
 
 function createChatWindow() {
   if (chatWindow) {
-    // Force reload to ensure fresh JS bundle is loaded (fixes caching issues)
-    chatWindow.webContents.reloadIgnoringCache()
     chatWindow.show()
     chatWindow.focus()
     return
@@ -284,17 +244,11 @@ function createChatWindow() {
 
   chatWindow.setMenu(null)
 
-  // Load the chat view with auth parameter
-  // Pass auth state directly to avoid race condition in renderer
-  const authToken = store.get('authToken', null) as string | null
-  const hasAuth = authToken ? 'true' : 'false'
-
+  // Load the chat view
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    const authParam = `&authenticated=${hasAuth}`
-    chatWindow.loadURL(`http://localhost:5173?view=chat${authParam}`)
+    chatWindow.loadURL('http://localhost:5173?view=chat')
   } else {
-    const query: Record<string, string> = { view: 'chat', authenticated: hasAuth }
-    chatWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query })
+    chatWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { view: 'chat' } })
   }
 
   // Open DevTools for debugging
@@ -393,7 +347,7 @@ function createNoteWindow(noteId: string, title: string, content: string) {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     noteWindow.loadURL(`http://localhost:5173?view=note&data=${noteData}`)
   } else {
-    noteWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    noteWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: { view: 'note', data: noteData }
     })
   }
@@ -445,7 +399,7 @@ function createTimerWindow(timerId: string, name: string, remainingSeconds: numb
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     timerWindow.loadURL(`http://localhost:5173?view=timer&data=${timerData}`)
   } else {
-    timerWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    timerWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: { view: 'timer', data: timerData }
     })
   }
@@ -501,7 +455,7 @@ function createSettingsWindow() {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     settingsWindow.loadURL('http://localhost:5173?view=settings')
   } else {
-    settingsWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    settingsWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: { view: 'settings' }
     })
   }
@@ -511,8 +465,14 @@ function createSettingsWindow() {
   })
 }
 
-function rebuildTrayMenu() {
-  if (!tray) return
+function createTray() {
+  try {
+    const iconPath = path.join(__dirname, '../assets/icons/tray.png')
+    const trayIcon = nativeImage.createFromPath(iconPath)
+    tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon)
+  } catch {
+    tray = new Tray(nativeImage.createEmpty())
+  }
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -545,20 +505,8 @@ function rebuildTrayMenu() {
     },
   ])
 
-  tray.setContextMenu(contextMenu)
-}
-
-function createTray() {
-  try {
-    const iconPath = path.join(__dirname, '../assets/icons/tray.png')
-    const trayIcon = nativeImage.createFromPath(iconPath)
-    tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon)
-  } catch {
-    tray = new Tray(nativeImage.createEmpty())
-  }
-
   tray.setToolTip('Sara - Your AI Assistant')
-  rebuildTrayMenu()
+  tray.setContextMenu(contextMenu)
 
   tray.on('click', () => {
     if (mainWindow?.isVisible()) {
@@ -596,6 +544,14 @@ function resetActivityTimer() {
 }
 
 // IPC Handlers
+ipcMain.handle('get-mode', () => {
+  return store.get('mode', 'wakeWord')
+})
+
+ipcMain.handle('set-mode', (_, mode: string) => {
+  store.set('mode', mode)
+})
+
 ipcMain.handle('get-api-url', () => {
   return store.get('apiUrl', 'https://sara-api.avery.cloud')
 })
@@ -665,34 +621,16 @@ ipcMain.on('update-timer', (_, timerData: { id: string; remainingSeconds: number
 })
 
 // App lifecycle
-debugLog('Setting up app.whenReady...')
-app.whenReady().then(async () => {
-  debugLog('app.whenReady fired!')
-  // Clear Chromium's HTTP cache to ensure fresh JS loads after rebuilds
-  // This fixes the issue where old JavaScript bundles are served from cache
-  await session.defaultSession.clearCache()
-  debugLog('Session cache cleared')
-  console.log('[Main] Cleared session cache')
-
+app.whenReady().then(() => {
   // Initialize settings store (must be after app is ready)
   store.init()
 
-  // Request microphone permission on macOS (required for getUserMedia in renderer)
-  if (process.platform === 'darwin') {
-    const micStatus = systemPreferences.getMediaAccessStatus('microphone')
-    console.log('[Main] Microphone permission status:', micStatus)
-    if (micStatus !== 'granted') {
-      const granted = await systemPreferences.askForMediaAccess('microphone')
-      console.log('[Main] Microphone permission granted:', granted)
-    }
-  }
+  // Start sidecar for activity monitoring and screenshots
+  startSidecar(store)
 
   createWindow()
   createTray()
   resetActivityTimer()
-
-  // Start the sidecar (activity monitoring, screenshots)
-  startSidecar()
 
   // Auto-start on login (can be toggled in settings)
   const autoStart = store.get('autoStart', true) as boolean
@@ -700,6 +638,11 @@ app.whenReady().then(async () => {
     openAtLogin: autoStart,
     openAsHidden: true,
   })
+
+  // If mode was saved as silent, show chat window
+  if (store.get('mode') === 'silent') {
+    showChatWindow()
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -717,24 +660,4 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   isQuitting = true
   stopSidecar()
-})
-
-// IPC handler for opening URLs in default browser
-ipcMain.on('open-url', (_, url: string) => {
-  shell.openExternal(url)
-})
-
-// IPC handlers for microphone permission (macOS)
-ipcMain.handle('request-mic-permission', async () => {
-  if (process.platform === 'darwin') {
-    return await systemPreferences.askForMediaAccess('microphone')
-  }
-  return true // Non-macOS platforms don't need explicit permission
-})
-
-ipcMain.handle('get-mic-permission', () => {
-  if (process.platform === 'darwin') {
-    return systemPreferences.getMediaAccessStatus('microphone')
-  }
-  return 'granted'
 })

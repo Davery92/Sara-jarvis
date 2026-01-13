@@ -29,7 +29,21 @@ class ApiClient {
     return headers
   }
 
-  async login(email: string, password: string): Promise<string | null> {
+  // Error callback for auth failures and other errors
+  private errorCallback: ((error: string) => void) | null = null
+
+  setErrorCallback(callback: ((error: string) => void) | null) {
+    this.errorCallback = callback
+  }
+
+  private reportError(message: string) {
+    console.error('[API]', message)
+    if (this.errorCallback) {
+      this.errorCallback(message)
+    }
+  }
+
+  async login(email: string, password: string): Promise<{ token: string | null; error?: string }> {
     try {
       const response = await fetch(`${this.baseUrl}/auth/login`, {
         method: 'POST',
@@ -41,19 +55,36 @@ class ApiClient {
       })
 
       if (!response.ok) {
-        return null
+        let errorMessage = 'Login failed'
+        try {
+          const errorData = await response.json()
+          errorMessage = errorData.detail || errorData.message || `Login failed (${response.status})`
+        } catch {
+          if (response.status === 401) {
+            errorMessage = 'Invalid email or password'
+          } else if (response.status === 403) {
+            errorMessage = 'Access denied'
+          } else if (response.status >= 500) {
+            errorMessage = 'Server error. Please try again later.'
+          }
+        }
+        this.reportError(errorMessage)
+        return { token: null, error: errorMessage }
       }
 
       const data = await response.json()
       const token = data.access_token || data.token
       if (token) {
         this.token = token
-        return token
+        return { token }
       }
-      return null
+      const error = 'No token received from server'
+      this.reportError(error)
+      return { token: null, error }
     } catch (error) {
-      console.error('Login error:', error)
-      return null
+      const message = error instanceof Error ? error.message : 'Connection failed. Check your network.'
+      this.reportError(message)
+      return { token: null, error: message }
     }
   }
 
@@ -247,9 +278,14 @@ class ApiClient {
   }
 
   async speak(text: string): Promise<ArrayBuffer> {
+    console.log('[API] speak() called, text length:', text.length)
     const token = await this.getToken()
+    console.log('[API] speak() token present:', !!token)
 
-    const response = await fetch(`${this.baseUrl}/api/voice-agent/speak`, {
+    const url = `${this.baseUrl}/api/voice-agent/speak`
+    console.log('[API] speak() URL:', url)
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -258,11 +294,17 @@ class ApiClient {
       body: JSON.stringify({ text }),
     })
 
+    console.log('[API] speak() response status:', response.status)
+
     if (!response.ok) {
-      throw new Error(`TTS failed: ${response.status}`)
+      const errorText = await response.text()
+      console.error('[API] speak() error response:', errorText)
+      throw new Error(`TTS failed: ${response.status} - ${errorText}`)
     }
 
-    return response.arrayBuffer()
+    const buffer = await response.arrayBuffer()
+    console.log('[API] speak() got buffer, size:', buffer.byteLength)
+    return buffer
   }
 
   async getNotes(): Promise<Array<{ id: string; title: string; content: string }>> {

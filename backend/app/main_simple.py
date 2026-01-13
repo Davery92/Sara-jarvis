@@ -9668,7 +9668,7 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.30"}
+    return {"downloads": downloads, "version": "1.0.34"}
 
 
 @app.get("/api/downloads/{filename}")

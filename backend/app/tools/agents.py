@@ -15,8 +15,13 @@ logger = logging.getLogger(__name__)
 class HandoffToAgentsTool(BaseTool):
     """Hand off a research or analysis task to background worker agents"""
 
-    name = "handoff_to_agents"
-    description = """Hand off a research or analysis task to background worker agents.
+    @property
+    def name(self) -> str:
+        return "handoff_to_agents"
+
+    @property
+    def description(self) -> str:
+        return """Hand off a research or analysis task to background worker agents.
     Use this when the user wants you to research something in the background,
     look into a topic thoroughly, compare options, or when they explicitly say
     'have your agents look into this', 'research this in the background',
@@ -33,27 +38,29 @@ class HandoffToAgentsTool(BaseTool):
     Best for: Research tasks, comparing products/options, learning about topics,
     gathering information that requires multiple sources."""
 
-    parameters = {
-        "type": "object",
-        "properties": {
-            "task_description": {
-                "type": "string",
-                "description": "A clear description of the research task or question to investigate. Be specific about what you want to learn."
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_description": {
+                    "type": "string",
+                    "description": "A clear description of the research task or question to investigate. Be specific about what you want to learn."
+                },
+                "task_type": {
+                    "type": "string",
+                    "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
+                    "enum": ["research", "analysis"],
+                    "default": "research"
+                }
             },
-            "task_type": {
-                "type": "string",
-                "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
-                "enum": ["research", "analysis"],
-                "default": "research"
-            }
-        },
-        "required": ["task_description"]
-    }
+            "required": ["task_description"]
+        }
 
-    async def execute(self, user_id: str, parameters: Dict[str, Any]) -> ToolResult:
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Execute the handoff to background agents"""
-        task_description = parameters.get("task_description", "")
-        task_type = parameters.get("task_type", "research")
+        task_description = kwargs.get("task_description", "")
+        task_type = kwargs.get("task_type", "research")
 
         if not task_description:
             return ToolResult(
@@ -120,33 +127,40 @@ class HandoffToAgentsTool(BaseTool):
 class GetBackgroundTasksTool(BaseTool):
     """Get status of active and recent background tasks"""
 
-    name = "get_background_tasks"
-    description = """Check the status of background tasks that agents are working on.
+    @property
+    def name(self) -> str:
+        return "get_background_tasks"
+
+    @property
+    def description(self) -> str:
+        return """Check the status of background tasks that agents are working on.
     Shows active tasks currently running and recently completed tasks.
     Use this when the user asks about their background tasks, agent work,
     or wants to know what research is pending/complete."""
 
-    parameters = {
-        "type": "object",
-        "properties": {
-            "include_completed": {
-                "type": "boolean",
-                "description": "Include recently completed tasks (default: true)",
-                "default": True
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "include_completed": {
+                    "type": "boolean",
+                    "description": "Include recently completed tasks (default: true)",
+                    "default": True
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of recent tasks to return (default: 5)",
+                    "default": 5
+                }
             },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of recent tasks to return (default: 5)",
-                "default": 5
-            }
-        },
-        "required": []
-    }
+            "required": []
+        }
 
-    async def execute(self, user_id: str, parameters: Dict[str, Any]) -> ToolResult:
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Get background task status"""
-        include_completed = parameters.get("include_completed", True)
-        limit = parameters.get("limit", 5)
+        include_completed = kwargs.get("include_completed", True)
+        limit = kwargs.get("limit", 5)
 
         try:
             from app.services.background_task_service import background_task_service

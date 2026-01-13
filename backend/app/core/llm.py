@@ -273,15 +273,20 @@ class LLMClientWithFailover:
         payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens)
 
         try:
-            self.primary_status.total_requests += 1
+            # Track request count for the endpoint being used
+            if url == self.primary_url:
+                self.primary_status.total_requests += 1
+            else:
+                self.fallback_status.total_requests += 1
+
             response = await client.post("/chat/completions", json=payload)
             response.raise_for_status()
 
             result = response.json()
             logger.debug(f"Chat completion successful via {url}")
 
-            # Track token usage
-            self._track_token_usage(result)
+            # Track token usage with endpoint context
+            self._track_token_usage(result, url)
 
             return result
 
@@ -300,19 +305,25 @@ class LLMClientWithFailover:
                 try:
                     logger.info(f"Attempting failover to {self.fallback_url}")
                     self.primary_status.failover_events += 1
+                    self.fallback_status.total_requests += 1
 
                     response = await self._fallback_client.post("/chat/completions", json=payload)
                     response.raise_for_status()
 
                     result = response.json()
                     logger.info(f"Failover to {self.fallback_url} successful")
+                    self.fallback_status.last_success = datetime.now()
+                    self.fallback_status.consecutive_successes += 1
 
-                    # Track token usage
-                    self._track_token_usage(result)
+                    # Track token usage with fallback context
+                    self._track_token_usage(result, self.fallback_url)
 
                     return result
 
                 except Exception as fallback_error:
+                    self.fallback_status.total_failures += 1
+                    self.fallback_status.consecutive_failures += 1
+                    self.fallback_status.last_failure = datetime.now()
                     logger.error(f"Fallback to {self.fallback_url} also failed: {fallback_error}")
                     raise
 
@@ -342,7 +353,7 @@ class LLMClientWithFailover:
 
         return payload
 
-    def _track_token_usage(self, result: Dict[str, Any]):
+    def _track_token_usage(self, result: Dict[str, Any], endpoint_url: str = None):
         """Track token usage if callback is set"""
         usage = result.get("usage", {})
         if usage and _token_usage_callback:
@@ -355,7 +366,13 @@ class LLMClientWithFailover:
                     operation_type="chat"
                 )
             except Exception as e:
-                logger.warning(f"Failed to log token usage: {e}")
+                logger.error(
+                    f"Token usage callback failed: {e}. "
+                    f"Usage data: prompt={usage.get('prompt_tokens')}, "
+                    f"completion={usage.get('completion_tokens')}, "
+                    f"model={self.model}, endpoint={endpoint_url or 'unknown'}",
+                    exc_info=True
+                )
 
     async def _anthropic_chat_completion(
         self,
@@ -430,7 +447,12 @@ class LLMClientWithFailover:
                         operation_type="chat"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to log token usage: {e}")
+                    logger.error(
+                        f"Anthropic token usage callback failed: {e}. "
+                        f"Usage data: input={usage.get('input_tokens')}, "
+                        f"output={usage.get('output_tokens')}, model={self.model}",
+                        exc_info=True
+                    )
 
             return openai_result
 
@@ -531,15 +553,21 @@ class LLMClientWithFailover:
             usage = result.get("usage", {})
             if usage and _token_usage_callback:
                 try:
+                    embedding_model = model or settings.embedding_model
                     _token_usage_callback(
                         prompt_tokens=usage.get("prompt_tokens", 0),
                         completion_tokens=0,
                         total_tokens=usage.get("total_tokens", usage.get("prompt_tokens", 0)),
-                        model=model or settings.embedding_model,
+                        model=embedding_model,
                         operation_type="embedding"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to log embedding token usage: {e}")
+                    logger.error(
+                        f"Embedding token usage callback failed: {e}. "
+                        f"Usage data: prompt={usage.get('prompt_tokens')}, "
+                        f"model={model or settings.embedding_model}, endpoint={emb_base}",
+                        exc_info=True
+                    )
 
             await embedding_client.aclose()
             return embedding
@@ -607,6 +635,12 @@ class LLMClientWithFailover:
             "fallback": {
                 "url": self.fallback_url,
                 "state": self.fallback_status.state.value,
+                "last_success": self.fallback_status.last_success.isoformat() if self.fallback_status.last_success else None,
+                "last_failure": self.fallback_status.last_failure.isoformat() if self.fallback_status.last_failure else None,
+                "total_requests": self.fallback_status.total_requests,
+                "total_failures": self.fallback_status.total_failures,
+                "consecutive_successes": self.fallback_status.consecutive_successes,
+                "consecutive_failures": self.fallback_status.consecutive_failures,
             },
             "active_endpoint": self.primary_url if self.primary_status.state == EndpointState.HEALTHY else self.fallback_url,
             "health_check_interval_seconds": self.health_check_interval,

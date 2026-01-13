@@ -125,14 +125,22 @@ class MemoryService:
                 try:
                     emb = await embedding_fn(content)
                     if emb:
-                        # Normalize to EMBEDDING_DIM
-                        if len(emb) < EMBEDDING_DIM:
-                            emb = emb + [0.0] * (EMBEDDING_DIM - len(emb))
-                        elif len(emb) > EMBEDDING_DIM:
-                            emb = emb[:EMBEDDING_DIM]
+                        # Normalize to EMBEDDING_DIM with logging
+                        original_dim = len(emb)
+                        if original_dim != EMBEDDING_DIM:
+                            logger.warning(
+                                f"Embedding dimension mismatch for head '{h}': got {original_dim}, expected {EMBEDDING_DIM}. "
+                                f"{'Padding' if original_dim < EMBEDDING_DIM else 'Truncating'} embedding."
+                            )
+                            if original_dim < EMBEDDING_DIM:
+                                emb = emb + [0.0] * (EMBEDDING_DIM - original_dim)
+                            else:
+                                emb = emb[:EMBEDDING_DIM]
                         q_embeddings[h] = emb
+                    else:
+                        logger.warning(f"Embedding service returned empty result for head '{h}' - skipping storage")
                 except Exception as e:
-                    logger.warning(f"Failed to generate embedding for head '{h}': {e}")
+                    logger.error(f"Failed to generate embedding for head '{h}': {e}", exc_info=True)
 
         # Store in database
         db: Session = self.SessionLocal()
@@ -227,16 +235,22 @@ class MemoryService:
         try:
             q_emb = await embedding_fn(q)
             if not q_emb:
-                logger.error("Failed to generate query embedding")
+                logger.error("Failed to generate query embedding - embedding service returned empty result")
                 return []
 
-            # Normalize embedding dimension
-            if len(q_emb) < EMBEDDING_DIM:
-                q_emb = q_emb + [0.0] * (EMBEDDING_DIM - len(q_emb))
-            elif len(q_emb) > EMBEDDING_DIM:
-                q_emb = q_emb[:EMBEDDING_DIM]
+            # Normalize embedding dimension with logging
+            original_dim = len(q_emb)
+            if original_dim != EMBEDDING_DIM:
+                logger.warning(
+                    f"Query embedding dimension mismatch: got {original_dim}, expected {EMBEDDING_DIM}. "
+                    f"{'Padding' if original_dim < EMBEDDING_DIM else 'Truncating'} for search."
+                )
+                if original_dim < EMBEDDING_DIM:
+                    q_emb = q_emb + [0.0] * (EMBEDDING_DIM - original_dim)
+                else:
+                    q_emb = q_emb[:EMBEDDING_DIM]
         except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}")
+            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
             return []
 
         db: Session = self.SessionLocal()

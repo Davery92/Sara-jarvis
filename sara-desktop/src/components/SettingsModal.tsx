@@ -43,15 +43,16 @@ export default function SettingsModal({ onClose, onAuthChange }: SettingsModalPr
       apiClient.setBaseUrl(apiUrl)
 
       // Attempt login
-      const token = await apiClient.login(email, password)
+      const result = await apiClient.login(email, password)
 
-      if (token) {
-        await window.electronAPI?.setAuthToken(token)
+      if (result.token) {
+        await window.electronAPI?.setAuthToken(result.token)
         setIsAuthenticated(true)
         onAuthChange(true)
         setPassword('')
       } else {
-        setError('Login failed. Please check your credentials.')
+        // Show the specific error message from the API
+        setError(result.error || 'Login failed. Please check your credentials.')
       }
     } catch (err) {
       console.error('Login error:', err)

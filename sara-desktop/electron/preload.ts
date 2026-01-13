@@ -1,15 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
-type Mode = 'wakeWord' | 'pushToTalk' | 'silent'
-
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Mode management
-  getMode: (): Promise<Mode> => ipcRenderer.invoke('get-mode'),
-  setMode: (mode: Mode): Promise<void> => ipcRenderer.invoke('set-mode', mode),
-  onModeChanged: (callback: (mode: Mode) => void) => {
-    ipcRenderer.on('mode-changed', (_: any, mode: Mode) => callback(mode))
-  },
-
   // API URL
   getApiUrl: (): Promise<string> => ipcRenderer.invoke('get-api-url'),
   setApiUrl: (url: string): Promise<void> => ipcRenderer.invoke('set-api-url', url),
@@ -27,11 +18,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Chat window controls
-  showChat: (options?: { voice?: boolean }) => ipcRenderer.send('show-chat', options),
+  showChat: () => ipcRenderer.send('show-chat'),
   hideChat: () => ipcRenderer.send('hide-chat'),
-  onStartVoice: (callback: () => void) => {
-    ipcRenderer.on('start-voice', () => callback())
-  },
 
   // Note window controls
   showNote: (noteData: { id: string; title: string; content: string }) =>
@@ -62,9 +50,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Open URL in default browser
   openUrl: (url: string) => ipcRenderer.send('open-url', url),
 
-  // Sidecar management
-  getSidecarStatus: (): Promise<{ running: boolean }> =>
-    ipcRenderer.invoke('sidecar-status'),
-  restartSidecar: (): Promise<boolean> =>
-    ipcRenderer.invoke('restart-sidecar'),
+  // Microphone permission (macOS)
+  requestMicPermission: (): Promise<boolean> =>
+    ipcRenderer.invoke('request-mic-permission'),
+  getMicPermissionStatus: (): Promise<string> =>
+    ipcRenderer.invoke('get-mic-permission'),
 })

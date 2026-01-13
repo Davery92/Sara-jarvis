@@ -351,14 +351,31 @@ def get_keyword_classifier() -> KeywordIntentClassifier:
 # Tool Intent Classifier - Maps messages to tool categories for token savings
 # ============================================================================
 
+from datetime import datetime, timedelta
+from threading import Lock
+
+@dataclass
+class ConversationContext:
+    """Stores context for a conversation session"""
+    recent_intents: List[str]  # Last N intents classified
+    recent_tools: List[str]    # Tool categories used in recent turns
+    last_update: datetime
+
+
 class ToolIntentClassifier:
     """
-    Fast keyword-based classifier that determines which tool categories to load.
+    Conversation-aware intent classifier that determines which tool categories to load.
 
-    This reduces token usage by only sending relevant tools to the LLM.
-    For example, a simple "hello" needs no tools, while "log 500 calories"
-    only needs fitness tools.
+    This reduces token usage by only sending relevant tools to the LLM while
+    preserving context across conversation turns. Conversational follow-ups
+    inherit tools from recent turns to maintain continuity.
     """
+
+    # Base tools always available (essential for most interactions)
+    BASE_TOOLS = ['memory', 'notes', 'time']
+
+    # Extended default tools for general/unclear intent
+    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning']
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {
@@ -430,7 +447,7 @@ class ToolIntentClassifier:
 
     # Map intents to tool categories
     INTENT_TO_TOOL_CATEGORIES = {
-        'CONVERSATIONAL': [],  # No tools needed for greetings
+        'CONVERSATIONAL': [],  # Will inherit from conversation context
         'FITNESS': ['fitness'],
         'NOTES': ['notes'],
         'TIME': ['time'],
@@ -441,9 +458,64 @@ class ToolIntentClassifier:
         'LEARNING': ['learning', 'web'],
         'PROJECTS': ['projects'],
         'MORNING_BRIEF': ['morning_brief', 'time'],
-        'AGENTS': ['agents', 'web'],  # Agent handoff with web search capability
-        'GENERAL': ['notes', 'memory', 'web'],  # Fallback for unclear intent
+        'AGENTS': ['agents', 'web'],
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time'],  # Expanded fallback
     }
+
+    # How many recent turns to preserve context from
+    CONTEXT_TURNS = 3
+    # How long to keep context before expiring (30 minutes)
+    CONTEXT_TTL_MINUTES = 30
+
+    def __init__(self):
+        self._conversation_contexts: Dict[str, ConversationContext] = {}
+        self._context_lock = Lock()
+
+    def _get_context(self, session_id: str) -> Optional[ConversationContext]:
+        """Get conversation context for a session, if it exists and isn't expired"""
+        with self._context_lock:
+            ctx = self._conversation_contexts.get(session_id)
+            if ctx is None:
+                return None
+
+            # Check if context has expired
+            if datetime.utcnow() - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES):
+                del self._conversation_contexts[session_id]
+                return None
+
+            return ctx
+
+    def _update_context(self, session_id: str, intent: str, tools: List[str]):
+        """Update conversation context with latest intent and tools"""
+        with self._context_lock:
+            ctx = self._conversation_contexts.get(session_id)
+
+            if ctx is None:
+                ctx = ConversationContext(
+                    recent_intents=[],
+                    recent_tools=[],
+                    last_update=datetime.utcnow()
+                )
+                self._conversation_contexts[session_id] = ctx
+
+            # Add current intent/tools, keeping only last N turns
+            ctx.recent_intents = ([intent] + ctx.recent_intents)[:self.CONTEXT_TURNS]
+            ctx.recent_tools = (tools + ctx.recent_tools)[:self.CONTEXT_TURNS * 3]
+            ctx.last_update = datetime.utcnow()
+
+            # Periodically clean up old sessions (every 100 updates)
+            if len(self._conversation_contexts) > 100:
+                self._cleanup_old_contexts()
+
+    def _cleanup_old_contexts(self):
+        """Remove expired conversation contexts"""
+        now = datetime.utcnow()
+        expired = [
+            sid for sid, ctx in self._conversation_contexts.items()
+            if now - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES)
+        ]
+        for sid in expired:
+            del self._conversation_contexts[sid]
 
     def classify(self, message: str) -> str:
         """
@@ -491,11 +563,67 @@ class ToolIntentClassifier:
         Returns:
             List of tool category strings to load
         """
-        return self.INTENT_TO_TOOL_CATEGORIES.get(intent, ['notes', 'memory', 'web'])
+        return self.INTENT_TO_TOOL_CATEGORIES.get(intent, self.DEFAULT_TOOLS)
+
+    def classify_with_context(self, message: str, session_id: Optional[str] = None) -> Tuple[str, List[str]]:
+        """
+        Classify message with conversation context awareness.
+
+        Conversational messages will inherit tools from recent conversation turns,
+        ensuring follow-up messages can still use tools that were relevant before.
+
+        Args:
+            message: The user's message text
+            session_id: Optional session identifier for context tracking
+
+        Returns:
+            Tuple of (intent, list of tool categories)
+        """
+        explicit_intent = self.classify(message)
+        explicit_tools = self.INTENT_TO_TOOL_CATEGORIES.get(explicit_intent, [])
+
+        # If we have a session and the intent is conversational or general,
+        # inherit tools from recent conversation
+        if session_id:
+            ctx = self._get_context(session_id)
+
+            if explicit_intent == 'CONVERSATIONAL':
+                # Conversational messages inherit tools from recent turns
+                if ctx and ctx.recent_tools:
+                    # Get unique tools from recent context
+                    inherited_tools = list(dict.fromkeys(ctx.recent_tools))[:6]
+                    tools = list(set(inherited_tools + self.BASE_TOOLS))
+                    logger.info(f"[ToolIntent] CONVERSATIONAL inheriting tools from context: {tools}")
+                else:
+                    # No context - use base tools
+                    tools = list(self.BASE_TOOLS)
+            elif explicit_intent == 'GENERAL':
+                # General intent gets expanded defaults plus any recent context
+                tools = list(self.DEFAULT_TOOLS)
+                if ctx and ctx.recent_tools:
+                    # Merge with recent tools
+                    tools = list(set(tools + ctx.recent_tools[:3]))
+            else:
+                # Specific intent - use its tools plus base tools
+                tools = list(set(explicit_tools + self.BASE_TOOLS))
+
+            # Update context with this turn
+            self._update_context(session_id, explicit_intent, tools)
+        else:
+            # No session tracking - use simple logic
+            if explicit_intent == 'CONVERSATIONAL':
+                tools = list(self.BASE_TOOLS)
+            elif explicit_intent == 'GENERAL':
+                tools = list(self.DEFAULT_TOOLS)
+            else:
+                tools = list(set(explicit_tools + self.BASE_TOOLS))
+
+        logger.info(f"[ToolIntent] '{message[:50]}...' -> {explicit_intent}, tools={tools}")
+        return explicit_intent, tools
 
     def classify_with_categories(self, message: str) -> Tuple[str, List[str]]:
         """
-        Convenience method that returns both intent and categories.
+        Convenience method that returns both intent and categories (without context).
 
         Args:
             message: The user's message text
@@ -505,6 +633,8 @@ class ToolIntentClassifier:
         """
         intent = self.classify(message)
         categories = self.get_tool_categories(intent)
+        # Always include base tools
+        categories = list(set(categories + self.BASE_TOOLS))
         return intent, categories
 
 

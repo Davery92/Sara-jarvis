@@ -4,10 +4,7 @@ import MiniChat from './components/MiniChat'
 import SettingsModal from './components/SettingsModal'
 import NoteViewer from './components/NoteViewer'
 import TimerFloat from './components/TimerFloat'
-import { sidecarBridge } from './services/sidecarBridge'
 
-export type Mode = 'wakeWord' | 'pushToTalk' | 'silent'
-export type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking'
 export type ViewType = 'circle' | 'chat' | 'note' | 'timer' | 'settings'
 
 // Get view type from URL query parameter
@@ -21,38 +18,26 @@ function getViewType(): ViewType {
   return 'circle'
 }
 
-// Check if voice should auto-start (wake word triggered)
-function shouldAutoStartVoice(): boolean {
+// Check if pre-authenticated from URL param (avoids race condition)
+function isPreAuthenticated(): boolean {
   const params = new URLSearchParams(window.location.search)
-  return params.get('voice') === 'true'
+  return params.get('authenticated') === 'true'
 }
 
 function App() {
   const viewType = getViewType()
-  const [mode, setMode] = useState<Mode>('wakeWord')
-  const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [isVisible, setIsVisible] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  // Initialize auth from URL param if present (main process knows auth state)
+  const [isAuthenticated, setIsAuthenticated] = useState(isPreAuthenticated())
   const [chatOpen, setChatOpen] = useState(false)
 
   // Initialize from Electron store
   useEffect(() => {
     const init = async () => {
       if (window.electronAPI) {
-        const savedMode = await window.electronAPI.getMode()
-        setMode(savedMode)
-        setChatOpen(savedMode === 'silent')
-
         const token = await window.electronAPI.getAuthToken()
         setIsAuthenticated(!!token)
-
-        // Listen for mode changes from tray menu
-        window.electronAPI.onModeChanged((newMode) => {
-          console.log('[App] Mode changed to:', newMode)
-          setMode(newMode)
-          setChatOpen(newMode === 'silent')
-        })
 
         // Listen for visibility changes (only affects circle window)
         if (viewType === 'circle') {
@@ -66,26 +51,8 @@ function App() {
           setShowSettings(true)
         })
       }
-
-      // Connect to sidecar and listen for wake word
-      sidecarBridge.on('wake_word_detected', () => {
-        console.log('[App] Wake word detected!')
-        // Open chat window with voice mode when wake word is heard
-        window.electronAPI?.showChat({ voice: true })
-        setChatOpen(true)
-        setVoiceState('listening')
-      })
-
-      // Listen for activity updates
-      sidecarBridge.on('activity_update', (msg) => {
-        console.log('[App] Activity update:', msg)
-      })
     }
     init()
-
-    return () => {
-      sidecarBridge.disconnect()
-    }
   }, [viewType])
 
   // Handle circle click - toggle chat open/closed
@@ -142,14 +109,12 @@ function App() {
 
   if (viewType === 'chat') {
     // Chat window - just render the chat (fully interactive, no drag)
-    const autoStartVoice = shouldAutoStartVoice()
     return (
       <div className="chat-window w-full h-full">
         <MiniChat
           onClose={handleChatClose}
           isAuthenticated={isAuthenticated}
           onNeedAuth={() => setShowSettings(true)}
-          autoStartVoice={autoStartVoice}
         />
         {showSettings && (
           <SettingsModal
@@ -170,8 +135,6 @@ function App() {
     >
       <div className={`transition-opacity duration-500 ${isVisible ? 'opacity-100' : 'opacity-20'}`}>
         <FloatingCircle
-          state={voiceState}
-          mode={mode}
           chatOpen={chatOpen}
           onClick={handleCircleClick}
           onRightClick={handleRightClick}

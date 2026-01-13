@@ -60,7 +60,7 @@ services:
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001"]
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed

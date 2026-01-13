@@ -4,7 +4,6 @@ import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from './config'
-import MermaidDiagram from './components/MermaidDiagram'
 import Notes from './components/Notes'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
@@ -12,7 +11,6 @@ import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
-import { GTKYTrigger } from './components/onboarding/GTKYTrigger'
 import FitnessSection from './components/fitness/FitnessSection'
 import RecipesSection from './components/fitness/RecipesSection'
 import LearningSection from './components/learning/LearningSection'
@@ -75,7 +73,6 @@ function App() {
   const [user, setUser] = useState(null)
   const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, fitness, recipes, settings, briefings, context-mode, smart-insights, orchestrator-lab
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
-  const [isMobileNotesSidebarOpen, setIsMobileNotesSidebarOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -251,7 +248,8 @@ function App() {
           }
         }
       } catch (error) {
-        // Silently ignore - health alerts are optional
+        // Log error but don't block - health alerts are optional
+        console.warn('Health alerts check failed:', error instanceof Error ? error.message : error)
       }
     }
 
@@ -956,92 +954,6 @@ function App() {
   const removeToast = (id) => {
     setToasts(prev => prev.filter(t => t.id !== id))
   }
-
-  // Autonomous behavior handlers for different idle thresholds
-  const handleQuickSweep = useCallback((mode) => {
-    console.log(`🔍 Quick Sweep triggered in ${mode} mode`)
-    
-    const messages = {
-      coach: "Ready to tackle something new? 💪",
-      analyst: "I've been analyzing your recent patterns...",
-      companion: "I'm here if you need to chat about anything",
-      guardian: "System status: All secure and running smoothly",
-      concierge: "Shall I help organize your day?", 
-      librarian: "I noticed some documents that might interest you"
-    }
-
-    
-    setTimeout(() => {
-    }, 2000)
-  }, [])
-
-  const handleStandardSweep = useCallback((mode) => {
-    console.log(`📊 Standard Sweep triggered in ${mode} mode`)
-    
-    const messages = {
-      coach: "I've spotted some patterns in your habits - want insights?",
-      analyst: "Ready for your productivity summary?",
-      companion: "How are you feeling about your progress today?",
-      guardian: "Time for a security and wellness check-in",
-      concierge: "I can help reschedule or prep for upcoming tasks",
-      librarian: "I've organized your knowledge graph - take a look?"
-    }
-
-    
-    setTimeout(() => {
-    }, 1500)
-  }, [])
-
-  const handleDigestSweep = useCallback((mode) => {
-    console.log(`📝 Digest Sweep triggered in ${mode} mode`)
-    
-    const messages = {
-      coach: "Let's review your wins and plan tomorrow! 🎯",
-      analyst: "Your weekly intelligence digest is ready",
-      companion: "Shall we reflect on today and set intentions?",
-      guardian: "Daily security briefing and system health report",
-      concierge: "Tomorrow's schedule optimized with buffer time",
-      librarian: "Weekly knowledge summary and reading recommendations"
-    }
-
-    
-    setTimeout(() => {
-    }, 1000)
-  }, [])
-
-  // Helper function to fetch and display the latest autonomous insight
-  const fetchAndDisplayLatestInsight = useCallback(async (threshold: string, mode: string) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/insights?limit=1&sweep_type=${threshold}`, {
-        credentials: 'include'
-      })
-      
-      if (response.ok) {
-        const insights = await response.json()
-        if (insights.length > 0) {
-          // Insights fetched successfully - can be used for notifications
-          console.log('Fetched insight:', insights[0]?.content?.substring(0, 100))
-        }
-      }
-    } catch (error) {
-      console.warn('Failed to fetch latest insight:', error)
-    }
-  }, [])
-
-  // Fallback sweep handlers (original client-side behavior)
-  const handleFallbackSweep = useCallback((threshold: string, mode: string) => {
-    switch (threshold) {
-      case 'quickSweep':
-        handleQuickSweep(mode)
-        break
-      case 'standardSweep':
-        handleStandardSweep(mode)
-        break
-      case 'digestSweep':
-        handleDigestSweep(mode)
-        break
-    }
-  }, [])
 
   const logout = async () => {
     try {

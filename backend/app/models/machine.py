@@ -43,7 +43,7 @@ class Machine(Base):
 
     # Configuration
     screenshot_enabled = Column(Boolean, default=True)
-    screenshot_interval_seconds = Column(Integer, default=30)
+    screenshot_interval_seconds = Column(Integer, default=300)  # 5 minutes
     clipboard_enabled = Column(Boolean, default=True)
     terminal_enabled = Column(Boolean, default=True)
     file_access_enabled = Column(Boolean, default=True)

@@ -154,37 +154,40 @@ class TimersStatusTool(BaseTool):
     
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Check timer status"""
-        
+
         include_completed = kwargs.get("include_completed", False)
         limit = kwargs.get("limit", 10)
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
             query = db.query(Timer).filter(Timer.user_id == user_id)
-            
+
             if include_completed:
-                query = query.filter(Timer.status.in_(["running", "completed"]))
+                # Include both active and completed timers
+                query = query.filter((Timer.is_active == True) | (Timer.is_completed == True))
             else:
-                query = query.filter(Timer.status == "running")
-            
+                # Only active (running) timers
+                query = query.filter(Timer.is_active == True, Timer.is_completed == False)
+
             timers = query.order_by(Timer.created_at.desc()).limit(limit).all()
-            
+
             now = datetime.now(timezone.utc)
             timer_list = []
-            
+
             for timer in timers:
                 # Calculate time remaining
                 time_remaining = None
                 is_expired = False
-                
-                if timer.status == "running":
-                    remaining_seconds = (timer.ends_at - now).total_seconds()
+
+                if timer.is_active and not timer.is_completed:
+                    remaining_seconds = (timer.end_time - now).total_seconds()
                     if remaining_seconds <= 0:
                         is_expired = True
                         # Auto-complete expired timers
-                        timer.status = "completed"
+                        timer.is_active = False
+                        timer.is_completed = True
                         db.commit()
                     else:
                         time_remaining = {
@@ -192,21 +195,22 @@ class TimersStatusTool(BaseTool):
                             "minutes": int(remaining_seconds // 60),
                             "hours": int(remaining_seconds // 3600)
                         }
-                
+
                 timer_data = {
                     "timer_id": str(timer.id),
-                    "label": timer.label,
-                    "ends_at": timer.ends_at.isoformat(),
+                    "title": timer.title,
+                    "end_time": timer.end_time.isoformat(),
                     "is_active": timer.is_active,
+                    "is_completed": timer.is_completed,
                     "created_at": timer.created_at.isoformat(),
                     "time_remaining": time_remaining,
                     "is_expired": is_expired
                 }
-                
+
                 timer_list.append(timer_data)
-            
-            active_count = len([t for t in timer_list if t["status"] == "running" and not t["is_expired"]])
-            
+
+            active_count = len([t for t in timer_list if t["is_active"] and not t["is_expired"]])
+
             return ToolResult(
                 success=True,
                 data={
@@ -216,7 +220,7 @@ class TimersStatusTool(BaseTool):
                 },
                 message=f"Found {len(timer_list)} timers ({active_count} active)"
             )
-            
+
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -252,56 +256,59 @@ class TimersCancelTool(BaseTool):
     
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Cancel a timer"""
-        
+
         timer_id = kwargs.get("timer_id")
-        
+
         if not timer_id:
             return ToolResult(
                 success=False,
                 message="Timer ID is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
             # Find the timer
             timer = db.query(Timer).filter(
                 Timer.id == timer_id,
                 Timer.user_id == user_id
             ).first()
-            
+
             if not timer:
                 return ToolResult(
                     success=False,
                     message="Timer not found"
                 )
-            
-            if timer.status in ["cancelled", "completed"]:
+
+            # Check if already inactive or completed
+            if not timer.is_active or timer.is_completed:
+                status_desc = "completed" if timer.is_completed else "cancelled"
                 return ToolResult(
                     success=False,
-                    message=f"Timer is already {timer.status}"
+                    message=f"Timer is already {status_desc}"
                 )
-            
-            # Cancel the timer
-            timer.status = "cancelled"
+
+            # Cancel the timer by marking it inactive
+            timer.is_active = False
             db.commit()
-            
+
             message = f"Cancelled timer"
-            if timer.label:
-                message += f": {timer.label}"
-            
+            if timer.title:
+                message += f": {timer.title}"
+
             return ToolResult(
                 success=True,
                 data={
                     "timer_id": str(timer.id),
-                    "label": timer.label,
-                    "ends_at": timer.ends_at.isoformat(),
-                    "status": timer.status
+                    "title": timer.title,
+                    "end_time": timer.end_time.isoformat(),
+                    "is_active": timer.is_active,
+                    "is_completed": timer.is_completed
                 },
                 message=message
             )
-            
+
         except Exception as e:
             db.rollback()
             return ToolResult(
