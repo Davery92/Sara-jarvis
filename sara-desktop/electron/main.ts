@@ -88,18 +88,13 @@ function startSidecar() {
     return
   }
 
-  // Get the path to the sidecar executable
+  // Get the path to the sidecar main.py
   let sidecarPath: string
-  let useCompiledBinary = false
-
   if (app.isPackaged) {
-    // In packaged app, use compiled sidecar executable
-    const isWindows = process.platform === 'win32'
-    const binaryName = isWindows ? 'sidecar.exe' : 'sidecar'
-    sidecarPath = path.join(process.resourcesPath, 'sidecar', binaryName)
-    useCompiledBinary = true
+    // In packaged app, sidecar Python files are in resources
+    sidecarPath = path.join(process.resourcesPath, 'sidecar', 'main.py')
   } else {
-    // In development, use Python script directly
+    // In development, sidecar is relative to electron directory
     sidecarPath = path.join(__dirname, '..', 'sidecar', 'main.py')
   }
 
@@ -117,28 +112,19 @@ function startSidecar() {
   const authToken = store.get('authToken', '') as string
   const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
 
-  // Spawn process - compiled binary or Python script
-  if (useCompiledBinary) {
-    // Run compiled executable directly
-    sidecarProcess = spawn(sidecarPath, [], {
-      env: {
-        ...process.env,
-        SARA_AUTH_TOKEN: authToken,
-        SARA_BACKEND_URL: apiUrl,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-  } else {
-    // Run Python script in development
-    sidecarProcess = spawn('python3', [sidecarPath], {
-      env: {
-        ...process.env,
-        SARA_AUTH_TOKEN: authToken,
-        SARA_BACKEND_URL: apiUrl,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-  }
+  // Determine Python command based on platform
+  const isWindows = process.platform === 'win32'
+  const pythonCmd = isWindows ? 'python' : 'python3'
+
+  // Spawn Python process
+  sidecarProcess = spawn(pythonCmd, [sidecarPath], {
+    env: {
+      ...process.env,
+      SARA_AUTH_TOKEN: authToken,
+      SARA_BACKEND_URL: apiUrl,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
 
   sidecarProcess.stdout?.on('data', (data) => {
     console.log('[Sidecar]', data.toString().trim())

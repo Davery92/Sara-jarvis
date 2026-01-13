@@ -519,6 +519,38 @@ function DesktopAppDownloads() {
           </div>
         </div>
       </div>
+
+      {/* Activity Monitoring Setup */}
+      <div className="mt-4 p-4 bg-amber-900/20 border border-amber-500/20 rounded-lg">
+        <div className="flex items-start gap-2">
+          <svg className="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+          </svg>
+          <div className="text-xs text-amber-200">
+            <p className="font-medium text-amber-300">Activity Monitoring Setup (Optional)</p>
+            <p className="mt-1 text-amber-200/80">
+              For activity tracking and screenshot features, install Python 3 and run:
+            </p>
+            <div className="mt-2 space-y-2">
+              <div>
+                <p className="text-amber-300/80 font-medium">Windows (PowerShell):</p>
+                <code className="block mt-1 bg-black/30 px-2 py-1 rounded text-amber-100 font-mono text-[10px] break-all">
+                  pip install pynput mss Pillow websockets httpx numpy
+                </code>
+              </div>
+              <div>
+                <p className="text-amber-300/80 font-medium">macOS (Terminal):</p>
+                <code className="block mt-1 bg-black/30 px-2 py-1 rounded text-amber-100 font-mono text-[10px] break-all">
+                  pip3 install pynput mss Pillow websockets httpx numpy
+                </code>
+              </div>
+            </div>
+            <p className="mt-2 text-amber-200/60">
+              Download Python from <a href="https://python.org/downloads" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-100">python.org</a>
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
