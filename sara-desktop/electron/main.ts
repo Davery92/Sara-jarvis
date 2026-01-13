@@ -217,8 +217,8 @@ function createWindow() {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173?view=circle')
   } else {
-    // In packaged app, index.html is at the same level as main.js
-    mainWindow.loadFile(path.join(__dirname, 'index.html'), { query: { view: 'circle' } })
+    // In packaged app, index.html is in ../dist/ relative to dist-electron/
+    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { view: 'circle' } })
   }
 
   // Open DevTools for debugging (press F12 or Ctrl+Shift+I)
@@ -294,7 +294,7 @@ function createChatWindow() {
     chatWindow.loadURL(`http://localhost:5173?view=chat${authParam}`)
   } else {
     const query: Record<string, string> = { view: 'chat', authenticated: hasAuth }
-    chatWindow.loadFile(path.join(__dirname, 'index.html'), { query })
+    chatWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query })
   }
 
   // Open DevTools for debugging
@@ -393,7 +393,7 @@ function createNoteWindow(noteId: string, title: string, content: string) {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     noteWindow.loadURL(`http://localhost:5173?view=note&data=${noteData}`)
   } else {
-    noteWindow.loadFile(path.join(__dirname, 'index.html'), {
+    noteWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
       query: { view: 'note', data: noteData }
     })
   }
@@ -445,7 +445,7 @@ function createTimerWindow(timerId: string, name: string, remainingSeconds: numb
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     timerWindow.loadURL(`http://localhost:5173?view=timer&data=${timerData}`)
   } else {
-    timerWindow.loadFile(path.join(__dirname, 'index.html'), {
+    timerWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
       query: { view: 'timer', data: timerData }
     })
   }
@@ -501,7 +501,7 @@ function createSettingsWindow() {
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
     settingsWindow.loadURL('http://localhost:5173?view=settings')
   } else {
-    settingsWindow.loadFile(path.join(__dirname, 'index.html'), {
+    settingsWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
       query: { view: 'settings' }
     })
   }
