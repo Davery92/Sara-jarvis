@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="description" content="AR Workbench Canvas - Interactive projected workspace" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Workbench Canvas</title>
+    <style>
+      /* Prevent overscroll/bounce on mobile */
+      html, body {
+        overflow: hidden;
+        overscroll-behavior: none;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body class="bg-canvas-bg">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

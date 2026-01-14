@@ -1,0 +1,85 @@
+import { useState } from 'react'
+import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid } from 'lucide-react'
+import { useCanvasStore } from '../store/canvasStore'
+import type { WindowType } from '../types'
+
+interface AppConfig {
+  id: WindowType
+  icon: typeof FileText
+  label: string
+  color: string
+  opensPickerFirst?: boolean
+}
+
+const apps: AppConfig[] = [
+  { id: 'chat', icon: MessageSquare, label: 'Chat', color: 'bg-teal-500' },
+  { id: 'note', icon: FileText, label: 'Notes', color: 'bg-blue-500' },
+  { id: 'fitness', icon: Dumbbell, label: 'Fitness', color: 'bg-green-500' },
+  { id: 'projects', icon: Briefcase, label: 'Projects', color: 'bg-purple-500' },
+  { id: 'timers', icon: Timer, label: 'Timers', color: 'bg-orange-500' },
+  { id: 'settings', icon: Settings, label: 'Settings', color: 'bg-gray-500' },
+]
+
+export default function ModeWheel() {
+  const { openWindow } = useCanvasStore()
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  const handleAppClick = (app: AppConfig) => {
+    // Open a new window for the app
+    openWindow(app.id, {})
+    setIsExpanded(false)
+  }
+
+  const handleMainButtonClick = () => {
+    setIsExpanded(!isExpanded)
+  }
+
+  return (
+    <div className="fixed bottom-8 right-8 z-50">
+      {/* Expanded app buttons - 2 columns */}
+      <div
+        className={`grid grid-cols-2 gap-3 mb-3 transition-all duration-200 ${
+          isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
+        }`}
+      >
+        {apps.map((app) => {
+          const Icon = app.icon
+
+          return (
+            <button
+              key={app.id}
+              onClick={() => handleAppClick(app)}
+              className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all
+                         shadow-lg hover:scale-110 active:scale-95 touch-target
+                         bg-canvas-elevated hover:bg-canvas-surface`}
+              title={app.label}
+            >
+              <Icon size={20} className="text-white" />
+              <span className="text-[10px] text-white/80">{app.label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Main button */}
+      <button
+        onClick={handleMainButtonClick}
+        className={`w-16 h-16 rounded-full flex items-center justify-center transition-all
+                   shadow-xl hover:scale-105 active:scale-95 touch-target
+                   bg-gradient-to-br from-blue-500 to-purple-600 ring-2 ring-white/20`}
+        title={isExpanded ? 'Close' : 'Open Apps'}
+      >
+        {isExpanded ? (
+          <ChevronUp size={28} className="text-white" />
+        ) : (
+          <LayoutGrid size={28} className="text-white" />
+        )}
+      </button>
+
+      {/* Label */}
+      <div className="absolute -left-16 top-1/2 -translate-y-1/2 text-canvas-muted text-sm whitespace-nowrap">
+        {isExpanded ? 'Apps' : ''}
+      </div>
+    </div>
+  )
+}
