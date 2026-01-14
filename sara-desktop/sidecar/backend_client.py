@@ -242,6 +242,7 @@ class BackendClient:
         self,
         command_id: str,
         success: bool,
+        result: Optional[dict] = None,
         error: Optional[str] = None
     ):
         """Report the result of a command execution."""
@@ -253,6 +254,7 @@ class BackendClient:
                 "type": "command_result",
                 "command_id": command_id,
                 "success": success,
+                "result": result,
                 "error": error,
                 "timestamp": datetime.utcnow().isoformat()
             }

@@ -4,6 +4,7 @@ Sara Desktop Sidecar - Main Entry Point
 Background service that provides:
 - Activity monitoring (keyboard, mouse, active window)
 - Screenshot capture (interval + on-demand)
+- System metrics collection (CPU, RAM, disk, network, GPU)
 - WebSocket connection to backend for commands
 - Local WebSocket bridge to Electron app
 """
@@ -14,6 +15,13 @@ import sys
 from typing import Optional
 
 from config import config
+
+# Try to import metrics collector
+try:
+    from metrics import metrics_collector, PSUTIL_AVAILABLE
+except ImportError:
+    metrics_collector = None
+    PSUTIL_AVAILABLE = False
 
 # Ensure log directory exists
 log_dir = config.settings_file.parent
@@ -43,6 +51,7 @@ class SidecarService:
         self._screenshot_service = None
         self._backend_client = None
         self._electron_bridge = None
+        self._metrics_collector = metrics_collector if PSUTIL_AVAILABLE else None
 
     async def start(self):
         """Start all sidecar services."""
@@ -93,6 +102,13 @@ class SidecarService:
                 asyncio.create_task(self._heartbeat_loop()),
             ])
 
+            # Add metrics loop if psutil is available
+            if self._metrics_collector:
+                self._tasks.append(asyncio.create_task(self._metrics_loop()))
+                logger.info("System metrics collection enabled")
+            else:
+                logger.warning("psutil not available - system metrics disabled")
+
             logger.info("All services started successfully")
 
             # Wait for all tasks
@@ -133,11 +149,72 @@ class SidecarService:
             try:
                 if self._backend_client and self._activity_monitor:
                     activity = self._activity_monitor.get_activity_summary()
+
+                    # Add quick metrics to heartbeat if available
+                    if self._metrics_collector:
+                        try:
+                            metrics = self._metrics_collector.collect()
+                            if metrics:
+                                activity["cpu_percent"] = metrics.cpu.usage_percent
+                                activity["memory_percent"] = metrics.memory.percent_used
+                        except Exception:
+                            pass
+
                     await self._backend_client.send_heartbeat(activity)
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
             await asyncio.sleep(config.heartbeat_interval)
+
+    async def _metrics_loop(self):
+        """Send periodic full metrics to backend and Electron."""
+        # Wait for initial connection
+        await asyncio.sleep(15)
+
+        while self.running:
+            try:
+                if self._metrics_collector:
+                    metrics = self._metrics_collector.collect()
+                    if metrics:
+                        metrics_dict = metrics.to_dict()
+
+                        # Send to Electron for UI display
+                        if self._electron_bridge:
+                            await self._electron_bridge.send_message({
+                                "type": "system_metrics",
+                                "metrics": {
+                                    "cpu_percent": metrics.cpu.usage_percent,
+                                    "memory_percent": metrics.memory.percent_used,
+                                    "memory_used_gb": metrics.memory.used_gb,
+                                    "memory_total_gb": metrics.memory.total_gb,
+                                    "disks": [
+                                        {
+                                            "mount": d.mount_point,
+                                            "percent": d.percent_used,
+                                            "free_gb": d.free_gb
+                                        }
+                                        for d in metrics.disks[:3]  # Top 3 disks
+                                    ],
+                                    "gpus": [
+                                        {
+                                            "name": g.name,
+                                            "utilization": g.utilization_percent,
+                                            "memory_percent": round(g.memory_used_mb / g.memory_total_mb * 100, 1) if g.memory_total_mb > 0 else 0,
+                                            "temp": g.temperature_c
+                                        }
+                                        for g in (metrics.gpus or [])
+                                    ] if metrics.gpus else None
+                                }
+                            })
+
+                        # Send full metrics to backend (less frequently)
+                        if self._backend_client and self._backend_client.is_connected:
+                            await self._backend_client.send_event("metrics", metrics_dict)
+
+            except Exception as e:
+                logger.error(f"Metrics error: {e}")
+
+            await asyncio.sleep(60)  # Full metrics every 60 seconds
 
     async def _on_activity_update(self, activity: dict):
         """Called when activity metrics are updated."""
@@ -237,6 +314,37 @@ class SidecarService:
             import webbrowser
             webbrowser.open(url)
             logger.info(f"Opened workspace: {url}")
+
+        elif cmd_type == "get_metrics":
+            # Return current system metrics
+            command_id = command.get("command_id", "unknown")
+            if self._metrics_collector:
+                try:
+                    metrics = self._metrics_collector.collect()
+                    if metrics:
+                        await self._backend_client.send_command_result(
+                            command_id,
+                            success=True,
+                            result={"metrics": metrics.to_dict()}
+                        )
+                    else:
+                        await self._backend_client.send_command_result(
+                            command_id,
+                            success=False,
+                            error="Failed to collect metrics"
+                        )
+                except Exception as e:
+                    await self._backend_client.send_command_result(
+                        command_id,
+                        success=False,
+                        error=str(e)
+                    )
+            else:
+                await self._backend_client.send_command_result(
+                    command_id,
+                    success=False,
+                    error="Metrics collector not available (psutil not installed)"
+                )
 
         else:
             logger.warning(f"Unknown command type: {cmd_type}")

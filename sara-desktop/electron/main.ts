@@ -11,11 +11,14 @@ let bridgeReconnectTimeout: NodeJS.Timeout | null = null
 function startSidecar(store: SimpleStore) {
   if (sidecarProcess) return
 
+  let sidecarDir: string
   let sidecarPath: string
   if (app.isPackaged) {
-    sidecarPath = path.join(process.resourcesPath, 'sidecar', 'main.py')
+    sidecarDir = path.join(process.resourcesPath, 'sidecar')
+    sidecarPath = path.join(sidecarDir, 'main.py')
   } else {
-    sidecarPath = path.join(__dirname, '..', 'sidecar', 'main.py')
+    sidecarDir = path.join(__dirname, '..', 'sidecar')
+    sidecarPath = path.join(sidecarDir, 'main.py')
   }
 
   if (!fs.existsSync(sidecarPath)) {
@@ -28,11 +31,29 @@ function startSidecar(store: SimpleStore) {
   const authToken = store.get('authToken', '') as string
   const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
   const isWindows = process.platform === 'win32'
-  const pythonCmd = isWindows ? 'python' : 'python3'
+  const isMac = process.platform === 'darwin'
+
+  // Look for venv Python first, fall back to system Python
+  let pythonCmd: string
+  const venvPython = isWindows
+    ? path.join(sidecarDir, 'venv', 'Scripts', 'python.exe')
+    : path.join(sidecarDir, 'venv', 'bin', 'python')
+
+  if (fs.existsSync(venvPython)) {
+    pythonCmd = venvPython
+    console.log('[Main] Using venv Python:', pythonCmd)
+  } else {
+    pythonCmd = isWindows ? 'python' : 'python3'
+    console.log('[Main] Using system Python:', pythonCmd)
+    if (isMac) {
+      console.log('[Main] Tip: Run sidecar/setup.sh to create a virtual environment')
+    }
+  }
 
   sidecarProcess = spawn(pythonCmd, [sidecarPath], {
     env: { ...process.env, SARA_AUTH_TOKEN: authToken, SARA_BACKEND_URL: apiUrl },
     stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: sidecarDir,  // Set working directory to sidecar folder
   })
 
   sidecarProcess.stdout?.on('data', (data) => console.log('[Sidecar]', data.toString().trim()))

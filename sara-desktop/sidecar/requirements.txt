@@ -11,6 +11,9 @@ Pillow>=10.0.0
 websockets>=12.0
 httpx>=0.26.0
 
+# System metrics
+psutil>=5.9.0
+
 # Utilities
 numpy>=1.24.0
 
