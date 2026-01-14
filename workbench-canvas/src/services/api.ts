@@ -157,28 +157,57 @@ export interface ChatMessage {
 }
 
 export interface StreamEvent {
-  type: 'content' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'content' | 'text_chunk' | 'tool_start' | 'tool_end' | 'done' | 'final_response' | 'response_ready' | 'error' | 'workspace_command'
   content?: string
+  data?: { content?: string; workspace_command?: string; [key: string]: any }
   tool?: string
   tool_input?: any
   tool_result?: any
   error?: string
 }
 
+export interface ChatModel {
+  id: string
+  name: string
+  provider: 'anthropic' | 'google' | 'local'
+}
+
+export interface ChatModelsResponse {
+  models: ChatModel[]
+  default: string
+}
+
+export interface ChatOptions {
+  model?: string
+  ephemeral?: boolean
+}
+
 // Chat functions with SSE streaming
 export const chatApi = {
+  getModels: async (): Promise<ChatModelsResponse> => {
+    const response = await api.get<ChatModelsResponse>('/chat/models')
+    return response.data
+  },
+
   sendMessage: async (
     messages: ChatMessage[],
     onEvent: (event: StreamEvent) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: ChatOptions
   ): Promise<void> => {
+    console.log('[chatApi] sendMessage called, url:', `${APP_CONFIG.apiUrl}/chat/stream`, 'model:', options?.model)
     const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({
+        messages,
+        model: options?.model,
+        ephemeral: options?.ephemeral,
+        source: 'workspace', // Identify as workspace chat for context-aware tools
+      }),
       signal,
       credentials: 'include', // Include cookies for auth
     })
@@ -704,6 +733,121 @@ export const projectsApi = {
     // Try to get mime type from headers
     const mimeType = response.headers['content-type'] || 'text/plain'
     return { content: response.data, mimeType }
+  },
+}
+
+// Workspace State types
+export interface WindowPosition {
+  x: number
+  y: number
+}
+
+export interface WindowSize {
+  width: number
+  height: number
+}
+
+export interface CanvasTransform {
+  x: number
+  y: number
+  scale: number
+}
+
+export interface WindowState {
+  id: string
+  type: string
+  title: string
+  position: WindowPosition
+  size: WindowSize
+  zIndex: number
+  data?: any
+}
+
+export interface SceneObjectState {
+  id: string
+  modelId: string
+  modelUrl: string
+  format: string
+  position: { x: number; y: number; z: number }
+  rotation: { x: number; y: number; z: number }
+  scale: number
+  filename: string
+}
+
+export interface WorkspaceStateData {
+  transform: CanvasTransform
+  windows: WindowState[]
+  sceneObjects?: SceneObjectState[]
+}
+
+export interface WorkspaceStateResponse {
+  id: string
+  user_id: string
+  state_data: WorkspaceStateData | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+// Workspace State functions
+export const workspaceApi = {
+  getState: async (): Promise<WorkspaceStateResponse> => {
+    const response = await api.get<WorkspaceStateResponse>('/api/workspace/state')
+    return response.data
+  },
+
+  saveState: async (stateData: WorkspaceStateData): Promise<WorkspaceStateResponse> => {
+    const response = await api.put<WorkspaceStateResponse>('/api/workspace/state', {
+      state_data: stateData,
+    })
+    return response.data
+  },
+
+  clearState: async (): Promise<void> => {
+    await api.delete('/api/workspace/state')
+  },
+}
+
+// 3D Model types
+export interface Model3D {
+  id: string
+  filename: string
+  display_name: string
+  file_format: string
+  file_size: number
+  download_url: string
+  created_at: string
+  updated_at: string
+}
+
+// 3D Model functions
+export const modelsApi = {
+  list: async (): Promise<Model3D[]> => {
+    const response = await api.get<Model3D[]>('/models')
+    return response.data
+  },
+
+  get: async (id: string): Promise<Model3D> => {
+    const response = await api.get<Model3D>(`/models/${id}`)
+    return response.data
+  },
+
+  upload: async (file: File): Promise<Model3D> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post<Model3D>('/models/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
+
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/models/${id}`)
+  },
+
+  getDownloadUrl: (id: string): string => {
+    return `${APP_CONFIG.apiUrl}/models/${id}/file`
   },
 }
 

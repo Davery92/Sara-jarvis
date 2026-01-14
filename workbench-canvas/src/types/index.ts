@@ -7,8 +7,34 @@ export interface CanvasTransform {
 
 export type CanvasMode = 'notes' | 'sketch' | 'reference'
 
+// 3D Scene Object types
+export interface Position3D {
+  x: number
+  y: number
+  z: number
+}
+
+export interface Rotation3D {
+  x: number
+  y: number
+  z: number
+}
+
+export type ModelFormat = 'stl' | 'obj' | 'gltf' | 'glb'
+
+export interface SceneObject {
+  id: string
+  modelId: string           // Reference to backend model
+  modelUrl: string          // API URL for the model file
+  format: ModelFormat
+  position: Position3D
+  rotation: Rotation3D
+  scale: number             // Uniform scale factor
+  filename: string
+}
+
 // Window types
-export type WindowType = 'note' | 'chat' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer'
+export type WindowType = 'note' | 'chat' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer'
 
 export interface Position {
   x: number
@@ -64,6 +90,13 @@ export interface FileViewerWindowData {
   fileId?: string
 }
 
+export interface ModelViewerWindowData {
+  modelId: string
+  filename: string
+  modelUrl: string
+  format: 'stl' | 'obj' | 'gltf' | 'glb'
+}
+
 export type WindowData =
   | NoteWindowData
   | ChatWindowData
@@ -72,6 +105,7 @@ export type WindowData =
   | TimersWindowData
   | SettingsWindowData
   | FileViewerWindowData
+  | ModelViewerWindowData
 
 // API types
 export interface Note {

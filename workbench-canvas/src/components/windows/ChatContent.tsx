@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageSquare, Send, Loader2, StopCircle, Wrench, Trash2 } from 'lucide-react'
+import { MessageSquare, Send, Loader2, StopCircle, Wrench, Trash2, Ghost, ChevronDown } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatApi, type ChatMessage, type StreamEvent } from '../../services/api'
-import type { ChatWindowData } from '../../types'
+import { useQuery } from '@tanstack/react-query'
+import { chatApi, workspaceApi, type ChatMessage, type StreamEvent, type ChatModel } from '../../services/api'
+import { useCanvasStore } from '../../store/canvasStore'
+import type { ChatWindowData, WindowType } from '../../types'
 
 interface ChatContentProps {
   data: ChatWindowData
@@ -22,9 +24,33 @@ export default function ChatContent({ data }: ChatContentProps) {
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [currentToolActivity, setCurrentToolActivity] = useState<{ tool: string; status: 'running' | 'done' }[]>([])
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b')
+  const [isEphemeral, setIsEphemeral] = useState(false)
+  const [showModelDropdown, setShowModelDropdown] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // Fetch available models
+  const { data: modelsData } = useQuery({
+    queryKey: ['chat-models'],
+    queryFn: chatApi.getModels,
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+  })
+
+  // Set default model when loaded
+  useEffect(() => {
+    if (modelsData?.default && selectedModel === 'gpt-oss:120b') {
+      setSelectedModel(modelsData.default)
+    }
+  }, [modelsData])
+
+  // Group models by provider
+  const groupedModels = modelsData?.models?.reduce((acc, model) => {
+    if (!acc[model.provider]) acc[model.provider] = []
+    acc[model.provider].push(model)
+    return acc
+  }, {} as Record<string, ChatModel[]>) || {}
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -36,9 +62,107 @@ export default function ChatContent({ data }: ChatContentProps) {
     inputRef.current?.focus()
   }, [])
 
+  // Handle workspace commands from Sara's tools
+  const handleWorkspaceCommand = (data: any) => {
+    if (!data) return
+    const { openWindow, closeWindow, bringToFront, windows, transform } = useCanvasStore.getState()
+    const command = data.workspace_command
+
+    console.log('[ChatContent] Workspace command:', command, data)
+
+    switch (command) {
+      case 'open_window': {
+        // Special handling for note_editor - open specific note in its own window
+        if (data.window_type === 'note_editor' && data.data?.note_id) {
+          const { openNoteWindow } = useCanvasStore.getState()
+          openNoteWindow(data.data.note_id, data.data.title || data.title || 'Note', data.data.content || '')
+          break
+        }
+
+        // Map window_type to our WindowType
+        const typeMap: Record<string, WindowType> = {
+          notes: 'note',
+          chat: 'chat',
+          fitness: 'fitness',
+          calendar: 'note', // Use note window for now
+          tasks: 'note', // Use note window for now
+          intelligence: 'note', // Use note window for now
+          settings: 'settings',
+        }
+        const windowType = typeMap[data.window_type] || 'note'
+        openWindow(windowType, data.data || {}, { title: data.title })
+        break
+      }
+
+      case 'close_window': {
+        // Find window by ID or title
+        if (data.window_id) {
+          closeWindow(data.window_id)
+        } else if (data.window_title) {
+          const targetWindow = windows.find(w =>
+            w.title.toLowerCase().includes(data.window_title.toLowerCase())
+          )
+          if (targetWindow) {
+            closeWindow(targetWindow.id)
+          }
+        }
+        break
+      }
+
+      case 'focus_window': {
+        // Find window by ID or title
+        if (data.window_id) {
+          bringToFront(data.window_id)
+        } else if (data.window_title) {
+          const targetWindow = windows.find(w =>
+            w.title.toLowerCase().includes(data.window_title.toLowerCase())
+          )
+          if (targetWindow) {
+            bringToFront(targetWindow.id)
+          }
+        }
+        break
+      }
+
+      case 'save_state': {
+        // Save current workspace state to server
+        const stateData = {
+          transform,
+          windows: windows.map(w => ({
+            id: w.id,
+            type: w.type,
+            title: w.title,
+            position: w.position,
+            size: w.size,
+            zIndex: w.zIndex,
+            data: w.data,
+          })),
+        }
+        workspaceApi.saveState(stateData).then(() => {
+          console.log('[ChatContent] Workspace state saved')
+        }).catch(err => {
+          console.error('[ChatContent] Failed to save workspace state:', err)
+        })
+        break
+      }
+
+      case 'arrange_windows': {
+        // Window arrangement (tile, cascade, stack, center)
+        // TODO: Implement arrangement logic in canvasStore
+        console.log('[ChatContent] Arrange windows:', data.arrangement)
+        break
+      }
+
+      default:
+        console.warn('[ChatContent] Unknown workspace command:', command)
+    }
+  }
+
   const handleSend = async () => {
+    console.log('[ChatContent] handleSend called, input:', input, 'isStreaming:', isStreaming)
     if (!input.trim() || isStreaming) return
 
+    console.log('[ChatContent] Sending message with model:', selectedModel, 'ephemeral:', isEphemeral)
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -67,15 +191,20 @@ export default function ChatContent({ data }: ChatContentProps) {
     ])
 
     try {
+      console.log('[ChatContent] Calling chatApi.sendMessage with', apiMessages.length, 'messages')
       await chatApi.sendMessage(
         apiMessages,
         (event: StreamEvent) => {
+          console.log('[ChatContent] Received event:', event.type)
           switch (event.type) {
             case 'content':
+            case 'text_chunk':
+              // Handle both 'content' and 'text_chunk' event types
+              const textContent = event.content || event.data?.content || ''
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
-                    ? { ...m, content: m.content + (event.content || '') }
+                    ? { ...m, content: m.content + textContent }
                     : m
                 )
               )
@@ -97,6 +226,7 @@ export default function ChatContent({ data }: ChatContentProps) {
               break
 
             case 'done':
+            case 'final_response':
               // Attach tool activity to the message
               setMessages((prev) =>
                 prev.map((m) =>
@@ -116,11 +246,18 @@ export default function ChatContent({ data }: ChatContentProps) {
                 )
               )
               break
+
+            case 'workspace_command':
+              // Handle workspace commands from Sara's tools
+              handleWorkspaceCommand(event.data)
+              break
           }
         },
-        abortControllerRef.current.signal
+        abortControllerRef.current.signal,
+        { model: selectedModel, ephemeral: isEphemeral }
       )
     } catch (err: any) {
+      console.error('[ChatContent] Error in sendMessage:', err)
       if (err.name !== 'AbortError') {
         setMessages((prev) =>
           prev.map((m) =>
@@ -131,6 +268,7 @@ export default function ChatContent({ data }: ChatContentProps) {
         )
       }
     } finally {
+      console.log('[ChatContent] sendMessage complete')
       setIsStreaming(false)
       setCurrentToolActivity([])
       abortControllerRef.current = null
@@ -152,23 +290,79 @@ export default function ChatContent({ data }: ChatContentProps) {
     }
   }
 
+  // Get display name for selected model
+  const selectedModelName = modelsData?.models?.find(m => m.id === selectedModel)?.name || selectedModel
+
   return (
     <div className="flex flex-col h-full bg-canvas-bg">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-border">
-        <div className="flex items-center gap-2">
+      <div className={`flex items-center justify-between px-4 py-2 border-b border-canvas-border ${isEphemeral ? 'bg-purple-500/10' : ''}`}>
+        <div className="flex items-center gap-3">
           <MessageSquare size={18} className="text-teal-500" />
-          <span className="font-medium text-white">Chat with Sara</span>
+
+          {/* Model Selector Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setShowModelDropdown(!showModelDropdown)}
+              className="flex items-center gap-1.5 px-2 py-1 bg-canvas-surface hover:bg-canvas-elevated rounded text-sm text-white transition-colors"
+            >
+              <span className="max-w-[120px] truncate">{selectedModelName}</span>
+              <ChevronDown size={14} className={`text-canvas-muted transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showModelDropdown && (
+              <div className="absolute top-full left-0 mt-1 w-48 bg-canvas-surface border border-canvas-border rounded-lg shadow-xl z-50 py-1 max-h-64 overflow-y-auto custom-scrollbar">
+                {Object.entries(groupedModels).map(([provider, models]) => (
+                  <div key={provider}>
+                    <div className="px-3 py-1 text-xs text-canvas-muted uppercase tracking-wider">
+                      {provider === 'anthropic' ? 'Claude' : provider === 'google' ? 'Gemini' : 'Local'}
+                    </div>
+                    {models.map((model) => (
+                      <button
+                        key={model.id}
+                        onClick={() => {
+                          setSelectedModel(model.id)
+                          setShowModelDropdown(false)
+                        }}
+                        className={`w-full px-3 py-1.5 text-left text-sm hover:bg-canvas-elevated transition-colors ${
+                          model.id === selectedModel ? 'text-teal-400 bg-canvas-elevated' : 'text-white'
+                        }`}
+                      >
+                        {model.name}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-        {messages.length > 0 && (
+
+        <div className="flex items-center gap-1">
+          {/* Ghost/Ephemeral Toggle */}
           <button
-            onClick={handleClear}
-            className="p-1.5 text-canvas-muted hover:text-red-400 hover:bg-canvas-surface rounded transition-colors"
-            title="Clear chat"
+            onClick={() => setIsEphemeral(!isEphemeral)}
+            className={`p-1.5 rounded transition-colors ${
+              isEphemeral
+                ? 'text-purple-400 bg-purple-500/20 hover:bg-purple-500/30'
+                : 'text-canvas-muted hover:text-purple-400 hover:bg-canvas-surface'
+            }`}
+            title={isEphemeral ? 'Ephemeral mode ON - chat won\'t be saved' : 'Ephemeral mode OFF - chat will be saved'}
           >
-            <Trash2 size={16} />
+            <Ghost size={16} />
           </button>
-        )}
+
+          {/* Clear Chat */}
+          {messages.length > 0 && (
+            <button
+              onClick={handleClear}
+              className="p-1.5 text-canvas-muted hover:text-red-400 hover:bg-canvas-surface rounded transition-colors"
+              title="Clear chat"
+            >
+              <Trash2 size={16} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages */}

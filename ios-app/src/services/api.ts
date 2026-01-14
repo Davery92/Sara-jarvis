@@ -8,6 +8,23 @@ const API_URL = __DEV__
 
 const TOKEN_KEY = '@sara_auth_token';
 
+// Chat model types
+export interface ChatModel {
+  id: string;
+  name: string;
+  provider: 'anthropic' | 'google' | 'local';
+}
+
+export interface ChatModelsResponse {
+  models: ChatModel[];
+  default: string;
+}
+
+export interface ChatOptions {
+  model?: string;
+  ephemeral?: boolean;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   public baseURL: string;
@@ -117,13 +134,20 @@ class ApiClient {
     return await this.getAuthToken();
   }
 
+  // Fetch available chat models
+  async getChatModels(): Promise<ChatModelsResponse> {
+    const response = await this.client.get('/chat/models');
+    return response.data;
+  }
+
   // Streaming support for chat using XMLHttpRequest (works in React Native)
   async streamChat(
     messages: any[],
     onChunk: (chunk: string) => void,
     onComplete: (conversationId?: string, episodeId?: string) => void,
     onError: (error: Error) => void,
-    sessionId?: string
+    sessionId?: string,
+    options?: ChatOptions
   ) {
     try {
       const token = await this.getAuthToken();
@@ -250,6 +274,12 @@ class ApiClient {
         const requestBody: any = { messages };
         if (sessionId) {
           requestBody.conversation_id = sessionId;  // Backend expects conversation_id
+        }
+        if (options?.model) {
+          requestBody.model = options.model;
+        }
+        if (options?.ephemeral) {
+          requestBody.ephemeral = options.ephemeral;
         }
         xhr.send(JSON.stringify(requestBody));
       });

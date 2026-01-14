@@ -1,9 +1,12 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, Notification } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { spawn, ChildProcess } from 'child_process'
+import WebSocket from 'ws'
 
 let sidecarProcess: ChildProcess | null = null
+let sidecarBridge: WebSocket | null = null
+let bridgeReconnectTimeout: NodeJS.Timeout | null = null
 
 function startSidecar(store: SimpleStore) {
   if (sidecarProcess) return
@@ -44,6 +47,118 @@ function stopSidecar() {
   if (sidecarProcess) {
     sidecarProcess.kill()
     sidecarProcess = null
+  }
+  disconnectBridge()
+}
+
+// Connect to sidecar's WebSocket bridge
+function connectToBridge(store: SimpleStore) {
+  if (sidecarBridge && sidecarBridge.readyState === WebSocket.OPEN) return
+
+  const bridgeUrl = 'ws://127.0.0.1:9876'
+  console.log('[Main] Connecting to sidecar bridge:', bridgeUrl)
+
+  try {
+    sidecarBridge = new WebSocket(bridgeUrl)
+
+    sidecarBridge.on('open', () => {
+      console.log('[Main] Connected to sidecar bridge')
+      // Send auth token to sidecar
+      const token = store.get('authToken', '') as string
+      if (token && sidecarBridge) {
+        sidecarBridge.send(JSON.stringify({ type: 'auth_token', token }))
+      }
+    })
+
+    sidecarBridge.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString())
+        handleBridgeMessage(message)
+      } catch (e) {
+        console.error('[Main] Failed to parse bridge message:', e)
+      }
+    })
+
+    sidecarBridge.on('close', () => {
+      console.log('[Main] Disconnected from sidecar bridge')
+      sidecarBridge = null
+      // Reconnect after delay
+      if (!bridgeReconnectTimeout) {
+        bridgeReconnectTimeout = setTimeout(() => {
+          bridgeReconnectTimeout = null
+          connectToBridge(store)
+        }, 3000)
+      }
+    })
+
+    sidecarBridge.on('error', (err) => {
+      console.error('[Main] Bridge connection error:', err.message)
+    })
+
+  } catch (e) {
+    console.error('[Main] Failed to connect to bridge:', e)
+  }
+}
+
+function disconnectBridge() {
+  if (bridgeReconnectTimeout) {
+    clearTimeout(bridgeReconnectTimeout)
+    bridgeReconnectTimeout = null
+  }
+  if (sidecarBridge) {
+    sidecarBridge.close()
+    sidecarBridge = null
+  }
+}
+
+function handleBridgeMessage(message: { type: string; [key: string]: any }) {
+  console.log('[Main] Bridge message:', message.type)
+
+  switch (message.type) {
+    case 'show_note':
+      // Show note popup
+      createNoteWindow(
+        message.note_id || 'remote-note',
+        message.title || 'Note',
+        message.content || ''
+      )
+      break
+
+    case 'show_timer':
+      // Show timer popup
+      createTimerWindow(
+        message.timer_id || `timer-${Date.now()}`,
+        message.label || 'Timer',
+        message.remaining_seconds || 0
+      )
+      break
+
+    case 'show_notification':
+      // Show system notification
+      if (Notification.isSupported()) {
+        new Notification({
+          title: message.title || 'Sara',
+          body: message.message || ''
+        }).show()
+      }
+      break
+
+    case 'speak':
+      // Forward to renderer for TTS (browser speech synthesis)
+      mainWindow?.webContents.send('speak', message.text)
+      break
+
+    case 'activity_update':
+      // Forward activity updates to renderer
+      mainWindow?.webContents.send('activity-update', message.activity)
+      break
+
+    case 'pong':
+      // Health check response
+      break
+
+    default:
+      console.log('[Main] Unknown bridge message type:', message.type)
   }
 }
 
@@ -627,6 +742,9 @@ app.whenReady().then(() => {
 
   // Start sidecar for activity monitoring and screenshots
   startSidecar(store)
+
+  // Connect to sidecar bridge after a short delay (let sidecar start its WebSocket server)
+  setTimeout(() => connectToBridge(store), 2000)
 
   createWindow()
   createTray()

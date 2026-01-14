@@ -61,7 +61,7 @@ class TreeNodeResponse(BaseModel):
     id: str
     name: str
     type: str  # "folder" or "note"
-    parent_id: str = None
+    parent_id: Optional[str] = None
     children: list = []
     created_at: str
     updated_at: str

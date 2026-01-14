@@ -31,6 +31,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     conversation_id: Optional[str] = None
+    model: Optional[str] = None  # Override default model (e.g., "claude-opus-4-5-20250514")
+    ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
+    source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
 
 
 class ChatResponse(BaseModel):

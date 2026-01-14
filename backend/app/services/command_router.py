@@ -27,6 +27,7 @@ class CommandType(str, Enum):
     SPEAK = "speak"
     SHOW_NOTIFICATION = "show_notification"
     START_LISTENING = "start_listening"
+    OPEN_WORKSPACE = "open_workspace"  # Open the workbench-canvas in browser
 
 
 @dataclass
@@ -220,13 +221,15 @@ class CommandRouterService:
         db: Session,
         user_id: str,
         url: str,
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None
     ) -> bool:
-        """Open a URL on the active device."""
+        """Open a URL on the specified or active device."""
         command = CommandMessage(
             command_type=CommandType.OPEN_URL,
             payload={"url": url},
-            source_device_id=source_device_id
+            source_device_id=source_device_id,
+            target_device_id=target_device_id
         )
         return await self.send_command(db, user_id, command)
 
@@ -237,9 +240,10 @@ class CommandRouterService:
         note_id: str,
         note_title: str,
         note_content: str,
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None
     ) -> bool:
-        """Show a note on the active device."""
+        """Show a note on the specified or active device."""
         command = CommandMessage(
             command_type=CommandType.SHOW_NOTE,
             payload={
@@ -247,7 +251,8 @@ class CommandRouterService:
                 "title": note_title,
                 "content": note_content
             },
-            source_device_id=source_device_id
+            source_device_id=source_device_id,
+            target_device_id=target_device_id
         )
         return await self.send_command(db, user_id, command)
 
@@ -336,6 +341,23 @@ class CommandRouterService:
             command_type=CommandType.START_LISTENING,
             payload={},
             source_device_id=source_device_id
+        )
+        return await self.send_command(db, user_id, command)
+
+    async def open_workspace(
+        self,
+        db: Session,
+        user_id: str,
+        workspace_url: str = "http://10.185.1.180:3002",
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None
+    ) -> bool:
+        """Open the workbench-canvas workspace on the specified or active device."""
+        command = CommandMessage(
+            command_type=CommandType.OPEN_WORKSPACE,
+            payload={"url": workspace_url},
+            source_device_id=source_device_id,
+            target_device_id=target_device_id
         )
         return await self.send_command(db, user_id, command)
 

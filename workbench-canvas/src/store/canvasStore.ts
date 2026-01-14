@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { APP_CONFIG } from '../config'
-import type { CanvasTransform, CanvasMode, WindowInstance, Position, Size, NoteWindowData, WindowType, WindowData } from '../types'
+import { workspaceApi, type WorkspaceStateData } from '../services/api'
+import type { CanvasTransform, CanvasMode, WindowInstance, Position, Size, NoteWindowData, WindowType, WindowData, SceneObject, Position3D, Rotation3D, ModelFormat } from '../types'
 
 // Window defaults for each type
 const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title: string }> = {
@@ -11,6 +12,7 @@ const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title
   timers: { width: 400, height: 350, title: 'Timers' },
   settings: { width: 700, height: 600, title: 'Settings' },
   fileviewer: { width: 700, height: 600, title: 'File Viewer' },
+  modelviewer: { width: 800, height: 600, title: '3D Model' },
 }
 
 interface WindowOptions {
@@ -34,6 +36,10 @@ interface CanvasState {
   windows: WindowInstance[]
   maxZIndex: number
 
+  // 3D Scene objects
+  sceneObjects: SceneObject[]
+  selectedObjectId: string | null
+
   // Transform actions
   setTransform: (transform: Partial<CanvasTransform>) => void
   resetTransform: () => void
@@ -55,6 +61,17 @@ interface CanvasState {
   moveWindow: (id: string, position: Position) => void
   resizeWindow: (id: string, size: Size) => void
   bringToFront: (id: string) => void
+
+  // 3D Scene actions
+  addSceneObject: (obj: Omit<SceneObject, 'id'>) => void
+  removeSceneObject: (id: string) => void
+  updateSceneObject: (id: string, updates: Partial<SceneObject>) => void
+  selectObject: (id: string | null) => void
+
+  // Persistence actions
+  saveStateToServer: () => Promise<void>
+  loadStateFromServer: () => Promise<void>
+  isStateLoaded: boolean
 }
 
 const modes: CanvasMode[] = ['notes', 'sketch', 'reference']
@@ -66,6 +83,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   isNotesPickerOpen: false,
   windows: [],
   maxZIndex: 0,
+  isStateLoaded: false,
+  sceneObjects: [],
+  selectedObjectId: null,
 
   // Transform actions
   setTransform: (newTransform) => {
@@ -238,5 +258,117 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         ),
       }
     })
+  },
+
+  // 3D Scene actions
+  addSceneObject: (obj) => {
+    const newObject: SceneObject = {
+      ...obj,
+      id: `scene-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    }
+    set((state) => ({
+      sceneObjects: [...state.sceneObjects, newObject],
+    }))
+  },
+
+  removeSceneObject: (id) => {
+    set((state) => ({
+      sceneObjects: state.sceneObjects.filter((obj) => obj.id !== id),
+      selectedObjectId: state.selectedObjectId === id ? null : state.selectedObjectId,
+    }))
+  },
+
+  updateSceneObject: (id, updates) => {
+    set((state) => ({
+      sceneObjects: state.sceneObjects.map((obj) =>
+        obj.id === id ? { ...obj, ...updates } : obj
+      ),
+    }))
+  },
+
+  selectObject: (id) => {
+    set({ selectedObjectId: id })
+  },
+
+  // Persistence actions
+  saveStateToServer: async () => {
+    const state = get()
+    const stateData: WorkspaceStateData = {
+      transform: state.transform,
+      windows: state.windows.map(w => ({
+        id: w.id,
+        type: w.type,
+        title: w.title,
+        position: w.position,
+        size: w.size,
+        zIndex: w.zIndex,
+        data: w.data,
+      })),
+      sceneObjects: state.sceneObjects.map(obj => ({
+        id: obj.id,
+        modelId: obj.modelId,
+        modelUrl: obj.modelUrl,
+        format: obj.format,
+        position: obj.position,
+        rotation: obj.rotation,
+        scale: obj.scale,
+        filename: obj.filename,
+      })),
+    }
+    try {
+      await workspaceApi.saveState(stateData)
+      console.log('[canvasStore] State saved to server')
+    } catch (error) {
+      console.error('[canvasStore] Failed to save state:', error)
+    }
+  },
+
+  loadStateFromServer: async () => {
+    try {
+      const response = await workspaceApi.getState()
+      if (response.state_data && (response.state_data.windows?.length > 0 || response.state_data.sceneObjects?.length)) {
+        const { transform, windows, sceneObjects } = response.state_data
+        // Find max zIndex from loaded windows
+        const maxZ = (windows || []).reduce((max, w) => Math.max(max, w.zIndex || 0), 0)
+
+        // Map loaded windows back to WindowInstance format
+        const loadedWindows: WindowInstance[] = (windows || []).map(w => ({
+          id: w.id,
+          type: w.type as WindowType,
+          title: w.title,
+          position: w.position,
+          size: w.size,
+          zIndex: w.zIndex || 0,
+          data: w.data || {},
+        }))
+
+        // Map loaded scene objects back to SceneObject format
+        const loadedSceneObjects: SceneObject[] = (sceneObjects || []).map(obj => ({
+          id: obj.id,
+          modelId: obj.modelId,
+          modelUrl: obj.modelUrl,
+          format: obj.format as ModelFormat,
+          position: obj.position,
+          rotation: obj.rotation,
+          scale: obj.scale,
+          filename: obj.filename,
+        }))
+
+        set({
+          transform: transform || { x: 0, y: 0, scale: 1 },
+          windows: loadedWindows,
+          sceneObjects: loadedSceneObjects,
+          maxZIndex: maxZ,
+          isStateLoaded: true,
+        })
+        console.log('[canvasStore] State loaded from server:', loadedWindows.length, 'windows,', loadedSceneObjects.length, 'scene objects')
+      } else {
+        set({ isStateLoaded: true })
+        console.log('[canvasStore] No saved state found')
+      }
+    } catch (error) {
+      console.error('[canvasStore] Failed to load state:', error)
+      set({ isStateLoaded: true })
+    }
   },
 }))

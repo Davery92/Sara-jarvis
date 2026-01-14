@@ -9,10 +9,13 @@ import {
   TouchableOpacity,
   Text,
   ActivityIndicator,
+  Modal,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Ionicons } from '@expo/vector-icons';
 import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext } from '../../types/navigation';
 import { Message } from '../../types/api';
 import { chatService } from '../../services/chat';
@@ -22,7 +25,7 @@ import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
 import { colors, spacing } from '../../styles/theme';
-import { apiClient } from '../../services/api';
+import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
 
 type Props = MainTabScreenProps<'Chat'> | { isEmbedded?: boolean };
 
@@ -40,6 +43,10 @@ export default function ChatScreen(props: Props) {
   const [isListening, setIsListening] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
+  const [isEphemeral, setIsEphemeral] = useState(false);
+  const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
+  const [showModelPicker, setShowModelPicker] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const streamingMessageRef = useRef('');
   const isRecordingRef = useRef(false);
@@ -159,6 +166,22 @@ export default function ChatScreen(props: Props) {
     loadConversationHistory();
   }, []);
 
+  // Fetch available chat models on mount
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const models = await apiClient.getChatModels();
+        setAvailableModels(models);
+        if (models.default && selectedModel === 'gpt-oss:120b') {
+          setSelectedModel(models.default);
+        }
+      } catch (error) {
+        console.error('[Chat] Failed to fetch chat models:', error);
+      }
+    };
+    fetchModels();
+  }, []);
+
   // Save active conversation when conversation_id changes
   useEffect(() => {
     const saveActiveConversation = async () => {
@@ -219,13 +242,15 @@ export default function ChatScreen(props: Props) {
     // Filter out the welcome message - it's not part of the real conversation
     const conversationMessages = updatedMessages.filter(m => m.id !== 'welcome');
 
-    console.log('[Chat] 📤 Sending message with conversationId:', conversationId, 'images:', images?.length || 0);
+    console.log('[Chat] 📤 Sending message with conversationId:', conversationId, 'model:', selectedModel, 'ephemeral:', isEphemeral, 'images:', images?.length || 0);
 
     await chatService.sendMessage(
       {
         messages: conversationMessages,  // Send full history, not just new message
         conversationId,
         images,  // Pass images to the service
+        model: selectedModel,  // Pass selected model
+        ephemeral: isEphemeral,  // Pass ephemeral mode
       },
       // onChunk - called for each piece of streaming text
       (chunk: string) => {
@@ -402,6 +427,8 @@ export default function ChatScreen(props: Props) {
         {
           messages: conversationMessages,
           conversationId,
+          model: selectedModel,  // Pass selected model
+          ephemeral: isEphemeral,  // Pass ephemeral mode
         },
         // onChunk
         (chunk: string) => {
@@ -586,13 +613,98 @@ export default function ChatScreen(props: Props) {
     );
   };
 
+  // Get display name for selected model
+  const selectedModelName = availableModels?.models?.find(m => m.id === selectedModel)?.name || selectedModel;
+
+  // Group models by provider
+  const groupedModels = availableModels?.models?.reduce((acc, model) => {
+    if (!acc[model.provider]) acc[model.provider] = [];
+    acc[model.provider].push(model);
+    return acc;
+  }, {} as Record<string, ChatModel[]>) || {};
+
   return (
-    <SafeAreaView style={styles.container} edges={['bottom']}>
+    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={['bottom']}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
+        {/* Header with Model Selector and Ghost Toggle */}
+        <View style={[styles.header, isEphemeral && styles.ephemeralHeader]}>
+          {/* Model Selector */}
+          <TouchableOpacity
+            style={styles.modelSelector}
+            onPress={() => setShowModelPicker(true)}
+          >
+            <Text style={styles.modelSelectorText} numberOfLines={1}>
+              {selectedModelName}
+            </Text>
+            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          {/* Ghost/Ephemeral Toggle */}
+          <TouchableOpacity
+            style={[styles.ghostButton, isEphemeral && styles.ghostButtonActive]}
+            onPress={() => setIsEphemeral(!isEphemeral)}
+          >
+            <Ionicons
+              name="eye-off-outline"
+              size={20}
+              color={isEphemeral ? '#a855f7' : colors.textMuted}
+            />
+          </TouchableOpacity>
+        </View>
+
+        {/* Model Picker Modal */}
+        <Modal
+          visible={showModelPicker}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowModelPicker(false)}
+        >
+          <Pressable
+            style={styles.modalOverlay}
+            onPress={() => setShowModelPicker(false)}
+          >
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>Select Model</Text>
+              {Object.entries(groupedModels).map(([provider, models]) => (
+                <View key={provider}>
+                  <Text style={styles.providerLabel}>
+                    {provider === 'anthropic' ? 'Claude' : provider === 'google' ? 'Gemini' : 'Local'}
+                  </Text>
+                  {models.map((model) => (
+                    <TouchableOpacity
+                      key={model.id}
+                      style={[
+                        styles.modelOption,
+                        model.id === selectedModel && styles.modelOptionSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedModel(model.id);
+                        setShowModelPicker(false);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.modelOptionText,
+                          model.id === selectedModel && styles.modelOptionTextSelected,
+                        ]}
+                      >
+                        {model.name}
+                      </Text>
+                      {model.id === selectedModel && (
+                        <Ionicons name="checkmark" size={18} color={colors.primary} />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ))}
+            </View>
+          </Pressable>
+        </Modal>
+
         {/* Messages List */}
         <FlatList
           ref={flatListRef}
@@ -642,6 +754,92 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  ephemeralContainer: {
+    backgroundColor: '#1a0a2e',  // Subtle purple tint
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  ephemeralHeader: {
+    backgroundColor: 'rgba(168, 85, 247, 0.1)',
+  },
+  modelSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: 8,
+    gap: 4,
+    maxWidth: 150,
+  },
+  modelSelectorText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  ghostButton: {
+    padding: spacing.xs,
+    borderRadius: 8,
+  },
+  ghostButtonActive: {
+    backgroundColor: 'rgba(168, 85, 247, 0.2)',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: colors.card,
+    borderRadius: 16,
+    padding: spacing.lg,
+    width: '80%',
+    maxWidth: 300,
+    maxHeight: '70%',
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  providerLabel: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  modelOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 8,
+  },
+  modelOptionSelected: {
+    backgroundColor: 'rgba(20, 184, 166, 0.1)',
+  },
+  modelOptionText: {
+    color: colors.text,
+    fontSize: 15,
+  },
+  modelOptionTextSelected: {
+    color: colors.primary,
+    fontWeight: '500',
   },
   messageList: {
     paddingVertical: spacing.md,

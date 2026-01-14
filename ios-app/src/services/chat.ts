@@ -1,4 +1,4 @@
-import apiClient from './api';
+import apiClient, { ChatOptions } from './api';
 import { Message, MessageContent } from '../types/api';
 import { ImageAttachment } from './imagePicker';
 
@@ -6,6 +6,8 @@ export interface SendMessageParams {
   messages: Message[];  // Changed from single message to full conversation history
   conversationId?: string;
   images?: ImageAttachment[];  // Optional images to attach to the last message
+  model?: string;  // Optional model override
+  ephemeral?: boolean;  // If true, chat won't be saved to memory
 }
 
 export interface ChatResponse {
@@ -57,6 +59,15 @@ class ChatService {
     }
 
     try {
+      // Build chat options
+      const chatOptions: ChatOptions = {};
+      if (params.model) {
+        chatOptions.model = params.model;
+      }
+      if (params.ephemeral) {
+        chatOptions.ephemeral = params.ephemeral;
+      }
+
       await apiClient.streamChat(
         formattedMessages,
         onChunk,
@@ -65,7 +76,8 @@ class ChatService {
           onComplete(conversationId || params.conversationId || '', episodeId);
         },
         onError,
-        params.conversationId  // Pass session_id to maintain conversation history
+        params.conversationId,  // Pass session_id to maintain conversation history
+        chatOptions  // Pass model and ephemeral options
       );
     } catch (error) {
       onError(error as Error);

@@ -231,6 +231,13 @@ class SidecarService:
                     "message": payload.get("message")
                 })
 
+        elif cmd_type == "open_workspace":
+            # Open the workbench-canvas workspace in browser
+            url = payload.get("url", "http://10.185.1.180:3002")
+            import webbrowser
+            webbrowser.open(url)
+            logger.info(f"Opened workspace: {url}")
+
         else:
             logger.warning(f"Unknown command type: {cmd_type}")
 

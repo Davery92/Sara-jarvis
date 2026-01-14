@@ -46,12 +46,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   checkAuth: async () => {
-    const token = getToken()
-    if (!token) {
-      set({ isLoading: false, user: null })
-      return
-    }
-
+    // Try to authenticate - either via token or cookies from main webapp
     try {
       const user = await authApi.me()
       set({ user, isLoading: false })

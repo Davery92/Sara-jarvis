@@ -7,3 +7,4 @@ from .doc import Document, DocChunk
 from .folder import Folder
 from .note import Note
 from .profile import UserProfile, GTKYSession, DailyReflection, ReflectionSettings, PrivacySettings, UserActivityLog
+from .workspace_state import WorkspaceState

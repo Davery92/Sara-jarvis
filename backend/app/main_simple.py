@@ -159,6 +159,40 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Separate key for Anthropic Claude API
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")  # Google Gemini API key
+
+# Available models for chat model selector
+AVAILABLE_MODELS = [
+    {"id": "claude-opus-4-5-20250514", "name": "Claude Opus 4.5", "provider": "anthropic"},
+    {"id": "claude-sonnet-4-5-20250514", "name": "Claude Sonnet 4.5", "provider": "anthropic"},
+    {"id": "claude-haiku-3-5-20241022", "name": "Claude Haiku 3.5", "provider": "anthropic"},
+    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
+    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
+    {"id": "gpt-oss:120b", "name": "Local 120B", "provider": "local"},
+    {"id": "gpt-oss:20b", "name": "Local 20B", "provider": "local"},
+    {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
+]
+
+def get_model_config(model_id: str) -> dict:
+    """Get the base URL and API key for a given model ID."""
+    if model_id.startswith("claude"):
+        return {
+            "base_url": "https://api.anthropic.com",
+            "api_key": ANTHROPIC_API_KEY,
+            "provider": "anthropic"
+        }
+    elif model_id.startswith("gemini"):
+        return {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": GOOGLE_API_KEY,
+            "provider": "google"
+        }
+    else:  # Local models (gpt-oss, nemotron, etc.)
+        return {
+            "base_url": "http://100.104.68.115:11434/v1",
+            "api_key": "dummy",
+            "provider": "local"
+        }
 
 def is_anthropic_provider() -> bool:
     """Check if the current provider is Anthropic Claude"""
@@ -1057,6 +1091,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     conversation_id: Optional[str] = None
+    model: Optional[str] = None  # Override default model
+    ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
+    source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
 
 class ChatResponse(BaseModel):
     message: ChatMessage
@@ -1070,6 +1107,16 @@ class DocumentResponse(BaseModel):
     mime_type: str
     content_text: str = ""
     is_processed: str  # String to match database storage ("true", "false", "error")
+    created_at: str
+    updated_at: str
+
+class Model3DResponse(BaseModel):
+    id: str
+    filename: str
+    display_name: str
+    file_format: str
+    file_size: int
+    download_url: str
     created_at: str
     updated_at: str
 
@@ -1500,7 +1547,7 @@ class SimpleLLMClient:
 
         return anthropic_messages
 
-    async def _anthropic_chat_request(self, messages: list, tools: list = None, max_tokens: int = 4096, temperature: float = 0.7):
+    async def _anthropic_chat_request(self, messages: list, tools: list = None, max_tokens: int = 4096, temperature: float = 0.7, model: str = None):
         """Make a chat request to Anthropic Claude API and convert response to OpenAI format"""
         # Extract system message and convert messages to Anthropic format
         system_content = None
@@ -1511,9 +1558,12 @@ class SimpleLLMClient:
 
         filtered_messages = self._convert_openai_messages_to_anthropic(messages)
 
+        # Use provided model or fall back to default
+        effective_model = model or OPENAI_MODEL
+
         # Build Anthropic request payload with prompt caching
         payload = {
-            "model": OPENAI_MODEL,
+            "model": effective_model,
             "messages": filtered_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -1693,19 +1743,33 @@ class SimpleLLMClient:
         """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
         import re
 
+        # Get model config - use stored config or fall back to global
+        model_config = getattr(self, '_current_model_config', None)
+        if model_config:
+            base_url = model_config["base_url"]
+            api_key = model_config["api_key"]
+            provider = model_config["provider"]
+        else:
+            base_url = OPENAI_BASE_URL
+            api_key = OPENAI_API_KEY
+            provider = "local" if "11434" in OPENAI_BASE_URL else "unknown"
+
         # Route to Anthropic handler if using Claude API (non-streaming for now)
-        if is_anthropic_provider():
+        logger.info(f"🔀 Provider routing: provider={provider}, base_url={base_url[:50]}")
+        if provider == "anthropic":
             logger.info("Using Anthropic Claude API (non-streaming mode)")
             messages = payload.get("messages", [])
             tools = payload.get("tools", [])
             max_tokens = payload.get("max_tokens", 4096)
             temperature = payload.get("temperature", 0.7)
+            model = payload.get("model", "claude-sonnet-4-5-20250514")
 
             result = await self._anthropic_chat_request(
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
-                temperature=temperature
+                temperature=temperature,
+                model=model
             )
 
             # Emit content as a single chunk for streaming interface compatibility
@@ -1728,12 +1792,12 @@ class SimpleLLMClient:
         estimated_prompt_tokens = len(payload_str) // 4  # Rough estimate: 4 chars per token
 
         try:
-            logger.info(f"🔍 Sending to {OPENAI_BASE_URL}/chat/completions with model={payload.get('model')}, keys={list(payload.keys())}")
-            if "generativelanguage.googleapis.com" in OPENAI_BASE_URL:
+            logger.info(f"🔍 Sending to {base_url}/chat/completions with model={payload.get('model')}, keys={list(payload.keys())}")
+            if "generativelanguage.googleapis.com" in base_url:
                 logger.debug(f"🔍 Gemini payload tools: {len(payload.get('tools', []))} tools")
-            async with self.client.stream("POST", f"{OPENAI_BASE_URL}/chat/completions",
+            async with self.client.stream("POST", f"{base_url}/chat/completions",
                                         json=payload,
-                                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}) as response:
+                                        headers={"Authorization": f"Bearer {api_key}"}) as response:
                 if response.status_code >= 400:
                     error_body = await response.aread()
                     logger.error(f"❌ API error {response.status_code}: {error_body.decode()}")
@@ -1989,10 +2053,19 @@ class SimpleLLMClient:
             logger.error(f"LLM error: {e}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
-    async def chat_with_tools(self, messages, tools, user_id, conversation_id=None):
-        """Enhanced chat with tool calling support"""
+    async def chat_with_tools(self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False):
+        """Enhanced chat with tool calling support
+
+        Args:
+            messages: List of chat messages
+            tools: List of tool definitions
+            user_id: User ID
+            conversation_id: Optional conversation ID for context
+            model: Optional model override (e.g., "claude-opus-4-5-20250514", "gemini-2.5-pro")
+            ephemeral: If True, don't save to memory/episodes
+        """
         try:
-            logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}")
+            logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}, model: {model}, ephemeral: {ephemeral}")
 
             # Generate conversation_id immediately if not provided
             if not conversation_id:
@@ -2042,8 +2115,20 @@ class SimpleLLMClient:
             if context_reminder and len(formatted_messages) > 0 and formatted_messages[0].get("role") == "system":
                 formatted_messages[0]["content"] = formatted_messages[0]["content"] + context_reminder
 
+            # Store ephemeral flag for use in store_conversation
+            self._ephemeral = ephemeral
+
+            # Determine which model to use
+            effective_model = model or OPENAI_MODEL
+            model_config = get_model_config(effective_model)
+            logger.info(f"🤖 Model selection: requested={model}, effective={effective_model}, provider={model_config['provider']}, base_url={model_config['base_url']}")
+
+            # Store model config for _stream_response to use
+            self._current_model = effective_model
+            self._current_model_config = model_config
+
             payload = {
-                "model": OPENAI_MODEL,
+                "model": effective_model,
                 "messages": formatted_messages,
                 "temperature": 0.7,
                 "max_tokens": 8000,
@@ -2057,8 +2142,8 @@ class SimpleLLMClient:
                 payload["tool_choice"] = "auto"
 
             # Add Ollama-specific context length if using local model
-            if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
-                payload["num_ctx"] = 65536  # 65k context window for gpt-oss:120b
+            if model_config["provider"] == "local":
+                payload["num_ctx"] = 65536  # 65k context window for local models
 
             # Log payload size for debugging context overflow
             import json
@@ -2146,13 +2231,17 @@ class SimpleLLMClient:
 
                     # Make follow-up request with streaming (with retry logic)
                     follow_up_payload = {
-                        "model": OPENAI_MODEL,
+                        "model": self._current_model,  # Use user-selected model, not default
                         "messages": current_messages,
                         "temperature": 0.7,
                         "max_tokens": 8000,
                         "tools": tools,
                         "stream": True
                     }
+
+                    # Add Ollama-specific context length if using local model
+                    if self._current_model_config.get("provider") == "local":
+                        follow_up_payload["num_ctx"] = 65536
 
                     # Debug: Log the assistant message and tool responses being sent
                     if current_messages:
@@ -2453,6 +2542,12 @@ class SimpleLLMClient:
                     if canvas_command:
                         await self.emit_event("canvas_command", reg_result.data)
                         logger.info(f"📐 Emitted canvas_command: {canvas_command}")
+
+                    # Emit workspace_command SSE event for workbench-canvas
+                    workspace_command = reg_result.data.get("workspace_command")
+                    if workspace_command:
+                        await self.emit_event("workspace_command", reg_result.data)
+                        logger.info(f"🖼️ Emitted workspace_command: {workspace_command}")
 
                 result = json.dumps({
                     "success": reg_result.success,
@@ -3326,6 +3421,11 @@ class SimpleLLMClient:
         Returns the episode_id of the assistant response for rating purposes."""
         assistant_episode_id = None
         try:
+            # Skip storage if ephemeral mode is enabled
+            if getattr(self, '_ephemeral', False):
+                logger.info(f"👻 Ephemeral mode - skipping conversation storage")
+                return None
+
             logger.info(f"📥 store_conversation called with conversation_id: {conversation_id}")
 
             # conversation_id should already be set by chat_with_tools
@@ -6114,6 +6214,14 @@ try:
 except Exception as e:
     logger.error(f"❌ User Settings routes failed to load: {e}")
 
+# Include Workspace State routes (canvas state persistence)
+try:
+    from app.routes.workspace import router as workspace_router
+    app.include_router(workspace_router, tags=["Workspace"])
+    logger.info("✅ Workspace State routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Workspace State routes failed to load: {e}")
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -8535,6 +8643,15 @@ You may receive a "Daily Brief" section containing your private understanding of
     return render_prompt_template(system_prompt, user=None, USER_EMAIL=user_email)
 
 
+@app.get("/chat/models")
+async def get_available_chat_models(current_user: User = Depends(get_current_user)):
+    """Get list of available chat models for the model selector dropdown."""
+    return {
+        "models": AVAILABLE_MODELS,
+        "default": OPENAI_MODEL
+    }
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     logger.info(f"Chat request from user {current_user.email} with {len(request.messages)} messages")
@@ -9379,20 +9496,32 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Start the LLM processing in a background task
             async def process_chat():
                 try:
-                    # INTENT-BASED TOOL LOADING
-                    # tool_categories was already determined by classify_with_context above
-                    # which includes conversation context preservation
+                    # SOURCE-AWARE TOOL LOADING
+                    # Different tools based on where the chat is coming from
 
-                    if tool_categories:
-                        tools = tool_registry.get_tools_by_categories(tool_categories)
-                        logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {tool_categories}")
+                    if request.source == "workspace":
+                        # Workspace chat gets dedicated workspace tools for canvas control
+                        workspace_categories = ['workspace', 'memory', 'notes', 'time', 'web']
+                        tools = tool_registry.get_tools_by_categories(workspace_categories)
+                        logger.info(f"🖼️ Workspace source: Loaded {len(tools)} tools from workspace categories")
+                    elif tool_categories:
+                        # Standard chat uses intent-based tool loading from classify_with_context
+                        # Also ensure 'devices' category is available for cross-device commands
+                        effective_categories = list(tool_categories)
+                        if 'devices' not in effective_categories:
+                            effective_categories.append('devices')
+                        tools = tool_registry.get_tools_by_categories(effective_categories)
+                        logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
                     else:
                         tools = []
                         logger.info(f"🔧 Intent={user_intent}: No tools needed (conversational)")
 
                     # Process chat with loaded tools
                     logger.info("⏳ Starting chat_with_tools...")
-                    response_content = await streaming_client.chat_with_tools(all_messages, tools, current_user.id, request.conversation_id)
+                    response_content = await streaming_client.chat_with_tools(
+                        all_messages, tools, current_user.id, request.conversation_id,
+                        model=request.model, ephemeral=request.ephemeral or False
+                    )
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
 
                     # Check if Sara's response mentions body state (for calibration feedback loop)
@@ -9668,7 +9797,7 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.34"}
+    return {"downloads": downloads, "version": "1.0.35"}
 
 
 @app.get("/api/downloads/{filename}")
@@ -10430,6 +10559,224 @@ async def search_documents(
     except Exception as e:
         logger.error(f"Document search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+# 3D Model API endpoints
+ALLOWED_3D_FORMATS = {'stl', 'obj', 'gltf', 'glb'}
+MODEL_MIME_TYPES = {
+    'stl': 'model/stl',
+    'obj': 'model/obj',
+    'gltf': 'model/gltf+json',
+    'glb': 'model/gltf-binary',
+}
+
+@app.post("/models/upload", response_model=Model3DResponse)
+async def upload_3d_model(
+    file: UploadFile,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Upload a 3D model file (STL, OBJ, GLTF, GLB)"""
+    model_id = str(uuid.uuid4())
+
+    try:
+        # Validate file extension
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Filename is required")
+
+        file_extension = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
+        if file_extension not in ALLOWED_3D_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file format. Allowed: {', '.join(ALLOWED_3D_FORMATS)}"
+            )
+
+        # Create models directory if it doesn't exist
+        models_dir = "uploads/models"
+        os.makedirs(models_dir, exist_ok=True)
+
+        # Generate unique filename
+        unique_filename = f"{model_id}.{file_extension}"
+        file_path = os.path.join(models_dir, unique_filename)
+
+        # Save file to disk
+        file_content = await file.read()
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(file_content)
+
+        # Create database record
+        now = datetime.utcnow()
+        cursor = db.connection().connection.cursor()
+        cursor.execute("""
+            INSERT INTO models_3d (id, user_id, filename, display_name, file_format, minio_key, file_size, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (model_id, current_user.id, file.filename, file.filename.rsplit('.', 1)[0], file_extension, file_path, len(file_content), now, now))
+        db.commit()
+
+        logger.info(f"3D model uploaded: {model_id} ({file.filename})")
+
+        return Model3DResponse(
+            id=model_id,
+            filename=file.filename,
+            display_name=file.filename.rsplit('.', 1)[0],
+            file_format=file_extension,
+            file_size=len(file_content),
+            download_url=f"/models/{model_id}/file",
+            created_at=now.isoformat(),
+            updated_at=now.isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"3D model upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload 3D model: {str(e)}")
+
+
+@app.get("/models", response_model=list[Model3DResponse])
+async def list_3d_models(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List all 3D models for the current user"""
+    try:
+        cursor = db.connection().connection.cursor()
+        cursor.execute("""
+            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
+            FROM models_3d WHERE user_id = %s ORDER BY created_at DESC
+        """, (current_user.id,))
+        rows = cursor.fetchall()
+
+        return [
+            Model3DResponse(
+                id=row[0],
+                filename=row[1],
+                display_name=row[2],
+                file_format=row[3],
+                file_size=row[4],
+                download_url=f"/models/{row[0]}/file",
+                created_at=row[5].isoformat() if row[5] else "",
+                updated_at=row[6].isoformat() if row[6] else ""
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error listing 3D models: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+
+
+@app.get("/models/{model_id}", response_model=Model3DResponse)
+async def get_3d_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get metadata for a specific 3D model"""
+    try:
+        cursor = db.connection().connection.cursor()
+        cursor.execute("""
+            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
+            FROM models_3d WHERE id = %s AND user_id = %s
+        """, (model_id, current_user.id))
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        return Model3DResponse(
+            id=row[0],
+            filename=row[1],
+            display_name=row[2],
+            file_format=row[3],
+            file_size=row[4],
+            download_url=f"/models/{row[0]}/file",
+            created_at=row[5].isoformat() if row[5] else "",
+            updated_at=row[6].isoformat() if row[6] else ""
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting 3D model: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get model: {str(e)}")
+
+
+@app.get("/models/{model_id}/file")
+async def download_3d_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Download a 3D model file"""
+    try:
+        cursor = db.connection().connection.cursor()
+        cursor.execute("""
+            SELECT minio_key, filename, file_format FROM models_3d WHERE id = %s AND user_id = %s
+        """, (model_id, current_user.id))
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        file_path, filename, file_format = row
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Model file not found on disk")
+
+        async with aiofiles.open(file_path, 'rb') as f:
+            file_content = await f.read()
+
+        mime_type = MODEL_MIME_TYPES.get(file_format, 'application/octet-stream')
+
+        return Response(
+            content=file_content,
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f"inline; filename=\"{filename}\"",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading 3D model: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
+
+
+@app.delete("/models/{model_id}")
+async def delete_3d_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a 3D model"""
+    try:
+        cursor = db.connection().connection.cursor()
+        cursor.execute("""
+            SELECT minio_key FROM models_3d WHERE id = %s AND user_id = %s
+        """, (model_id, current_user.id))
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        file_path = row[0]
+
+        # Delete file from disk
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        # Delete database record
+        cursor.execute("DELETE FROM models_3d WHERE id = %s", (model_id,))
+        db.commit()
+
+        logger.info(f"3D model deleted: {model_id}")
+        return {"message": "Model deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting 3D model: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
+
 
 # Conversation memory API endpoints
 @app.get("/conversations", response_model=list[ConversationResponse])

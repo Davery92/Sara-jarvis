@@ -124,7 +124,7 @@ export default function Window({
 
   return (
     <div
-      className="absolute bg-canvas-surface border border-canvas-border rounded-lg shadow-2xl overflow-hidden select-none"
+      className="absolute bg-canvas-surface border border-canvas-border rounded-lg shadow-2xl overflow-hidden select-none pointer-events-auto"
       style={{
         left: position.x,
         top: position.y,

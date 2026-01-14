@@ -1,4 +1,4 @@
-import type { WindowType, WindowData, NoteWindowData, ChatWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData } from '../types'
+import type { WindowType, WindowData, NoteWindowData, ChatWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData } from '../types'
 import NoteContent from './windows/NoteContent'
 import ChatContent from './windows/ChatContent'
 import FitnessContent from './windows/FitnessContent'
@@ -6,6 +6,7 @@ import ProjectsContent from './windows/ProjectsContent'
 import TimersContent from './windows/TimersContent'
 import SettingsContent from './windows/SettingsContent'
 import FileViewerContent from './windows/FileViewerContent'
+import ModelViewerContent from './windows/ModelViewerContent'
 
 interface WindowContentProps {
   type: WindowType
@@ -29,6 +30,8 @@ export function WindowContent({ type, data, windowId }: WindowContentProps) {
       return <SettingsContent data={data as SettingsWindowData} windowId={windowId} />
     case 'fileviewer':
       return <FileViewerContent data={data as FileViewerWindowData} windowId={windowId} />
+    case 'modelviewer':
+      return <ModelViewerContent data={data as ModelViewerWindowData} windowId={windowId} />
     default:
       return (
         <div className="flex items-center justify-center h-full text-canvas-muted">

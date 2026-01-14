@@ -107,6 +107,8 @@ from app.tools.canvas import (
     CanvasSaveAsNoteTool
 )
 from app.tools.patterns import PATTERN_TOOLS
+from app.tools.device_commands import DEVICE_TOOLS
+from app.tools.workspace import WORKSPACE_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -242,6 +244,20 @@ class ToolRegistry:
             'tools': [
                 'pattern_query', 'pattern_insights',
                 'pattern_timeseries', 'pattern_correlation'
+            ]
+        },
+        'devices': {
+            'description': 'Control connected desktop agents - send notifications, open URLs, show notes, take screenshots, open workspace on user devices',
+            'tools': [
+                'device_list', 'device_send_notification', 'device_open_url',
+                'device_show_note', 'device_take_screenshot', 'device_open_workspace'
+            ]
+        },
+        'workspace': {
+            'description': 'Control the workbench-canvas workspace - open windows, arrange layout, manage notes in the infinite canvas (only available in workspace chat)',
+            'tools': [
+                'workspace_open_window', 'workspace_open_note', 'workspace_close_window',
+                'workspace_save_state', 'workspace_arrange', 'workspace_focus_window'
             ]
         }
     }
@@ -400,6 +416,12 @@ class ToolRegistry:
 
             # Pattern Correlation Tools
             *PATTERN_TOOLS,
+
+            # Device Command Tools (cross-device actions)
+            *DEVICE_TOOLS,
+
+            # Workspace Control Tools (for workbench-canvas)
+            *WORKSPACE_TOOLS,
         ]
 
         for tool in tools:

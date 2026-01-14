@@ -32,6 +32,25 @@ services:
     depends_on:
       - backend
 
+  canvas:
+    build:
+      context: ./workbench-canvas
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3002:3002"
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=http://10.185.1.180:8000
+    volumes:
+      # Mount source code for live editing
+      - ./workbench-canvas:/app
+      # Exclude node_modules (use container's version)
+      - /app/node_modules
+      # Exclude dist (use container's version)
+      - /app/dist
+    depends_on:
+      - backend
+
   backend:
     build:
       context: ./backend

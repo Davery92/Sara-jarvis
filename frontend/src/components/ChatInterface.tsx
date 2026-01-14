@@ -5,13 +5,13 @@ import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from '../config'
 import { apiClient } from '../api/client'
-import type { Document } from '../api/client'
+import type { Document, ChatModel, ChatModelsResponse } from '../api/client'
 import MermaidDiagram from './MermaidDiagram'
 import StarRating from './StarRating'
 import { CanvasPanel } from './canvas/CanvasPanel'
 import { useArtifacts } from './canvas/hooks/useArtifacts'
 import { NoteSelectorModal } from './canvas/NoteSelectorModal'
-import { Code, FileText, GitBranch, Maximize2, StickyNote } from 'lucide-react'
+import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown } from 'lucide-react'
 import { ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
 
 interface Conversation {
@@ -162,7 +162,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [isResizing, setIsResizing] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [showImageMenu, setShowImageMenu] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b')
+  const [isEphemeral, setIsEphemeral] = useState(false)
+  const [showModelDropdown, setShowModelDropdown] = useState(false)
+  const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const modelDropdownRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
@@ -273,6 +278,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
     loadConversationHistory()
   }, [setMessages])
+
+  // Fetch available chat models on mount
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const models = await apiClient.getChatModels()
+        setAvailableModels(models)
+        if (models.default && selectedModel === 'gpt-oss:120b') {
+          setSelectedModel(models.default)
+        }
+      } catch (error) {
+        console.error('Failed to fetch chat models:', error)
+      }
+    }
+    fetchModels()
+  }, [])
+
+  // Close model dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target as Node)) {
+        setShowModelDropdown(false)
+      }
+    }
+    if (showModelDropdown) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showModelDropdown])
 
   // Save active conversation when conversation_id changes
   useEffect(() => {
@@ -570,7 +604,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
             return { role: m.role, content: textContent }
           }),
-          conversation_id: currentConversationId
+          conversation_id: currentConversationId,
+          model: selectedModel,
+          ephemeral: isEphemeral
         })
       })
 
@@ -836,9 +872,71 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         style={{ width: canvasPanelOpen ? `${100 - canvasWidth}%` : '100%' }}
       >
         {/* Header */}
-        <div className="p-4 border-b border-gray-700 flex items-center justify-between bg-gray-800">
-          <h2 className="text-lg font-semibold">Chat with Sara</h2>
-          <div className="flex items-center space-x-2">
+        <div className={`p-4 border-b border-gray-700 flex items-center justify-between ${isEphemeral ? 'bg-purple-900/20' : 'bg-gray-800'}`}>
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-semibold">Chat with Sara</h2>
+
+            {/* Model Selector Dropdown */}
+            <div className="relative" ref={modelDropdownRef}>
+              <button
+                onClick={() => setShowModelDropdown(!showModelDropdown)}
+                className="flex items-center gap-1.5 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm text-white transition-colors"
+              >
+                <span className="max-w-[120px] truncate">
+                  {availableModels?.models?.find(m => m.id === selectedModel)?.name || selectedModel}
+                </span>
+                <ChevronDown size={14} className={`text-gray-400 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
+              </button>
+
+              {showModelDropdown && availableModels?.models && (
+                <div className="absolute top-full left-0 mt-1 w-48 bg-gray-700 border border-gray-600 rounded-lg shadow-xl z-50 py-1 max-h-64 overflow-y-auto">
+                  {/* Group models by provider */}
+                  {Object.entries(
+                    availableModels.models.reduce((acc, model) => {
+                      if (!acc[model.provider]) acc[model.provider] = []
+                      acc[model.provider].push(model)
+                      return acc
+                    }, {} as Record<string, ChatModel[]>)
+                  ).map(([provider, models]) => (
+                    <div key={provider}>
+                      <div className="px-3 py-1 text-xs text-gray-400 uppercase tracking-wider">
+                        {provider === 'anthropic' ? 'Claude' : provider === 'google' ? 'Gemini' : 'Local'}
+                      </div>
+                      {models.map((model) => (
+                        <button
+                          key={model.id}
+                          onClick={() => {
+                            setSelectedModel(model.id)
+                            setShowModelDropdown(false)
+                          }}
+                          className={`w-full px-3 py-1.5 text-left text-sm hover:bg-gray-600 transition-colors ${
+                            model.id === selectedModel ? 'text-teal-400 bg-gray-600' : 'text-white'
+                          }`}
+                        >
+                          {model.name}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Ghost/Ephemeral Toggle */}
+            <button
+              onClick={() => setIsEphemeral(!isEphemeral)}
+              className={`p-1.5 rounded transition-colors ${
+                isEphemeral
+                  ? 'text-purple-400 bg-purple-500/20 hover:bg-purple-500/30'
+                  : 'text-gray-400 hover:text-purple-400 hover:bg-gray-700'
+              }`}
+              title={isEphemeral ? "Ephemeral mode ON - chat won't be saved" : "Ephemeral mode OFF - chat will be saved"}
+            >
+              <Ghost size={18} />
+            </button>
+
             <button
               onClick={handleNewChat}
               className="text-gray-400 hover:text-white transition-colors px-3 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-sm"

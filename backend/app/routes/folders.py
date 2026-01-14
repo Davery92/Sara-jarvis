@@ -90,12 +90,12 @@ async def get_folder_tree(
         for folder in folders:
             if folder.parent_id == parent_id:
                 node = TreeNodeResponse(
-                    id=folder.id,
+                    id=str(folder.id),
                     name=folder.name,
                     type="folder",
-                    parent_id=folder.parent_id,
-                    created_at=folder.created_at.isoformat(),
-                    updated_at=folder.updated_at.isoformat(),
+                    parent_id=str(folder.parent_id) if folder.parent_id else None,
+                    created_at=folder.created_at.isoformat() if folder.created_at else "",
+                    updated_at=folder.updated_at.isoformat() if folder.updated_at else "",
                     children=build_tree(folder.id)
                 )
                 nodes.append(node)
@@ -104,12 +104,12 @@ async def get_folder_tree(
         for note in notes:
             if note.folder_id == parent_id:
                 node = TreeNodeResponse(
-                    id=note.id,
+                    id=str(note.id),
                     name=note.title or "Untitled",
                     type="note",
-                    parent_id=note.folder_id,
-                    created_at=note.created_at.isoformat(),
-                    updated_at=note.updated_at.isoformat(),
+                    parent_id=str(note.folder_id) if note.folder_id else None,
+                    created_at=note.created_at.isoformat() if note.created_at else "",
+                    updated_at=note.updated_at.isoformat() if note.updated_at else "",
                     children=[]
                 )
                 nodes.append(node)

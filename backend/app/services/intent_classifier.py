@@ -443,6 +443,14 @@ class ToolIntentClassifier:
             "how are you", "what's up", 'howdy', 'yo', 'sup', 'ok', 'okay',
             'sounds good', 'got it', 'nice', 'great', 'awesome', 'cool'
         ],
+        'DEVICES': [
+            'device', 'devices', 'desktop', 'computer', 'pc', 'my pc',
+            'my computer', 'my desktop', 'my laptop', 'macbook', 'windows',
+            'send notification', 'send a notification', 'notify', 'notification',
+            'open on my', 'open url on', 'open this on', 'on my computer',
+            'on my desktop', 'on my pc', 'screenshot', 'take screenshot',
+            'connected devices', 'what devices', 'list devices', 'show devices'
+        ],
     }
 
     # Map intents to tool categories
@@ -459,7 +467,8 @@ class ToolIntentClassifier:
         'PROJECTS': ['projects'],
         'MORNING_BRIEF': ['morning_brief', 'time'],
         'AGENTS': ['agents', 'web'],
-        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time'],  # Expanded fallback
+        'DEVICES': ['devices'],  # Cross-device commands
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices'],  # Expanded fallback with devices
     }
 
     # How many recent turns to preserve context from
@@ -529,6 +538,18 @@ class ToolIntentClassifier:
         """
         import re
         message_lower = message.lower()
+
+        # Priority check: Device-targeting phrases should override other intents
+        # These phrases indicate the user wants to do something ON a device
+        device_targeting_phrases = [
+            'on my pc', 'on my desktop', 'on my computer', 'on my laptop',
+            'on my macbook', 'on my windows', 'to my pc', 'to my desktop',
+            'to my computer', 'to my laptop', 'send notification', 'send a notification',
+            'notify my', 'screenshot of my', 'open on my'
+        ]
+        for phrase in device_targeting_phrases:
+            if phrase in message_lower:
+                return 'DEVICES'
 
         # Check each intent pattern
         for intent, keywords in self.INTENT_PATTERNS.items():

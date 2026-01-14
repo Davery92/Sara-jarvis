@@ -39,6 +39,22 @@ export interface ToolEffect {
   result: string
 }
 
+export interface ChatModel {
+  id: string
+  name: string
+  provider: 'anthropic' | 'google' | 'local'
+}
+
+export interface ChatModelsResponse {
+  models: ChatModel[]
+  default: string
+}
+
+export interface ChatOptions {
+  model?: string
+  ephemeral?: boolean
+}
+
 export interface Note {
   id: string
   title: string
@@ -234,8 +250,18 @@ class ApiClient {
     return response.data
   }
 
+  // Get available chat models
+  async getChatModels(): Promise<ChatModelsResponse> {
+    const response = await this.client.get('/chat/models')
+    return response.data
+  }
+
   // Streaming chat method
-  async sendMessageStream(content: string, onEvent: (event: any) => void): Promise<void> {
+  async sendMessageStream(
+    content: string,
+    onEvent: (event: any) => void,
+    options?: ChatOptions
+  ): Promise<void> {
     const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
       method: 'POST',
       headers: {
@@ -243,7 +269,9 @@ class ApiClient {
       },
       credentials: 'include',
       body: JSON.stringify({
-        messages: [{ role: 'user', content }]
+        messages: [{ role: 'user', content }],
+        model: options?.model,
+        ephemeral: options?.ephemeral,
       })
     })
 
