@@ -9764,12 +9764,17 @@ async def list_downloads(
                 # Determine platform and arch
                 platform = "unknown"
                 arch = "x64"
+                agent_type = "desktop"  # desktop or headless
+
                 if "mac" in filename.lower():
                     platform = "macOS"
                     if "arm64" in filename.lower():
                         arch = "arm64"
                 elif "win" in filename.lower():
                     platform = "Windows"
+                elif "linux" in filename.lower() or "agent" in filename.lower():
+                    platform = "Linux"
+                    agent_type = "headless"
                 elif filename.endswith(".asar"):
                     platform = "Windows"  # asar files are for Windows updates
 
@@ -9789,6 +9794,7 @@ async def list_downloads(
                     "platform": platform,
                     "arch": arch,
                     "type": file_type,
+                    "agent_type": agent_type,
                     "size_bytes": stat.st_size,
                     "size_mb": round(stat.st_size / (1024 * 1024), 1),
                     "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()

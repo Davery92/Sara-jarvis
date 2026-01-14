@@ -1,0 +1,42 @@
+[Unit]
+Description=Sara Headless Agent
+Documentation=https://github.com/Davery92/Sara-jarvis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sara-agent
+Group=sara-agent
+
+# Working directory
+WorkingDirectory=/opt/sara-agent
+
+# Environment file (contains auth token and settings)
+EnvironmentFile=-/etc/sara-agent/environment
+
+# Start the agent
+ExecStart=/opt/sara-agent/venv/bin/python /opt/sara-agent/main.py
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/sara-agent.log /etc/sara-agent
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=25%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sara-agent
+
+[Install]
+WantedBy=multi-user.target
