@@ -123,3 +123,93 @@ def format_iso_utc(dt: Optional[datetime]) -> Optional[str]:
     # Convert to UTC and format with Z suffix
     utc_dt = dt.astimezone(UTC)
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+
+def relative_time(dt: Optional[datetime], reference: Optional[datetime] = None) -> str:
+    """
+    Get a human-readable relative time string like "2 days ago" or "just now".
+
+    Args:
+        dt: The datetime to describe
+        reference: Reference datetime to compare against (defaults to now)
+
+    Returns:
+        Human-readable string like "just now", "5 minutes ago", "yesterday",
+        "3 days ago", "2 weeks ago", "last month", etc.
+    """
+    if dt is None:
+        return "unknown time"
+
+    # Convert to local timezone for comparison
+    local_dt = to_local(dt)
+    ref = reference if reference else now()
+
+    diff = ref - local_dt
+    seconds = diff.total_seconds()
+
+    # Handle future times (shouldn't happen often with memories)
+    if seconds < 0:
+        return "in the future"
+
+    # Less than a minute
+    if seconds < 60:
+        return "just now"
+
+    # Less than an hour
+    minutes = int(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+
+    # Less than a day
+    hours = int(minutes / 60)
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+
+    # Check if it was yesterday
+    if is_yesterday(dt):
+        return "yesterday"
+
+    # Less than a week
+    days = int(hours / 24)
+    if days < 7:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+
+    # Less than a month (approx 30 days)
+    weeks = int(days / 7)
+    if days < 30:
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+
+    # Less than a year
+    months = int(days / 30)
+    if days < 365:
+        return f"{months} month{'s' if months != 1 else ''} ago"
+
+    # More than a year
+    years = int(days / 365)
+    return f"{years} year{'s' if years != 1 else ''} ago"
+
+
+def format_memory_timestamp(dt: Optional[datetime]) -> str:
+    """
+    Format a timestamp for memory context display.
+    Shows both absolute date and relative time for clarity.
+
+    Example: "Jan 5 (2 weeks ago)" or "Today at 2:30 PM"
+    """
+    if dt is None:
+        return "unknown time"
+
+    local_dt = to_local(dt)
+    rel = relative_time(dt)
+
+    # For today, show time
+    if is_today(dt):
+        return f"Today at {local_dt.strftime('%I:%M %p')}"
+
+    # For yesterday, show that
+    if is_yesterday(dt):
+        return f"Yesterday at {local_dt.strftime('%I:%M %p')}"
+
+    # For older dates, show date + relative time
+    date_str = local_dt.strftime("%b %d")
+    return f"{date_str} ({rel})"

@@ -16,7 +16,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List, Union
 # CryptContext imported via app.core.auth.pwd_context
 from datetime import datetime, timedelta, timezone, date
-from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc
+from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc, format_memory_timestamp, relative_time
 from jose import jwt, JWTError
 import uuid
 import httpx
@@ -3281,29 +3281,30 @@ class SimpleLLMClient:
                     emotional_data = {}
                     topics_data = []
                 
-                # Format timestamp
+                # Format timestamp with relative time for clarity
                 try:
-                    time_str = episode['created_at'].strftime('%Y-%m-%d %H:%M')
+                    created_at = episode['created_at']
+                    time_str = format_memory_timestamp(created_at)
                 except (AttributeError, TypeError):
                     time_str = "Recent"
-                
+
                 # Create rich context header
                 context_parts = []
                 if emotional_data.get('primary_emotion'):
                     emotion = emotional_data.get('primary_emotion')
                     intensity = emotional_data.get('intensity', 0.5)
                     context_parts.append(f"Emotion: {emotion} ({intensity:.1%})")
-                
+
                 if topics_data:
                     context_parts.append(f"Topics: {', '.join(topics_data[:2])}")
-                
+
                 importance = episode['importance'] or 0.5
                 context_parts.append(f"Importance: {importance:.1%}")
-                
+
                 context_str = " | ".join(context_parts) if context_parts else ""
-                
-                # Header with rich metadata
-                response_parts.append(f"🧠 *Memory #{i+1}* - {time_str}")
+
+                # Header with rich metadata - emphasize the relative time
+                response_parts.append(f"🧠 *Memory #{i+1}* - **{time_str}**")
                 if context_str:
                     response_parts.append(f"   📊 {context_str}")
                 
@@ -6222,6 +6223,22 @@ try:
 except Exception as e:
     logger.error(f"❌ Workspace State routes failed to load: {e}")
 
+# Include Maps routes (mindmaps/flowcharts)
+try:
+    from app.routes.maps import router as maps_router
+    app.include_router(maps_router, tags=["Maps"])
+    logger.info("✅ Maps routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Maps routes failed to load: {e}")
+
+# Include Research routes (web search with AI summary)
+try:
+    from app.routes.research import router as research_router
+    app.include_router(research_router, tags=["Research"])
+    logger.info("✅ Research routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Research routes failed to load: {e}")
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -7111,11 +7128,56 @@ async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = Fi
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Canvas mode triggers - voice commands that open workspace
+CANVAS_TRIGGERS = [
+    "let's get to work",
+    "lets get to work",
+    "open the canvas",
+    "open canvas",
+    "open workspace",
+    "open my workspace",
+    "start working",
+    "work mode",
+    "time to work",
+]
+
+def _is_canvas_trigger(message: str) -> bool:
+    """Check if message is a workspace/canvas trigger."""
+    msg_lower = message.lower().strip()
+    return any(trigger in msg_lower for trigger in CANVAS_TRIGGERS)
+
+def _get_canvas_mode(user_id: str) -> bool:
+    """Check if user is in canvas mode (Redis with 1hr TTL)."""
+    try:
+        from redis import Redis
+        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        return redis_client.get(f"canvas_mode:{user_id}") == "1"
+    except Exception:
+        return False
+
+def _set_canvas_mode(user_id: str, enabled: bool = True):
+    """Set canvas mode with 1 hour TTL."""
+    try:
+        from redis import Redis
+        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        if enabled:
+            redis_client.setex(f"canvas_mode:{user_id}", 3600, "1")
+        else:
+            redis_client.delete(f"canvas_mode:{user_id}")
+    except Exception as e:
+        logger.warning(f"[Voice] Failed to set canvas mode: {e}")
+
+
 @app.post("/api/pi-dashboard/voice/chat")
 async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db)):
     """
     Streaming chat for Pi dashboard with device token auth.
     Returns SSE stream with Sara's response.
+
+    Features:
+    - Cross-device conversation context (joins active conversation if < 1hr old)
+    - Canvas mode detection and workspace triggers
+    - Shared conversation history with webapp/iOS
     """
     # Try device token auth first
     user_id = await get_device_user(request, db)
@@ -7137,16 +7199,34 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
         if not message:
             raise HTTPException(status_code=400, detail="No message provided")
 
-        logger.info(f"[Pi Dashboard Voice] Chat from user {user_id}: {message[:50]}...")
+        logger.info(f"[Voice] Chat from user {user_id}: {message[:50]}...")
 
         # Get user object for chat
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Generate conversation ID if not provided
+        # === CROSS-DEVICE CONTEXT: Join active conversation if recent (< 1 hour) ===
         if not conversation_id:
-            conversation_id = f"pi-voice-{uuid.uuid4()}"
+            user_profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+
+            if user_profile and user_profile.profile_data:
+                active_id = user_profile.profile_data.get('active_conversation_id')
+
+                if active_id:
+                    # Check if conversation was active in last hour
+                    last_episode = db.query(Episode).filter(
+                        Episode.conversation_id == active_id,
+                        Episode.user_id == user_id
+                    ).order_by(Episode.created_at.desc()).first()
+
+                    if last_episode and last_episode.created_at > datetime.utcnow() - timedelta(hours=1):
+                        conversation_id = active_id
+                        logger.info(f"[Voice] Joining active conversation: {conversation_id}")
+
+            if not conversation_id:
+                conversation_id = f"voice-{uuid.uuid4()}"
+                logger.info(f"[Voice] Starting fresh conversation: {conversation_id}")
 
         # Stream the response
         async def generate_stream():
@@ -7155,13 +7235,60 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                 # Create system prompt
                 system_prompt = get_system_prompt(ASSISTANT_NAME, user.email)
 
+                # === CANVAS MODE: Check if active and enhance system prompt ===
+                is_canvas_mode = _get_canvas_mode(user_id)
+                is_canvas_trigger_msg = _is_canvas_trigger(message)
+
+                if is_canvas_trigger_msg:
+                    # User wants to open workspace - enable canvas mode
+                    _set_canvas_mode(user_id, True)
+                    is_canvas_mode = True
+                    logger.info(f"[Voice] Canvas mode triggered by: {message}")
+
+                    # Directly open workspace on Windows PC (don't rely on LLM to call tool)
+                    try:
+                        from app.services.command_router import command_router
+                        workspace_opened = await command_router.open_workspace(db, user_id)
+                        if workspace_opened:
+                            logger.info(f"[Voice] Workspace opened successfully for user {user_id}")
+                        else:
+                            logger.warning(f"[Voice] Failed to open workspace - no active device?")
+                    except Exception as e:
+                        logger.error(f"[Voice] Error opening workspace: {e}")
+
+                if is_canvas_mode:
+                    system_prompt += """
+
+## Canvas/Workspace Mode Active
+You are now in workspace mode. The user is working on their Windows PC with the workspace canvas open (or about to open it). You can:
+- Use device_open_workspace to open the canvas if they ask
+- Open/update canvas artifacts (code, diagrams, mindmaps)
+- Help with coding tasks with live preview
+- Create and organize notes
+- Be concise and action-oriented - prefer showing over telling.
+"""
+
                 # Intent classification for lazy context (with conversation context)
                 tool_classifier = get_tool_intent_classifier()
                 context_router = get_context_router()
                 # Use conversation-aware classification
                 user_intent, tool_categories = tool_classifier.classify_with_context(message, conversation_id)
                 context_decision = context_router.decide(intent=user_intent, message=message, turn_count=1)
-                logger.info(f"[Pi Dashboard Voice] Intent={user_intent}, tools={tool_categories}, {context_decision.reason}")
+                logger.info(f"[Voice] Intent={user_intent}, tools={tool_categories}, canvas={is_canvas_mode}")
+
+                # === CANVAS TRIGGER: Force device tools if workspace trigger ===
+                if is_canvas_trigger_msg and "device" not in (tool_categories or []):
+                    tool_categories = (tool_categories or []) + ["device"]
+                    logger.info(f"[Voice] Added device tools for canvas trigger")
+
+                # === CANVAS MODE: Always include workspace tools when in canvas mode ===
+                if is_canvas_mode:
+                    tool_categories = tool_categories or []
+                    if "workspace" not in tool_categories:
+                        tool_categories = tool_categories + ["workspace"]
+                    if "maps" not in tool_categories:
+                        tool_categories = tool_categories + ["maps"]
+                    logger.info(f"[Voice] Canvas mode - added workspace tools: {tool_categories}")
 
                 # Lazy memory retrieval
                 if context_decision.inject_memory:
@@ -7178,19 +7305,36 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                                 memory_context += f"{i}. {content_preview}\n"
                             system_prompt += memory_context
                     except Exception as e:
-                        logger.warning(f"[Pi Dashboard Voice] Memory retrieval failed: {e}")
+                        logger.warning(f"[Voice] Memory retrieval failed: {e}")
 
                 # Get tools based on intent (already determined by classify_with_context)
                 tools = []
                 if tool_categories:
                     tools = tool_registry.get_tools_by_categories(tool_categories)
-                    logger.info(f"[Pi Dashboard Voice] Loaded {len(tools)} tools for categories: {tool_categories}")
+                    logger.info(f"[Voice] Loaded {len(tools)} tools for categories: {tool_categories}")
 
-                # Build messages
-                llm_messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": message}
-                ]
+                # === CONVERSATION HISTORY: Fetch recent messages from this conversation ===
+                conversation_history = []
+                try:
+                    recent_episodes = db.query(Episode).filter(
+                        Episode.conversation_id == conversation_id,
+                        Episode.user_id == user_id,
+                        Episode.role.in_(["user", "assistant"])
+                    ).order_by(Episode.created_at.desc()).limit(10).all()
+
+                    # Reverse to chronological order
+                    for ep in reversed(recent_episodes):
+                        conversation_history.append({"role": ep.role, "content": ep.content})
+
+                    if conversation_history:
+                        logger.info(f"[Voice] Loaded {len(conversation_history)} messages from conversation history")
+                except Exception as e:
+                    logger.warning(f"[Voice] Failed to load conversation history: {e}")
+
+                # Build messages: system + history + new message
+                llm_messages = [{"role": "system", "content": system_prompt}]
+                llm_messages.extend(conversation_history)
+                llm_messages.append({"role": "user", "content": message})
 
                 # Use the global LLM client
                 if tools:
@@ -7216,25 +7360,45 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                 yield f"data: {json.dumps({'type': 'final_response', 'content': full_response, 'conversation_id': conversation_id})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-                # Store episode in background
+                # Store episodes: separate user and assistant messages for proper history
                 try:
-                    episode_id = str(uuid.uuid4())
+                    # Store user message
+                    user_episode_id = str(uuid.uuid4())
                     db.execute(text("""
-                        INSERT INTO episode (id, user_id, content, importance, created_at, source)
-                        VALUES (:id, :user_id, :content, :importance, NOW(), :source)
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
                     """), {
-                        "id": episode_id,
+                        "id": user_episode_id,
                         "user_id": user_id,
-                        "content": f"User (voice via Pi dashboard): {message}\n\nSara: {full_response}",
+                        "conversation_id": conversation_id,
+                        "role": "user",
+                        "content": message,
                         "importance": 0.5,
                         "source": "pi_dashboard_voice"
                     })
+
+                    # Store assistant response
+                    assistant_episode_id = str(uuid.uuid4())
+                    db.execute(text("""
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
+                    """), {
+                        "id": assistant_episode_id,
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                        "role": "assistant",
+                        "content": full_response,
+                        "importance": 0.5,
+                        "source": "pi_dashboard_voice"
+                    })
+
                     db.commit()
+                    logger.info(f"[Voice] Stored episodes for conversation: {conversation_id}")
                 except Exception as e:
-                    logger.warning(f"[Pi Dashboard Voice] Failed to store episode: {e}")
+                    logger.warning(f"[Voice] Failed to store episodes: {e}")
 
             except Exception as e:
-                logger.error(f"[Pi Dashboard Voice] Chat error: {e}")
+                logger.error(f"[Voice] Chat error: {e}")
                 import traceback
                 traceback.print_exc()
                 yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -8546,6 +8710,9 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 
 **search_memory** — Search past conversations
 - Use for: recalling previous discussions, finding context from earlier chats
+- **IMPORTANT**: Memory results include timestamps showing when they occurred (e.g., "Jan 5 (2 weeks ago)")
+- Always note how old memories are—a conversation from 2 weeks ago is DIFFERENT context than today
+- When discussing current events (weather, plans, etc.), prioritize recent memories over older ones
 
 **web_search** — Search the internet
 - Params: `recency` (any/day/week/month), `sites` (array of site filters)
@@ -8597,6 +8764,23 @@ The system tracks what you've already retrieved this conversation. When you see 
 Even if the tool call would succeed, redundant retrieval wastes time and breaks conversational flow. The backend caches tool results, but you should avoid the call entirely when possible.
 
 If you're uncertain whether you have something, check the Session Context first. If it's not listed and you need it, then search.
+
+---
+
+## Memory Temporal Awareness
+
+**Memories have timestamps for a reason.** When you see "Relevant Past Context" or memory search results:
+
+1. **Note the relative time** — Memories show when they occurred (e.g., "Jan 5 (2 weeks ago)", "Yesterday at 3:00 PM")
+2. **Distinguish past from present** — A conversation about rain from 2 weeks ago doesn't mean it's raining NOW
+3. **Prioritize recent context** — For current topics (weather, mood, plans), recent memories are more relevant than older ones
+4. **Use timestamps explicitly** — If referencing old context, acknowledge when it happened: "When we talked about this 2 weeks ago..." rather than treating it as current
+
+This is especially important for:
+- Weather and current conditions
+- Mood and emotional state
+- Plans and schedules
+- Anything time-sensitive
 
 ---
 
@@ -8932,11 +9116,23 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                 if relevant_memories:
                     logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
                     memory_context = "\n\n## Relevant Past Context:\n"
+                    memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
                     for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
                         content_preview = mem.get("content", "")[:300]
                         similarity = mem.get("similarity", 0)
-                        created_at = mem.get("created_at", "")
-                        memory_context += f"{i}. [{created_at}] (similarity: {similarity:.2f})\n   {content_preview}\n\n"
+                        created_at_raw = mem.get("created_at", "")
+                        # Format timestamp with relative time for clarity
+                        if isinstance(created_at_raw, datetime):
+                            time_str = format_memory_timestamp(created_at_raw)
+                        elif isinstance(created_at_raw, str) and created_at_raw:
+                            try:
+                                dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
+                                time_str = format_memory_timestamp(dt)
+                            except (ValueError, TypeError):
+                                time_str = created_at_raw
+                        else:
+                            time_str = "unknown time"
+                        memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
                 else:
                     logger.info("ℹ️ No relevant memories found")
     except Exception as e:
@@ -9295,11 +9491,23 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         if relevant_memories:
                             logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
                             memory_context = "\n\n## Relevant Past Context:\n"
+                            memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
                             for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
                                 content_preview = mem.get("content", "")[:300]
                                 similarity = mem.get("similarity", 0)
-                                created_at = mem.get("created_at", "")
-                                memory_context += f"{i}. [{created_at}] (similarity: {similarity:.2f})\n   {content_preview}\n\n"
+                                created_at_raw = mem.get("created_at", "")
+                                # Format timestamp with relative time for clarity
+                                if isinstance(created_at_raw, datetime):
+                                    time_str = format_memory_timestamp(created_at_raw)
+                                elif isinstance(created_at_raw, str) and created_at_raw:
+                                    try:
+                                        dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
+                                        time_str = format_memory_timestamp(dt)
+                                    except (ValueError, TypeError):
+                                        time_str = created_at_raw
+                                else:
+                                    time_str = "unknown time"
+                                memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
                         else:
                             logger.info("ℹ️ No relevant memories found")
                 except Exception as e:
@@ -9500,10 +9708,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Different tools based on where the chat is coming from
 
                     if request.source == "workspace":
-                        # Workspace chat gets dedicated workspace tools for canvas control
-                        workspace_categories = ['workspace', 'memory', 'notes', 'time', 'web']
-                        tools = tool_registry.get_tools_by_categories(workspace_categories)
-                        logger.info(f"🖼️ Workspace source: Loaded {len(tools)} tools from workspace categories")
+                        # Workspace chat uses same intent-based tool loading as main chat
+                        # but ALWAYS includes workspace and maps tools for canvas control
+                        effective_categories = list(tool_categories) if tool_categories else []
+                        # Always add workspace tools for canvas control
+                        if 'workspace' not in effective_categories:
+                            effective_categories.append('workspace')
+                        if 'maps' not in effective_categories:
+                            effective_categories.append('maps')
+                        tools = tool_registry.get_tools_by_categories(effective_categories)
+                        logger.info(f"🖼️ Workspace source: Loaded {len(tools)} tools from categories: {effective_categories}")
                     elif tool_categories:
                         # Standard chat uses intent-based tool loading from classify_with_context
                         # Also ensure 'devices' category is available for cross-device commands
@@ -9803,7 +10017,7 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.35"}
+    return {"downloads": downloads, "version": "1.0.36"}
 
 
 @app.get("/api/downloads/{filename}")

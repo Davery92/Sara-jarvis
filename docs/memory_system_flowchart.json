@@ -1,0 +1,382 @@
+{
+  "name": "Sara Memory System Architecture",
+  "description": "Complete flowchart of the memory storage, retrieval, and consolidation system",
+  "nodes": [
+    {
+      "id": "title",
+      "position": {"x": 800, "y": 20},
+      "size": {"width": 400, "height": 60},
+      "content": {"type": "text", "data": {"text": "🧠 SARA MEMORY SYSTEM ARCHITECTURE"}},
+      "style": {"backgroundColor": "#1e3a5f", "borderColor": "#3b82f6"}
+    },
+
+    {
+      "id": "section-write",
+      "position": {"x": 50, "y": 120},
+      "size": {"width": 250, "height": 40},
+      "content": {"type": "text", "data": {"text": "📝 WRITE PATH (Memory Storage)"}},
+      "style": {"backgroundColor": "#065f46", "borderColor": "#10b981"}
+    },
+    {
+      "id": "user-input",
+      "position": {"x": 50, "y": 180},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "User Chat Message\n(or Sara Response)"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    },
+    {
+      "id": "store-episode",
+      "position": {"x": 50, "y": 270},
+      "size": {"width": 220, "height": 70},
+      "content": {"type": "text", "data": {"text": "IntelligentMemoryService\n.store_episode()\nmain_simple.py:5041"}},
+      "style": {"backgroundColor": "#1e40af", "borderColor": "#3b82f6"}
+    },
+    {
+      "id": "emotional-analysis",
+      "position": {"x": 300, "y": 270},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "EmotionalAnalyzer\n.analyze_emotional_state()\nDetect: joy, sadness, etc."}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "topic-extraction",
+      "position": {"x": 300, "y": 360},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Topic Extraction\nfitness, work, learning,\npersonal, creative, tech"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "importance-calc",
+      "position": {"x": 300, "y": 440},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Importance Scoring\nLLM + Heuristics\n(0.0 - 1.0)"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "embedding-gen",
+      "position": {"x": 50, "y": 370},
+      "size": {"width": 220, "height": 60},
+      "content": {"type": "text", "data": {"text": "Generate Embedding\nbge-m3 model (1024 dims)\nvia embeddings.py"}},
+      "style": {"backgroundColor": "#4c1d95", "borderColor": "#8b5cf6"}
+    },
+    {
+      "id": "pg-episode",
+      "position": {"x": 50, "y": 460},
+      "size": {"width": 220, "height": 80},
+      "content": {"type": "text", "data": {"text": "PostgreSQL: Episode Table\n- content, role, source\n- importance, emotional_tone\n- topics, embedding (pgvector)"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+    {
+      "id": "event-outbox",
+      "position": {"x": 50, "y": 560},
+      "size": {"width": 220, "height": 60},
+      "content": {"type": "text", "data": {"text": "EventOutbox (Transactional)\nepisode_created → UPSERT"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+    {
+      "id": "neo4j-sync",
+      "position": {"x": 50, "y": 640},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Neo4j Graph Sync\nEntity, Topic, Tag nodes"}},
+      "style": {"backgroundColor": "#0e7490", "borderColor": "#06b6d4"}
+    },
+    {
+      "id": "redis-cache",
+      "position": {"x": 260, "y": 560},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Redis Working Set\nuser:{id}:memory:recent\nSorted by timestamp\n48hr TTL, max 1000"}},
+      "style": {"backgroundColor": "#dc2626", "borderColor": "#ef4444"}
+    },
+
+    {
+      "id": "section-read",
+      "position": {"x": 550, "y": 120},
+      "size": {"width": 250, "height": 40},
+      "content": {"type": "text", "data": {"text": "🔍 READ PATH (Memory Retrieval)"}},
+      "style": {"backgroundColor": "#065f46", "borderColor": "#10b981"}
+    },
+    {
+      "id": "query-input",
+      "position": {"x": 550, "y": 180},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "Query / User Message\nContext needed?"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    },
+    {
+      "id": "context-router",
+      "position": {"x": 550, "y": 260},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "Context Router\nDecides: needs_context?\n(selective RAG)"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "intelligent-search",
+      "position": {"x": 550, "y": 340},
+      "size": {"width": 220, "height": 70},
+      "content": {"type": "text", "data": {"text": "IntelligentMemoryService\n.intelligent_memory_search()\nmain_simple.py:5113"}},
+      "style": {"backgroundColor": "#1e40af", "borderColor": "#3b82f6"}
+    },
+    {
+      "id": "window-select",
+      "position": {"x": 790, "y": 260},
+      "size": {"width": 200, "height": 80},
+      "content": {"type": "text", "data": {"text": "ContextWindowManager\n.auto_select_window()\nTemporal/Topic/Emotional/\nImportance/Hybrid/Semantic"}},
+      "style": {"backgroundColor": "#4c1d95", "borderColor": "#8b5cf6"}
+    },
+    {
+      "id": "tier1-redis",
+      "position": {"x": 550, "y": 440},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Tier 1: Redis\nRecent memories\n(Hot/Working set)\nzrevrange top 50"}},
+      "style": {"backgroundColor": "#dc2626", "borderColor": "#ef4444"}
+    },
+    {
+      "id": "tier2-pg",
+      "position": {"x": 750, "y": 440},
+      "size": {"width": 200, "height": 80},
+      "content": {"type": "text", "data": {"text": "Tier 2: PostgreSQL HNSW\nVector similarity search\nembedding <=> query::vector\n30-day hot tier window"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+    {
+      "id": "tier3-graph",
+      "position": {"x": 970, "y": 440},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Tier 3: Graph Edges\n1-hop expansion\nTemporal + Semantic\nedges from top results"}},
+      "style": {"backgroundColor": "#0e7490", "borderColor": "#06b6d4"}
+    },
+    {
+      "id": "composite-score",
+      "position": {"x": 700, "y": 550},
+      "size": {"width": 280, "height": 100},
+      "content": {"type": "text", "data": {"text": "Composite Scoring Formula:\n• Semantic similarity: 40%\n• Recency (14-day half-life): 20%\n• AI importance score: 20%\n• Rating boost (Wilson): 15%\n• Exploration bonus: 5%"}},
+      "style": {"backgroundColor": "#312e81", "borderColor": "#6366f1"}
+    },
+    {
+      "id": "format-context",
+      "position": {"x": 700, "y": 670},
+      "size": {"width": 200, "height": 70},
+      "content": {"type": "text", "data": {"text": "Format for Sara\n\"Jan 5 (2 weeks ago)\"\n+ content preview\n+ relevance score"}},
+      "style": {"backgroundColor": "#1e40af", "borderColor": "#3b82f6"}
+    },
+
+    {
+      "id": "section-night",
+      "position": {"x": 1200, "y": 120},
+      "size": {"width": 280, "height": 40},
+      "content": {"type": "text", "data": {"text": "🌙 NIGHTLY DREAM CYCLE (2 AM ET)"}},
+      "style": {"backgroundColor": "#065f46", "borderColor": "#10b981"}
+    },
+    {
+      "id": "night-trigger",
+      "position": {"x": 1200, "y": 180},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "NightlyDreamService\nScheduler (2-3 AM Eastern)\nChecks: _should_dream()"}},
+      "style": {"backgroundColor": "#581c87", "borderColor": "#a855f7"}
+    },
+    {
+      "id": "process-user",
+      "position": {"x": 1200, "y": 260},
+      "size": {"width": 220, "height": 60},
+      "content": {"type": "text", "data": {"text": "For each user:\n_process_user_daily_conversations()"}},
+      "style": {"backgroundColor": "#1e40af", "borderColor": "#3b82f6"}
+    },
+    {
+      "id": "get-episodes",
+      "position": {"x": 1200, "y": 340},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Get Yesterday's Episodes\n_get_daily_episodes()\nGrouped into sessions"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+    {
+      "id": "content-intel",
+      "position": {"x": 1420, "y": 260},
+      "size": {"width": 200, "height": 80},
+      "content": {"type": "text", "data": {"text": "Content Intelligence:\n• content_intelligence\n• metadata_extractor\n• smart_tagger"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "neo4j-store",
+      "position": {"x": 1420, "y": 360},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "enhanced_neo4j\n.store_intelligent_content()\nwith entities, topics, tags"}},
+      "style": {"backgroundColor": "#0e7490", "borderColor": "#06b6d4"}
+    },
+    {
+      "id": "dream-service",
+      "position": {"x": 1200, "y": 420},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "DreamingService\n.dream_cycle()\nmain_simple.py:5264"}},
+      "style": {"backgroundColor": "#581c87", "borderColor": "#a855f7"}
+    },
+    {
+      "id": "pattern-analysis",
+      "position": {"x": 1200, "y": 500},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Pattern Analysis:\n• Emotional patterns\n• Topic patterns\n• Behavioral trends"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "cluster-memories",
+      "position": {"x": 1400, "y": 500},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Memory Clustering\n_cluster_related_memories()\nby semantic similarity"}},
+      "style": {"backgroundColor": "#4c1d95", "borderColor": "#8b5cf6"}
+    },
+    {
+      "id": "forgotten-gems",
+      "position": {"x": 1200, "y": 590},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Forgotten Gems\n_find_forgotten_gems()\nOld but relevant memories"}},
+      "style": {"backgroundColor": "#0e7490", "borderColor": "#06b6d4"}
+    },
+    {
+      "id": "connection-suggest",
+      "position": {"x": 1400, "y": 590},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Connection Suggestions\nLinks between memories\nby entities, topics, tags"}},
+      "style": {"backgroundColor": "#0e7490", "borderColor": "#06b6d4"}
+    },
+    {
+      "id": "dream-insights",
+      "position": {"x": 1300, "y": 680},
+      "size": {"width": 220, "height": 80},
+      "content": {"type": "text", "data": {"text": "Store DreamInsight Records\nTypes: pattern, connection,\nunresolved_thread, emerging,\ncontradiction, wellbeing"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+    {
+      "id": "daily-summary",
+      "position": {"x": 1540, "y": 680},
+      "size": {"width": 180, "height": 70},
+      "content": {"type": "text", "data": {"text": "Daily Summary\nThemes, mood patterns,\nkey outcomes, progress"}},
+      "style": {"backgroundColor": "#312e81", "borderColor": "#6366f1"}
+    },
+    {
+      "id": "importance-decay",
+      "position": {"x": 1200, "y": 780},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "Importance Decay Event\n-5% for episodes > 30 days\nFloor at 0.1 importance"}},
+      "style": {"backgroundColor": "#991b1b", "borderColor": "#dc2626"}
+    },
+
+    {
+      "id": "section-compact",
+      "position": {"x": 50, "y": 740},
+      "size": {"width": 280, "height": 40},
+      "content": {"type": "text", "data": {"text": "🗜️ MEMORY COMPACTION (On-Demand)"}},
+      "style": {"backgroundColor": "#065f46", "borderColor": "#10b981"}
+    },
+    {
+      "id": "compact-trigger",
+      "position": {"x": 50, "y": 800},
+      "size": {"width": 200, "height": 60},
+      "content": {"type": "text", "data": {"text": "MemoryConsolidationService\nTrigger: importance < 0.1\n+ age > 180 days"}},
+      "style": {"backgroundColor": "#1e40af", "borderColor": "#3b82f6"}
+    },
+    {
+      "id": "find-candidates",
+      "position": {"x": 50, "y": 880},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Find Candidates\nLow importance + old\n+ not yet consolidated"}},
+      "style": {"backgroundColor": "#7c2d12", "borderColor": "#f97316"}
+    },
+    {
+      "id": "cluster-batch",
+      "position": {"x": 260, "y": 880},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Cluster by Topic/Time\nBatch size: 20\nTime-based grouping"}},
+      "style": {"backgroundColor": "#4c1d95", "borderColor": "#8b5cf6"}
+    },
+    {
+      "id": "llm-summary",
+      "position": {"x": 50, "y": 960},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "LLM Summary Generation\n2-3 sentences per cluster\ngpt-oss:120b / 20b fallback"}},
+      "style": {"backgroundColor": "#581c87", "borderColor": "#a855f7"}
+    },
+    {
+      "id": "mark-consolidated",
+      "position": {"x": 260, "y": 960},
+      "size": {"width": 180, "height": 60},
+      "content": {"type": "text", "data": {"text": "Mark as Consolidated\nconsolidated = TRUE\nconsolidated_into = id"}},
+      "style": {"backgroundColor": "#166534", "borderColor": "#22c55e"}
+    },
+
+    {
+      "id": "section-models",
+      "position": {"x": 550, "y": 780},
+      "size": {"width": 200, "height": 40},
+      "content": {"type": "text", "data": {"text": "📊 DATA MODELS"}},
+      "style": {"backgroundColor": "#065f46", "borderColor": "#10b981"}
+    },
+    {
+      "id": "model-episode",
+      "position": {"x": 550, "y": 840},
+      "size": {"width": 200, "height": 120},
+      "content": {"type": "text", "data": {"text": "Episode (PostgreSQL)\n• id, user_id, source, role\n• content, importance\n• emotional_tone, topics\n• embedding (pgvector)\n• created_at, access_count"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    },
+    {
+      "id": "model-trace",
+      "position": {"x": 770, "y": 840},
+      "size": {"width": 200, "height": 100},
+      "content": {"type": "text", "data": {"text": "MemoryTrace (alt store)\n• id, user_id, content\n• role, salience\n• source, meta JSON"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    },
+    {
+      "id": "model-insight",
+      "position": {"x": 550, "y": 980},
+      "size": {"width": 200, "height": 100},
+      "content": {"type": "text", "data": {"text": "DreamInsight\n• insight_type, confidence\n• title, content, evidence\n• surface_strategy\n• expiry_at, surfaced_count"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    },
+    {
+      "id": "model-edge",
+      "position": {"x": 770, "y": 960},
+      "size": {"width": 180, "height": 80},
+      "content": {"type": "text", "data": {"text": "MemoryEdge\n• src, dst, type\n• weight (0-1)\ntypes: temporal, semantic,\nsummary_of"}},
+      "style": {"backgroundColor": "#1f2937", "borderColor": "#6b7280"}
+    }
+  ],
+  "edges": [
+    {"id": "e1", "source": "user-input", "target": "store-episode", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e2", "source": "store-episode", "target": "emotional-analysis", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e3", "source": "emotional-analysis", "target": "topic-extraction", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e4", "source": "topic-extraction", "target": "importance-calc", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e5", "source": "store-episode", "target": "embedding-gen", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e6", "source": "embedding-gen", "target": "pg-episode", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e7", "source": "importance-calc", "target": "pg-episode", "sourceHandle": "left", "targetHandle": "right", "style": {"curved": true}},
+    {"id": "e8", "source": "pg-episode", "target": "event-outbox", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e9", "source": "event-outbox", "target": "neo4j-sync", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e10", "source": "pg-episode", "target": "redis-cache", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+
+    {"id": "e20", "source": "query-input", "target": "context-router", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e21", "source": "context-router", "target": "intelligent-search", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e22", "source": "context-router", "target": "window-select", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e23", "source": "window-select", "target": "intelligent-search", "sourceHandle": "bottom", "targetHandle": "right", "style": {"curved": true}},
+    {"id": "e24", "source": "intelligent-search", "target": "tier1-redis", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e25", "source": "intelligent-search", "target": "tier2-pg", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e26", "source": "intelligent-search", "target": "tier3-graph", "sourceHandle": "right", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e27", "source": "tier2-pg", "target": "composite-score", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e28", "source": "tier3-graph", "target": "composite-score", "sourceHandle": "bottom", "targetHandle": "right", "style": {"curved": true}},
+    {"id": "e29", "source": "composite-score", "target": "format-context", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+
+    {"id": "e40", "source": "night-trigger", "target": "process-user", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e41", "source": "process-user", "target": "get-episodes", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e42", "source": "process-user", "target": "content-intel", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e43", "source": "content-intel", "target": "neo4j-store", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e44", "source": "get-episodes", "target": "dream-service", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e45", "source": "dream-service", "target": "pattern-analysis", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e46", "source": "dream-service", "target": "cluster-memories", "sourceHandle": "right", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e47", "source": "pattern-analysis", "target": "forgotten-gems", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e48", "source": "cluster-memories", "target": "connection-suggest", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e49", "source": "forgotten-gems", "target": "dream-insights", "sourceHandle": "bottom", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e50", "source": "connection-suggest", "target": "dream-insights", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e51", "source": "dream-insights", "target": "daily-summary", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e52", "source": "dream-insights", "target": "importance-decay", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+
+    {"id": "e60", "source": "compact-trigger", "target": "find-candidates", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
+    {"id": "e61", "source": "find-candidates", "target": "cluster-batch", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+    {"id": "e62", "source": "cluster-batch", "target": "llm-summary", "sourceHandle": "bottom", "targetHandle": "right", "style": {"curved": true}},
+    {"id": "e63", "source": "llm-summary", "target": "mark-consolidated", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}}
+  ]
+}
