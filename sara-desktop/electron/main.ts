@@ -7,6 +7,7 @@ import WebSocket from 'ws'
 let sidecarProcess: ChildProcess | null = null
 let sidecarBridge: WebSocket | null = null
 let bridgeReconnectTimeout: NodeJS.Timeout | null = null
+let currentVoiceState: string = 'disconnected'
 
 function startSidecar(store: SimpleStore) {
   if (sidecarProcess) return
@@ -172,6 +173,37 @@ function handleBridgeMessage(message: { type: string; [key: string]: any }) {
     case 'activity_update':
       // Forward activity updates to renderer
       mainWindow?.webContents.send('activity-update', message.activity)
+      break
+
+    case 'voice_state':
+      // Update tray icon based on voice state
+      currentVoiceState = message.state || 'disconnected'
+      console.log('[Main] Voice state:', currentVoiceState)
+      updateTrayIcon(currentVoiceState)
+      // Forward to renderer
+      mainWindow?.webContents.send('voice-state', currentVoiceState)
+      break
+
+    case 'voice_transcript':
+      // Voice transcript from Jetson
+      console.log('[Main] Voice transcript - User:', message.user, 'Sara:', message.sara?.substring(0, 50))
+      // Forward to renderer for display
+      mainWindow?.webContents.send('voice-transcript', {
+        user: message.user,
+        sara: message.sara
+      })
+      // Also show notification
+      if (Notification.isSupported() && message.user) {
+        new Notification({
+          title: 'Voice Command',
+          body: message.user
+        }).show()
+      }
+      break
+
+    case 'system_metrics':
+      // Forward system metrics to renderer
+      mainWindow?.webContents.send('system-metrics', message.metrics)
       break
 
     case 'pong':
@@ -601,6 +633,43 @@ function createSettingsWindow() {
   })
 }
 
+function updateTrayIcon(voiceState: string) {
+  if (!tray) return
+
+  // Update tooltip to show voice state
+  const stateLabels: Record<string, string> = {
+    disconnected: 'Sara - Voice: Disconnected',
+    connected: 'Sara - Voice: Ready',
+    wake_word: 'Sara - Voice: Listening...',
+    speaking: 'Sara - Voice: Speaking...',
+  }
+  tray.setToolTip(stateLabels[voiceState] || 'Sara - Your AI Assistant')
+
+  // Try to load state-specific icon if it exists
+  const iconName = `tray-${voiceState}.png`
+  const iconPath = path.join(__dirname, '../assets/icons', iconName)
+  const defaultIconPath = path.join(__dirname, '../assets/icons/tray.png')
+
+  try {
+    if (fs.existsSync(iconPath)) {
+      const stateIcon = nativeImage.createFromPath(iconPath)
+      if (!stateIcon.isEmpty()) {
+        tray.setImage(stateIcon)
+        return
+      }
+    }
+    // Fall back to default icon
+    if (fs.existsSync(defaultIconPath)) {
+      const defaultIcon = nativeImage.createFromPath(defaultIconPath)
+      if (!defaultIcon.isEmpty()) {
+        tray.setImage(defaultIcon)
+      }
+    }
+  } catch (e) {
+    console.error('[Main] Failed to update tray icon:', e)
+  }
+}
+
 function createTray() {
   try {
     const iconPath = path.join(__dirname, '../assets/icons/tray.png')
@@ -653,6 +722,9 @@ function createTray() {
       fadeIn()
     }
   })
+
+  // Set initial voice state icon
+  updateTrayIcon(currentVoiceState)
 }
 
 function fadeIn() {

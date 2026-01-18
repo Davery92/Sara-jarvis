@@ -8817,6 +8817,17 @@ This is especially important for:
 
 You may receive a "Daily Brief" section containing your private understanding of David. This knowledge should inform your responses naturally—the way memory informs human conversation. It is present but unstated.
 
+**CRITICAL: FOCUS ON THE USER'S ACTUAL REQUEST**
+
+Your context may contain various background information (health data, body state, workout logs, etc.). This is ambient context—NOT the topic of conversation unless David explicitly asks about it.
+
+When David asks you to do something (open a note, search for something, use a tool):
+1. **DO THAT THING FIRST** — Complete the actual request
+2. **IGNORE UNRELATED CONTEXT** — If he asks to "open a note", do NOT talk about health data just because it's in your context
+3. **Match topic to request** — A request about notes/workspace has nothing to do with CSV files or health reports
+
+The background context exists to inform relevant responses, NOT to confuse you about what David is actually asking. If he says "open my AMS360 note in the canvas" → use the workspace tools to open that note. Period.
+
 **FORBIDDEN PHRASES** — Never use these constructions:
 - "Based on my daily brief..."
 - "According to my notes about you..."
@@ -9482,10 +9493,32 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             session_id = request.conversation_id or str(current_user.id)
             user_intent, tool_categories = tool_classifier.classify_with_context(last_user_message, session_id)
             turn_count = len(request.messages)
+
+            # WORK MODE DETECTION
+            # Work mode provides lean, task-focused context (no daily brief/body state unless asked)
+            is_work_mode = False
+
+            if request.source == "workspace":
+                # Canvas/workspace source is always work mode
+                is_work_mode = True
+                logger.info("💼 Work mode active (workspace source)")
+            else:
+                # Check for trigger phrase
+                if _is_canvas_trigger(last_user_message):
+                    _set_canvas_mode(str(current_user.id), True)
+                    is_work_mode = True
+                    logger.info(f"💼 Work mode triggered by phrase: '{last_user_message[:50]}...'")
+                else:
+                    # Check Redis flag (persists for 1 hour)
+                    is_work_mode = _get_canvas_mode(str(current_user.id))
+                    if is_work_mode:
+                        logger.info("💼 Work mode active (Redis flag)")
+
             context_decision = context_router.decide(
                 intent=user_intent,
                 message=last_user_message,
-                turn_count=turn_count
+                turn_count=turn_count,
+                in_work_mode=is_work_mode
             )
             logger.info(f"🎯 Intent={user_intent}, {context_decision.reason}")
 
@@ -9544,7 +9577,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"♟️ Injected chess context into system prompt")
 
-            # DAILY BRIEF SYSTEM: Update moment layer and inject compiled brief
+            # DAILY BRIEF SYSTEM: Update moment layer and conditionally inject compiled brief
             try:
                 if DAILY_BRIEF_AVAILABLE:
                     # Get the last user message for moment layer
@@ -9552,7 +9585,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     if request.messages:
                         last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
 
-                    # Update moment layer (fast, no LLM)
+                    # Update moment layer (fast, no LLM) - always do this regardless of work mode
                     await daily_brief_service.update_moment(
                         user_id=current_user.id,
                         current_message=last_user_message,
@@ -9561,39 +9594,46 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"📝 Updated moment layer")
 
-                    # Get compiled daily brief (lazy, cached)
-                    daily_brief = await daily_brief_service.get_compiled_brief(current_user.id)
+                    # Only inject compiled brief if context router says so
+                    if context_decision.inject_daily_brief:
+                        # Get compiled daily brief (lazy, cached)
+                        daily_brief = await daily_brief_service.get_compiled_brief(current_user.id)
 
-                    if daily_brief:
-                        # Inject daily brief into system message
-                        current_content = system_message.content
-                        system_message = ChatMessage(
-                            role="system",
-                            content=current_content + "\n\n" + daily_brief
-                        )
-                        logger.info(f"📋 Injected daily brief ({len(daily_brief)} chars) into system prompt")
+                        if daily_brief:
+                            # Inject daily brief into system message
+                            current_content = system_message.content
+                            system_message = ChatMessage(
+                                role="system",
+                                content=current_content + "\n\n" + daily_brief
+                            )
+                            logger.info(f"📋 Injected daily brief ({len(daily_brief)} chars) into system prompt")
+                    else:
+                        logger.info("⏭️ Skipping daily brief (work mode)")
             except Exception as e:
                 logger.warning(f"⚠️ Daily brief injection failed (non-critical): {e}")
                 # Continue without daily brief if it fails
 
-            # BODY STATE CONTEXT: Inject physiological awareness
-            try:
-                subconscious_result = db.execute(text("""
-                    SELECT body_state_context
-                    FROM subconscious_state
-                    WHERE user_id = :user_id
-                """), {"user_id": current_user.id}).fetchone()
+            # BODY STATE CONTEXT: Conditionally inject physiological awareness
+            if context_decision.inject_body_state:
+                try:
+                    subconscious_result = db.execute(text("""
+                        SELECT body_state_context
+                        FROM subconscious_state
+                        WHERE user_id = :user_id
+                    """), {"user_id": current_user.id}).fetchone()
 
-                if subconscious_result and subconscious_result.body_state_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{subconscious_result.body_state_context}"
-                    )
-                    logger.info(f"🫀 Injected body state context into system prompt")
-            except Exception as e:
-                logger.warning(f"⚠️ Body state context injection failed (non-critical): {e}")
-                # Continue without body state context if it fails
+                    if subconscious_result and subconscious_result.body_state_context:
+                        current_content = system_message.content
+                        system_message = ChatMessage(
+                            role="system",
+                            content=current_content + f"\n\n{subconscious_result.body_state_context}"
+                        )
+                        logger.info(f"🫀 Injected body state context into system prompt")
+                except Exception as e:
+                    logger.warning(f"⚠️ Body state context injection failed (non-critical): {e}")
+                    # Continue without body state context if it fails
+            else:
+                logger.info("⏭️ Skipping body state (work mode)")
 
             # SARA'S INNER MONOLOGUE: Inject journal context
             try:
@@ -9716,12 +9756,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Start the LLM processing in a background task
             async def process_chat():
                 try:
-                    # SOURCE-AWARE TOOL LOADING
-                    # Different tools based on where the chat is coming from
+                    # WORK MODE-AWARE TOOL LOADING
+                    # Work mode always includes workspace and maps tools for canvas control
 
-                    if request.source == "workspace":
-                        # Workspace chat uses same intent-based tool loading as main chat
-                        # but ALWAYS includes workspace and maps tools for canvas control
+                    if is_work_mode:
+                        # Work mode: always include workspace + maps tools regardless of intent
                         effective_categories = list(tool_categories) if tool_categories else []
                         # Always add workspace tools for canvas control
                         if 'workspace' not in effective_categories:
@@ -9729,7 +9768,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         if 'maps' not in effective_categories:
                             effective_categories.append('maps')
                         tools = tool_registry.get_tools_by_categories(effective_categories)
-                        logger.info(f"🖼️ Workspace source: Loaded {len(tools)} tools from categories: {effective_categories}")
+                        logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
                     elif tool_categories:
                         # Standard chat uses intent-based tool loading from classify_with_context
                         # Also ensure 'devices' category is available for cross-device commands
@@ -10029,7 +10068,17 @@ async def list_downloads(
     # Sort by platform, then arch
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    return {"downloads": downloads, "version": "1.0.36"}
+    # Get version from latest file or package.json if available
+    version = "1.0.36"
+    for d in downloads:
+        if "1.0." in d["filename"]:
+            try:
+                v = d["filename"].split("-")[1]
+                if v > version:
+                    version = v
+            except:
+                pass
+    return {"downloads": downloads, "version": version}
 
 
 @app.get("/api/downloads/{filename}")

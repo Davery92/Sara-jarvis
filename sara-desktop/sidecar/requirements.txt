@@ -17,5 +17,8 @@ psutil>=5.9.0
 # Utilities
 numpy>=1.24.0
 
+# Voice bridge (audio playback from Jetson voice agent)
+sounddevice>=0.4.6
+
 # For packaging
 pyinstaller>=6.0.0

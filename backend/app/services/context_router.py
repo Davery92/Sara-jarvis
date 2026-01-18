@@ -17,6 +17,8 @@ class ContextDecision(NamedTuple):
     inject_memory: bool
     inject_cognitive: bool
     inject_insight: bool
+    inject_daily_brief: bool
+    inject_body_state: bool
     reason: str
 
 
@@ -48,12 +50,25 @@ class ContextRouter:
     # Intents that don't need insight injection (task-focused)
     NO_INSIGHT_INTENTS = ['TIME', 'HOME', 'FITNESS', 'CHESS']
 
+    # Keywords that force daily brief injection even in work mode
+    DAILY_BRIEF_KEYWORDS = [
+        'schedule', 'today', 'calendar', 'my day', 'what do i have',
+        'meetings', 'brief', 'agenda', 'plans for', 'appointments'
+    ]
+
+    # Keywords that force body state injection even in work mode
+    BODY_STATE_KEYWORDS = [
+        'tired', 'energy', 'sleep', 'how am i', 'feeling', 'health',
+        'stressed', 'exhausted', 'rested', 'wellness', 'fatigue'
+    ]
+
     def decide(
         self,
         intent: str,
         message: str,
         turn_count: int,
-        has_question: bool = None
+        has_question: bool = None,
+        in_work_mode: bool = False
     ) -> ContextDecision:
         """
         Determine which contexts to inject for a message.
@@ -63,6 +78,7 @@ class ContextRouter:
             message: The user's message text
             turn_count: Number of turns in the conversation
             has_question: Whether the message contains a question (auto-detect if None)
+            in_work_mode: Whether the user is in work mode (lean, task-focused context)
 
         Returns:
             ContextDecision with boolean flags for each context type
@@ -81,6 +97,10 @@ class ContextRouter:
         # Determine if insight context should be injected
         inject_insight = self._should_inject_insight(intent, has_question)
 
+        # Determine if daily brief and body state should be injected
+        inject_daily_brief = self._should_inject_daily_brief(message_lower, in_work_mode)
+        inject_body_state = self._should_inject_body_state(message_lower, in_work_mode)
+
         # Build reason string for logging
         reasons = []
         if inject_memory:
@@ -89,19 +109,27 @@ class ContextRouter:
             reasons.append("cognitive")
         if inject_insight:
             reasons.append("insight")
+        if inject_daily_brief:
+            reasons.append("daily_brief")
+        if inject_body_state:
+            reasons.append("body_state")
 
         reason = f"Injecting: {', '.join(reasons) if reasons else 'none'}"
+        if in_work_mode:
+            reason = f"[WORK MODE] {reason}"
 
         decision = ContextDecision(
             inject_memory=inject_memory,
             inject_cognitive=inject_cognitive,
             inject_insight=inject_insight,
+            inject_daily_brief=inject_daily_brief,
+            inject_body_state=inject_body_state,
             reason=reason
         )
 
         logger.info(
             f"[ContextRouter] Intent={intent}, turns={turn_count}, "
-            f"has_q={has_question} -> {reason}"
+            f"has_q={has_question}, work_mode={in_work_mode} -> {reason}"
         )
 
         return decision
@@ -172,6 +200,30 @@ class ContextRouter:
             return False
 
         return True
+
+    def _should_inject_daily_brief(self, message_lower: str, in_work_mode: bool) -> bool:
+        """
+        Daily brief is injected when:
+        1. Not in work mode (always inject in normal mode)
+        2. In work mode but user asks about schedule/calendar/day
+        """
+        if not in_work_mode:
+            return True
+
+        # In work mode, check for schedule-related keywords
+        return any(kw in message_lower for kw in self.DAILY_BRIEF_KEYWORDS)
+
+    def _should_inject_body_state(self, message_lower: str, in_work_mode: bool) -> bool:
+        """
+        Body state is injected when:
+        1. Not in work mode (always inject in normal mode)
+        2. In work mode but user asks about wellness/energy/feelings
+        """
+        if not in_work_mode:
+            return True
+
+        # In work mode, check for wellness-related keywords
+        return any(kw in message_lower for kw in self.BODY_STATE_KEYWORDS)
 
 
 # Singleton instance

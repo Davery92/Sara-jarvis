@@ -23,6 +23,15 @@ except ImportError:
     metrics_collector = None
     PSUTIL_AVAILABLE = False
 
+# Try to import voice bridge
+try:
+    from voice_bridge import VoiceBridge, VoiceState, is_available as voice_bridge_available
+    VOICE_BRIDGE_AVAILABLE = voice_bridge_available()
+except ImportError:
+    VoiceBridge = None
+    VoiceState = None
+    VOICE_BRIDGE_AVAILABLE = False
+
 # Ensure log directory exists
 log_dir = config.settings_file.parent
 log_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +61,8 @@ class SidecarService:
         self._backend_client = None
         self._electron_bridge = None
         self._metrics_collector = metrics_collector if PSUTIL_AVAILABLE else None
+        self._voice_bridge = None
+        self._voice_state = "disconnected"
 
     async def start(self):
         """Start all sidecar services."""
@@ -109,6 +120,21 @@ class SidecarService:
             else:
                 logger.warning("psutil not available - system metrics disabled")
 
+            # Start voice bridge if available and enabled
+            if VOICE_BRIDGE_AVAILABLE and config.voice_bridge_enabled:
+                self._voice_bridge = VoiceBridge(
+                    host=config.voice_bridge_host,
+                    port=config.voice_bridge_port,
+                    on_state_change=self._on_voice_state_change,
+                    on_transcript=self._on_voice_transcript,
+                )
+                self._tasks.append(asyncio.create_task(self._voice_bridge.start()))
+                logger.info(f"Voice bridge enabled: {config.voice_bridge_host}:{config.voice_bridge_port}")
+            elif not VOICE_BRIDGE_AVAILABLE:
+                logger.warning("Voice bridge not available - missing dependencies (sounddevice)")
+            else:
+                logger.info("Voice bridge disabled by configuration")
+
             logger.info("All services started successfully")
 
             # Wait for all tasks
@@ -140,6 +166,8 @@ class SidecarService:
             await self._backend_client.disconnect()
         if self._electron_bridge:
             await self._electron_bridge.stop()
+        if self._voice_bridge:
+            await self._voice_bridge.stop()
 
         logger.info("Sidecar stopped")
 
@@ -225,6 +253,26 @@ class SidecarService:
                 "activity": activity
             })
 
+    def _on_voice_state_change(self, state: str):
+        """Called when voice bridge state changes."""
+        self._voice_state = state
+        # Forward to Electron for tray icon updates
+        if self._electron_bridge:
+            asyncio.create_task(self._electron_bridge.send_message({
+                "type": "voice_state",
+                "state": state
+            }))
+
+    def _on_voice_transcript(self, user_text: str, sara_text: str):
+        """Called when voice transcript is received."""
+        # Forward to Electron for display
+        if self._electron_bridge:
+            asyncio.create_task(self._electron_bridge.send_message({
+                "type": "voice_transcript",
+                "user": user_text,
+                "sara": sara_text
+            }))
+
     async def _handle_electron_message(self, data: dict):
         """Handle messages from Electron via the bridge."""
         msg_type = data.get("type")
@@ -249,7 +297,7 @@ class SidecarService:
 
     async def _handle_command(self, command: dict):
         """Handle a command received from backend."""
-        cmd_type = command.get("command")
+        cmd_type = command.get("command_type") or command.get("command")  # Support both keys
         payload = command.get("payload", {})
 
         logger.info(f"Received command: {cmd_type}")
