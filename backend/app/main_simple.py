@@ -2097,9 +2097,18 @@ class SimpleLLMClient:
 
             # Build and inject session context reminder
             session_summary = session_cache.get_session_context_summary(conversation_id)
+
+            # Also get current displayed map (tracked per user)
+            from app.tools.maps import get_current_map
+            current_map = get_current_map(user_id)
+
             context_reminder = ""
-            if any(session_summary.values()):
+            has_context = any(session_summary.get(k) for k in ["notes", "documents", "memories", "web_pages"]) or current_map
+            if has_context:
                 context_lines = ["\n## Session Context (already retrieved this conversation)"]
+                if current_map:
+                    context_lines.append(f"**Currently displayed map:** {current_map.get('map_name')} (id: {current_map.get('map_id')[:8]}...)")
+                    context_lines.append("  → Use map_explode without parameters to explode THIS map")
                 if session_summary.get("notes"):
                     context_lines.append(f"**Notes in context:** {', '.join(session_summary['notes'])}")
                 if session_summary.get("documents"):

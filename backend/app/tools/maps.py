@@ -15,8 +15,61 @@ from sqlalchemy import select
 import logging
 import uuid
 import json
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def _get_redis():
+    """Get Redis client for map state tracking."""
+    try:
+        import redis
+        url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        return redis.from_url(url, decode_responses=True)
+    except Exception as e:
+        logger.warning(f"Redis not available for map tracking: {e}")
+        return None
+
+
+def set_current_map(user_id: str, map_id: str, map_name: str):
+    """Track the currently displayed map for this user."""
+    try:
+        r = _get_redis()
+        if r:
+            key = f"user:{user_id}:current_map"
+            r.setex(key, 3600, json.dumps({  # 1 hour TTL
+                "map_id": map_id,
+                "map_name": map_name
+            }))
+            logger.info(f"📍 Set current map for user: {map_name}")
+    except Exception as e:
+        logger.error(f"Error setting current map: {e}")
+
+
+def get_current_map(user_id: str) -> Optional[Dict[str, str]]:
+    """Get the currently displayed map for this user."""
+    try:
+        r = _get_redis()
+        if r:
+            key = f"user:{user_id}:current_map"
+            data = r.get(key)
+            if data:
+                return json.loads(data)
+        return None
+    except Exception as e:
+        logger.error(f"Error getting current map: {e}")
+        return None
+
+
+def clear_current_map(user_id: str):
+    """Clear the current map tracking."""
+    try:
+        r = _get_redis()
+        if r:
+            key = f"user:{user_id}:current_map"
+            r.delete(key)
+    except Exception as e:
+        logger.error(f"Error clearing current map: {e}")
 
 
 class MapCreateTool(BaseTool):
@@ -861,6 +914,9 @@ class MapShowTool(BaseTool):
             if not map_obj:
                 return ToolResult(success=False, message=f"Map not found: {map_id or map_name}")
 
+            # Track this as the current displayed map
+            set_current_map(user_id, map_obj.id, map_obj.name)
+
             return ToolResult(
                 success=True,
                 data={
@@ -914,6 +970,12 @@ class MapHideTool(BaseTool):
 
         if not map_id:
             return ToolResult(success=False, message="map_id is required")
+
+        # Clear current map tracking if fully hiding
+        if mode == "hide":
+            current = get_current_map(user_id)
+            if current and current.get("map_id") == map_id:
+                clear_current_map(user_id)
 
         return ToolResult(
             success=True,
@@ -1075,7 +1137,8 @@ class MapExplodeTool(BaseTool):
 - Resizes all nodes to fit their text content
 - Spreads nodes apart so connections are clearly visible
 - Applies force-directed layout to minimize edge crossings
-Use this when the map looks cramped or text is cut off."""
+Use this when the map looks cramped or text is cut off.
+If no map_id or map_name is provided, automatically uses the currently displayed map."""
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -1112,8 +1175,14 @@ Use this when the map looks cramped or text is cut off."""
         min_node_width = kwargs.get("min_node_width", 150)
         max_node_width = kwargs.get("max_node_width", 400)
 
+        # Auto-detect current map if none specified
         if not map_id and not map_name:
-            return ToolResult(success=False, message="Either map_id or map_name is required")
+            current = get_current_map(user_id)
+            if current:
+                map_id = current.get("map_id")
+                logger.info(f"📍 Auto-detected current map: {current.get('map_name')}")
+            else:
+                return ToolResult(success=False, message="No map specified and no map currently displayed. Please show a map first or specify map_id/map_name.")
 
         db_gen = get_db()
         db: Session = next(db_gen)

@@ -96,7 +96,40 @@ class SessionToolCache:
         except Exception as e:
             logger.error(f"Cache store error: {e}")
 
-    def get_session_context_summary(self, conversation_id: str) -> Dict[str, List[str]]:
+    def set_current_map(self, conversation_id: str, map_id: str, map_name: str):
+        """Track the currently displayed map for this session."""
+        try:
+            key = f"session:{conversation_id}:current_map"
+            self.redis.setex(key, self.ttl_seconds, json.dumps({
+                "map_id": map_id,
+                "map_name": map_name,
+                "displayed_at": datetime.now().isoformat()
+            }))
+            logger.info(f"📍 Set current map: {map_name} ({map_id[:8]}...)")
+        except Exception as e:
+            logger.error(f"Error setting current map: {e}")
+
+    def get_current_map(self, conversation_id: str) -> Optional[Dict[str, str]]:
+        """Get the currently displayed map for this session."""
+        try:
+            key = f"session:{conversation_id}:current_map"
+            data = self.redis.get(key)
+            if data:
+                return json.loads(data.decode('utf-8'))
+            return None
+        except Exception as e:
+            logger.error(f"Error getting current map: {e}")
+            return None
+
+    def clear_current_map(self, conversation_id: str):
+        """Clear the current map (when map is hidden)."""
+        try:
+            key = f"session:{conversation_id}:current_map"
+            self.redis.delete(key)
+        except Exception as e:
+            logger.error(f"Error clearing current map: {e}")
+
+    def get_session_context_summary(self, conversation_id: str) -> Dict[str, Any]:
         """
         Get a summary of what's been retrieved in this session.
         Returns dict of {tool_type: [summaries]}
@@ -109,7 +142,8 @@ class SessionToolCache:
                 "notes": [],
                 "documents": [],
                 "memories": [],
-                "web_pages": []
+                "web_pages": [],
+                "current_map": self.get_current_map(conversation_id)
             }
 
             for entry_bytes in history:
