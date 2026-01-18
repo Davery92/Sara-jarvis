@@ -774,10 +774,17 @@ export interface SceneObjectState {
   filename: string
 }
 
+export interface VisibleMapState {
+  mapId: string
+  position: { x: number; y: number }
+  collapsed: boolean
+}
+
 export interface WorkspaceStateData {
   transform: CanvasTransform
   windows: WindowState[]
   sceneObjects?: SceneObjectState[]
+  visibleMaps?: VisibleMapState[]
 }
 
 export interface WorkspaceStateResponse {
@@ -848,6 +855,267 @@ export const modelsApi = {
 
   getDownloadUrl: (id: string): string => {
     return `${APP_CONFIG.apiUrl}/models/${id}/file`
+  },
+}
+
+// Maps types (mindmaps/flowcharts)
+export interface MapNodeContent {
+  type: 'text' | 'image' | 'code' | 'embed'
+  data: {
+    text?: string
+    imageUrl?: string
+    code?: string
+    language?: string
+  }
+}
+
+export interface MapNode {
+  id: string
+  position: { x: number; y: number }
+  size: { width: number; height: number }
+  content: MapNodeContent
+  style?: {
+    backgroundColor?: string
+    borderColor?: string
+    borderWidth?: number
+    borderRadius?: number
+  }
+}
+
+export interface MapEdge {
+  id: string
+  source: string
+  target: string
+  sourceHandle?: 'top' | 'right' | 'bottom' | 'left'
+  targetHandle?: 'top' | 'right' | 'bottom' | 'left'
+  style?: {
+    strokeColor?: string
+    strokeWidth?: number
+    curved?: boolean
+  }
+}
+
+export interface MapData {
+  nodes: MapNode[]
+  edges: MapEdge[]
+}
+
+export interface MapResponse {
+  id: string
+  user_id: string
+  name: string
+  description?: string
+  map_data: MapData
+  is_readonly: boolean
+  import_source?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface MapSummary {
+  id: string
+  name: string
+  description?: string
+  is_readonly: boolean
+  node_count: number
+  edge_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface MapCreateData {
+  name: string
+  description?: string
+  map_data?: MapData
+  is_readonly?: boolean
+}
+
+export interface MapUpdateData {
+  name?: string
+  description?: string
+  map_data?: MapData
+  is_readonly?: boolean
+}
+
+export interface MapImportData {
+  name: string
+  format: 'json' | 'mermaid'
+  content: string
+  is_readonly?: boolean
+  description?: string
+}
+
+// Maps functions
+export const mapsApi = {
+  list: async (): Promise<MapSummary[]> => {
+    const response = await api.get<MapSummary[]>('/api/maps')
+    return response.data
+  },
+
+  get: async (id: string): Promise<MapResponse> => {
+    const response = await api.get<MapResponse>(`/api/maps/${id}`)
+    return response.data
+  },
+
+  create: async (data: MapCreateData): Promise<MapResponse> => {
+    const response = await api.post<MapResponse>('/api/maps', data)
+    return response.data
+  },
+
+  update: async (id: string, data: MapUpdateData): Promise<MapResponse> => {
+    const response = await api.put<MapResponse>(`/api/maps/${id}`, data)
+    return response.data
+  },
+
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/api/maps/${id}`)
+  },
+
+  // Node operations
+  addNode: async (mapId: string, node: Omit<MapNode, 'id'>): Promise<{ node: MapNode; map: MapResponse }> => {
+    const response = await api.post<{ node: MapNode; map: MapResponse }>(`/api/maps/${mapId}/nodes`, node)
+    return response.data
+  },
+
+  updateNode: async (mapId: string, nodeId: string, data: Partial<MapNode>): Promise<MapResponse> => {
+    const response = await api.put<MapResponse>(`/api/maps/${mapId}/nodes/${nodeId}`, data)
+    return response.data
+  },
+
+  deleteNode: async (mapId: string, nodeId: string): Promise<MapResponse> => {
+    const response = await api.delete<MapResponse>(`/api/maps/${mapId}/nodes/${nodeId}`)
+    return response.data
+  },
+
+  // Edge operations
+  addEdge: async (mapId: string, edge: Omit<MapEdge, 'id'>): Promise<{ edge: MapEdge; map: MapResponse }> => {
+    const response = await api.post<{ edge: MapEdge; map: MapResponse }>(`/api/maps/${mapId}/edges`, edge)
+    return response.data
+  },
+
+  deleteEdge: async (mapId: string, edgeId: string): Promise<MapResponse> => {
+    const response = await api.delete<MapResponse>(`/api/maps/${mapId}/edges/${edgeId}`)
+    return response.data
+  },
+
+  // Import
+  import: async (data: MapImportData): Promise<MapResponse> => {
+    const response = await api.post<MapResponse>('/api/maps/import', data)
+    return response.data
+  },
+
+  // Current map tracking (for Sara's auto-detect)
+  setCurrentMap: async (mapId: string, mapName: string): Promise<void> => {
+    await api.post('/api/maps/current', { map_id: mapId, map_name: mapName })
+  },
+
+  clearCurrentMap: async (): Promise<void> => {
+    await api.delete('/api/maps/current')
+  },
+
+  getCurrentMap: async (): Promise<{ current_map: { map_id: string; map_name: string } | null }> => {
+    const response = await api.get<{ current_map: { map_id: string; map_name: string } | null }>('/api/maps/current')
+    return response.data
+  },
+
+  // Explode map - resize nodes and spread apart
+  explode: async (mapId: string, spacingFactor: number = 1.5): Promise<MapResponse> => {
+    const response = await api.post<MapResponse>(`/api/maps/${mapId}/explode`, {
+      spacing_factor: spacingFactor
+    })
+    return response.data
+  },
+}
+
+// Research types
+export interface ResearchSource {
+  url: string
+  title: string
+  snippet: string
+}
+
+export interface ResearchEvent {
+  type: 'sources' | 'content' | 'done' | 'error'
+  data?: ResearchSource[] | string | { message: string }
+}
+
+export interface SaveResearchResponse {
+  note_id: string
+  folder_id: string
+}
+
+// Research functions with SSE streaming
+export const researchApi = {
+  search: async (
+    query: string,
+    model: string,
+    onEvent: (event: ResearchEvent) => void,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    const response = await fetch(`${APP_CONFIG.apiUrl}/api/research/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({
+        query,
+        model,
+        mode: 'simple',
+      }),
+      signal,
+      credentials: 'include',
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new Error('No response body reader available')
+    }
+
+    const decoder = new TextDecoder()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+
+        if (done) {
+          break
+        }
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const eventData = JSON.parse(line.slice(6))
+              onEvent(eventData)
+            } catch {
+              // Skip malformed JSON
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+  },
+
+  save: async (
+    query: string,
+    content: string,
+    sources?: ResearchSource[]
+  ): Promise<SaveResearchResponse> => {
+    const response = await api.post<SaveResearchResponse>('/api/research/save', {
+      query,
+      content,
+      sources,
+    })
+    return response.data
   },
 }
 

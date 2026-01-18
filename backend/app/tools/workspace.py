@@ -10,11 +10,13 @@ the side panel in the main webapp. Workspace tools control the full workbench-ca
 application (the infinite canvas with multiple windows).
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from app.tools.base import BaseTool, ToolResult
 from app.models.note import Note
+from app.models.workspace_state import WorkspaceState
 from app.db.session import get_db
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 import logging
 
 logger = logging.getLogger(__name__)
@@ -352,6 +354,91 @@ the window by its ID or title."""
         )
 
 
+class WorkspaceListWindowsTool(BaseTool):
+    """Tool for listing all open windows in the workspace"""
+
+    @property
+    def name(self) -> str:
+        return "workspace_list_windows"
+
+    @property
+    def description(self) -> str:
+        return """List all currently open windows in the user's workspace canvas.
+Returns window IDs, types, and titles so you can reference them for focus, close, or other operations.
+Use this to see what windows the user has open before trying to focus or close a specific window."""
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "window_type": {
+                    "type": "string",
+                    "description": "Optional filter by window type (e.g., 'note', 'notes', 'chat', 'terminal')"
+                }
+            }
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """List open windows from workspace state"""
+        window_type_filter = kwargs.get("window_type")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            # Get workspace state from database
+            stmt = select(WorkspaceState).where(WorkspaceState.user_id == user_id)
+            state = db.execute(stmt).scalar_one_or_none()
+
+            if not state or not state.state_data:
+                return ToolResult(
+                    success=True,
+                    data={"windows": [], "count": 0},
+                    message="No workspace state found - workspace may not be open"
+                )
+
+            windows = state.state_data.get("windows", [])
+
+            # Filter by type if specified
+            if window_type_filter:
+                filter_lower = window_type_filter.lower()
+                windows = [w for w in windows if filter_lower in w.get("type", "").lower()]
+
+            # Build summary for each window
+            window_list = []
+            for w in windows:
+                window_info = {
+                    "id": w.get("id"),
+                    "type": w.get("type"),
+                    "title": w.get("title"),
+                }
+                # Include note_id if it's a note window
+                if w.get("data", {}).get("note_id"):
+                    window_info["note_id"] = w["data"]["note_id"]
+                if w.get("data", {}).get("note_title"):
+                    window_info["note_title"] = w["data"]["note_title"]
+                window_list.append(window_info)
+
+            return ToolResult(
+                success=True,
+                data={
+                    "windows": window_list,
+                    "count": len(window_list)
+                },
+                message=f"Found {len(window_list)} open window(s) in workspace"
+            )
+
+        except Exception as e:
+            logger.error(f"Error listing workspace windows: {e}")
+            return ToolResult(
+                success=False,
+                message=f"Failed to list windows: {str(e)}"
+            )
+        finally:
+            db.close()
+
+
 # List of all workspace tools for easy import
 WORKSPACE_TOOLS = [
     WorkspaceOpenWindowTool(),
@@ -360,4 +447,5 @@ WORKSPACE_TOOLS = [
     WorkspaceSaveStateTool(),
     WorkspaceArrangeTool(),
     WorkspaceFocusWindowTool(),
+    WorkspaceListWindowsTool(),
 ]

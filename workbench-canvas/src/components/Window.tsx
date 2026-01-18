@@ -124,7 +124,7 @@ export default function Window({
 
   return (
     <div
-      className="absolute bg-canvas-surface border border-canvas-border rounded-lg shadow-2xl overflow-hidden select-none pointer-events-auto"
+      className="absolute bg-canvas-surface border border-canvas-border rounded-lg shadow-2xl overflow-hidden pointer-events-auto"
       style={{
         left: position.x,
         top: position.y,
@@ -136,7 +136,7 @@ export default function Window({
     >
       {/* Title bar */}
       <div
-        className="h-10 bg-canvas-elevated border-b border-canvas-border flex items-center justify-between px-3 cursor-move"
+        className="h-10 bg-canvas-elevated border-b border-canvas-border flex items-center justify-between px-3 cursor-move select-none"
         onMouseDown={handleDragStart}
       >
         <div className="flex items-center gap-2 text-gray-300 text-sm font-medium truncate">
@@ -155,7 +155,7 @@ export default function Window({
       </div>
 
       {/* Content area */}
-      <div className="overflow-hidden" style={{ height: size.height - 40 }}>
+      <div className="overflow-hidden select-text" style={{ height: size.height - 40 }}>
         {children}
       </div>
 

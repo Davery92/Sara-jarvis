@@ -14,8 +14,10 @@ import {
   Trash2,
   FolderPlus,
   Loader2,
+  ExternalLink,
 } from 'lucide-react'
 import { notesApi, foldersApi, type TreeNode } from '../../services/api'
+import { useCanvasStore } from '../../store/canvasStore'
 import type { NoteWindowData, Note } from '../../types'
 
 interface NoteContentProps {
@@ -25,6 +27,7 @@ interface NoteContentProps {
 
 export default function NoteContent({ data }: NoteContentProps) {
   const queryClient = useQueryClient()
+  const { openWindow } = useCanvasStore()
   const [selectedNote, setSelectedNote] = useState<Note | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [editTitle, setEditTitle] = useState('')
@@ -148,6 +151,17 @@ export default function NoteContent({ data }: NoteContentProps) {
     createFolderMutation.mutate({
       name: newItemName.trim(),
       parentId: newFolderParentId,
+    })
+  }
+
+  // Detach note as a separate read-only window
+  const handleDetach = () => {
+    if (!selectedNote) return
+    openWindow('report', {
+      title: selectedNote.title,
+      content: selectedNote.content,
+    }, {
+      title: selectedNote.title,
     })
   }
 
@@ -311,8 +325,15 @@ export default function NoteContent({ data }: NoteContentProps) {
                 ) : (
                   <>
                     <button
+                      onClick={handleDetach}
+                      className="p-2 bg-blue-500/20 hover:bg-blue-500 rounded text-blue-400 hover:text-white"
+                      title="Open as separate window"
+                    >
+                      <ExternalLink size={16} />
+                    </button>
+                    <button
                       onClick={handleStartEdit}
-                      className="p-2 hover:bg-canvas-elevated rounded text-canvas-muted hover:text-white"
+                      className="p-2 bg-canvas-elevated hover:bg-canvas-border rounded text-white"
                       title="Edit"
                     >
                       <Edit2 size={16} />
@@ -323,7 +344,7 @@ export default function NoteContent({ data }: NoteContentProps) {
                           deleteNoteMutation.mutate(selectedNote.id)
                         }
                       }}
-                      className="p-2 hover:bg-canvas-elevated rounded text-red-400 hover:text-red-300"
+                      className="p-2 bg-red-500/20 hover:bg-red-500 rounded text-red-400 hover:text-white"
                       title="Delete"
                     >
                       <Trash2 size={16} />

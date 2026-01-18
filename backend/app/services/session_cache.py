@@ -5,8 +5,8 @@ Prevents redundant tool calls within a conversation session
 import hashlib
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import Any, Optional, Dict, List
+from datetime import datetime
+from typing import Optional, Dict, List
 from redis import Redis
 
 logger = logging.getLogger(__name__)
@@ -96,54 +96,22 @@ class SessionToolCache:
         except Exception as e:
             logger.error(f"Cache store error: {e}")
 
-    def set_current_map(self, conversation_id: str, map_id: str, map_name: str):
-        """Track the currently displayed map for this session."""
-        try:
-            key = f"session:{conversation_id}:current_map"
-            self.redis.setex(key, self.ttl_seconds, json.dumps({
-                "map_id": map_id,
-                "map_name": map_name,
-                "displayed_at": datetime.now().isoformat()
-            }))
-            logger.info(f"📍 Set current map: {map_name} ({map_id[:8]}...)")
-        except Exception as e:
-            logger.error(f"Error setting current map: {e}")
-
-    def get_current_map(self, conversation_id: str) -> Optional[Dict[str, str]]:
-        """Get the currently displayed map for this session."""
-        try:
-            key = f"session:{conversation_id}:current_map"
-            data = self.redis.get(key)
-            if data:
-                return json.loads(data.decode('utf-8'))
-            return None
-        except Exception as e:
-            logger.error(f"Error getting current map: {e}")
-            return None
-
-    def clear_current_map(self, conversation_id: str):
-        """Clear the current map (when map is hidden)."""
-        try:
-            key = f"session:{conversation_id}:current_map"
-            self.redis.delete(key)
-        except Exception as e:
-            logger.error(f"Error clearing current map: {e}")
-
-    def get_session_context_summary(self, conversation_id: str) -> Dict[str, Any]:
+    def get_session_context_summary(self, conversation_id: str) -> Dict[str, List[str]]:
         """
         Get a summary of what's been retrieved in this session.
         Returns dict of {tool_type: [summaries]}
+        Note: current_map is NOT included here since it's tracked per user_id, not conversation_id.
+              It's fetched separately in main_simple.py using the maps module.
         """
         try:
             history_key = self._make_history_key(conversation_id)
-            history = self.redis.lrange(history_key, 0, 50)  # Last 50 calls
+            history = self.redis.lrange(history_key, 0, 50) or []  # Last 50 calls, default to empty list
 
             summary = {
                 "notes": [],
                 "documents": [],
                 "memories": [],
-                "web_pages": [],
-                "current_map": self.get_current_map(conversation_id)
+                "web_pages": []
             }
 
             for entry_bytes in history:

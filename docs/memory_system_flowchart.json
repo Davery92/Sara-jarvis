@@ -377,6 +377,15 @@
     {"id": "e60", "source": "compact-trigger", "target": "find-candidates", "sourceHandle": "bottom", "targetHandle": "top", "style": {"curved": true}},
     {"id": "e61", "source": "find-candidates", "target": "cluster-batch", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
     {"id": "e62", "source": "cluster-batch", "target": "llm-summary", "sourceHandle": "bottom", "targetHandle": "right", "style": {"curved": true}},
-    {"id": "e63", "source": "llm-summary", "target": "mark-consolidated", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}}
+    {"id": "e63", "source": "llm-summary", "target": "mark-consolidated", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true}},
+
+    {"id": "e30", "source": "tier1-redis", "target": "composite-score", "sourceHandle": "bottom", "targetHandle": "left", "style": {"curved": true}},
+
+    {"id": "e11", "source": "redis-cache", "target": "tier1-redis", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true, "strokeDasharray": "5,5"}},
+    {"id": "e12", "source": "pg-episode", "target": "tier2-pg", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true, "strokeDasharray": "5,5"}},
+    {"id": "e13", "source": "neo4j-sync", "target": "tier3-graph", "sourceHandle": "right", "targetHandle": "left", "style": {"curved": true, "strokeDasharray": "5,5"}},
+
+    {"id": "e53", "source": "importance-decay", "target": "pg-episode", "sourceHandle": "left", "targetHandle": "bottom", "style": {"curved": true}},
+    {"id": "e64", "source": "mark-consolidated", "target": "pg-episode", "sourceHandle": "top", "targetHandle": "bottom", "style": {"curved": true}}
   ]
 }

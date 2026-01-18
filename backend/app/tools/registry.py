@@ -109,6 +109,7 @@ from app.tools.canvas import (
 from app.tools.patterns import PATTERN_TOOLS
 from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
+from app.tools.maps import MAP_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -254,10 +255,20 @@ class ToolRegistry:
             ]
         },
         'workspace': {
-            'description': 'Control the workbench-canvas workspace - open windows, arrange layout, manage notes in the infinite canvas (only available in workspace chat)',
+            'description': 'Control the workbench-canvas workspace - open windows, arrange layout, manage notes in the infinite canvas. Use workspace_list_windows to see what windows are open before focusing or closing.',
             'tools': [
-                'workspace_open_window', 'workspace_open_note', 'workspace_close_window',
-                'workspace_save_state', 'workspace_arrange', 'workspace_focus_window'
+                'workspace_list_windows', 'workspace_open_window', 'workspace_open_note',
+                'workspace_close_window', 'workspace_save_state', 'workspace_arrange',
+                'workspace_focus_window'
+            ]
+        },
+        'maps': {
+            'description': 'Create and control mindmaps/flowcharts on the workspace canvas - create maps, add/edit/delete nodes, connect nodes, import from JSON or Mermaid, explode/expand maps',
+            'tools': [
+                'map_create', 'map_delete', 'map_get', 'map_list',
+                'map_add_node', 'map_edit_node', 'map_delete_node',
+                'map_connect', 'map_disconnect',
+                'map_show', 'map_hide', 'map_import_json', 'map_explode'
             ]
         }
     }
@@ -422,6 +433,9 @@ class ToolRegistry:
 
             # Workspace Control Tools (for workbench-canvas)
             *WORKSPACE_TOOLS,
+
+            # Map Control Tools (mindmaps/flowcharts on canvas)
+            *MAP_TOOLS,
         ]
 
         for tool in tools:

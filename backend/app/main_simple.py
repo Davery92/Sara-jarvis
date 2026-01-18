@@ -1715,6 +1715,9 @@ class SimpleLLMClient:
                 "data": data,
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             })
+            logger.info(f"📤 Event QUEUED: {event_type}")
+        else:
+            logger.error(f"❌ NO EVENT QUEUE for '{event_type}'!")
     
     def _extract_final_message(self, content: str) -> str:
         """Extract final message from MLX fine-tuned model's channel format.
@@ -2107,8 +2110,8 @@ class SimpleLLMClient:
             if has_context:
                 context_lines = ["\n## Session Context (already retrieved this conversation)"]
                 if current_map:
-                    context_lines.append(f"**Currently displayed map:** {current_map.get('map_name')} (id: {current_map.get('map_id')[:8]}...)")
-                    context_lines.append("  → Use map_explode without parameters to explode THIS map")
+                    context_lines.append(f"**Currently displayed map:** \"{current_map.get('map_name')}\"")
+                    context_lines.append("  → Just call map_explode with NO parameters - it auto-detects the current map")
                 if session_summary.get("notes"):
                     context_lines.append(f"**Notes in context:** {', '.join(session_summary['notes'])}")
                 if session_summary.get("documents"):

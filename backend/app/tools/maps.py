@@ -182,6 +182,8 @@ The map will be saved and can be shown on the workspace canvas."""
             if show_on_canvas:
                 result_data["workspace_command"] = "show_map"
                 result_data["map"] = map_obj.to_dict()
+                # Track this as the current displayed map
+                set_current_map(user_id, map_obj.id, map_obj.name)
 
             return ToolResult(
                 success=True,
@@ -1110,6 +1112,8 @@ flowchart TD
             if show_on_canvas:
                 result_data["workspace_command"] = "show_map"
                 result_data["map"] = map_obj.to_dict()
+                # Track this as the current displayed map
+                set_current_map(user_id, map_obj.id, map_obj.name)
 
             return ToolResult(
                 success=True,
@@ -1133,12 +1137,14 @@ class MapExplodeTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return """Explode/expand a mindmap to make it more readable:
-- Resizes all nodes to fit their text content
+        return """USE THIS TOOL when user says: "explode the map", "explode the graph", "expand the map", "spread out the nodes", "make the map readable", "resize the nodes", or similar requests.
+
+This tool:
+- Resizes all nodes to fit their text content (no more cut-off text)
 - Spreads nodes apart so connections are clearly visible
 - Applies force-directed layout to minimize edge crossings
-Use this when the map looks cramped or text is cut off.
-If no map_id or map_name is provided, automatically uses the currently displayed map."""
+
+If no map_id or map_name is provided, automatically uses the currently displayed map - just call the tool with no parameters."""
 
     @property
     def parameters(self) -> Dict[str, Any]:

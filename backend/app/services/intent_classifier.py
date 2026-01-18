@@ -451,6 +451,13 @@ class ToolIntentClassifier:
             'on my desktop', 'on my pc', 'screenshot', 'take screenshot',
             'connected devices', 'what devices', 'list devices', 'show devices'
         ],
+        'WORKSPACE': [
+            'map', 'maps', 'mindmap', 'mind map', 'flowchart', 'flow chart',
+            'diagram', 'graph', 'node', 'nodes', 'canvas', 'workspace',
+            'explode', 'expand the', 'spread out', 'resize', 'layout',
+            'show the map', 'hide the map', 'create a map', 'add node',
+            'connect nodes', 'visualization', 'visualize'
+        ],
     }
 
     # Map intents to tool categories
@@ -468,6 +475,7 @@ class ToolIntentClassifier:
         'MORNING_BRIEF': ['morning_brief', 'time'],
         'AGENTS': ['agents', 'web'],
         'DEVICES': ['devices'],  # Cross-device commands
+        'WORKSPACE': ['workspace', 'maps'],  # Canvas and map control
         'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices'],  # Expanded fallback with devices
     }
 

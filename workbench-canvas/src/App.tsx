@@ -5,6 +5,9 @@ import LoginScreen from './components/LoginScreen'
 import Canvas from './components/Canvas'
 import ModeWheel from './components/ModeWheel'
 import NotesPicker from './components/NotesPicker'
+import MapPicker from './components/maps/MapPicker'
+import MapImportModal from './components/maps/MapImportModal'
+import MapNodeEditor from './components/maps/MapNodeEditor'
 import { ThreeScene } from './components/three'
 import { modelsApi } from './services/api'
 import type { FileViewerWindowData } from './types'
@@ -13,7 +16,23 @@ const MODEL_3D_EXTENSIONS = ['stl', 'obj', 'gltf', 'glb']
 
 function App() {
   const { user, isLoading, checkAuth } = useAuthStore()
-  const { isNotesPickerOpen, addSceneObject, openWindow } = useCanvasStore()
+  const {
+    isNotesPickerOpen,
+    isMapPickerOpen,
+    isMapImportModalOpen,
+    editingNodeId,
+    mapSelection,
+    maps,
+    addSceneObject,
+    openWindow,
+    deleteMapNode,
+    deleteMapEdge,
+    cancelConnection,
+    clearMapSelection,
+    setNotesPickerOpen,
+    setMapPickerOpen,
+    setEditingNodeId,
+  } = useCanvasStore()
   const [isDragOver, setIsDragOver] = useState(false)
 
   // Check authentication on mount
@@ -40,27 +59,88 @@ function App() {
   // Handle keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Escape to close panels
-      if (e.key === 'Escape') {
-        useCanvasStore.getState().setNotesPickerOpen(false)
+      // Skip if typing in an input or textarea
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return
       }
-      // F11 or F for fullscreen toggle (F11 is browser default)
-      if (e.key === 'f' && !e.ctrlKey && !e.metaKey) {
-        if (document.fullscreenElement) {
-          document.exitFullscreen()
-        } else {
-          document.documentElement.requestFullscreen()
+
+      // Escape to close panels and cancel connection mode
+      if (e.key === 'Escape') {
+        const state = useCanvasStore.getState()
+        if (state.mapSelection?.connectionSource) {
+          cancelConnection()
+        } else if (state.isMapPickerOpen) {
+          setMapPickerOpen(false)
+        } else if (state.isNotesPickerOpen) {
+          setNotesPickerOpen(false)
+        } else if (state.editingNodeId) {
+          setEditingNodeId(null)
+        } else if (state.mapSelection) {
+          clearMapSelection()
         }
       }
-      // R to reset view
-      if (e.key === 'r' && !e.ctrlKey && !e.metaKey) {
-        useCanvasStore.getState().resetTransform()
+
+      // Delete key to delete selected map items
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const state = useCanvasStore.getState()
+        if (state.mapSelection) {
+          const { mapId, nodeIds, edgeIds } = state.mapSelection
+          // Find the map to check if it's readonly
+          const map = state.maps.find((m) => m.id === mapId)
+          if (map && !map.isReadonly) {
+            // Delete selected edges first
+            edgeIds.forEach((edgeId) => deleteMapEdge(mapId, edgeId))
+            // Delete selected nodes
+            nodeIds.forEach((nodeId) => deleteMapNode(mapId, nodeId))
+          }
+        }
+      }
+
+      // App shortcuts (no modifier keys)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        switch (e.key.toLowerCase()) {
+          case 'm': // Maps
+            setMapPickerOpen(!useCanvasStore.getState().isMapPickerOpen)
+            break
+          case 'c': // Chat
+            openWindow('chat', {})
+            break
+          case 'n': // Notes
+            openWindow('note', {})
+            break
+          case 's': // Search/Research
+            openWindow('research', {})
+            break
+          case 'p': // Projects
+            openWindow('projects', {})
+            break
+          case 't': // Timers
+            openWindow('timers', {})
+            break
+          case 'g': // Gym/Fitness
+            openWindow('fitness', {})
+            break
+          case 'f': // Fullscreen
+            if (document.fullscreenElement) {
+              document.exitFullscreen()
+            } else {
+              document.documentElement.requestFullscreen()
+            }
+            break
+          case 'r': // Reset view
+            useCanvasStore.getState().resetTransform()
+            break
+          case '?': // Help (show shortcuts)
+            openWindow('settings', {})
+            break
+        }
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
+  }, [cancelConnection, clearMapSelection, deleteMapEdge, deleteMapNode, openWindow, setEditingNodeId, setMapPickerOpen, setNotesPickerOpen])
 
   // Handle drag and drop for files
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -155,6 +235,25 @@ function App() {
       {/* UI overlays */}
       <ModeWheel />
       {isNotesPickerOpen && <NotesPicker />}
+      {isMapPickerOpen && <MapPicker />}
+      {isMapImportModalOpen && <MapImportModal />}
+
+      {/* Map Node Editor */}
+      {editingNodeId && mapSelection && (() => {
+        const map = maps.find((m) => m.id === mapSelection.mapId)
+        const node = map?.mapData.nodes.find((n) => n.id === editingNodeId)
+        if (map && node && !map.isReadonly) {
+          return (
+            <MapNodeEditor
+              mapId={map.id}
+              nodeId={node.id}
+              initialContent={node.content}
+              onClose={() => setEditingNodeId(null)}
+            />
+          )
+        }
+        return null
+      })()}
 
       {/* Drag overlay */}
       {isDragOver && (

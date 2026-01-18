@@ -1,11 +1,15 @@
 import { create } from 'zustand'
 import { APP_CONFIG } from '../config'
-import { workspaceApi, type WorkspaceStateData } from '../services/api'
-import type { CanvasTransform, CanvasMode, WindowInstance, Position, Size, NoteWindowData, WindowType, WindowData, SceneObject, Position3D, Rotation3D, ModelFormat } from '../types'
+import { workspaceApi, mapsApi, type WorkspaceStateData } from '../services/api'
+import type {
+  CanvasTransform, CanvasMode, WindowInstance, Position, Size, NoteWindowData,
+  WindowType, WindowData, SceneObject, Position3D, Rotation3D, ModelFormat,
+  MapInstance, MapNode, MapEdge, MapSelection, MapData, MapNodeContent, VisibleMapState
+} from '../types'
 
 // Window defaults for each type
 const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title: string }> = {
-  note: { width: 500, height: 400, title: 'Note' },
+  note: { width: 800, height: 500, title: 'Notes' },
   chat: { width: 600, height: 700, title: 'Chat with Sara' },
   fitness: { width: 800, height: 600, title: 'Fitness' },
   projects: { width: 900, height: 700, title: 'Projects' },
@@ -13,6 +17,8 @@ const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title
   settings: { width: 700, height: 600, title: 'Settings' },
   fileviewer: { width: 700, height: 600, title: 'File Viewer' },
   modelviewer: { width: 800, height: 600, title: '3D Model' },
+  research: { width: 700, height: 600, title: 'Research' },
+  report: { width: 500, height: 450, title: 'Report' },
 }
 
 interface WindowOptions {
@@ -31,6 +37,9 @@ interface CanvasState {
 
   // UI state
   isNotesPickerOpen: boolean
+  isMapPickerOpen: boolean
+  isMapImportModalOpen: boolean
+  editingNodeId: string | null  // Node being edited
 
   // Windows
   windows: WindowInstance[]
@@ -39,6 +48,10 @@ interface CanvasState {
   // 3D Scene objects
   sceneObjects: SceneObject[]
   selectedObjectId: string | null
+
+  // Maps (mindmaps/flowcharts)
+  maps: MapInstance[]
+  mapSelection: MapSelection | null
 
   // Transform actions
   setTransform: (transform: Partial<CanvasTransform>) => void
@@ -53,6 +66,9 @@ interface CanvasState {
   // UI actions
   setNotesPickerOpen: (open: boolean) => void
   toggleNotesPicker: () => void
+  setMapPickerOpen: (open: boolean) => void
+  setMapImportModalOpen: (open: boolean) => void
+  setEditingNodeId: (nodeId: string | null) => void
 
   // Window actions
   openWindow: (type: WindowType, data: WindowData, options?: WindowOptions) => void
@@ -68,6 +84,32 @@ interface CanvasState {
   updateSceneObject: (id: string, updates: Partial<SceneObject>) => void
   selectObject: (id: string | null) => void
 
+  // Map actions
+  addMap: (map: MapInstance) => void
+  removeMap: (mapId: string) => void
+  updateMap: (mapId: string, updates: Partial<MapInstance>) => void
+  moveMapOnCanvas: (mapId: string, position: Position) => void
+  collapseMap: (mapId: string, collapsed: boolean) => void
+
+  // Map node actions
+  addMapNode: (mapId: string, node: Omit<MapNode, 'id'>) => string
+  updateMapNode: (mapId: string, nodeId: string, updates: Partial<MapNode>) => void
+  deleteMapNode: (mapId: string, nodeId: string) => void
+  moveMapNode: (mapId: string, nodeId: string, position: Position) => void
+  resizeMapNode: (mapId: string, nodeId: string, size: Size) => void
+
+  // Map edge actions
+  addMapEdge: (mapId: string, edge: Omit<MapEdge, 'id'>) => string
+  deleteMapEdge: (mapId: string, edgeId: string) => void
+
+  // Map selection actions
+  selectMapNode: (mapId: string, nodeId: string, additive?: boolean) => void
+  selectMapEdge: (mapId: string, edgeId: string) => void
+  clearMapSelection: () => void
+  startConnection: (mapId: string, nodeId: string, handle: 'top' | 'right' | 'bottom' | 'left') => void
+  completeConnection: (targetNodeId: string, targetHandle: 'top' | 'right' | 'bottom' | 'left') => void
+  cancelConnection: () => void
+
   // Persistence actions
   saveStateToServer: () => Promise<void>
   loadStateFromServer: () => Promise<void>
@@ -76,16 +118,41 @@ interface CanvasState {
 
 const modes: CanvasMode[] = ['notes', 'sketch', 'reference']
 
+// Helper to generate unique IDs
+const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+
+// Debounced auto-save for window state changes
+let autoSaveTimeout: NodeJS.Timeout | null = null
+const AUTO_SAVE_DELAY = 2000 // 2 seconds debounce
+
+const scheduleAutoSave = () => {
+  if (autoSaveTimeout) {
+    clearTimeout(autoSaveTimeout)
+  }
+  autoSaveTimeout = setTimeout(async () => {
+    const store = useCanvasStore.getState()
+    if (store.isStateLoaded) {
+      console.log('[canvasStore] Auto-saving window state...')
+      await store.saveStateToServer()
+    }
+  }, AUTO_SAVE_DELAY)
+}
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
   // Initial state
   transform: { x: 0, y: 0, scale: 1 },
   mode: 'notes',
   isNotesPickerOpen: false,
+  isMapPickerOpen: false,
+  isMapImportModalOpen: false,
+  editingNodeId: null,
   windows: [],
   maxZIndex: 0,
   isStateLoaded: false,
   sceneObjects: [],
   selectedObjectId: null,
+  maps: [],
+  mapSelection: null,
 
   // Transform actions
   setTransform: (newTransform) => {
@@ -148,6 +215,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   // UI actions
   setNotesPickerOpen: (open) => set({ isNotesPickerOpen: open }),
   toggleNotesPicker: () => set((state) => ({ isNotesPickerOpen: !state.isNotesPickerOpen })),
+  setMapPickerOpen: (open) => set({ isMapPickerOpen: open }),
+  setMapImportModalOpen: (open) => set({ isMapImportModalOpen: open }),
+  setEditingNodeId: (nodeId) => set({ editingNodeId: nodeId }),
 
   // Window actions
   openWindow: (type, data, options = {}) => {
@@ -179,6 +249,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       windows: [...state.windows, newWindow],
       maxZIndex: newZIndex,
     })
+    scheduleAutoSave()
   },
 
   openNoteWindow: (noteId, title, content) => {
@@ -219,12 +290,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       maxZIndex: newZIndex,
       isNotesPickerOpen: false, // Close picker after opening note
     })
+    scheduleAutoSave()
   },
 
   closeWindow: (id) => {
     set((state) => ({
       windows: state.windows.filter((w) => w.id !== id),
     }))
+    scheduleAutoSave()
   },
 
   moveWindow: (id, position) => {
@@ -233,6 +306,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         w.id === id ? { ...w, position } : w
       ),
     }))
+    scheduleAutoSave()
   },
 
   resizeWindow: (id, size) => {
@@ -246,6 +320,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         w.id === id ? { ...w, size: constrainedSize } : w
       ),
     }))
+    scheduleAutoSave()
   },
 
   bringToFront: (id) => {
@@ -290,6 +365,288 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     set({ selectedObjectId: id })
   },
 
+  // Map actions
+  addMap: (map) => {
+    set((state) => ({
+      maps: [...state.maps, map],
+      isMapPickerOpen: false,
+    }))
+  },
+
+  removeMap: (mapId) => {
+    set((state) => {
+      // Check if the node being edited belongs to this map
+      const map = state.maps.find((m) => m.id === mapId)
+      const isEditingThisMap = map && state.editingNodeId &&
+        map.mapData.nodes.some((n) => n.id === state.editingNodeId)
+
+      return {
+        maps: state.maps.filter((m) => m.id !== mapId),
+        mapSelection: state.mapSelection?.mapId === mapId ? null : state.mapSelection,
+        editingNodeId: isEditingThisMap ? null : state.editingNodeId,
+      }
+    })
+  },
+
+  updateMap: (mapId, updates) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId ? { ...m, ...updates } : m
+      ),
+    }))
+  },
+
+  moveMapOnCanvas: (mapId, position) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId ? { ...m, canvasPosition: position } : m
+      ),
+    }))
+  },
+
+  collapseMap: (mapId, collapsed) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId ? { ...m, collapsed } : m
+      ),
+    }))
+  },
+
+  // Map node actions
+  addMapNode: (mapId, node) => {
+    const nodeId = generateId()
+    const newNode: MapNode = { ...node, id: nodeId }
+
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? { ...m, mapData: { ...m.mapData, nodes: [...m.mapData.nodes, newNode] } }
+          : m
+      ),
+    }))
+
+    return nodeId
+  },
+
+  updateMapNode: (mapId, nodeId, updates) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? {
+              ...m,
+              mapData: {
+                ...m.mapData,
+                nodes: m.mapData.nodes.map((n) =>
+                  n.id === nodeId ? { ...n, ...updates } : n
+                ),
+              },
+            }
+          : m
+      ),
+    }))
+  },
+
+  deleteMapNode: (mapId, nodeId) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? {
+              ...m,
+              mapData: {
+                nodes: m.mapData.nodes.filter((n) => n.id !== nodeId),
+                edges: m.mapData.edges.filter(
+                  (e) => e.source !== nodeId && e.target !== nodeId
+                ),
+              },
+            }
+          : m
+      ),
+      mapSelection:
+        state.mapSelection?.nodeIds.includes(nodeId)
+          ? {
+              ...state.mapSelection,
+              nodeIds: state.mapSelection.nodeIds.filter((id) => id !== nodeId),
+            }
+          : state.mapSelection,
+    }))
+  },
+
+  moveMapNode: (mapId, nodeId, position) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? {
+              ...m,
+              mapData: {
+                ...m.mapData,
+                nodes: m.mapData.nodes.map((n) =>
+                  n.id === nodeId ? { ...n, position } : n
+                ),
+              },
+            }
+          : m
+      ),
+    }))
+  },
+
+  resizeMapNode: (mapId, nodeId, size) => {
+    const minWidth = 100
+    const minHeight = 50
+    const constrainedSize = {
+      width: Math.max(minWidth, size.width),
+      height: Math.max(minHeight, size.height),
+    }
+
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? {
+              ...m,
+              mapData: {
+                ...m.mapData,
+                nodes: m.mapData.nodes.map((n) =>
+                  n.id === nodeId ? { ...n, size: constrainedSize } : n
+                ),
+              },
+            }
+          : m
+      ),
+    }))
+  },
+
+  // Map edge actions
+  addMapEdge: (mapId, edge) => {
+    const edgeId = generateId()
+    const newEdge: MapEdge = {
+      ...edge,
+      id: edgeId,
+      sourceHandle: edge.sourceHandle || 'right',
+      targetHandle: edge.targetHandle || 'left',
+      style: edge.style || { curved: true },
+    }
+
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? { ...m, mapData: { ...m.mapData, edges: [...m.mapData.edges, newEdge] } }
+          : m
+      ),
+    }))
+
+    return edgeId
+  },
+
+  deleteMapEdge: (mapId, edgeId) => {
+    set((state) => ({
+      maps: state.maps.map((m) =>
+        m.id === mapId
+          ? {
+              ...m,
+              mapData: {
+                ...m.mapData,
+                edges: m.mapData.edges.filter((e) => e.id !== edgeId),
+              },
+            }
+          : m
+      ),
+      mapSelection:
+        state.mapSelection?.edgeIds.includes(edgeId)
+          ? {
+              ...state.mapSelection,
+              edgeIds: state.mapSelection.edgeIds.filter((id) => id !== edgeId),
+            }
+          : state.mapSelection,
+    }))
+  },
+
+  // Map selection actions
+  selectMapNode: (mapId, nodeId, additive = false) => {
+    set((state) => {
+      if (additive && state.mapSelection?.mapId === mapId) {
+        // Toggle selection in additive mode
+        const isSelected = state.mapSelection.nodeIds.includes(nodeId)
+        return {
+          mapSelection: {
+            ...state.mapSelection,
+            nodeIds: isSelected
+              ? state.mapSelection.nodeIds.filter((id) => id !== nodeId)
+              : [...state.mapSelection.nodeIds, nodeId],
+            edgeIds: [],
+          },
+        }
+      }
+      // Single selection
+      return {
+        mapSelection: {
+          mapId,
+          nodeIds: [nodeId],
+          edgeIds: [],
+        },
+      }
+    })
+  },
+
+  selectMapEdge: (mapId, edgeId) => {
+    set({
+      mapSelection: {
+        mapId,
+        nodeIds: [],
+        edgeIds: [edgeId],
+      },
+    })
+  },
+
+  clearMapSelection: () => {
+    set({ mapSelection: null })
+  },
+
+  startConnection: (mapId, nodeId, handle) => {
+    set((state) => ({
+      mapSelection: {
+        mapId,
+        nodeIds: [nodeId],
+        edgeIds: [],
+        connectionSource: nodeId,
+        sourceHandle: handle,
+      },
+    }))
+  },
+
+  completeConnection: (targetNodeId, targetHandle) => {
+    const state = get()
+    const selection = state.mapSelection
+    if (!selection?.connectionSource || selection.connectionSource === targetNodeId) {
+      // Cancel if no source or trying to connect to self
+      set({ mapSelection: { ...selection!, connectionSource: undefined, sourceHandle: undefined } })
+      return
+    }
+
+    // Add the edge with handle positions
+    const edgeId = state.addMapEdge(selection.mapId, {
+      source: selection.connectionSource,
+      target: targetNodeId,
+      sourceHandle: selection.sourceHandle,
+      targetHandle: targetHandle,
+    })
+
+    // Clear connection mode
+    set({
+      mapSelection: {
+        mapId: selection.mapId,
+        nodeIds: [],
+        edgeIds: [edgeId],
+      },
+    })
+  },
+
+  cancelConnection: () => {
+    set((state) => ({
+      mapSelection: state.mapSelection
+        ? { ...state.mapSelection, connectionSource: undefined }
+        : null,
+    }))
+  },
+
   // Persistence actions
   saveStateToServer: async () => {
     const state = get()
@@ -314,9 +671,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         scale: obj.scale,
         filename: obj.filename,
       })),
+      visibleMaps: state.maps.map(m => ({
+        mapId: m.id,
+        position: m.canvasPosition,
+        collapsed: m.collapsed,
+      })),
     }
     try {
       await workspaceApi.saveState(stateData)
+      // Also save each map's data to the backend
+      for (const map of state.maps) {
+        try {
+          await mapsApi.update(map.id, {
+            map_data: map.mapData,
+          })
+        } catch (e) {
+          console.error(`[canvasStore] Failed to save map ${map.id}:`, e)
+        }
+      }
       console.log('[canvasStore] State saved to server')
     } catch (error) {
       console.error('[canvasStore] Failed to save state:', error)
@@ -326,8 +698,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   loadStateFromServer: async () => {
     try {
       const response = await workspaceApi.getState()
-      if (response.state_data && (response.state_data.windows?.length > 0 || response.state_data.sceneObjects?.length)) {
-        const { transform, windows, sceneObjects } = response.state_data
+      const hasData = response.state_data && (
+        response.state_data.windows?.length > 0 ||
+        response.state_data.sceneObjects?.length ||
+        response.state_data.visibleMaps?.length
+      )
+
+      if (hasData) {
+        const { transform, windows, sceneObjects, visibleMaps } = response.state_data!
         // Find max zIndex from loaded windows
         const maxZ = (windows || []).reduce((max, w) => Math.max(max, w.zIndex || 0), 0)
 
@@ -354,14 +732,36 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           filename: obj.filename,
         }))
 
+        // Load visible maps from backend
+        const loadedMaps: MapInstance[] = []
+        if (visibleMaps?.length) {
+          for (const vm of visibleMaps) {
+            try {
+              const mapData = await mapsApi.get(vm.mapId)
+              loadedMaps.push({
+                id: mapData.id,
+                name: mapData.name,
+                description: mapData.description,
+                mapData: mapData.map_data,
+                isReadonly: mapData.is_readonly,
+                canvasPosition: vm.position,
+                collapsed: vm.collapsed,
+              })
+            } catch (e) {
+              console.error(`[canvasStore] Failed to load map ${vm.mapId}:`, e)
+            }
+          }
+        }
+
         set({
           transform: transform || { x: 0, y: 0, scale: 1 },
           windows: loadedWindows,
           sceneObjects: loadedSceneObjects,
+          maps: loadedMaps,
           maxZIndex: maxZ,
           isStateLoaded: true,
         })
-        console.log('[canvasStore] State loaded from server:', loadedWindows.length, 'windows,', loadedSceneObjects.length, 'scene objects')
+        console.log('[canvasStore] State loaded from server:', loadedWindows.length, 'windows,', loadedSceneObjects.length, 'scene objects,', loadedMaps.length, 'maps')
       } else {
         set({ isStateLoaded: true })
         console.log('[canvasStore] No saved state found')

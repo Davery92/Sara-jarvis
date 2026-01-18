@@ -153,6 +153,93 @@ export default function ChatContent({ data }: ChatContentProps) {
         break
       }
 
+      case 'show_map': {
+        // Show a map on the canvas
+        const { addMap, updateMap, maps } = useCanvasStore.getState()
+        const mapData = data.map
+        if (!mapData) {
+          console.warn('[ChatContent] show_map: No map data provided')
+          break
+        }
+
+        // Check if map already exists on canvas
+        const existingMap = maps.find(m => m.id === mapData.id)
+        if (existingMap) {
+          // Update existing map and uncollapse it
+          updateMap(mapData.id, {
+            mapData: mapData.map_data,
+            collapsed: false,
+          })
+        } else {
+          // Add new map to canvas
+          const newMap = {
+            id: mapData.id,
+            name: mapData.name,
+            description: mapData.description,
+            mapData: mapData.map_data,
+            isReadonly: mapData.is_readonly || false,
+            canvasPosition: data.position || { x: 200, y: 200 },
+            collapsed: data.collapsed || false,
+          }
+          addMap(newMap)
+        }
+        console.log('[ChatContent] Map shown:', mapData.name)
+        break
+      }
+
+      case 'update_map': {
+        // Update an existing map on the canvas
+        const { updateMap: updateMapStore, maps: currentMaps, addMap: addMapStore } = useCanvasStore.getState()
+        const updatedMapData = data.map
+        console.log('[ChatContent] update_map received:', {
+          mapId: updatedMapData?.id,
+          mapName: updatedMapData?.name,
+          hasMapData: !!updatedMapData?.map_data,
+          currentMapsCount: currentMaps.length,
+          currentMapIds: currentMaps.map(m => m.id)
+        })
+
+        if (!updatedMapData) {
+          console.warn('[ChatContent] update_map: No map data provided')
+          break
+        }
+
+        const mapToUpdate = currentMaps.find(m => m.id === updatedMapData.id)
+        if (mapToUpdate) {
+          updateMapStore(updatedMapData.id, {
+            mapData: updatedMapData.map_data,
+          })
+          console.log('[ChatContent] Map updated successfully:', updatedMapData.name)
+        } else {
+          // Map not on canvas - add it
+          console.log('[ChatContent] Map not on canvas, adding it:', updatedMapData.id)
+          const newMap = {
+            id: updatedMapData.id,
+            name: updatedMapData.name,
+            description: updatedMapData.description,
+            mapData: updatedMapData.map_data,
+            isReadonly: updatedMapData.is_readonly || false,
+            canvasPosition: { x: 200, y: 200 },
+            collapsed: false,
+          }
+          addMapStore(newMap)
+          console.log('[ChatContent] Map added to canvas:', updatedMapData.name)
+        }
+        break
+      }
+
+      case 'hide_map':
+      case 'collapse_map': {
+        // Hide or collapse a map
+        const { removeMap, collapseMap } = useCanvasStore.getState()
+        if (command === 'hide_map') {
+          removeMap(data.map_id)
+        } else {
+          collapseMap(data.map_id, true)
+        }
+        break
+      }
+
       default:
         console.warn('[ChatContent] Unknown workspace command:', command)
     }

@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback } from 'react'
 import { useCanvasStore } from '../store/canvasStore'
 import Window from './Window'
 import { WindowContent } from './WindowContentRegistry'
+import MapLayer from './maps/MapLayer'
 
 export default function Canvas() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -11,7 +12,44 @@ export default function Canvas() {
   const isPanning = useRef(false)
   const lastMouse = useRef({ x: 0, y: 0 })
 
-  // Handle wheel zoom (but allow scrolling inside windows)
+  // Global mouse handlers for middle-click panning (works everywhere)
+  useEffect(() => {
+    const handleGlobalMouseDown = (e: MouseEvent) => {
+      // Middle mouse button for panning
+      if (e.button === 1) {
+        e.preventDefault()
+        isPanning.current = true
+        lastMouse.current = { x: e.clientX, y: e.clientY }
+      }
+    }
+
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (isPanning.current) {
+        const dx = e.clientX - lastMouse.current.x
+        const dy = e.clientY - lastMouse.current.y
+        pan(dx, dy)
+        lastMouse.current = { x: e.clientX, y: e.clientY }
+      }
+    }
+
+    const handleGlobalMouseUp = (e: MouseEvent) => {
+      if (e.button === 1) {
+        isPanning.current = false
+      }
+    }
+
+    window.addEventListener('mousedown', handleGlobalMouseDown)
+    window.addEventListener('mousemove', handleGlobalMouseMove)
+    window.addEventListener('mouseup', handleGlobalMouseUp)
+
+    return () => {
+      window.removeEventListener('mousedown', handleGlobalMouseDown)
+      window.removeEventListener('mousemove', handleGlobalMouseMove)
+      window.removeEventListener('mouseup', handleGlobalMouseUp)
+    }
+  }, [pan])
+
+  // Handle wheel for pan (two-finger scroll) and zoom (pinch/ctrl+scroll)
   const handleWheel = useCallback((e: WheelEvent) => {
     // Check if the event target is inside a scrollable window content area
     const target = e.target as HTMLElement
@@ -28,36 +66,19 @@ export default function Canvas() {
       }
     }
 
-    // Otherwise, zoom the canvas
     e.preventDefault()
-    const delta = -e.deltaY * 0.001
-    zoom(delta, e.clientX, e.clientY)
-  }, [zoom])
 
-  // Handle mouse down for panning (middle click or space+click)
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    // Middle mouse button for panning
-    if (e.button === 1) {
-      e.preventDefault()
-      isPanning.current = true
-      lastMouse.current = { x: e.clientX, y: e.clientY }
+    // Ctrl/Cmd + scroll = zoom (also handles trackpad pinch)
+    if (e.ctrlKey || e.metaKey) {
+      const delta = -e.deltaY * 0.01
+      zoom(delta, e.clientX, e.clientY)
+    } else {
+      // Regular scroll = pan (two-finger drag on trackpad)
+      pan(-e.deltaX, -e.deltaY)
     }
-  }, [])
+  }, [zoom, pan])
 
-  // Handle mouse move for panning
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isPanning.current) {
-      const dx = e.clientX - lastMouse.current.x
-      const dy = e.clientY - lastMouse.current.y
-      pan(dx, dy)
-      lastMouse.current = { x: e.clientX, y: e.clientY }
-    }
-  }, [pan])
 
-  // Handle mouse up to stop panning
-  const handleMouseUp = useCallback(() => {
-    isPanning.current = false
-  }, [])
 
   // Add wheel listener with passive: false
   useEffect(() => {
@@ -71,11 +92,7 @@ export default function Canvas() {
   return (
     <div
       ref={containerRef}
-      className="w-full h-full relative overflow-hidden cursor-default select-none pointer-events-none"
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
+      className="w-full h-full relative overflow-hidden cursor-default"
       style={{
         background: 'transparent',
       }}
@@ -87,6 +104,9 @@ export default function Canvas() {
           transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
         }}
       >
+        {/* Render maps (behind windows) */}
+        <MapLayer />
+
         {/* Render windows */}
         {windows.map((window) => (
           <Window
@@ -107,8 +127,9 @@ export default function Canvas() {
       </div>
 
       {/* Help text */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-canvas-muted text-xs pointer-events-none">
-        Drop 3D models | Click to select | Drag to rotate | Shift+drag to move | Scroll to scale | Delete to remove
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-canvas-muted text-xs pointer-events-none text-center">
+        <div>Middle-click drag to pan | Ctrl+scroll to zoom | R reset view</div>
+        <div className="mt-1 opacity-70">C chat | N notes | M maps | S search | P projects | T timers | G gym | ? help</div>
       </div>
     </div>
   )
