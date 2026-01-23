@@ -812,6 +812,12 @@ export const workspaceApi = {
   clearState: async (): Promise<void> => {
     await api.delete('/api/workspace/state')
   },
+
+  // Get pending workspace commands from voice/non-SSE sources
+  getPendingCommands: async (): Promise<{ commands: any[]; count: number }> => {
+    const response = await api.get<{ commands: any[]; count: number }>('/api/workspace/pending-commands')
+    return response.data
+  },
 }
 
 // 3D Model types

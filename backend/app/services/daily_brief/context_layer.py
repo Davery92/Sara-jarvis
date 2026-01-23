@@ -25,8 +25,7 @@ class ContextLayer:
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR
-        self.fast_model = os.environ.get("FAST_MODEL", "gpt-oss:20b")
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
+        # Background LLM settings are now managed by BackgroundLLMClient
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's brief directory structure exists."""
@@ -52,27 +51,23 @@ class ContextLayer:
         logger.debug(f"📝 Wrote context layer for user {user_id[:8]}")
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call 20B model for context analysis."""
-        import httpx
-
-        url = f"{self.llm_base_url}/chat/completions"
-
-        payload = {
-            "model": self.fast_model,
-            "messages": [
-                {"role": "system", "content": "You are Sara, analyzing your active context about David."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 800,
-            "temperature": 0.7
-        }
+        """Call background LLM for context analysis (uses fallback/fast model)."""
+        from app.core.llm import get_background_llm_client
+        from app.core.config import settings
 
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
+            bg_client = get_background_llm_client()
+            # Use the fallback model (faster) for context analysis
+            response = await bg_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are Sara, analyzing your active context about David."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=800,
+                temperature=0.7,
+                model=settings.bg_llm_fallback_model  # Use fast model for context layer
+            )
+            return response["choices"][0]["message"]["content"]
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             raise

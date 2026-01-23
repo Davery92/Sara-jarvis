@@ -37,15 +37,15 @@ class HypothesisService:
         self._embedding_service = None
 
     def _get_llm_client(self):
-        """Lazy-load LLM client"""
+        """Lazy-load background LLM client for hypothesis extraction"""
         if self._llm_client:
             return self._llm_client
         try:
-            from app.core.llm import llm_client
-            self._llm_client = llm_client
+            from app.core.llm import get_background_llm_client
+            self._llm_client = get_background_llm_client()
             return self._llm_client
         except Exception as e:
-            logger.error(f"Failed to initialize LLM client: {e}")
+            logger.error(f"Failed to initialize background LLM client: {e}")
             return None
 
     def _get_embedding_service(self):

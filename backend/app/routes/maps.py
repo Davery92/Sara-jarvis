@@ -757,6 +757,20 @@ async def explode_map_endpoint(
                 node["position"]["x"] += velocities[nid]["vx"]
                 node["position"]["y"] += velocities[nid]["vy"]
 
+    # For compact mode (spacing_factor < 1), scale positions toward center
+    if req.spacing_factor < 1.0:
+        # Calculate centroid
+        centroid_x = sum(n["position"]["x"] for n in nodes) / len(nodes)
+        centroid_y = sum(n["position"]["y"] for n in nodes) / len(nodes)
+
+        # Scale positions toward centroid
+        scale = req.spacing_factor  # 0.5 means move halfway to center
+        for node in nodes:
+            dx = node["position"]["x"] - centroid_x
+            dy = node["position"]["y"] - centroid_y
+            node["position"]["x"] = centroid_x + dx * scale
+            node["position"]["y"] = centroid_y + dy * scale
+
     # Normalize positions
     min_x = min(n["position"]["x"] for n in nodes)
     min_y = min(n["position"]["y"] for n in nodes)

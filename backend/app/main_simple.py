@@ -200,6 +200,7 @@ def is_anthropic_provider() -> bool:
 
 # Smaller, faster model for notifications (uses same endpoint but different model)
 OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
+VOICE_MODEL = os.getenv("VOICE_MODEL", "gpt-oss:20b")  # Faster model for voice interactions
 
 # Fast model configuration (for Pi dashboard fast worker, etc.)
 # Uses Gemini by default for speed
@@ -209,6 +210,13 @@ FAST_MODEL_API_KEY = os.getenv("FAST_MODEL_API_KEY", os.getenv("OPENAI_API_KEY",
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://10.185.1.8:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+
+# Background LLM Configuration (separate from chat - always uses local models)
+BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:11434/v1")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "gpt-oss:120b")
+BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://100.104.68.115:11434/v1")
+BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "gpt-oss:20b")
+
 GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "postgres").lower()
 MEMORY_HOT_DAYS = int(os.getenv("MEMORY_HOT_DAYS", "30"))
 MEMORY_K_DEFAULT = int(os.getenv("MEMORY_K", "10"))
@@ -2560,6 +2568,16 @@ class SimpleLLMClient:
                     if workspace_command:
                         await self.emit_event("workspace_command", reg_result.data)
                         logger.info(f"🖼️ Emitted workspace_command: {workspace_command}")
+                        # Also store in Redis for voice/non-SSE access
+                        try:
+                            from redis import Redis
+                            redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
+                            cmd_data = json.dumps(reg_result.data)
+                            redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
+                            redis_conn.expire(f"workspace_commands:{user_id}", 60)  # 1 minute TTL
+                            logger.info(f"🖼️ Stored workspace_command in Redis for user {user_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to store workspace_command in Redis: {e}")
 
                 result = json.dumps({
                     "success": reg_result.success,
@@ -5755,22 +5773,32 @@ Generate a brief title and 1-2 sentence insight about why this might be worth re
             db.close()
     
     async def _call_fast_llm(self, prompt: str, max_tokens: int = 150) -> Optional[str]:
-        """Call the fast LLM for quick analysis"""
+        """Call the fast LLM for quick analysis (uses background LLM client)"""
         try:
-            # Use the global llm_client instance
-            response = await llm_client.chat([{"role": "user", "content": prompt}])
+            from app.core.llm import get_background_llm_client
+            bg_client = get_background_llm_client()
+            response = await bg_client.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
             if response and "choices" in response and response["choices"]:
                 return response["choices"][0]["message"]["content"].strip()
             return None
         except Exception as e:
             logger.error(f"Fast LLM call failed: {e}")
             return None
-    
+
     async def _call_smart_llm(self, prompt: str, max_tokens: int = 300) -> Optional[str]:
-        """Call the smart LLM for deep analysis"""
+        """Call the smart LLM for deep analysis (uses background LLM client)"""
         try:
-            # Use the global llm_client instance
-            response = await llm_client.chat([{"role": "user", "content": prompt}])
+            from app.core.llm import get_background_llm_client
+            bg_client = get_background_llm_client()
+            response = await bg_client.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
             if response and "choices" in response and response["choices"]:
                 return response["choices"][0]["message"]["content"].strip()
             return None
@@ -7180,6 +7208,37 @@ def _set_canvas_mode(user_id: str, enabled: bool = True):
         logger.warning(f"[Voice] Failed to set canvas mode: {e}")
 
 
+@app.get("/api/workspace/pending-commands")
+async def get_pending_workspace_commands(current_user: User = Depends(get_current_user)):
+    """
+    Get pending workspace commands from voice/non-SSE sources.
+    Canvas should poll this endpoint to receive workspace commands from voice interactions.
+    Commands are removed after being fetched.
+    """
+    try:
+        from redis import Redis
+        redis = Redis.from_url(config.settings.redis_url, decode_responses=True)
+
+        commands = []
+        user_id = str(current_user.id)
+        key = f"workspace_commands:{user_id}"
+
+        # Get all pending commands and clear the list
+        while True:
+            cmd = redis.rpop(key)
+            if cmd is None:
+                break
+            try:
+                commands.append(json.loads(cmd))
+            except json.JSONDecodeError:
+                pass
+
+        return {"commands": commands, "count": len(commands)}
+    except Exception as e:
+        logger.warning(f"Failed to get pending workspace commands: {e}")
+        return {"commands": [], "count": 0}
+
+
 @app.post("/api/pi-dashboard/voice/chat")
 async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db)):
     """
@@ -7348,18 +7407,19 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 llm_messages.extend(conversation_history)
                 llm_messages.append({"role": "user", "content": message})
 
-                # Use the global LLM client
+                # Use the global LLM client with voice-optimized model (faster 20b)
                 if tools:
                     # Use chat_with_tools for tool-enabled conversations
                     full_response = await llm_client.chat_with_tools(
                         llm_messages,
                         tools=tools,
                         user_id=user_id,
-                        conversation_id=conversation_id
+                        conversation_id=conversation_id,
+                        model=VOICE_MODEL
                     )
                 else:
                     # Simple chat without tools
-                    full_response = await llm_client.chat(llm_messages)
+                    full_response = await llm_client.chat(llm_messages, model=VOICE_MODEL)
 
                 # Ensure we have a string response
                 if isinstance(full_response, dict):
@@ -8358,6 +8418,7 @@ def load_settings_from_db():
     """Load persistent settings from database on startup"""
     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
 
     try:
         db = SessionLocal()
@@ -8403,6 +8464,23 @@ def load_settings_from_db():
             if "embedding_dim" in settings_dict:
                 EMBEDDING_DIM = int(settings_dict["embedding_dim"])
                 config.settings.embedding_dim = EMBEDDING_DIM
+
+            # Background LLM settings
+            if "bg_llm_primary_url" in settings_dict:
+                BG_LLM_PRIMARY_URL = settings_dict["bg_llm_primary_url"]
+                config.settings.bg_llm_primary_url = BG_LLM_PRIMARY_URL
+
+            if "bg_llm_primary_model" in settings_dict:
+                BG_LLM_PRIMARY_MODEL = settings_dict["bg_llm_primary_model"]
+                config.settings.bg_llm_primary_model = BG_LLM_PRIMARY_MODEL
+
+            if "bg_llm_fallback_url" in settings_dict:
+                BG_LLM_FALLBACK_URL = settings_dict["bg_llm_fallback_url"]
+                config.settings.bg_llm_fallback_url = BG_LLM_FALLBACK_URL
+
+            if "bg_llm_fallback_model" in settings_dict:
+                BG_LLM_FALLBACK_MODEL = settings_dict["bg_llm_fallback_model"]
+                config.settings.bg_llm_fallback_model = BG_LLM_FALLBACK_MODEL
 
             logger.info("✅ Persisted settings loaded successfully")
     except Exception as e:
@@ -8841,6 +8919,19 @@ The background context exists to inform relevant responses, NOT to confuse you a
 **Instead:** Weave this knowledge naturally. If you know David prefers brief responses when stressed, just give brief responses—don't announce the reasoning. If you know he's deep in a project, reference it as shared context, not discovered information.
 
 **On direct questions:** If David asks about your memory, the brief, or what you know about him—be completely transparent. Show him the full picture if he wants. The prohibition is on *unprompted* reference to the mechanism, not secrecy.
+
+---
+
+## Self-Knowledge
+
+You have detailed documentation about your architecture and capabilities. When you need to check what you can do, how your systems work, or verify your limitations, use the **get_self_knowledge** tool:
+
+- `get_self_knowledge(section="architecture")` — Memory system, databases, composite scoring
+- `get_self_knowledge(section="capabilities")` — Tools by category, what actions you can perform
+- `get_self_knowledge(section="autonomous")` — Background services, scheduled jobs
+- `get_self_knowledge(section="limitations")` — What you can't do, failure modes
+
+Use this when David asks about your capabilities, or when you're uncertain what tools you have available.
 
 ---
 
@@ -11730,7 +11821,12 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
         "openai_notification_model": OPENAI_NOTIFICATION_MODEL,
         "embedding_base_url": EMBEDDING_BASE_URL,
         "embedding_model": EMBEDDING_MODEL,
-        "embedding_dimension": EMBEDDING_DIM
+        "embedding_dimension": EMBEDDING_DIM,
+        # Background processing settings
+        "bg_llm_primary_url": BG_LLM_PRIMARY_URL,
+        "bg_llm_primary_model": BG_LLM_PRIMARY_MODEL,
+        "bg_llm_fallback_url": BG_LLM_FALLBACK_URL,
+        "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL
     }
 
 class AISettingsUpdate(BaseModel):
@@ -11743,6 +11839,11 @@ class AISettingsUpdate(BaseModel):
     embedding_base_url: Optional[str] = None
     embedding_model: Optional[str] = None
     embedding_dimension: Optional[int] = None
+    # Background processing settings
+    bg_llm_primary_url: Optional[str] = None
+    bg_llm_primary_model: Optional[str] = None
+    bg_llm_fallback_url: Optional[str] = None
+    bg_llm_fallback_model: Optional[str] = None
 
 @app.put("/settings/ai")
 async def update_ai_settings(
@@ -11751,6 +11852,7 @@ async def update_ai_settings(
 ):
     """Update AI configuration settings (requires restart to take effect)"""
     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
 
     updated_settings = {}
     
@@ -11835,7 +11937,30 @@ async def update_ai_settings(
         EMBEDDING_DIM = settings.embedding_dimension
         config.settings.embedding_dim = settings.embedding_dimension
         updated_settings["embedding_dimension"] = settings.embedding_dimension
-    
+
+    # Background LLM settings
+    if settings.bg_llm_primary_url is not None:
+        normalized_url = _normalize_openai(settings.bg_llm_primary_url)
+        BG_LLM_PRIMARY_URL = normalized_url
+        config.settings.bg_llm_primary_url = normalized_url
+        updated_settings["bg_llm_primary_url"] = normalized_url
+
+    if settings.bg_llm_primary_model is not None:
+        BG_LLM_PRIMARY_MODEL = settings.bg_llm_primary_model
+        config.settings.bg_llm_primary_model = settings.bg_llm_primary_model
+        updated_settings["bg_llm_primary_model"] = settings.bg_llm_primary_model
+
+    if settings.bg_llm_fallback_url is not None:
+        normalized_url = _normalize_openai(settings.bg_llm_fallback_url)
+        BG_LLM_FALLBACK_URL = normalized_url
+        config.settings.bg_llm_fallback_url = normalized_url
+        updated_settings["bg_llm_fallback_url"] = normalized_url
+
+    if settings.bg_llm_fallback_model is not None:
+        BG_LLM_FALLBACK_MODEL = settings.bg_llm_fallback_model
+        config.settings.bg_llm_fallback_model = settings.bg_llm_fallback_model
+        updated_settings["bg_llm_fallback_model"] = settings.bg_llm_fallback_model
+
     # Persist settings to database for survival across restarts
     try:
         db = SessionLocal()

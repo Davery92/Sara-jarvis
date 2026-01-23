@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
 from app.models.profile import DailyReflection, ReflectionSettings, UserActivityLog
-from app.core.llm import llm_client
+from app.core.llm import get_background_llm_client
 import logging
 
 logger = logging.getLogger(__name__)
@@ -403,19 +403,20 @@ Examples of good follow-ups:
 
 Follow-up:"""
 
-            response_obj = await llm_client.chat_completion(
+            bg_client = get_background_llm_client()
+            response_obj = await bg_client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=100
             )
-            
+
             follow_up = response_obj["choices"][0]["message"]["content"].strip()
             return follow_up if len(follow_up) > 10 else None
-            
+
         except Exception as e:
             logger.error(f"Failed to generate follow-up: {e}")
             return None
-    
+
     async def _generate_insights(
         self,
         user_id: str,
@@ -482,12 +483,13 @@ Guidelines:
 
 Response:"""
 
-            response_obj = await llm_client.chat_completion(
+            bg_client = get_background_llm_client()
+            response_obj = await bg_client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=400
             )
-            
+
             insights_text = response_obj["choices"][0]["message"]["content"].strip()
             
             try:

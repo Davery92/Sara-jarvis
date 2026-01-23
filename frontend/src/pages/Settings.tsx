@@ -670,6 +670,11 @@ export default function Settings() {
     embedding_base_url: getEmbeddingBaseUrl(),
     embedding_model: getEmbeddingModel(),
     embedding_dimension: getEmbeddingDimension(),
+    // Background processing defaults
+    bg_llm_primary_url: 'http://100.104.68.115:11434/v1',
+    bg_llm_primary_model: 'gpt-oss:120b',
+    bg_llm_fallback_url: 'http://100.104.68.115:11434/v1',
+    bg_llm_fallback_model: 'gpt-oss:20b',
   })
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const queryClient = useQueryClient()
@@ -722,6 +727,11 @@ export default function Settings() {
         embedding_base_url: getEmbeddingBaseUrl() || settings.embedding_base_url,
         embedding_model: getEmbeddingModel() || settings.embedding_model,
         embedding_dimension: getEmbeddingDimension() || settings.embedding_dimension,
+        // Background processing settings
+        bg_llm_primary_url: settings.bg_llm_primary_url || 'http://100.104.68.115:11434/v1',
+        bg_llm_primary_model: settings.bg_llm_primary_model || 'gpt-oss:120b',
+        bg_llm_fallback_url: settings.bg_llm_fallback_url || 'http://100.104.68.115:11434/v1',
+        bg_llm_fallback_model: settings.bg_llm_fallback_model || 'gpt-oss:20b',
       })
     }
   }, [settings])
@@ -1065,6 +1075,76 @@ export default function Settings() {
                     max="4096"
                   />
                   <p className="mt-1 text-xs text-gray-400">Vector dimension for embeddings</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Background Processing Settings */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Background Processing</h3>
+              <p className="text-gray-400 text-sm mb-4">
+                Configure the models used for dreaming, memory consolidation, and other automated background tasks.
+                These settings are separate from your chat model selection.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label htmlFor="bg_llm_primary_url" className="block text-sm font-medium text-gray-300 mb-2">
+                    Primary URL
+                  </label>
+                  <input
+                    type="url"
+                    id="bg_llm_primary_url"
+                    value={formData.bg_llm_primary_url || ''}
+                    onChange={(e) => handleInputChange('bg_llm_primary_url', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="http://100.104.68.115:11434/v1"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Main endpoint for background tasks</p>
+                </div>
+
+                <div>
+                  <label htmlFor="bg_llm_primary_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    Primary Model
+                  </label>
+                  <input
+                    type="text"
+                    id="bg_llm_primary_model"
+                    value={formData.bg_llm_primary_model || ''}
+                    onChange={(e) => handleInputChange('bg_llm_primary_model', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="gpt-oss:120b"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Model for deep analysis tasks</p>
+                </div>
+
+                <div>
+                  <label htmlFor="bg_llm_fallback_url" className="block text-sm font-medium text-gray-300 mb-2">
+                    Fallback URL
+                  </label>
+                  <input
+                    type="url"
+                    id="bg_llm_fallback_url"
+                    value={formData.bg_llm_fallback_url || ''}
+                    onChange={(e) => handleInputChange('bg_llm_fallback_url', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="http://100.104.68.115:11434/v1"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Backup endpoint if primary fails</p>
+                </div>
+
+                <div>
+                  <label htmlFor="bg_llm_fallback_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    Fallback Model
+                  </label>
+                  <input
+                    type="text"
+                    id="bg_llm_fallback_model"
+                    value={formData.bg_llm_fallback_model || ''}
+                    onChange={(e) => handleInputChange('bg_llm_fallback_model', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="gpt-oss:20b"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Faster model for quick background tasks</p>
                 </div>
               </div>
             </div>

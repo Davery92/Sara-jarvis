@@ -42,8 +42,8 @@ The window will appear in the user's workspace canvas."""
             "properties": {
                 "window_type": {
                     "type": "string",
-                    "enum": ["notes", "chat", "fitness", "calendar", "tasks", "intelligence", "settings"],
-                    "description": "Type of window to open: 'notes' for notes browser, 'chat' for another chat window, 'fitness' for fitness tracking, 'calendar' for calendar view, 'tasks' for task list, 'intelligence' for intelligence reports, 'settings' for settings"
+                    "enum": ["notes", "chat", "fitness", "calendar", "tasks", "intelligence", "settings", "projects", "timers", "research"],
+                    "description": "Type of window to open: 'notes' for notes browser, 'chat' for chat, 'fitness' for fitness tracking, 'calendar' for calendar, 'tasks' for task list, 'intelligence' for intelligence reports, 'settings' for settings, 'projects' for project tracker, 'timers' for timers, 'research' for web research"
                 },
                 "title": {
                     "type": "string",
@@ -78,7 +78,10 @@ The window will appear in the user's workspace canvas."""
             "calendar": "Calendar",
             "tasks": "Tasks",
             "intelligence": "Intelligence",
-            "settings": "Settings"
+            "settings": "Settings",
+            "projects": "Projects",
+            "timers": "Timers",
+            "research": "Research"
         }
 
         window_title = title or default_titles.get(window_type, window_type.title())

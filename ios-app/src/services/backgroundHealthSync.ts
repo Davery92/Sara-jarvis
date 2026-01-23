@@ -67,16 +67,24 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
       });
     }
 
-    // 2. HRV samples from last 4 hours
+    // 2. HRV from morning only (5-8 AM) - Watch readings during day are inaccurate
     const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
-    const hrvSamples = await healthKitService.getHRVSamples(fourHoursAgo, now);
-    for (const sample of hrvSamples.slice(0, 5)) {
-      metrics.push({
-        metric_type: 'hrv',
-        value: sample.value,
-        recorded_at: sample.startDate,
-        source: 'apple_health',
-      });
+    const hour = now.getHours();
+    if (hour >= 5 && hour < 8) {
+      const hrvSamples = await healthKitService.getHRVSamples(fourHoursAgo, now);
+      if (hrvSamples.length > 0) {
+        // Take only the most recent morning reading
+        const morningHRV = hrvSamples[0];
+        const hrvRecordedAt = new Date(now);
+        hrvRecordedAt.setHours(6, 0, 0, 0); // Standardize to 6 AM
+        metrics.push({
+          metric_type: 'hrv',
+          value: morningHRV.value,
+          recorded_at: hrvRecordedAt.toISOString(),
+          source: 'apple_health',
+          metadata: { morning_reading: true },
+        });
+      }
     }
 
     // 3. Heart rate samples from last 4 hours
@@ -91,7 +99,6 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
     }
 
     // 4. Sleep from last night (morning only)
-    const hour = now.getHours();
     if (hour >= 5 && hour <= 12) {
       const sleepHours = await healthKitService.getLastNightSleepHours();
       if (sleepHours > 0) {

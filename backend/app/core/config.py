@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     llm_health_check_interval: int = 30  # seconds between health checks
     llm_health_check_timeout: float = 5.0  # timeout for health check requests
     llm_recovery_checks_required: int = 3  # successful checks to mark as healthy
+
+    # Background LLM Configuration (separate from chat - always uses local models)
+    bg_llm_primary_url: str = "http://100.104.68.115:11434/v1"
+    bg_llm_primary_model: str = "gpt-oss:120b"
+    bg_llm_fallback_url: str = "http://100.104.68.115:11434/v1"
+    bg_llm_fallback_model: str = "gpt-oss:20b"
     
     # Search / Reranker / Caching
     search_provider: str = "tavily"  # Options: searxng, tavily

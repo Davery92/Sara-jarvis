@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from app.db.session import get_db
 from app.models.user import User
-from app.tools.calendar import CalendarEvent  # Use existing model with extend_existing
+from app.tools.calendar import CalendarEvent, build_rrule  # Use existing model with extend_existing
 from app.schemas.calendar import (
     CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
     IOSCalendarSyncRequest, IOSCalendarSyncResponse
@@ -51,19 +51,21 @@ async def list_calendar_events(
             id=event.id,
             title=event.title,
             description=event.description,
-            start_time=event.start_time.isoformat(),
-            end_time=event.end_time.isoformat(),
+            start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
+            end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
             location=event.location or None,
             all_day=event.all_day,
             reminder_minutes=event.reminder_minutes,
             is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+            rrule=getattr(event, 'rrule', None),
+            is_recurring=bool(getattr(event, 'rrule', None)),
             source=getattr(event, 'source', 'sara') or 'sara',
             ios_event_id=getattr(event, 'ios_event_id', None),
             ios_calendar_id=getattr(event, 'ios_calendar_id', None),
             ios_calendar_name=getattr(event, 'ios_calendar_name', None),
             read_only=getattr(event, 'read_only', False) or False,
-            created_at=event.created_at.isoformat(),
-            updated_at=event.updated_at.isoformat()
+            created_at=event.created_at.isoformat() + 'Z',
+            updated_at=event.updated_at.isoformat() + 'Z'
         )
         for event in events
     ]
@@ -79,6 +81,15 @@ async def create_calendar_event(
     start_dt = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
     end_dt = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
 
+    # Handle recurrence - use provided rrule or build from friendly recurrence value
+    rrule = event_data.rrule
+    if not rrule and event_data.recurrence:
+        freq_map = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY", "weekdays": "WEEKLY"}
+        freq = freq_map.get(event_data.recurrence.lower())
+        if freq:
+            days = ["MO", "TU", "WE", "TH", "FR"] if event_data.recurrence.lower() == "weekdays" else None
+            rrule = build_rrule(frequency=freq, days=days)
+
     event = CalendarEvent(
         user_id=current_user.id,
         title=event_data.title,
@@ -87,7 +98,8 @@ async def create_calendar_event(
         end_time=end_dt,
         location=event_data.location or "",
         all_day=event_data.all_day or False,
-        reminder_minutes=event_data.reminder_minutes
+        reminder_minutes=event_data.reminder_minutes,
+        rrule=rrule
     )
     db.add(event)
     db.commit()
@@ -97,19 +109,21 @@ async def create_calendar_event(
         id=event.id,
         title=event.title,
         description=event.description,
-        start_time=event.start_time.isoformat(),
-        end_time=event.end_time.isoformat(),
+        start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
+        end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
         location=event.location or None,
         all_day=event.all_day,
         reminder_minutes=event.reminder_minutes,
         is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        rrule=event.rrule,
+        is_recurring=bool(event.rrule),
         source=getattr(event, 'source', 'sara') or 'sara',
         ios_event_id=getattr(event, 'ios_event_id', None),
         ios_calendar_id=getattr(event, 'ios_calendar_id', None),
         ios_calendar_name=getattr(event, 'ios_calendar_name', None),
         read_only=getattr(event, 'read_only', False) or False,
-        created_at=event.created_at.isoformat(),
-        updated_at=event.updated_at.isoformat()
+        created_at=event.created_at.isoformat() + 'Z',
+        updated_at=event.updated_at.isoformat() + 'Z'
     )
 
 
@@ -146,6 +160,19 @@ async def update_calendar_event(
     if event_data.is_completed is not None:
         event.is_completed = event_data.is_completed
 
+    # Handle recurrence update
+    if event_data.rrule is not None:
+        event.rrule = event_data.rrule if event_data.rrule else None  # Empty string clears recurrence
+    elif event_data.recurrence is not None:
+        if event_data.recurrence:  # Non-empty recurrence value
+            freq_map = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY", "yearly": "YEARLY", "weekdays": "WEEKLY"}
+            freq = freq_map.get(event_data.recurrence.lower())
+            if freq:
+                days = ["MO", "TU", "WE", "TH", "FR"] if event_data.recurrence.lower() == "weekdays" else None
+                event.rrule = build_rrule(frequency=freq, days=days)
+        else:
+            event.rrule = None  # Empty string clears recurrence
+
     event.updated_at = datetime.now()
     db.commit()
     db.refresh(event)
@@ -154,19 +181,21 @@ async def update_calendar_event(
         id=event.id,
         title=event.title,
         description=event.description,
-        start_time=event.start_time.isoformat(),
-        end_time=event.end_time.isoformat(),
+        start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
+        end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
         location=event.location or None,
         all_day=event.all_day,
         reminder_minutes=event.reminder_minutes,
         is_completed=event.is_completed if isinstance(event.is_completed, bool) else event.is_completed == "true",
+        rrule=event.rrule,
+        is_recurring=bool(event.rrule),
         source=getattr(event, 'source', 'sara') or 'sara',
         ios_event_id=getattr(event, 'ios_event_id', None),
         ios_calendar_id=getattr(event, 'ios_calendar_id', None),
         ios_calendar_name=getattr(event, 'ios_calendar_name', None),
         read_only=getattr(event, 'read_only', False) or False,
-        created_at=event.created_at.isoformat(),
-        updated_at=event.updated_at.isoformat()
+        created_at=event.created_at.isoformat() + 'Z',
+        updated_at=event.updated_at.isoformat() + 'Z'
     )
 
 

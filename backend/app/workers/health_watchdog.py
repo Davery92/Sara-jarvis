@@ -58,8 +58,7 @@ class HealthWatchdog:
     def __init__(self, db_url: str):
         self.engine = create_engine(db_url)
         self.SessionLocal = sessionmaker(bind=self.engine)
-        self.llm_url = settings.llm_primary_url.replace('/v1', '')
-        self.analysis_model = "gpt-oss:20b"  # Smaller model for background analysis
+        # Background LLM settings are now managed by BackgroundLLMClient
 
     async def run_check(self):
         """Run a single health check cycle."""
@@ -242,21 +241,23 @@ class HealthWatchdog:
                         'message': f"Resting HR elevated: {int(value)} bpm (+{round(pct_change)}% above baseline)",
                     })
 
-            # Check HRV drop
-            elif metric_type == 'hrv':
-                threshold = baseline['avg'] * (1 - THRESHOLDS['hrv_drop_pct'])
-                if value < threshold:
-                    pct_change = ((baseline['avg'] - value) / baseline['avg']) * 100
-                    anomalies.append({
-                        'type': 'hrv_drop',
-                        'metric': 'hrv',
-                        'current_value': value,
-                        'baseline': baseline['avg'],
-                        'threshold': threshold,
-                        'pct_change': round(pct_change, 1),
-                        'severity': SEVERITY_WARNING,
-                        'message': f"HRV dropped: {int(value)} ms (-{round(pct_change)}% below baseline)",
-                    })
+            # Check HRV drop - DISABLED: Using morning-only reading, alerts disabled
+            # Watch readings throughout the day are inaccurate, so HRV anomaly detection
+            # has been disabled. Only the morning reading (5-8 AM) is collected.
+            # elif metric_type == 'hrv':
+            #     threshold = baseline['avg'] * (1 - THRESHOLDS['hrv_drop_pct'])
+            #     if value < threshold:
+            #         pct_change = ((baseline['avg'] - value) / baseline['avg']) * 100
+            #         anomalies.append({
+            #             'type': 'hrv_drop',
+            #             'metric': 'hrv',
+            #             'current_value': value,
+            #             'baseline': baseline['avg'],
+            #             'threshold': threshold,
+            #             'pct_change': round(pct_change, 1),
+            #             'severity': SEVERITY_WARNING,
+            #             'message': f"HRV dropped: {int(value)} ms (-{round(pct_change)}% below baseline)",
+            #         })
 
             # Check sleep deficit
             elif metric_type == 'sleep_hours':
@@ -276,20 +277,19 @@ class HealthWatchdog:
         if multi_day_anomaly:
             anomalies.append(multi_day_anomaly)
 
-        # Check for critical combo (HR spike + HRV drop + poor sleep)
+        # Check for critical combo (HR spike + poor sleep) - HRV removed since alerts disabled
         has_hr_spike = any(a['type'] == 'hr_spike' for a in anomalies)
-        has_hrv_drop = any(a['type'] == 'hrv_drop' for a in anomalies)
         has_sleep_deficit = any(a['type'] == 'sleep_deficit' for a in anomalies)
 
-        if has_hr_spike and has_hrv_drop and has_sleep_deficit:
+        if has_hr_spike and has_sleep_deficit:
             # Upgrade severity to urgent
             for anomaly in anomalies:
-                if anomaly['type'] in ['hr_spike', 'hrv_drop']:
+                if anomaly['type'] == 'hr_spike':
                     anomaly['severity'] = SEVERITY_URGENT
             anomalies.append({
                 'type': 'critical_combo',
                 'severity': SEVERITY_URGENT,
-                'message': "Multiple health indicators affected: elevated HR, low HRV, and sleep deficit",
+                'message': "Multiple health indicators affected: elevated HR and sleep deficit",
             })
 
         return anomalies
@@ -492,20 +492,18 @@ Format your response as JSON:
 }}"""
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.llm_url}/v1/chat/completions",
-                    json={
-                        "model": self.analysis_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.7,
-                        "max_tokens": 300,
-                    }
-                )
-                response.raise_for_status()
-                result = response.json()
+            from app.core.llm import get_background_llm_client
+            from app.core.config import settings as app_settings
 
-                content = result['choices'][0]['message']['content']
+            bg_client = get_background_llm_client()
+            result = await bg_client.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=300,
+                model=app_settings.bg_llm_fallback_model  # Use fast model for health watchdog
+            )
+
+            content = result['choices'][0]['message']['content']
 
                 # Parse JSON from response
                 try:
@@ -709,8 +707,8 @@ async def run_watchdog_loop():
     watchdog = HealthWatchdog(db_url)
 
     logger.info("Health watchdog started")
-    logger.info(f"Using LLM: {watchdog.llm_url}")
-    logger.info(f"Analysis model: {watchdog.analysis_model}")
+    logger.info(f"Using background LLM: primary={settings.bg_llm_primary_url}, fallback={settings.bg_llm_fallback_url}")
+    logger.info(f"Background models: primary={settings.bg_llm_primary_model}, fallback={settings.bg_llm_fallback_model}")
 
     while True:
         try:

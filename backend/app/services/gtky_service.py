@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from sqlalchemy.orm import Session
 from app.models.profile import UserProfile, GTKYSession, UserActivityLog
-from app.core.llm import llm_client
+from app.core.llm import get_background_llm_client
 import logging
 
 logger = logging.getLogger(__name__)
@@ -353,19 +353,20 @@ Generate a brief, warm follow-up comment that:
 
 Follow-up:"""
 
-            response_obj = await llm_client.chat_completion(
+            bg_client = get_background_llm_client()
+            response_obj = await bg_client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=100
             )
-            
+
             follow_up = response_obj["choices"][0]["message"]["content"].strip()
             return follow_up if len(follow_up) > 10 else None
-            
+
         except Exception as e:
             logger.error(f"Failed to generate follow-up: {e}")
             return None
-    
+
     async def _create_user_profile(self, user_id: str) -> UserProfile:
         """Create user profile from completed GTKY sessions"""
         
@@ -444,14 +445,15 @@ Generate a 2-3 sentence summary that:
 
 Summary:"""
 
-            response_obj = await llm_client.chat_completion(
+            bg_client = get_background_llm_client()
+            response_obj = await bg_client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=150
             )
-            
+
             return response_obj["choices"][0]["message"]["content"].strip()
-            
+
         except Exception as e:
             logger.error(f"Failed to generate profile summary: {e}")
             return "I'm excited to learn more about you and help with your goals!"

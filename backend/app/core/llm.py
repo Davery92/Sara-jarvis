@@ -648,6 +648,134 @@ class LLMClientWithFailover:
         }
 
 
+class BackgroundLLMClient:
+    """
+    Dedicated LLM client for background processing tasks.
+
+    Uses separate settings from the chat model to ensure background services
+    (dreaming, memory consolidation, daily briefs, etc.) always use local models
+    regardless of what model is selected for interactive chat.
+
+    Features:
+    - Simple failover: try primary model, fall back to fallback model
+    - Does NOT respect chat model settings
+    - Always uses local models configured in bg_llm_* settings
+    """
+
+    def __init__(self):
+        self.primary_url = settings.bg_llm_primary_url
+        self.primary_model = settings.bg_llm_primary_model
+        self.fallback_url = settings.bg_llm_fallback_url
+        self.fallback_model = settings.bg_llm_fallback_model
+
+        # HTTP clients (lazy initialization)
+        self._primary_client: Optional[httpx.AsyncClient] = None
+        self._fallback_client: Optional[httpx.AsyncClient] = None
+        self._started = False
+
+    async def _ensure_started(self):
+        """Initialize HTTP clients if not already started"""
+        if self._started:
+            return
+
+        self._primary_client = httpx.AsyncClient(
+            base_url=self.primary_url,
+            timeout=60.0  # Longer timeout for background tasks
+        )
+        self._fallback_client = httpx.AsyncClient(
+            base_url=self.fallback_url,
+            timeout=60.0
+        )
+        self._started = True
+        logger.info(
+            f"Background LLM client started. Primary: {self.primary_url} ({self.primary_model}), "
+            f"Fallback: {self.fallback_url} ({self.fallback_model})"
+        )
+
+    async def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        model: Optional[str] = None  # Allow override for specific tasks
+    ) -> Dict[str, Any]:
+        """
+        Send chat completion with simple failover for background tasks.
+
+        Strategy:
+        1. Try primary model/endpoint first
+        2. On failure, fall back to fallback model/endpoint
+        """
+        await self._ensure_started()
+
+        use_model = model or self.primary_model
+        payload = {
+            "model": use_model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        try:
+            logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
+            response = await self._primary_client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            result = response.json()
+            logger.debug(f"Background LLM request successful via primary endpoint")
+            return result
+
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
+            logger.warning(f"Background LLM primary request failed: {e}, trying fallback")
+
+            # Try fallback
+            try:
+                fallback_payload = {
+                    **payload,
+                    "model": self.fallback_model
+                }
+                logger.debug(f"Background LLM failover to {self.fallback_url} with model {self.fallback_model}")
+                response = await self._fallback_client.post("/chat/completions", json=fallback_payload)
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Background LLM failover to {self.fallback_url} successful")
+                return result
+            except Exception as fallback_error:
+                logger.error(f"Background LLM fallback also failed: {fallback_error}")
+                raise
+
+    async def close(self):
+        """Close HTTP clients"""
+        if self._primary_client:
+            await self._primary_client.aclose()
+        if self._fallback_client:
+            await self._fallback_client.aclose()
+        self._started = False
+        logger.info("Background LLM client closed")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current configuration status"""
+        return {
+            "primary_url": self.primary_url,
+            "primary_model": self.primary_model,
+            "fallback_url": self.fallback_url,
+            "fallback_model": self.fallback_model,
+            "started": self._started
+        }
+
+
+# Global background LLM client instance
+_background_llm_client: Optional[BackgroundLLMClient] = None
+
+
+def get_background_llm_client() -> BackgroundLLMClient:
+    """Get or create the background LLM client singleton"""
+    global _background_llm_client
+    if _background_llm_client is None:
+        _background_llm_client = BackgroundLLMClient()
+    return _background_llm_client
+
+
 # Global LLM client instance with failover
 _llm_client: Optional[LLMClientWithFailover] = None
 

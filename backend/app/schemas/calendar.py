@@ -11,6 +11,9 @@ class CalendarEventCreate(BaseModel):
     location: Optional[str] = None
     all_day: Optional[bool] = False
     reminder_minutes: Optional[int] = None
+    # Recurrence fields
+    rrule: Optional[str] = None  # RRULE string e.g. "FREQ=WEEKLY;BYDAY=MO,WE,FR"
+    recurrence: Optional[str] = None  # Friendly: daily, weekly, monthly, yearly, weekdays
 
 
 class CalendarEventUpdate(BaseModel):
@@ -22,6 +25,9 @@ class CalendarEventUpdate(BaseModel):
     all_day: Optional[bool] = None
     reminder_minutes: Optional[int] = None
     is_completed: Optional[bool] = None
+    # Recurrence fields
+    rrule: Optional[str] = None  # RRULE string e.g. "FREQ=WEEKLY;BYDAY=MO,WE,FR"
+    recurrence: Optional[str] = None  # Friendly: daily, weekly, monthly, yearly, weekdays
 
 
 class CalendarEventResponse(BaseModel):
@@ -34,6 +40,9 @@ class CalendarEventResponse(BaseModel):
     all_day: bool
     reminder_minutes: Optional[int] = None
     is_completed: bool
+    # Recurrence fields
+    rrule: Optional[str] = None
+    is_recurring: bool = False
     # iOS calendar sync fields
     source: str = "sara"
     ios_event_id: Optional[str] = None

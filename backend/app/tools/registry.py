@@ -4,7 +4,7 @@ from app.tools.memory import MemorySearchTool
 from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
-from app.tools.calendar import CalendarListTool, CalendarCreateTool
+from app.tools.calendar import CalendarListTool, CalendarCreateTool, CalendarSetRecurringTool
 from app.tools.knowledge_graph import (
     KnowledgeGraphSearchTool, 
     ConnectionFinderTool, 
@@ -110,6 +110,7 @@ from app.tools.patterns import PATTERN_TOOLS
 from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
 from app.tools.maps import MAP_TOOLS
+from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,10 @@ class ToolRegistry:
                 'map_connect', 'map_disconnect',
                 'map_show', 'map_hide', 'map_import_json', 'map_explode'
             ]
+        },
+        'self_knowledge': {
+            'description': 'Retrieve detailed self-knowledge about Sara\'s architecture, capabilities, autonomous systems, and limitations',
+            'tools': ['get_self_knowledge']
         }
     }
 
@@ -303,7 +308,8 @@ class ToolRegistry:
             # Calendar
             CalendarListTool(),
             CalendarCreateTool(),
-            
+            CalendarSetRecurringTool(),
+
             # Knowledge Graph
             KnowledgeGraphSearchTool(),
             ConnectionFinderTool(),
@@ -436,6 +442,9 @@ class ToolRegistry:
 
             # Map Control Tools (mindmaps/flowcharts on canvas)
             *MAP_TOOLS,
+
+            # Self-Knowledge Tools (Sara's self-awareness)
+            *SELF_KNOWLEDGE_TOOLS,
         ]
 
         for tool in tools:

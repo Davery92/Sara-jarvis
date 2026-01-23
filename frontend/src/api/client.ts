@@ -107,6 +107,11 @@ export interface AISettings {
   embedding_base_url: string
   embedding_model: string
   embedding_dimension: number
+  // Background processing settings
+  bg_llm_primary_url?: string
+  bg_llm_primary_model?: string
+  bg_llm_fallback_url?: string
+  bg_llm_fallback_model?: string
 }
 
 export interface AISettingsUpdate {
@@ -118,6 +123,11 @@ export interface AISettingsUpdate {
   embedding_base_url?: string
   embedding_model?: string
   embedding_dimension?: number
+  // Background processing settings
+  bg_llm_primary_url?: string
+  bg_llm_primary_model?: string
+  bg_llm_fallback_url?: string
+  bg_llm_fallback_model?: string
 }
 
 export interface TokenStats {

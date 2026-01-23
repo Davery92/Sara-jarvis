@@ -54,7 +54,9 @@ export default function ChatContent({ data }: ChatContentProps) {
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Use scrollIntoView with block: 'nearest' to only scroll the immediate container
+    // and prevent scrolling parent containers (which could affect the canvas)
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [messages, currentToolActivity])
 
   // Focus input on mount
@@ -245,6 +247,31 @@ export default function ChatContent({ data }: ChatContentProps) {
     }
   }
 
+  // Poll for pending workspace commands from voice/non-SSE sources
+  useEffect(() => {
+    const pollPendingCommands = async () => {
+      try {
+        const result = await workspaceApi.getPendingCommands()
+        if (result.commands && result.commands.length > 0) {
+          console.log('[ChatContent] Received pending workspace commands:', result.commands)
+          for (const cmd of result.commands) {
+            handleWorkspaceCommand(cmd)
+          }
+        }
+      } catch (error) {
+        // Silently ignore errors - this is just polling
+      }
+    }
+
+    // Poll every 2 seconds
+    const interval = setInterval(pollPendingCommands, 2000)
+
+    // Initial poll
+    pollPendingCommands()
+
+    return () => clearInterval(interval)
+  }, [])
+
   const handleSend = async () => {
     console.log('[ChatContent] handleSend called, input:', input, 'isStreaming:', isStreaming)
     if (!input.trim() || isStreaming) return
@@ -371,6 +398,9 @@ export default function ChatContent({ data }: ChatContentProps) {
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Stop all keyboard events from bubbling to canvas/global handlers
+    e.stopPropagation()
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -453,7 +483,7 @@ export default function ChatContent({ data }: ChatContentProps) {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4" data-scrollable="true">
         {messages.length === 0 && (
           <div className="text-center text-canvas-muted py-12">
             <MessageSquare size={48} className="mx-auto mb-4 opacity-30" />

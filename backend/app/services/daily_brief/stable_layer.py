@@ -25,8 +25,7 @@ class StableLayer:
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR
-        self.full_model = os.environ.get("OPENAI_MODEL", "gpt-oss:120b")
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
+        # Background LLM settings are now managed by BackgroundLLMClient
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's brief directory structure exists."""
@@ -52,27 +51,20 @@ class StableLayer:
         logger.debug(f"📝 Wrote stable layer for user {user_id[:8]}")
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call 120B model for deep synthesis."""
-        import httpx
-
-        url = f"{self.llm_base_url}/chat/completions"
-
-        payload = {
-            "model": self.full_model,
-            "messages": [
-                {"role": "system", "content": "You are Sara, synthesizing your deep understanding of David."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 1500,
-            "temperature": 0.7
-        }
+        """Call background LLM for deep synthesis (uses primary model)."""
+        from app.core.llm import get_background_llm_client
 
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:  # Longer timeout for 120B
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
+            bg_client = get_background_llm_client()
+            response = await bg_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are Sara, synthesizing your deep understanding of David."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1500,
+                temperature=0.7
+            )
+            return response["choices"][0]["message"]["content"]
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             raise

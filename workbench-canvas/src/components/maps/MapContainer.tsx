@@ -1,5 +1,5 @@
 import { useCallback, useState, useRef, useEffect } from 'react'
-import { X, Minimize2, GripHorizontal, Expand, Loader2 } from 'lucide-react'
+import { X, Minimize2, GripHorizontal, Expand, Shrink, Loader2 } from 'lucide-react'
 import { useCanvasStore } from '../../store/canvasStore'
 import { mapsApi } from '../../services/api'
 import MapNode from './MapNode'
@@ -17,23 +17,16 @@ export default function MapContainer({ map }: MapContainerProps) {
   const dragStart = useRef({ x: 0, y: 0 })
   const initialPos = useRef({ x: 0, y: 0 })
 
-  const handleExplode = async () => {
+  const handleExplode = async (compact: boolean = false) => {
     if (map.isReadonly || isExploding) return
     setIsExploding(true)
     try {
-      const beforeNode = map.mapData?.nodes?.[0]
-      console.log('[MapContainer] BEFORE:', `x=${beforeNode?.position?.x?.toFixed(0)}, y=${beforeNode?.position?.y?.toFixed(0)}, w=${beforeNode?.size?.width}, h=${beforeNode?.size?.height}`)
-
-      const result = await mapsApi.explode(map.id)
-
-      const afterNode = result.map_data?.nodes?.[0]
-      console.log('[MapContainer] AFTER:', `x=${afterNode?.position?.x?.toFixed(0)}, y=${afterNode?.position?.y?.toFixed(0)}, w=${afterNode?.size?.width}, h=${afterNode?.size?.height}`)
-
-      // Update the map in the store with new data
+      // Use smaller spacing for compact, larger for explode
+      const spacingFactor = compact ? 0.5 : 1.5
+      const result = await mapsApi.explode(map.id, spacingFactor)
       updateMap(map.id, { mapData: result.map_data })
-      console.log('[MapContainer] Store updated')
     } catch (err) {
-      console.error('Failed to explode map:', err)
+      console.error('Failed to explode/compact map:', err)
     } finally {
       setIsExploding(false)
     }
@@ -144,18 +137,32 @@ export default function MapContainer({ map }: MapContainerProps) {
         </div>
         <div className="flex items-center gap-1">
           {!map.isReadonly && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                handleExplode()
-              }}
-              onMouseDown={(e) => e.stopPropagation()}
-              disabled={isExploding}
-              className="w-5 h-5 flex items-center justify-center rounded bg-gray-700/80 hover:bg-teal-600 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
-              title="Explode map - resize nodes and spread apart"
-            >
-              {isExploding ? <Loader2 size={12} className="animate-spin" /> : <Expand size={12} />}
-            </button>
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleExplode(true)
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                disabled={isExploding}
+                className="w-5 h-5 flex items-center justify-center rounded bg-gray-700/80 hover:bg-orange-600 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
+                title="Compact map - bring nodes closer"
+              >
+                {isExploding ? <Loader2 size={12} className="animate-spin" /> : <Shrink size={12} />}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleExplode(false)
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                disabled={isExploding}
+                className="w-5 h-5 flex items-center justify-center rounded bg-gray-700/80 hover:bg-teal-600 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
+                title="Explode map - spread nodes apart"
+              >
+                {isExploding ? <Loader2 size={12} className="animate-spin" /> : <Expand size={12} />}
+              </button>
+            </>
           )}
           <button
             onClick={(e) => {
