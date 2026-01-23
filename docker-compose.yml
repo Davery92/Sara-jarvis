@@ -142,6 +142,42 @@ services:
       retries: 10
       start_period: 25s
 
+  # Celery Worker - processes background tasks
+  celery-worker:
+    build: ./backend
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-gemini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-https://generativelanguage.googleapis.com/v1beta/openai}
+      - OPENAI_MODEL=${OPENAI_MODEL-gemini-3-flash-preview}
+      - OPENAI_API_KEY=${GEMINI_API_KEY}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+    depends_on:
+      - redis
+      - db
+
+  # Celery Beat - schedules periodic tasks
+  celery-beat:
+    build: ./backend
+    restart: unless-stopped
+    command: celery -A app.celery_app beat --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+    depends_on:
+      - redis
+      - celery-worker
+
 volumes:
   postgres_data:
   minio_data:

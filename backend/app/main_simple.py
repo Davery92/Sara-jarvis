@@ -40,6 +40,8 @@ from app.services.body_state_calibration import calibration_service
 from app.services.sara_journal_service import sara_journal
 from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
+from app.services.cognitive.working_memory import get_working_memory_service
+from app.services.cognitive.raw_buffer import get_raw_buffer_service, StreamType
 from app.core import config
 from app.core.prompt_template import render_prompt_template
 from app.core.auth import (
@@ -9397,7 +9399,39 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     except Exception as e:
         logger.warning(f"⚠️ Workout context retrieval failed (non-critical): {e}")
 
-    # Inject memory context, insights, cognitive context, body state, journal, and workout into system message
+    # Retrieve working memory context (cognitive architecture Phase 1)
+    working_memory_context = ""
+    try:
+        working_memory_service = get_working_memory_service()
+        wm_snapshot = await working_memory_service.get_snapshot(current_user.id)
+
+        # Only include if there's meaningful content
+        if wm_snapshot.current_context or wm_snapshot.pending_actions:
+            working_memory_context = working_memory_service.format_for_prompt(wm_snapshot)
+            logger.info(f"🧠 Retrieved working memory context: {len(working_memory_context)} chars")
+
+        # Record this interaction for user state tracking
+        await working_memory_service.record_interaction(current_user.id)
+    except Exception as e:
+        logger.warning(f"⚠️ Working memory context retrieval failed (non-critical): {e}")
+
+    # Add user message to raw buffer for consolidation processing
+    try:
+        raw_buffer_service = get_raw_buffer_service()
+        if last_user_message:
+            await raw_buffer_service.add_entry(
+                stream_type=StreamType.TEXT,
+                content=last_user_message,
+                source="user_message",
+                metadata={
+                    "conversation_id": request.conversation_id,
+                    "user_id": current_user.id
+                }
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Raw buffer entry failed (non-critical): {e}")
+
+    # Inject memory context, insights, cognitive context, body state, journal, workout, and working memory into system message
     enhanced_content = system_message.content
     if memory_context:
         enhanced_content += memory_context
@@ -9417,8 +9451,11 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     if workout_context:
         enhanced_content += f"\n\n{workout_context}"
         logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
+    if working_memory_context:
+        enhanced_content += f"\n\n{working_memory_context}"
+        logger.info(f"🧠 Injected {len(working_memory_context)} chars of working memory context into system prompt")
 
-    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context:
+    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context or working_memory_context:
         system_message = ChatMessage(role="system", content=enhanced_content)
 
     all_messages = [system_message] + request.messages
@@ -9463,6 +9500,22 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     except Exception as e:
         logger.error(f"❌ Failed to store conversation in memory: {e}")
         # Don't fail the request if memory storage fails
+
+    # Add assistant response to raw buffer for consolidation processing
+    try:
+        raw_buffer_service = get_raw_buffer_service()
+        if response_content:
+            await raw_buffer_service.add_entry(
+                stream_type=StreamType.TEXT,
+                content=response_content[:500],  # Truncate for buffer
+                source="assistant_response",
+                metadata={
+                    "conversation_id": request.conversation_id,
+                    "user_id": current_user.id
+                }
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Raw buffer entry for response failed (non-critical): {e}")
 
     # Trigger cognitive processing (hypothesis extraction, reflection analysis) in background
     # This is fire-and-forget so it doesn't slow down the response
