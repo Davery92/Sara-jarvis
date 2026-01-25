@@ -27,6 +27,7 @@ import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
 import MiniChatOverlay from './components/MiniChatOverlay'
 import HealthAlertChat from './components/HealthAlertChat'
 import { PatternsDashboard } from './components/patterns'
+import SensoryMonitor from './components/SensoryMonitor'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -1153,6 +1154,13 @@ function App() {
                   <span>Patterns</span>
                 </button>
                 <button
+                  onClick={() => { setView('sensory-monitor'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'sensory-monitor' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">sensors</span>
+                  <span>Sensory</span>
+                </button>
+                <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1258,6 +1266,13 @@ function App() {
             >
               <span className="material-icons">insights</span>
               <span className="text-xs">Patterns</span>
+            </button>
+            <button
+              onClick={() => setView('sensory-monitor')}
+              className={`flex flex-col items-center ${view === 'sensory-monitor' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">sensors</span>
+              <span className="text-xs">Sensory</span>
             </button>
             <button
               onClick={() => setView('settings')}
@@ -1925,6 +1940,10 @@ function App() {
 
           {view === 'patterns' && (
             <PatternsDashboard />
+          )}
+
+          {view === 'sensory-monitor' && (
+            <SensoryMonitor />
           )}
         </main>
       </div>

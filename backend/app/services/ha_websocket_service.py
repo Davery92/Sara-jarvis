@@ -185,6 +185,18 @@ class HAWebsocketService:
             attributes=attributes
         )
 
+        # Bridge to cognitive raw buffer for Phase 1+ architecture
+        try:
+            from app.tasks.input_processing import process_environmental
+            process_environmental.delay(
+                entity_id=entity_id,
+                old_state=from_state,
+                new_state=to_state,
+                attributes=attributes
+            )
+        except Exception as e:
+            logger.debug(f"Could not send to raw buffer: {e}")
+
         logger.debug(f"Logged: {entity_id} {from_state} -> {to_state}")
 
     async def _log_activity(
