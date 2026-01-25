@@ -24,24 +24,32 @@ class ScreenshotService:
 
     Features:
     - Interval-based capture (default 30 seconds)
+    - Mode-aware capture rates (10s active, 60s ambient)
     - On-demand capture
     - Perceptual hashing to skip unchanged screens
     - Optional vision analysis
     """
 
+    # Mode-aware intervals
+    ACTIVE_INTERVAL = 10   # High frequency during active engagement
+    AMBIENT_INTERVAL = 60  # Low frequency during ambient monitoring
+
     def __init__(
         self,
         backend_client: "BackendClient",
         interval: int = 30,
-        enabled: bool = True
+        enabled: bool = True,
+        mode_aware: bool = True
     ):
         self.backend_client = backend_client
         self.interval = interval
         self.enabled = enabled
+        self.mode_aware = mode_aware
 
         self._running = False
         self._last_hash: Optional[str] = None
         self._skip_unchanged = True
+        self._current_mode: str = "ambient"
 
     async def start(self):
         """Start periodic screenshot capture."""
@@ -49,7 +57,7 @@ class ScreenshotService:
             logger.info("Screenshot service disabled")
             return
 
-        logger.info(f"Starting screenshot service (interval: {self.interval}s)")
+        logger.info(f"Starting screenshot service (interval: {self.interval}s, mode_aware: {self.mode_aware})")
         self._running = True
 
         try:
@@ -63,7 +71,9 @@ class ScreenshotService:
                     except Exception as e:
                         logger.error(f"Screenshot capture error: {e}")
 
-                    await asyncio.sleep(self.interval)
+                    # Get mode-aware interval
+                    interval = await self._get_capture_interval()
+                    await asyncio.sleep(interval)
 
         except ImportError as e:
             logger.error(f"Screenshot dependencies not installed: {e}")
@@ -147,7 +157,15 @@ class ScreenshotService:
                     analyze=analyze,
                     analyze_prompt=analyze_prompt
                 )
-                logger.info(f"Screenshot uploaded: {result.get('screenshot_id', 'unknown')}")
+                screenshot_id = result.get('screenshot_id', 'unknown')
+                logger.info(f"Screenshot uploaded: {screenshot_id}")
+
+                # Send to raw buffer for cognitive architecture
+                await self._send_to_raw_buffer(
+                    active_app=app_name,
+                    window_title=window_title,
+                    screenshot_ref=screenshot_id
+                )
 
             except Exception as e:
                 logger.error(f"Screenshot upload failed: {e}")
@@ -213,3 +231,90 @@ class ScreenshotService:
         """Enable or disable screenshot capture."""
         self.enabled = enabled
         logger.info(f"Screenshot capture {'enabled' if enabled else 'disabled'}")
+
+    async def _get_capture_interval(self) -> int:
+        """
+        Get the capture interval based on current mode.
+
+        Queries the backend for the current mode and returns
+        appropriate interval (10s active, 60s ambient).
+        Falls back to default interval if mode query fails.
+        """
+        if not self.mode_aware:
+            return self.interval
+
+        if not self.backend_client or not self.backend_client.config:
+            return self.interval
+
+        config = self.backend_client.config
+        if not config.auth_token:
+            return self.interval
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{config.backend_url}/api/cognitive/mode",
+                    headers={"Authorization": f"Bearer {config.auth_token}"}
+                )
+                response.raise_for_status()
+                data = response.json()
+                mode = data.get("mode", "ambient")
+
+                # Log mode changes
+                if mode != self._current_mode:
+                    logger.info(f"Mode changed: {self._current_mode} -> {mode}")
+                    self._current_mode = mode
+
+                # Return interval based on mode
+                if mode == "active":
+                    return self.ACTIVE_INTERVAL
+                else:
+                    return self.AMBIENT_INTERVAL
+
+        except ImportError:
+            return self.interval
+        except Exception as e:
+            logger.debug(f"Could not query mode, using default interval: {e}")
+            return self.interval
+
+    async def _send_to_raw_buffer(
+        self,
+        active_app: str = None,
+        window_title: str = None,
+        screenshot_ref: str = None
+    ):
+        """
+        Send screen capture metadata to Sara's cognitive raw buffer.
+
+        This bridges screen captures to the Phase 1+ cognitive architecture
+        so Sara can maintain awareness of screen context.
+        """
+        if not self.backend_client or not self.backend_client.config:
+            return
+
+        config = self.backend_client.config
+        if not config.auth_token:
+            return
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{config.backend_url}/api/cognitive/raw-buffer/screen",
+                    json={
+                        "active_app": active_app,
+                        "window_title": window_title,
+                        "screenshot_ref": screenshot_ref,
+                        "source": "screenshot_service"
+                    },
+                    headers={"Authorization": f"Bearer {config.auth_token}"}
+                )
+                response.raise_for_status()
+                logger.debug("Screen capture metadata sent to raw buffer")
+
+        except ImportError:
+            logger.debug("httpx not available for raw buffer bridge")
+        except Exception as e:
+            # Don't fail screenshot service if raw buffer is unavailable
+            logger.debug(f"Could not send screen capture to raw buffer: {e}")

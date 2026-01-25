@@ -4,6 +4,7 @@ Voice Bridge - Connects to Jetson voice agent for audio playback.
 Receives audio from the Jetson voice agent via WebSocket and plays it locally.
 Sends playback_complete events back to prevent echo detection.
 Reports voice state changes to Electron for tray icon updates.
+Bridges voice transcripts to Sara's cognitive raw buffer.
 """
 
 import asyncio
@@ -12,9 +13,20 @@ import logging
 import queue
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config import SidecarConfig
 
 logger = logging.getLogger("voice_bridge")
+
+# HTTP client for backend communication
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+    logger.warning("httpx not available - raw buffer bridge disabled")
 
 # Audio playback
 try:
@@ -57,6 +69,7 @@ class VoiceBridge:
         port: int = 8765,
         on_state_change: Optional[Callable[[str], None]] = None,
         on_transcript: Optional[Callable[[str, str], None]] = None,
+        config: Optional["SidecarConfig"] = None,
     ):
         """
         Initialize the voice bridge.
@@ -66,6 +79,7 @@ class VoiceBridge:
             port: WebSocket port on Jetson
             on_state_change: Callback when voice state changes (for tray icon)
             on_transcript: Callback for transcripts (user_text, sara_response)
+            config: Sidecar configuration for backend communication
         """
         self.host = host
         self.port = port
@@ -73,6 +87,7 @@ class VoiceBridge:
 
         self.on_state_change = on_state_change
         self.on_transcript = on_transcript
+        self.config = config
 
         self.running = False
         self.connected = False
@@ -89,6 +104,9 @@ class VoiceBridge:
 
         # Audio thread
         self._audio_thread: Optional[threading.Thread] = None
+
+        # HTTP client for raw buffer
+        self._http_client: Optional[httpx.AsyncClient] = None
 
     @property
     def state(self) -> str:
@@ -176,6 +194,14 @@ class VoiceBridge:
         logger.info(f"Starting voice bridge to {self.ws_url}")
         self.running = True
 
+        # Initialize HTTP client for raw buffer communication
+        if HTTPX_AVAILABLE and self.config and self.config.auth_token:
+            self._http_client = httpx.AsyncClient(
+                timeout=10.0,
+                headers={"Authorization": f"Bearer {self.config.auth_token}"}
+            )
+            logger.info("Raw buffer bridge enabled")
+
         # Start audio playback thread
         self._audio_thread = threading.Thread(
             target=self._audio_playback_thread,
@@ -191,6 +217,56 @@ class VoiceBridge:
         logger.info("Stopping voice bridge")
         self.running = False
         self.state = VoiceState.DISCONNECTED
+
+        # Close HTTP client
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def _send_to_raw_buffer(self, user_text: str, sara_text: Optional[str] = None):
+        """
+        Send voice transcript to Sara's cognitive raw buffer.
+
+        This bridges the voice conversation to the Phase 1+ cognitive architecture
+        so Sara can maintain awareness of voice interactions.
+        """
+        if not self._http_client or not self.config:
+            return
+
+        try:
+            response = await self._http_client.post(
+                f"{self.config.backend_url}/api/cognitive/raw-buffer/audio",
+                json={
+                    "user_text": user_text,
+                    "sara_response": sara_text,
+                    "source": "voice_bridge"
+                }
+            )
+            response.raise_for_status()
+            logger.debug(f"Voice transcript sent to raw buffer: {len(user_text)} chars")
+
+        except Exception as e:
+            # Don't fail voice bridge if raw buffer is unavailable
+            logger.warning(f"Could not send transcript to raw buffer: {e}")
+
+    async def _signal_wake_word(self):
+        """
+        Signal wake word detection to the mode controller.
+
+        This triggers the transition from ambient to active mode.
+        """
+        if not self._http_client or not self.config:
+            return
+
+        try:
+            response = await self._http_client.post(
+                f"{self.config.backend_url}/api/cognitive/mode/wake-word"
+            )
+            response.raise_for_status()
+            logger.debug("Wake word signaled to mode controller")
+
+        except Exception as e:
+            logger.warning(f"Could not signal wake word: {e}")
 
     async def _connection_loop(self):
         """Main WebSocket connection loop with auto-reconnect."""
@@ -280,10 +356,18 @@ class VoiceBridge:
             logger.info("Wake word detected!")
             self.state = VoiceState.WAKE_WORD
 
+            # Signal mode transition to backend
+            asyncio.create_task(self._signal_wake_word())
+
         elif event_type == "transcript":
             # User's transcribed speech
             user_text = event.get("user", "")
             sara_text = event.get("sara", "")
+
+            # Send to raw buffer for cognitive architecture
+            if user_text:
+                asyncio.create_task(self._send_to_raw_buffer(user_text, sara_text))
+
             if self.on_transcript:
                 try:
                     self.on_transcript(user_text, sara_text)

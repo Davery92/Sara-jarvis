@@ -32,6 +32,14 @@ except ImportError:
     VoiceState = None
     VOICE_BRIDGE_AVAILABLE = False
 
+# Try to import audio playback detector
+try:
+    from audio_playback import AudioPlaybackDetector, is_available as audio_playback_available
+    AUDIO_PLAYBACK_AVAILABLE = audio_playback_available()
+except ImportError:
+    AudioPlaybackDetector = None
+    AUDIO_PLAYBACK_AVAILABLE = False
+
 # Ensure log directory exists
 log_dir = config.settings_file.parent
 log_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +71,8 @@ class SidecarService:
         self._metrics_collector = metrics_collector if PSUTIL_AVAILABLE else None
         self._voice_bridge = None
         self._voice_state = "disconnected"
+        self._audio_playback_detector = None
+        self._last_playback_state = False
 
     async def start(self):
         """Start all sidecar services."""
@@ -134,6 +144,17 @@ class SidecarService:
                 logger.warning("Voice bridge not available - missing dependencies (sounddevice)")
             else:
                 logger.info("Voice bridge disabled by configuration")
+
+            # Start audio playback detector if available
+            if AUDIO_PLAYBACK_AVAILABLE:
+                self._audio_playback_detector = AudioPlaybackDetector(
+                    on_state_change=self._on_audio_playback_change
+                )
+                self._tasks.append(asyncio.create_task(self._audio_playback_detector.start()))
+                self._tasks.append(asyncio.create_task(self._audio_playback_report_loop()))
+                logger.info("Audio playback detection enabled")
+            else:
+                logger.warning("Audio playback detection not available - missing pulsectl")
 
             logger.info("All services started successfully")
 
@@ -272,6 +293,47 @@ class SidecarService:
                 "user": user_text,
                 "sara": sara_text
             }))
+
+    def _on_audio_playback_change(self, state):
+        """Called when audio playback state changes."""
+        self._last_playback_state = state.is_playing
+        logger.info(f"Audio playback {'started' if state.is_playing else 'stopped'}: {state.applications}")
+
+        # Forward to Electron for UI
+        if self._electron_bridge:
+            asyncio.create_task(self._electron_bridge.send_message({
+                "type": "audio_playback",
+                "is_playing": state.is_playing,
+                "applications": state.applications
+            }))
+
+    async def _audio_playback_report_loop(self):
+        """Periodically report audio playback state to backend."""
+        import httpx
+
+        await asyncio.sleep(5)  # Wait for startup
+
+        while self.running:
+            try:
+                if self._audio_playback_detector:
+                    state = self._audio_playback_detector.state
+
+                    # Send to backend
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        apps = ",".join(state.applications) if state.applications else ""
+                        await client.post(
+                            f"{config.backend_url}/api/sensory/audio-playback",
+                            params={
+                                "is_playing": state.is_playing,
+                                "volume_level": state.volume_level,
+                                "applications": apps
+                            }
+                        )
+
+            except Exception as e:
+                logger.debug(f"Audio playback report error: {e}")
+
+            await asyncio.sleep(5)  # Report every 5 seconds
 
     async def _handle_electron_message(self, data: dict):
         """Handle messages from Electron via the bridge."""
