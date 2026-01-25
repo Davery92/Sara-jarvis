@@ -42,6 +42,7 @@ from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
 from app.services.cognitive.working_memory import get_working_memory_service
 from app.services.cognitive.raw_buffer import get_raw_buffer_service, StreamType
+from app.services.karma import get_karma_service
 from app.core import config
 from app.core.prompt_template import render_prompt_template
 from app.core.auth import (
@@ -6152,6 +6153,22 @@ try:
 except Exception as e:
     logger.error(f"❌ Health metrics routes failed to load: {e}")
 
+# Include Cognitive routes (audio processing, speaker recognition, Sara identity)
+try:
+    from app.routes.cognitive import router as cognitive_router
+    app.include_router(cognitive_router, tags=["Cognitive"])
+    logger.info("✅ Cognitive routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Cognitive routes failed to load: {e}")
+
+# Include Sensory Monitor routes (real-time audio/visual monitoring)
+try:
+    from app.routes.sensory import router as sensory_router
+    app.include_router(sensory_router, tags=["Sensory"])
+    logger.info("✅ Sensory monitor routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Sensory monitor routes failed to load: {e}")
+
 # Include Emotion routes (Phase 2)
 try:
     from app.routes.emotions import router as emotions_router
@@ -9415,6 +9432,16 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     except Exception as e:
         logger.warning(f"⚠️ Working memory context retrieval failed (non-critical): {e}")
 
+    # Retrieve karma context (cognitive architecture Phase 2)
+    karma_context = ""
+    try:
+        karma_service = await get_karma_service(db)
+        karma_context = await karma_service.format_karma_context("sara")
+        if karma_context:
+            logger.info(f"⚖️ Retrieved karma context: {len(karma_context)} chars")
+    except Exception as e:
+        logger.warning(f"⚠️ Karma context retrieval failed (non-critical): {e}")
+
     # Add user message to raw buffer for consolidation processing
     try:
         raw_buffer_service = get_raw_buffer_service()
@@ -9454,8 +9481,11 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     if working_memory_context:
         enhanced_content += f"\n\n{working_memory_context}"
         logger.info(f"🧠 Injected {len(working_memory_context)} chars of working memory context into system prompt")
+    if karma_context:
+        enhanced_content += f"\n\n{karma_context}"
+        logger.info(f"⚖️ Injected {len(karma_context)} chars of karma context into system prompt")
 
-    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context or working_memory_context:
+    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context or working_memory_context or karma_context:
         system_message = ChatMessage(role="system", content=enhanced_content)
 
     all_messages = [system_message] + request.messages
