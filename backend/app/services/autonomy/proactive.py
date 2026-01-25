@@ -5,6 +5,7 @@ Periodically reviews context and considers if action would be helpful,
 without being prompted by the user.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -372,20 +373,21 @@ Pending items:
     ) -> None:
         """Handle a proactive notification."""
         # Record the action for outcome tracking
+        context_snapshot = json.dumps({
+            "priority": action.priority,
+            "user_availability": context.get("user_state", {}).get("availability", "unknown") if isinstance(context.get("user_state"), dict) else getattr(context.get("user_state"), "availability", "unknown"),
+            "metadata": action.metadata,
+        })
         await self.db.execute(
             text("""
                 INSERT INTO action_log
                 (user_id, action_type, action_content, context_snapshot)
-                VALUES (:user_id, 'proactive_notification', :content, :context)
+                VALUES (:user_id, 'proactive_notification', :content, :context::jsonb)
             """),
             {
                 "user_id": "64f37c56-85cb-4590-8de9-adfc17c343ed",
                 "content": f"{action.title}: {action.body}",
-                "context": {
-                    "priority": action.priority,
-                    "user_availability": context["user_state"].availability,
-                    "metadata": action.metadata,
-                },
+                "context": context_snapshot,
             }
         )
         await self.db.commit()
