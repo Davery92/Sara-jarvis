@@ -382,12 +382,12 @@ Pending items:
             text("""
                 INSERT INTO action_log
                 (user_id, action_type, action_content, context_snapshot)
-                VALUES (:user_id, 'proactive_notification', :content, :context::jsonb)
+                VALUES (:user_id, 'proactive_notification', :content, CAST(:ctx AS jsonb))
             """),
             {
                 "user_id": "64f37c56-85cb-4590-8de9-adfc17c343ed",
                 "content": f"{action.title}: {action.body}",
-                "context": context_snapshot,
+                "ctx": context_snapshot,
             }
         )
         await self.db.commit()
