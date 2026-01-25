@@ -1,0 +1,408 @@
+"""
+ReflectionAgent - The meta-cognitive agent that audits and improves the system.
+
+Orchestrates all reflection components:
+- Consolidation auditing
+- Pattern detection
+- Proposal generation
+- Uncertainty handling
+"""
+
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .scratchpad import ReflectionScratchpad, ObservationType, get_reflection_scratchpad
+from .consolidation_auditor import ConsolidationAuditor, ConsolidationAuditResult
+from .pattern_detector import PatternDetector, DetectedPattern
+from .proposal_generator import PromptProposalGenerator, PromptProposal
+from app.services.karma import get_karma_service, KarmaEvent
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReflectionCycleResult:
+    """Results of a complete reflection cycle."""
+    cycle_start: datetime = field(default_factory=datetime.utcnow)
+    consolidation_audit: Optional[ConsolidationAuditResult] = None
+    outcomes_assessed: int = 0
+    patterns_detected: List[DetectedPattern] = field(default_factory=list)
+    proposals_generated: List[PromptProposal] = field(default_factory=list)
+    uncertainties_flagged: int = 0
+    duration_seconds: float = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "cycle_start": self.cycle_start.isoformat(),
+            "consolidation_audit": {
+                "total_raw": self.consolidation_audit.total_raw,
+                "total_kept": self.consolidation_audit.total_kept,
+                "missed_items": len(self.consolidation_audit.missed_items),
+                "accuracy_score": self.consolidation_audit.accuracy_score,
+            } if self.consolidation_audit else None,
+            "outcomes_assessed": self.outcomes_assessed,
+            "patterns_detected": len(self.patterns_detected),
+            "proposals_generated": len(self.proposals_generated),
+            "uncertainties_flagged": self.uncertainties_flagged,
+            "duration_seconds": self.duration_seconds,
+        }
+
+
+class ReflectionAgent:
+    """
+    The meta-cognitive agent that audits and improves Sara's system.
+
+    Responsibilities:
+    1. AUDIT: Compare what consolidation kept vs. what was available
+    2. ANALYZE: Review actions and their outcomes
+    3. DETECT: Look for patterns - recurring errors, successful approaches
+    4. PROPOSE: When confident, propose specific fixes
+    5. LEARN: Flag uncertainties for David's input
+    """
+
+    def __init__(
+        self,
+        db: AsyncSession,
+        scratchpad: ReflectionScratchpad,
+        consolidation_auditor: ConsolidationAuditor,
+        pattern_detector: PatternDetector,
+        proposal_generator: PromptProposalGenerator,
+    ):
+        self.db = db
+        self.scratchpad = scratchpad
+        self.consolidation_auditor = consolidation_auditor
+        self.pattern_detector = pattern_detector
+        self.proposal_generator = proposal_generator
+
+    async def run_reflection_cycle(self) -> ReflectionCycleResult:
+        """
+        Run a complete reflection cycle.
+
+        Called periodically by the Celery worker.
+        """
+        cycle_start = datetime.utcnow()
+        result = ReflectionCycleResult(cycle_start=cycle_start)
+
+        logger.info("Starting reflection cycle")
+
+        try:
+            # 1. Audit recent consolidation
+            audit_window_start = cycle_start - timedelta(hours=4)
+            consolidation_audit = await self.consolidation_auditor.audit_consolidation_window(
+                audit_window_start, cycle_start
+            )
+            await self.consolidation_auditor.record_audit_observations(consolidation_audit)
+            result.consolidation_audit = consolidation_audit
+            logger.info(f"Consolidation audit complete: {consolidation_audit.total_raw} raw, "
+                       f"{len(consolidation_audit.missed_items)} misses")
+
+            # 2. Review pending action outcomes
+            pending_outcomes = await self._get_pending_outcome_assessments()
+            for pending in pending_outcomes:
+                outcome = await self._assess_outcome(pending)
+                await self._record_outcome(pending["action_id"], outcome)
+            result.outcomes_assessed = len(pending_outcomes)
+            logger.info(f"Assessed {len(pending_outcomes)} pending outcomes")
+
+            # 3. Detect patterns
+            patterns = await self.pattern_detector.detect_patterns()
+            for pattern in patterns:
+                await self._record_or_update_pattern(pattern)
+            result.patterns_detected = patterns
+            logger.info(f"Detected {len(patterns)} patterns")
+
+            # 4. Generate proposals for significant patterns
+            high_confidence_patterns = [p for p in patterns if p.confidence >= 0.7]
+            proposals = await self.proposal_generator.generate_proposals_from_patterns(
+                high_confidence_patterns
+            )
+            for proposal in proposals:
+                await self.proposal_generator.submit_proposal(proposal)
+            result.proposals_generated = proposals
+            logger.info(f"Generated {len(proposals)} proposals")
+
+            # 5. Check for situations needing clarification
+            uncertain_items = await self._identify_uncertain_items()
+            for item in uncertain_items:
+                await self._flag_uncertainty(item)
+            result.uncertainties_flagged = len(uncertain_items)
+            logger.info(f"Flagged {len(uncertain_items)} uncertainties")
+
+            # 6. Self-assess this reflection cycle
+            await self._self_assess(result)
+
+        except Exception as e:
+            logger.error(f"Reflection cycle failed: {e}", exc_info=True)
+            raise
+
+        result.duration_seconds = (datetime.utcnow() - cycle_start).total_seconds()
+        logger.info(f"Reflection cycle complete in {result.duration_seconds:.1f}s")
+
+        return result
+
+    async def _get_pending_outcome_assessments(self) -> List[Dict]:
+        """Get actions that need outcome assessment."""
+        result = await self.db.execute(
+            text("""
+                SELECT action_id, user_id, action_type, action_content,
+                       context_snapshot, created_at
+                FROM action_log
+                WHERE outcome_status = 'pending'
+                AND created_at < NOW() - INTERVAL '30 minutes'
+                ORDER BY created_at
+                LIMIT 50
+            """)
+        )
+
+        return [
+            {
+                "action_id": str(row[0]),
+                "user_id": row[1],
+                "action_type": row[2],
+                "action_content": row[3],
+                "context_snapshot": row[4],
+                "created_at": row[5],
+            }
+            for row in result.fetchall()
+        ]
+
+    async def _assess_outcome(self, pending: Dict) -> Dict:
+        """
+        Assess the outcome of an action.
+
+        Uses heuristics based on:
+        - Subsequent user interactions
+        - Error signals
+        - Time since action
+        """
+        action_id = pending["action_id"]
+        created_at = pending["created_at"]
+
+        # Check for follow-up user messages that might indicate success/failure
+        followup_result = await self.db.execute(
+            text("""
+                SELECT COUNT(*) as count,
+                       MIN(created_at) as first_followup
+                FROM episodes
+                WHERE user_id = :user_id
+                AND created_at > :action_time
+                AND created_at < :action_time + INTERVAL '1 hour'
+                AND content ILIKE '%thank%' OR content ILIKE '%great%' OR content ILIKE '%perfect%'
+            """),
+            {
+                "user_id": pending["user_id"],
+                "action_time": created_at,
+            }
+        )
+        positive_signals = followup_result.fetchone()[0] or 0
+
+        # Check for negative signals
+        negative_result = await self.db.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM episodes
+                WHERE user_id = :user_id
+                AND created_at > :action_time
+                AND created_at < :action_time + INTERVAL '1 hour'
+                AND (content ILIKE '%wrong%' OR content ILIKE '%error%' OR
+                     content ILIKE '%not what%' OR content ILIKE '%incorrect%')
+            """),
+            {
+                "user_id": pending["user_id"],
+                "action_time": created_at,
+            }
+        )
+        negative_signals = negative_result.fetchone()[0] or 0
+
+        # Determine outcome
+        if positive_signals > 0 and negative_signals == 0:
+            return {
+                "status": "success",
+                "details": f"Positive user signals detected ({positive_signals})",
+                "source": "implicit"
+            }
+        elif negative_signals > 0:
+            return {
+                "status": "failure",
+                "details": f"Negative user signals detected ({negative_signals})",
+                "source": "implicit"
+            }
+        else:
+            # After timeout, assume partial success if no negative signals
+            hours_elapsed = (datetime.utcnow() - created_at).total_seconds() / 3600
+            if hours_elapsed > 24:
+                return {
+                    "status": "unknown",
+                    "details": "No signals detected within timeout",
+                    "source": "timeout"
+                }
+            else:
+                # Keep as pending for now
+                return None
+
+    async def _record_outcome(self, action_id: str, outcome: Optional[Dict]) -> None:
+        """Record the assessed outcome of an action."""
+        if not outcome:
+            return
+
+        await self.db.execute(
+            text("""
+                UPDATE action_log
+                SET outcome_status = :status,
+                    outcome_details = :details,
+                    outcome_recorded_at = NOW(),
+                    feedback_source = :source
+                WHERE action_id = :action_id
+            """),
+            {
+                "action_id": action_id,
+                "status": outcome["status"],
+                "details": outcome["details"],
+                "source": outcome["source"],
+            }
+        )
+        await self.db.commit()
+
+        # Record observation
+        await self.scratchpad.add_observation(
+            observation_type=ObservationType.ACTION_OUTCOME,
+            subject_agent="sara",
+            summary=f"Action outcome: {outcome['status']}",
+            details={
+                "action_id": action_id,
+                "outcome": outcome["status"],
+                "outcome_details": outcome["details"],
+                "source": outcome["source"],
+            },
+            confidence=0.7 if outcome["source"] == "implicit" else 0.5,
+            evidence_refs={"action_id": action_id},
+        )
+
+    async def _record_or_update_pattern(self, pattern: DetectedPattern) -> None:
+        """Record a new pattern or update an existing one."""
+        # Check for similar existing patterns
+        existing = await self.scratchpad.get_active_patterns(
+            pattern_type=pattern.pattern_type,
+        )
+
+        for existing_pattern in existing:
+            if self._patterns_match(pattern, existing_pattern):
+                # Update existing pattern
+                await self.pattern_detector.update_existing_pattern(
+                    existing_pattern.pattern_id,
+                    pattern.supporting_observations,
+                )
+                return
+
+        # Create new pattern
+        await self.pattern_detector.persist_pattern(pattern)
+
+    def _patterns_match(self, new: DetectedPattern, existing) -> bool:
+        """Check if a new pattern matches an existing one."""
+        # Same type and affected agent/dimension
+        if new.affected_agent != existing.affected_agent:
+            return False
+        if new.affected_dimension != existing.affected_dimension:
+            return False
+
+        # Similar description (simple word overlap)
+        new_words = set(new.description.lower().split())
+        existing_words = set(existing.description.lower().split())
+        overlap = len(new_words & existing_words) / min(len(new_words), len(existing_words))
+
+        return overlap > 0.5
+
+    async def _identify_uncertain_items(self) -> List[Dict]:
+        """Identify situations that need David's clarification."""
+        uncertain_items = []
+
+        # Look for low-confidence observations
+        low_confidence = await self.scratchpad.get_recent_observations(
+            days=3,
+        )
+
+        for obs in low_confidence:
+            if obs.confidence < 0.3 and not obs.resolved:
+                uncertain_items.append({
+                    "context": obs.summary,
+                    "what_happened": obs.details.get("outcome_details", "") if obs.details else "",
+                    "possible_causes": ["Unknown - needs clarification"],
+                    "question_for_david": f"What should I learn from this observation: {obs.summary}?",
+                    "observation_id": obs.observation_id,
+                })
+
+        return uncertain_items[:3]  # Limit to 3 per cycle
+
+    async def _flag_uncertainty(self, item: Dict) -> None:
+        """Flag an uncertain situation for David."""
+        await self.scratchpad.add_observation(
+            observation_type=ObservationType.UNCERTAINTY_FLAG,
+            summary=f"Need clarification: {item['question_for_david'][:100]}",
+            details={
+                "context": item["context"],
+                "what_happened": item["what_happened"],
+                "possible_causes": item["possible_causes"],
+                "question": item["question_for_david"],
+            },
+            confidence=0.0,  # Explicitly uncertain
+        )
+
+        # Send notification to David
+        try:
+            from app.services.notification_service import get_notification_service
+            notification_service = get_notification_service()
+            await notification_service.notify_uncertainty(item)
+        except Exception as e:
+            logger.warning(f"Failed to notify about uncertainty: {e}")
+
+        logger.info(f"Flagged uncertainty: {item['question_for_david'][:50]}")
+
+    async def _self_assess(self, result: ReflectionCycleResult) -> None:
+        """The reflection agent reflects on its own performance."""
+        karma_service = await get_karma_service(self.db)
+
+        # Did we find meaningful patterns?
+        meaningful_patterns = [p for p in result.patterns_detected if p.confidence >= 0.6]
+
+        if meaningful_patterns:
+            await karma_service.record_event(KarmaEvent(
+                agent_id="reflection",
+                dimension_name="insight_quality",
+                delta=len(meaningful_patterns) * 0.5,
+                reason=f"Identified {len(meaningful_patterns)} meaningful patterns",
+                evidence_type="automated",
+            ))
+
+        # Did we generate proposals?
+        if result.proposals_generated:
+            # Small positive for generating proposals (approval/rejection adjusts later)
+            await karma_service.record_event(KarmaEvent(
+                agent_id="reflection",
+                dimension_name="insight_quality",
+                delta=0.5,
+                reason=f"Generated {len(result.proposals_generated)} proposals for review",
+                evidence_type="automated",
+            ))
+
+
+# Factory function for creating ReflectionAgent
+async def get_reflection_agent(db: AsyncSession) -> ReflectionAgent:
+    """Create and return a configured ReflectionAgent."""
+    scratchpad = await get_reflection_scratchpad(db)
+    auditor = ConsolidationAuditor(db, scratchpad)
+    detector = PatternDetector(db, scratchpad)
+    generator = PromptProposalGenerator(db)
+
+    return ReflectionAgent(
+        db=db,
+        scratchpad=scratchpad,
+        consolidation_auditor=auditor,
+        pattern_detector=detector,
+        proposal_generator=generator,
+    )

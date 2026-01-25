@@ -41,13 +41,20 @@ def event_loop():
 
 @pytest.fixture(scope="function")
 def db_engine():
-    """Create an in-memory SQLite database engine for testing"""
+    """Create an in-memory SQLite database engine for testing.
+
+    Note: Does NOT create all tables automatically because some models
+    use PostgreSQL-specific types (JSONB) that aren't compatible with SQLite.
+    Tests should create only the tables they need using their own setup fixtures.
+    """
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    # Don't create all tables - some have JSONB columns that SQLite doesn't support
+    # Each test should create only the tables it needs using its own setup fixture
+    # Base.metadata.create_all(bind=engine)
     yield engine
     engine.dispose()
 

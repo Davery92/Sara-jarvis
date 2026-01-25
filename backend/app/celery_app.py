@@ -27,6 +27,9 @@ celery_app = Celery(
         "app.tasks.working_memory",
         "app.tasks.health",
         "app.tasks.input_processing",
+        "app.tasks.karma",
+        "app.tasks.reflection",
+        "app.tasks.autonomy",
     ]
 )
 
@@ -65,10 +68,11 @@ celery_app.conf.beat_schedule = {
     # PHASE 1: Foundation
     # ============================================
 
-    # Consolidation sweep - compress raw inputs into context
-    "consolidation-sweep": {
-        "task": "app.tasks.consolidation.run_consolidation",
-        "schedule": 60.0,  # Every 60 seconds
+    # Consolidation watcher - checks if quiet period reached, then triggers consolidation
+    # Does NOT run on fixed timer - only consolidates after activity goes quiet
+    "consolidation-watcher": {
+        "task": "app.tasks.consolidation.check_consolidation_trigger",
+        "schedule": 10.0,  # Check every 10 seconds
         "options": {"queue": "cognitive"}
     },
 
@@ -94,72 +98,100 @@ celery_app.conf.beat_schedule = {
     },
 
     # ============================================
-    # PHASE 2: Karma (to be activated)
+    # PHASE 2: Karma
     # ============================================
 
-    # Karma decay - daily drift toward neutral
-    # "karma-decay": {
-    #     "task": "app.tasks.karma.apply_decay",
-    #     "schedule": crontab(hour=4, minute=0),
-    #     "options": {"queue": "maintenance"}
-    # },
+    # Karma decay - daily drift toward neutral (4 AM)
+    "karma-decay": {
+        "task": "app.tasks.karma.apply_karma_decay",
+        "schedule": crontab(hour=4, minute=0),
+        "options": {"queue": "maintenance"}
+    },
+
+    # Karma alerts - check for critically low scores (every 6 hours)
+    "karma-alerts": {
+        "task": "app.tasks.karma.check_karma_alerts",
+        "schedule": crontab(minute=0, hour="*/6"),
+        "options": {"queue": "maintenance"}
+    },
+
+    # Karma report - daily status summary (8 AM)
+    "karma-report": {
+        "task": "app.tasks.karma.generate_karma_report",
+        "schedule": crontab(hour=8, minute=0),
+        "options": {"queue": "low_priority"}
+    },
 
     # ============================================
-    # PHASE 3: Reflection (to be activated)
+    # PHASE 3: Reflection
     # ============================================
 
-    # Reflection cycle - meta-cognitive auditing
-    # "reflection-cycle": {
-    #     "task": "app.tasks.reflection.run_reflection_cycle",
-    #     "schedule": crontab(minute=0, hour="*/4"),
-    #     "options": {"queue": "reflection"}
-    # },
+    # Reflection cycle - meta-cognitive auditing (every 4 hours)
+    "reflection-cycle": {
+        "task": "app.tasks.reflection.run_reflection_cycle",
+        "schedule": crontab(minute=0, hour="*/4"),
+        "options": {"queue": "reflection"}
+    },
+
+    # Scratchpad cleanup - remove expired observations (daily at 5 AM)
+    "scratchpad-cleanup": {
+        "task": "app.tasks.reflection.cleanup_scratchpad",
+        "schedule": crontab(hour=5, minute=0),
+        "options": {"queue": "maintenance"}
+    },
+
+    # Reflection report - daily summary (9 AM)
+    "reflection-report": {
+        "task": "app.tasks.reflection.generate_reflection_report",
+        "schedule": crontab(hour=9, minute=0),
+        "options": {"queue": "low_priority"}
+    },
 
     # ============================================
-    # PHASE 4: Autonomy (to be activated)
+    # PHASE 4: Autonomy
     # ============================================
 
-    # Proactive check - consider if action needed
-    # "proactive-check": {
-    #     "task": "app.tasks.autonomy.proactive_check",
-    #     "schedule": 900.0,  # Every 15 minutes
-    #     "options": {"queue": "cognitive"}
-    # },
+    # Proactive check - consider if action needed (every 15 minutes)
+    "proactive-check": {
+        "task": "app.tasks.autonomy.proactive_check",
+        "schedule": 900.0,
+        "options": {"queue": "cognitive"}
+    },
 
-    # Morning anticipation
-    # "morning-anticipation": {
-    #     "task": "app.tasks.autonomy.morning_anticipation",
-    #     "schedule": crontab(hour=7, minute=0),
-    #     "options": {"queue": "cognitive"}
-    # },
+    # Morning anticipation (7 AM daily)
+    "morning-anticipation": {
+        "task": "app.tasks.autonomy.morning_anticipation",
+        "schedule": crontab(hour=7, minute=0),
+        "options": {"queue": "cognitive"}
+    },
 
-    # Evening anticipation
-    # "evening-anticipation": {
-    #     "task": "app.tasks.autonomy.evening_anticipation",
-    #     "schedule": crontab(hour=21, minute=0),
-    #     "options": {"queue": "cognitive"}
-    # },
+    # Evening anticipation (9 PM daily)
+    "evening-anticipation": {
+        "task": "app.tasks.autonomy.evening_anticipation",
+        "schedule": crontab(hour=21, minute=0),
+        "options": {"queue": "cognitive"}
+    },
 
-    # Nightly memory consolidation
-    # "nightly-consolidation": {
-    #     "task": "app.tasks.autonomy.nightly_memory_consolidation",
-    #     "schedule": crontab(hour=3, minute=0),
-    #     "options": {"queue": "maintenance"}
-    # },
+    # Nightly memory consolidation (3 AM daily)
+    "nightly-consolidation": {
+        "task": "app.tasks.autonomy.nightly_memory_consolidation",
+        "schedule": crontab(hour=3, minute=0),
+        "options": {"queue": "maintenance"}
+    },
 
-    # Weekly learning digest
-    # "weekly-digest": {
-    #     "task": "app.tasks.autonomy.weekly_learning_digest",
-    #     "schedule": crontab(hour=10, minute=0, day_of_week="sunday"),
-    #     "options": {"queue": "reflection"}
-    # },
+    # Weekly learning digest (Sunday 10 AM)
+    "weekly-digest": {
+        "task": "app.tasks.autonomy.weekly_learning_digest",
+        "schedule": crontab(hour=10, minute=0, day_of_week="sunday"),
+        "options": {"queue": "reflection"}
+    },
 
-    # Idle processing - productive use of quiet time
-    # "idle-processing": {
-    #     "task": "app.tasks.autonomy.idle_processing",
-    #     "schedule": 600.0,  # Every 10 minutes
-    #     "options": {"queue": "low_priority"}
-    # },
+    # Idle processing - productive use of quiet time (every 10 minutes)
+    "idle-processing": {
+        "task": "app.tasks.autonomy.idle_processing",
+        "schedule": 600.0,
+        "options": {"queue": "low_priority"}
+    },
 }
 
 # Task routing - send tasks to appropriate queues

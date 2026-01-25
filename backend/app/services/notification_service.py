@@ -286,15 +286,186 @@ class NotificationService:
     
     def configure(self, ntfy_url: str = None, default_topic: str = None, enabled: bool = None):
         """Configure the notification service"""
-        
+
         if ntfy_url is not None:
             self.ntfy_base_url = ntfy_url
         if default_topic is not None:
             self.default_topic = default_topic
         if enabled is not None:
             self.enabled = enabled
-            
-        logger.info(f"📱 Notification service configured: enabled={self.enabled}")
+
+        logger.info(f"Notification service configured: enabled={self.enabled}")
+
+    # ==========================================
+    # Reflection System Notifications (Phase 3)
+    # ==========================================
+
+    async def notify_david(
+        self,
+        title: str,
+        body: str,
+        priority: str = "normal",
+        category: str = "general",
+        url: Optional[str] = None
+    ) -> bool:
+        """
+        Send a notification to David (generic interface for reflection system).
+
+        Args:
+            title: Notification title
+            body: Notification body text
+            priority: "low", "normal", "high", or "urgent"
+            category: Category for grouping
+            url: Optional URL to include
+
+        Returns:
+            True if notification was sent successfully
+        """
+        priority_map = {
+            "low": NotificationPriority.LOW,
+            "normal": NotificationPriority.NORMAL,
+            "high": NotificationPriority.HIGH,
+            "urgent": NotificationPriority.URGENT
+        }
+
+        actions = None
+        if url:
+            actions = [{
+                "type": "view",
+                "label": "View Details",
+                "url": url
+            }]
+
+        # Use a dedicated topic for David's notifications
+        return await self.send_notification(
+            user_id="david",  # Always to David
+            title=title,
+            message=body,
+            priority=priority_map.get(priority, NotificationPriority.NORMAL),
+            tags=[category, "sara"],
+            actions=actions,
+            topic="sara-david"  # Dedicated topic for David
+        )
+
+    async def notify_new_proposal(self, proposal) -> bool:
+        """
+        Notify David of a new prompt proposal requiring review.
+
+        Args:
+            proposal: PromptProposal object or dict with proposal details
+        """
+        if hasattr(proposal, 'proposal_id'):
+            proposal_id = proposal.proposal_id
+            target = proposal.target_agent
+            section = proposal.target_prompt_section
+            reasoning = proposal.reasoning[:200] if proposal.reasoning else "No reasoning provided"
+        else:
+            proposal_id = proposal.get('proposal_id', 'unknown')
+            target = proposal.get('target_agent', 'unknown')
+            section = proposal.get('target_prompt_section', 'unknown')
+            reasoning = proposal.get('reasoning', 'No reasoning provided')[:200]
+
+        title = f"Sara Proposal #{proposal_id}"
+        body = f"Target: {target}/{section}\n\n{reasoning}..."
+
+        # URL to review interface
+        url = f"https://sara.avery.cloud/reflection/proposals/{proposal_id}"
+
+        return await self.notify_david(
+            title=title,
+            body=body,
+            priority="normal",
+            category="proposal",
+            url=url
+        )
+
+    async def notify_uncertainty(self, uncertainty: Dict[str, Any]) -> bool:
+        """
+        Notify David of a flagged uncertainty requiring clarification.
+
+        Args:
+            uncertainty: Dict with question_for_david, context, observation_id, etc.
+        """
+        question = uncertainty.get('question_for_david', 'Clarification needed')
+        context = uncertainty.get('context', '')[:150]
+        observation_id = uncertainty.get('observation_id', 'unknown')
+
+        title = "Sara Needs Input"
+        body = f"{question}\n\nContext: {context}..."
+
+        return await self.notify_david(
+            title=title,
+            body=body,
+            priority="high",
+            category="uncertainty"
+        )
+
+    async def notify_karma_alert(
+        self,
+        agent_id: str,
+        dimension: str,
+        score: float,
+        level: str
+    ) -> bool:
+        """
+        Notify David of a karma score alert.
+
+        Args:
+            agent_id: Agent with the alert
+            dimension: Karma dimension
+            score: Current score
+            level: Alert level ("critical" or "warning")
+        """
+        priority = "urgent" if level == "critical" else "high"
+
+        title = f"Karma Alert: {agent_id}"
+        body = f"The '{dimension}' dimension is {level} ({score:.1f}/100)"
+
+        return await self.notify_david(
+            title=title,
+            body=body,
+            priority=priority,
+            category="karma"
+        )
+
+    async def notify_proactive_action(
+        self,
+        action_type: str,
+        title_text: str,
+        body_text: str,
+        priority_score: float = 0.5
+    ) -> bool:
+        """
+        Notify David of a proactive action Sara is considering/taking.
+
+        Args:
+            action_type: Type of action (notify, remind, prepare)
+            title_text: Action title
+            body_text: Action description
+            priority_score: Priority score (0-1)
+        """
+        if priority_score >= 0.8:
+            priority = "high"
+        elif priority_score >= 0.6:
+            priority = "normal"
+        else:
+            priority = "low"
+
+        title = f"Sara: {title_text}"
+        body = f"[{action_type}] {body_text}"
+
+        return await self.notify_david(
+            title=title,
+            body=body,
+            priority=priority,
+            category="proactive"
+        )
+
 
 # Global service instance
 notification_service = NotificationService()
+
+
+def get_notification_service() -> NotificationService:
+    """Get the global NotificationService instance."""
+    return notification_service

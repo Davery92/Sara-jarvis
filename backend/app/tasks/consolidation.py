@@ -2,7 +2,10 @@
 Consolidation tasks for Sara's cognitive architecture.
 
 The consolidation agent compresses raw inputs into digestible context packets.
-It runs every 60 seconds, processing the raw buffer and updating working memory.
+It is EVENT-DRIVEN, not timer-based:
+- Monitors for activity (audio, text, etc.)
+- Only consolidates after a quiet period following activity
+- Never interrupts active conversations
 """
 
 import logging
@@ -16,13 +19,114 @@ from app.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
+# Configuration for activity-based consolidation
+QUIET_THRESHOLD_SECONDS = 60  # How long quiet before consolidating
+MIN_ACTIVITY_FOR_CONSOLIDATION = 3  # Minimum entries to bother consolidating
+
+
+@celery_app.task(bind=True, name="app.tasks.consolidation.check_consolidation_trigger")
+def check_consolidation_trigger(self) -> Dict[str, Any]:
+    """
+    Smart consolidation trigger - only consolidates after activity goes quiet.
+
+    Logic:
+    1. Check when the last input activity was
+    2. Check when consolidation last ran
+    3. Only trigger if:
+       - There's been activity since last consolidation
+       - AND it's been quiet for QUIET_THRESHOLD_SECONDS
+       - AND there's enough new content to consolidate
+    """
+    import redis
+
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    r = redis.from_url(redis_url)
+
+    try:
+        # Get Redis server time for consistency
+        redis_time = r.time()
+        now_ms = redis_time[0] * 1000 + redis_time[1] // 1000
+
+        # Find the most recent activity across all streams
+        streams = ["raw_buffer:text", "raw_buffer:audio", "raw_buffer:screen",
+                   "raw_buffer:notification", "raw_buffer:calendar", "raw_buffer:environmental"]
+
+        last_activity_ms = 0
+        total_new_entries = 0
+
+        # Get last consolidation time
+        last_consolidation = r.get("consolidation:last_activity_ms")
+        last_consolidation_ms = int(last_consolidation) if last_consolidation else 0
+
+        for stream in streams:
+            try:
+                # Get the most recent entry
+                latest = r.xrevrange(stream, "+", "-", count=1)
+                if latest:
+                    entry_id = latest[0][0].decode() if isinstance(latest[0][0], bytes) else latest[0][0]
+                    entry_ms = int(entry_id.split("-")[0])
+                    if entry_ms > last_activity_ms:
+                        last_activity_ms = entry_ms
+
+                    # Count entries since last consolidation
+                    if last_consolidation_ms > 0:
+                        new_entries = r.xrange(stream, min=f"{last_consolidation_ms}-0", max="+")
+                        total_new_entries += len(new_entries)
+                    else:
+                        # First run - count all recent entries
+                        new_entries = r.xrange(stream, min=f"{now_ms - 300000}-0", max="+")  # Last 5 min
+                        total_new_entries += len(new_entries)
+            except Exception as e:
+                logger.debug(f"Error checking stream {stream}: {e}")
+                continue
+
+        # Calculate quiet duration
+        quiet_duration_ms = now_ms - last_activity_ms if last_activity_ms > 0 else 0
+        quiet_duration_seconds = quiet_duration_ms / 1000
+
+        # Determine if we should consolidate
+        should_consolidate = (
+            last_activity_ms > last_consolidation_ms and  # New activity since last consolidation
+            quiet_duration_seconds >= QUIET_THRESHOLD_SECONDS and  # Been quiet long enough
+            total_new_entries >= MIN_ACTIVITY_FOR_CONSOLIDATION  # Enough to consolidate
+        )
+
+        result = {
+            "checked_at": datetime.utcnow().isoformat(),
+            "last_activity_ms": last_activity_ms,
+            "last_consolidation_ms": last_consolidation_ms,
+            "quiet_duration_seconds": round(quiet_duration_seconds, 1),
+            "new_entries": total_new_entries,
+            "should_consolidate": should_consolidate,
+            "triggered": False
+        }
+
+        if should_consolidate:
+            logger.info(f"Triggering consolidation: {quiet_duration_seconds:.0f}s quiet, {total_new_entries} new entries")
+            # Update last activity marker BEFORE running to prevent double-triggers
+            r.set("consolidation:last_activity_ms", str(last_activity_ms))
+            # Trigger the actual consolidation
+            run_consolidation.delay()
+            result["triggered"] = True
+        else:
+            if total_new_entries > 0 and quiet_duration_seconds < QUIET_THRESHOLD_SECONDS:
+                logger.debug(f"Waiting for quiet: {quiet_duration_seconds:.0f}s / {QUIET_THRESHOLD_SECONDS}s needed")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Consolidation trigger check failed: {e}")
+        return {"error": str(e), "triggered": False}
+
 
 @celery_app.task(bind=True, name="app.tasks.consolidation.run_consolidation")
 def run_consolidation(self) -> Dict[str, Any]:
     """
     Main consolidation sweep task.
 
-    Every 60 seconds:
+    Called by check_consolidation_trigger when activity goes quiet.
+    NOT run on a fixed timer - only after natural pauses in activity.
+
     1. Query raw buffer for unprocessed entries
     2. Group entries by timestamp proximity
     3. Score relevance and filter
@@ -51,18 +155,36 @@ def run_consolidation(self) -> Dict[str, Any]:
         # Get consolidation config
         config = get_consolidation_config(r, solo_user_id)
 
-        # Calculate time window
-        window_seconds = config.get("window_seconds", 60)
-        window_end = run_start
-        window_start = window_end - timedelta(seconds=window_seconds)
+        # Get time window: from last consolidation to now
+        # This is set by check_consolidation_trigger when it triggers us
+        try:
+            redis_time = r.time()
+            window_end_ms = redis_time[0] * 1000 + redis_time[1] // 1000
+        except Exception:
+            window_end_ms = int(run_start.timestamp() * 1000)
+
+        # Get the previous consolidation timestamp
+        last_consolidation = r.get("consolidation:previous_activity_ms")
+        if last_consolidation:
+            window_start_ms = int(last_consolidation)
+        else:
+            # First run ever - look back 5 minutes
+            window_start_ms = window_end_ms - (5 * 60 * 1000)
+
+        # Update previous marker for next run
+        current_activity = r.get("consolidation:last_activity_ms")
+        if current_activity:
+            r.set("consolidation:previous_activity_ms", current_activity)
+
+        logger.info(f"Consolidation window: {window_start_ms} to {window_end_ms} ({(window_end_ms - window_start_ms) / 1000:.0f}s)")
 
         # Get raw buffer entries from all streams
-        streams = ["raw_buffer:text", "raw_buffer:screen", "raw_buffer:notification",
-                   "raw_buffer:calendar", "raw_buffer:environmental"]
+        streams = ["raw_buffer:text", "raw_buffer:audio", "raw_buffer:screen",
+                   "raw_buffer:notification", "raw_buffer:calendar", "raw_buffer:environmental"]
 
         all_entries = []
         for stream in streams:
-            entries = read_stream_entries(r, stream, window_start, window_end)
+            entries = read_stream_entries_ms(r, stream, window_start_ms, window_end_ms)
             all_entries.extend(entries)
 
         result["raw_entries_processed"] = len(all_entries)
@@ -161,23 +283,21 @@ def get_consolidation_config(r, user_id: str) -> Dict[str, Any]:
     }
 
 
-def read_stream_entries(r, stream: str, start: datetime, end: datetime) -> List[Dict]:
-    """Read entries from a Redis stream within the time window."""
+def read_stream_entries_ms(r, stream: str, start_ms: int, end_ms: int) -> List[Dict]:
+    """Read entries from a Redis stream within the time window (using milliseconds)."""
     try:
-        # Convert datetime to Redis stream ID format (milliseconds)
-        start_ms = int(start.timestamp() * 1000)
-        end_ms = int(end.timestamp() * 1000)
-
         # XRANGE to get entries in time window
         entries = r.xrange(stream, min=f"{start_ms}-0", max=f"{end_ms}-9999999999")
 
         result = []
         for entry_id, data in entries:
+            entry_id_str = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+            timestamp_ms = int(entry_id_str.split("-")[0])
             entry = {
-                "id": entry_id.decode() if isinstance(entry_id, bytes) else entry_id,
+                "id": entry_id_str,
                 "stream_type": stream.replace("raw_buffer:", ""),
-                "timestamp": datetime.fromtimestamp(int(entry_id.decode().split("-")[0]) / 1000)
-                            if isinstance(entry_id, bytes) else datetime.fromtimestamp(int(entry_id.split("-")[0]) / 1000),
+                "timestamp_ms": timestamp_ms,
+                "timestamp": datetime.fromtimestamp(timestamp_ms / 1000),
             }
             # Decode data fields
             for key, value in data.items():
@@ -201,17 +321,17 @@ def group_entries_by_time(entries: List[Dict], threshold_ms: int) -> List[List[D
     if not entries:
         return []
 
-    # Sort by timestamp
-    sorted_entries = sorted(entries, key=lambda e: e.get("timestamp", datetime.min))
+    # Sort by timestamp_ms (extracted from stream ID)
+    sorted_entries = sorted(entries, key=lambda e: e.get("timestamp_ms", 0))
 
     groups = []
     current_group = [sorted_entries[0]]
 
     for entry in sorted_entries[1:]:
-        current_ts = entry.get("timestamp", datetime.min)
-        group_ts = current_group[-1].get("timestamp", datetime.min)
+        current_ts = entry.get("timestamp_ms", 0)
+        group_ts = current_group[-1].get("timestamp_ms", 0)
 
-        diff_ms = abs((current_ts - group_ts).total_seconds() * 1000)
+        diff_ms = abs(current_ts - group_ts)
 
         if diff_ms <= threshold_ms:
             current_group.append(entry)
@@ -261,6 +381,7 @@ def calculate_relevance(entry: Dict, priority_rules: List[Dict], config: Dict) -
     stream_type = entry.get("stream_type", "")
     stream_boosts = {
         "text": 0.1,
+        "audio": 0.25,  # Spoken context is highly relevant
         "notification": 0.2,
         "calendar": 0.3,
         "screen": 0.0,
