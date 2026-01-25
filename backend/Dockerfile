@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     stockfish \
     ffmpeg \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching

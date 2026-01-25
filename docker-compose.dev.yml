@@ -104,6 +104,8 @@ services:
       - ./shadow-agent:/shadow-agent
       # Mount data directory for audio files (morning briefs, etc.)
       - ./data:/home/david/jarvis/data
+      # Mount SSH keys for Jetson access
+      - /home/david/.ssh:/root/.ssh:ro
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__
@@ -172,7 +174,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection,autonomy
     environment:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}

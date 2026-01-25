@@ -1,0 +1,83 @@
+version: "3.8"
+
+# Simplified GPU Cluster - NeMo Diarization Only
+# Uses existing faster-whisper for transcription
+
+services:
+  # ============================================
+  # NeMo Speaker Diarization
+  # ============================================
+  nemo-diarization:
+    build:
+      context: .
+      dockerfile: Dockerfile.nemo
+    container_name: nemo-diarization
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - NEMO_CACHE_DIR=/data/cache
+    ports:
+      - "8002:8002"
+    volumes:
+      - /data/nemo-models:/data/models
+      - /data/nemo-cache:/data/cache
+      - /data/speakers:/data/speakers
+      - /data/audio:/data/audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # Speaker Enrollment Service
+  # ============================================
+  speaker-enrollment:
+    build:
+      context: .
+      dockerfile: Dockerfile.enrollment
+    container_name: speaker-enrollment
+    environment:
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+    ports:
+      - "8003:8003"
+    volumes:
+      - /data/speakers:/data/speakers
+      - /data/enrollment-samples:/data/samples
+    depends_on:
+      - nemo-diarization
+    restart: unless-stopped
+
+  # ============================================
+  # Audio Pipeline Worker
+  # ============================================
+  audio-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: audio-worker
+    environment:
+      - WHISPER_URL=http://host.docker.internal:8585
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+      - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      - SARA_BACKEND_URL=http://10.185.1.180:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /data/audio:/data/audio
+    depends_on:
+      - nemo-diarization
+    restart: unless-stopped
+
+networks:
+  default:
+    name: sara-audio-net

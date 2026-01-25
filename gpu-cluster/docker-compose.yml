@@ -1,0 +1,173 @@
+version: "3.8"
+
+# GPU Cluster Services for Sara Cognitive Architecture
+# Target: 10.185.1.8 (6x GTX 1070)
+#
+# GPU Allocation:
+# - GPU 0-1: Riva ASR (streaming transcription)
+# - GPU 2: NeMo diarization
+# - GPU 3-4: VLLM/scene analysis (existing)
+# - GPU 5: Overflow/backup
+
+services:
+  # ============================================
+  # NVIDIA Riva ASR - Speech Recognition
+  # ============================================
+  riva-server:
+    image: nvcr.io/nvidia/riva/riva-speech:2.14.0
+    container_name: riva-server
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0,1
+      - RIVA_API_KEY=${RIVA_API_KEY:-}
+    ports:
+      - "50051:50051"   # gRPC
+      - "8001:8001"     # HTTP health
+    volumes:
+      - riva-models:/data/models
+      - ./riva-config:/config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # Riva Model Setup (init container)
+  # ============================================
+  riva-init:
+    image: nvcr.io/nvidia/riva/riva-speech:2.14.0
+    container_name: riva-init
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    volumes:
+      - riva-models:/data/models
+      - ./riva-config:/config
+    command: >
+      bash -c "
+        if [ ! -f /data/models/.initialized ]; then
+          echo 'Downloading Riva ASR models...';
+          riva-build speech_recognition \
+            /data/models/asr.rmir \
+            /data/models/asr.riva \
+            --decoder_type=flashlight \
+            --acoustic_model=/data/models/conformer_ctc_large.nemo \
+            --language_model=/data/models/lm.binary \
+            --punctuation_model=/data/models/punctuation.nemo;
+          touch /data/models/.initialized;
+          echo 'Riva models initialized';
+        else
+          echo 'Riva models already initialized';
+        fi
+      "
+    profiles:
+      - init
+
+  # ============================================
+  # NeMo Speaker Diarization
+  # ============================================
+  nemo-diarization:
+    build:
+      context: .
+      dockerfile: Dockerfile.nemo
+    container_name: nemo-diarization
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - NEMO_CACHE_DIR=/data/cache
+    ports:
+      - "8002:8002"     # REST API
+    volumes:
+      - nemo-models:/data/models
+      - nemo-cache:/data/cache
+      - speaker-profiles:/data/speakers
+      - ./audio-uploads:/data/audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # Speaker Enrollment Service
+  # ============================================
+  speaker-enrollment:
+    build:
+      context: .
+      dockerfile: Dockerfile.enrollment
+    container_name: speaker-enrollment
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+    ports:
+      - "8003:8003"     # REST API
+    volumes:
+      - speaker-profiles:/data/speakers
+      - ./enrollment-samples:/data/samples
+    depends_on:
+      - nemo-diarization
+    restart: unless-stopped
+
+  # ============================================
+  # Audio Processing Queue (Redis)
+  # ============================================
+  audio-redis:
+    image: redis:7-alpine
+    container_name: audio-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - audio-redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # ============================================
+  # Audio Pipeline Worker
+  # ============================================
+  audio-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: audio-worker
+    environment:
+      - RIVA_SERVER=riva-server:50051
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+      - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
+      - REDIS_URL=redis://audio-redis:6379/0
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+    volumes:
+      - ./audio-uploads:/data/audio
+    depends_on:
+      - riva-server
+      - nemo-diarization
+      - audio-redis
+    restart: unless-stopped
+
+volumes:
+  riva-models:
+  nemo-models:
+  nemo-cache:
+  speaker-profiles:
+  audio-redis-data:
+
+networks:
+  default:
+    name: gpu-cluster-net

@@ -1,0 +1,17 @@
+# Speaker Enrollment Service
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    fastapi==0.109.0 \
+    uvicorn==0.27.0 \
+    httpx==0.26.0 \
+    aiofiles==23.2.1 \
+    python-multipart==0.0.6
+
+COPY enrollment_service.py /app/
+
+EXPOSE 8003
+
+CMD ["uvicorn", "enrollment_service:app", "--host", "0.0.0.0", "--port", "8003"]
