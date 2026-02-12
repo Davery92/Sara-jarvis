@@ -92,7 +92,11 @@ from app.tools.learning import (
     LearningAnalyzeGapsTool,
     LearningFetchSourceTool,
     LearningPathTool,
-    LearningNextSessionTool
+    LearningNextSessionTool,
+    LearningTangentCaptureTool,
+    LearningTangentListTool,
+    LearningKnownDomainsTool,
+    LearningFindAnchorsTool
 )
 from app.tools.morning_brief import MorningBriefTool, WeatherTool
 from app.tools.projects import PROJECT_TOOLS
@@ -111,6 +115,13 @@ from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
 from app.tools.maps import MAP_TOOLS
 from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
+from app.tools.email import EMAIL_TOOLS
+from app.tools.soul import SOUL_TOOLS
+from app.tools.heartbeat import HEARTBEAT_TOOLS
+from app.tools.behavior_router import BEHAVIOR_ROUTER_TOOLS
+from app.tools.personal_knowledge import PKG_TOOLS
+from app.tools.standing_orders import STANDING_ORDER_TOOLS
+from app.tools.content_inbox import CONTENT_INBOX_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -191,13 +202,15 @@ class ToolRegistry:
             ]
         },
         'learning': {
-            'description': 'Manage learning topics, sources, study notes, autonomous research, and personalized learning paths',
+            'description': 'Manage learning topics, sources, study notes, autonomous research, personalized learning paths, tangent capture, known domains, and analogy anchors',
             'tools': [
                 'learning_topic_create', 'learning_topic_list', 'learning_topic_update',
                 'learning_source_add', 'learning_source_list', 'learning_fetch_source',
                 'learning_scratchpad_read', 'learning_scratchpad_update',
                 'learning_research', 'learning_analyze_gaps',
-                'learning_path', 'learning_next_session'
+                'learning_path', 'learning_next_session',
+                'learning_tangent_capture', 'learning_tangent_list',
+                'learning_known_domains', 'learning_find_anchors'
             ]
         },
         'daily': {
@@ -275,6 +288,43 @@ class ToolRegistry:
         'self_knowledge': {
             'description': 'Retrieve detailed self-knowledge about Sara\'s architecture, capabilities, autonomous systems, and limitations',
             'tools': ['get_self_knowledge']
+        },
+        'email': {
+            'description': 'Search, read, and get summaries of emails from synced mailboxes',
+            'tools': ['email_search', 'email_read', 'email_recent']
+        },
+        'soul': {
+            'description': "View and propose changes to Sara's core identity, operating principles, boundaries, and growth areas. The Soul is Sara's persistent self-definition.",
+            'tools': [
+                'view_soul', 'propose_soul_change', 'list_soul_proposals'
+            ]
+        },
+        'heartbeat': {
+            'description': "Manage Sara's heartbeat checklist - dynamic monitors, time-bound reminders, conditional triggers, and the HEARTBEAT.md natural language rules file.",
+            'tools': [
+                'add_heartbeat_item', 'list_heartbeat_items',
+                'remove_heartbeat_item', 'update_heartbeat_item',
+                'read_heartbeat_file', 'update_heartbeat_file'
+            ]
+        },
+        'behavior': {
+            'description': "Route behavior intents to the appropriate system (Soul, Skills, Automation, or Heartbeat) using intelligent classification. Also view unified behavioral configuration.",
+            'tools': ['route_behavior', 'show_behavior_config']
+        },
+        'personal_knowledge': {
+            'description': "Query and store personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
+            'tools': ['query_david_knowledge', 'remember_about_david']
+        },
+        'standing_orders': {
+            'description': "Manage standing orders — pre-authorized autonomous actions Sara can execute without asking. Also view/undo recent autonomous actions.",
+            'tools': [
+                'standing_order_list', 'standing_order_create',
+                'standing_order_modify', 'action_ledger_recent', 'action_undo'
+            ]
+        },
+        'inbox': {
+            'description': "Search and read items from David's content inbox — saved URLs, Reddit posts, PDFs, articles, and text snippets.",
+            'tools': ['inbox_search', 'inbox_read']
         }
     }
 
@@ -406,6 +456,10 @@ class ToolRegistry:
             LearningAnalyzeGapsTool(),
             LearningPathTool(),
             LearningNextSessionTool(),
+            LearningTangentCaptureTool(),
+            LearningTangentListTool(),
+            LearningKnownDomainsTool(),
+            LearningFindAnchorsTool(),
 
             # Morning Brief & Weather Tools
             MorningBriefTool(),
@@ -445,6 +499,27 @@ class ToolRegistry:
 
             # Self-Knowledge Tools (Sara's self-awareness)
             *SELF_KNOWLEDGE_TOOLS,
+
+            # Email Tools
+            *EMAIL_TOOLS,
+
+            # Soul Tools (Sara's identity and self-modification)
+            *SOUL_TOOLS,
+
+            # Heartbeat Tools (dynamic monitoring checklist)
+            *HEARTBEAT_TOOLS,
+
+            # Behavior Router Tools (intelligent routing to appropriate system)
+            *BEHAVIOR_ROUTER_TOOLS,
+
+            # Personal Knowledge Graph Tools (query/remember about David)
+            *PKG_TOOLS,
+
+            # Standing Order Tools (pre-authorized autonomous actions)
+            *STANDING_ORDER_TOOLS,
+
+            # Content Inbox Tools (search/read saved content)
+            *CONTENT_INBOX_TOOLS,
         ]
 
         for tool in tools:

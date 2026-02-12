@@ -1,7 +1,8 @@
 import React from 'react';
-import { ActivityIndicator, View, StyleSheet } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { ActivityIndicator, View, StyleSheet, Platform } from 'react-native';
+import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import * as ExpoLinking from 'expo-linking';
 import { useAuth } from '../context/AuthContext';
 import AuthNavigator from './AuthNavigator';
 import AppNavigator from './AppNavigator';
@@ -17,6 +18,20 @@ import { colors } from '../styles/theme';
 import { navigationRef, onNavigatorReady } from '../services/navigation';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+
+const linking: LinkingOptions<RootStackParamList> = {
+  prefixes: [ExpoLinking.createURL('/'), 'sara://'],
+  config: {
+    screens: {
+      Main: {
+        // Inbox is a stack screen in AppNavigator (not a tab in MainNavigator)
+        screens: {
+          Inbox: 'inbox/share',
+        },
+      },
+    },
+  },
+};
 
 export default function RootNavigator() {
   const { isAuthenticated, loading } = useAuth();
@@ -35,7 +50,7 @@ export default function RootNavigator() {
   console.log('[RootNavigator] Rendering navigator, isAuthenticated:', isAuthenticated);
 
   return (
-    <NavigationContainer ref={navigationRef} onReady={onNavigatorReady}>
+    <NavigationContainer ref={navigationRef} onReady={onNavigatorReady} linking={linking}>
       <Stack.Navigator>
         {isAuthenticated ? (
           <>

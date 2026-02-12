@@ -1,4 +1,5 @@
 """Authentication routes."""
+import logging
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from sqlalchemy.orm import Session
@@ -8,8 +9,25 @@ from app.models.user import User
 from app.schemas.auth import UserCreate, UserLogin, UserResponse
 from app.core.auth import create_access_token, get_cookie_domain
 from app.core.deps import get_current_user
+from app.core.security import rate_limiter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+async def check_auth_rate_limit(request: Request):
+    """Rate limit auth endpoints: 5 attempts per 5 minutes per IP."""
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"auth:{client_ip}"
+    if rate_limiter.is_rate_limited(key, max_requests=5, window_seconds=300):
+        retry_after = rate_limiter.get_retry_after(key, window_seconds=300)
+        logger.warning(f"Auth rate limit exceeded for {client_ip}")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many attempts. Retry after {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 @router.post("/signup", response_model=UserResponse)
@@ -17,7 +35,8 @@ async def signup(
     user_data: UserCreate,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(check_auth_rate_limit),
 ):
     """Register a new user account."""
     existing_user = db.query(User).filter(User.email == user_data.email).first()
@@ -76,7 +95,8 @@ async def login(
     user_data: UserLogin,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(check_auth_rate_limit),
 ):
     """Authenticate user and return access token."""
     user = db.query(User).filter(User.email == user_data.email).first()

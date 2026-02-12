@@ -417,6 +417,408 @@ Generate {card_count} flashcards covering key concepts. Output JSON only."""
             db.rollback()
             return {"status": "error", "error": str(e)}
 
+    # ─── Cognitive Review Modes ──────────────────────────────────────────
+
+    REVIEW_MODES = [
+        "analogy_check",
+        "explain_back",
+        "build_challenge",
+        "connection_map",
+        "gap_detection",
+    ]
+
+    async def generate_review(
+        self,
+        topic_id: str,
+        user_id: str,
+        db: Session,
+        preferred_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate a review exercise using one of 5 cognitive review modes.
+        Selects the best mode based on review history unless a preference is given.
+        """
+        try:
+            topic = db.query(LearningTopic).filter(
+                LearningTopic.id == topic_id,
+                LearningTopic.user_id == user_id
+            ).first()
+            if not topic:
+                return {"status": "error", "error": "Topic not found"}
+
+            # Get chunks for context
+            chunks = db.query(SourceChunk).join(TopicSource).filter(
+                TopicSource.topic_id == topic_id,
+                TopicSource.fetch_status == "fetched"
+            ).limit(15).all()
+
+            # Select mode
+            if preferred_mode and preferred_mode in self.REVIEW_MODES:
+                mode = preferred_mode
+            else:
+                mode = self._select_review_mode(topic_id, user_id, db)
+
+            # Get anchor points for analogy-aware modes
+            anchors = []
+            try:
+                from app.services.anchor_service import anchor_service
+                anchors = await anchor_service.get_active_anchors(topic_id, user_id, db)
+            except Exception:
+                pass
+
+            # Dispatch to the appropriate generator
+            generators = {
+                "analogy_check": self._generate_analogy_check,
+                "explain_back": self._generate_explain_back,
+                "build_challenge": self._generate_build_challenge,
+                "connection_map": self._generate_connection_map,
+                "gap_detection": self._generate_gap_detection,
+            }
+
+            generator = generators[mode]
+            result = await generator(topic, chunks, anchors, user_id, db)
+            result["review_mode"] = mode
+            result["topic_id"] = topic_id
+            result["topic_title"] = topic.title
+            return result
+
+        except Exception as e:
+            logger.error(f"Error generating review: {e}")
+            return {"status": "error", "error": str(e)}
+
+    def _select_review_mode(self, topic_id: str, user_id: str, db: Session) -> str:
+        """Select the best review mode based on history — least-recently-used with variety."""
+        progress_items = db.query(LearningProgress).filter(
+            LearningProgress.topic_id == topic_id,
+            LearningProgress.user_id == user_id
+        ).all()
+
+        # Collect all review_mode_history entries
+        mode_counts: Dict[str, int] = {m: 0 for m in self.REVIEW_MODES}
+        for p in progress_items:
+            for entry in (p.review_mode_history or []):
+                m = entry.get("mode")
+                if m in mode_counts:
+                    mode_counts[m] += 1
+
+        # Pick the least-used mode
+        min_count = min(mode_counts.values())
+        candidates = [m for m, c in mode_counts.items() if c == min_count]
+        return random.choice(candidates)
+
+    async def _generate_analogy_check(
+        self, topic, chunks: List, anchors: List, user_id: str, db: Session
+    ) -> Dict[str, Any]:
+        """Does this analogy still hold? Where does it break?"""
+        from app.core.llm import llm_client
+
+        # Pick an anchor to test
+        if not anchors:
+            return await self._generate_explain_back(topic, chunks, anchors, user_id, db)
+
+        anchor = random.choice(anchors[:3])
+        anchor_dict = anchor if isinstance(anchor, dict) else anchor.to_dict()
+
+        context = "\n\n".join([c.text for c in chunks[:8]])
+
+        prompt = f"""You are a learning coach reviewing David's understanding via analogy testing.
+
+Topic: {topic.title}
+Analogy used: "{anchor_dict.get('anchor_concept', '')}" from the domain of {anchor_dict.get('anchor_domain', '')}
+Bridge: {anchor_dict.get('bridge_description', '')}
+
+Source material:
+{context[:4000]}
+
+Generate a review exercise that tests whether this analogy still holds for a specific sub-concept.
+Pick one specific aspect where the analogy works well AND one where it breaks down.
+
+Output ONLY valid JSON:
+{{
+  "concept": "The specific concept being tested",
+  "prompt": "The question/prompt to present to David (2-3 sentences, conversational)",
+  "analogy_domain": "{anchor_dict.get('anchor_domain', '')}",
+  "hints": ["hint if stuck"],
+  "ideal_response_elements": ["key point 1", "key point 2", "where analogy breaks"]
+}}"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm_client.chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        return self._parse_review_response(result, "analogy_check")
+
+    async def _generate_explain_back(
+        self, topic, chunks: List, anchors: List, user_id: str, db: Session
+    ) -> Dict[str, Any]:
+        """Explain this as if teaching a junior dev."""
+        from app.core.llm import llm_client
+
+        context = "\n\n".join([c.text for c in chunks[:8]])
+
+        # Pick a concept from the chunks
+        prompt = f"""You are a learning coach testing David's ability to explain concepts clearly.
+
+Topic: {topic.title}
+
+Source material:
+{context[:4000]}
+
+Pick ONE specific concept from this topic and create a review exercise where David must explain it as if teaching a junior developer who has never encountered it. The concept should be meaty enough to require real understanding, not a trivial definition.
+
+Output ONLY valid JSON:
+{{
+  "concept": "The specific concept to explain",
+  "prompt": "The scenario/question (e.g., 'A junior dev just asked you: what is X and why should they care? How would you explain it?')",
+  "scenario_context": "Brief context for the teaching scenario",
+  "hints": ["hint if stuck"],
+  "ideal_response_elements": ["key point 1", "key point 2", "key point 3"]
+}}"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm_client.chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        return self._parse_review_response(result, "explain_back")
+
+    async def _generate_build_challenge(
+        self, topic, chunks: List, anchors: List, user_id: str, db: Session
+    ) -> Dict[str, Any]:
+        """Mini design problem requiring the concept."""
+        from app.core.llm import llm_client
+
+        context = "\n\n".join([c.text for c in chunks[:8]])
+
+        prompt = f"""You are a learning coach creating a mini design challenge for David.
+
+Topic: {topic.title}
+
+Source material:
+{context[:4000]}
+
+Create a small, practical design problem that requires David to APPLY a concept from this topic. The challenge should be:
+- Scoped to 5-10 minutes of thinking (not a project)
+- Practical and realistic (something he might actually encounter)
+- Requires understanding, not just recall
+
+Output ONLY valid JSON:
+{{
+  "concept": "The concept being applied",
+  "prompt": "The design challenge (3-5 sentences describing the problem)",
+  "constraints": ["constraint 1", "constraint 2"],
+  "hints": ["hint if stuck"],
+  "ideal_response_elements": ["key design decision 1", "key design decision 2", "tradeoff to address"]
+}}"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm_client.chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        return self._parse_review_response(result, "build_challenge")
+
+    async def _generate_connection_map(
+        self, topic, chunks: List, anchors: List, user_id: str, db: Session
+    ) -> Dict[str, Any]:
+        """How does concept A relate to concept B?"""
+        from app.core.llm import llm_client
+        from app.models.learning import TopicConnection
+
+        # Try to get connected topics for cross-topic connection mapping
+        connections = db.query(TopicConnection).filter(
+            (TopicConnection.source_topic_id == topic.id) |
+            (TopicConnection.target_topic_id == topic.id)
+        ).limit(5).all()
+
+        connected_topics = []
+        for conn in connections:
+            other_id = conn.target_topic_id if conn.source_topic_id == topic.id else conn.source_topic_id
+            other = db.query(LearningTopic).filter(LearningTopic.id == other_id).first()
+            if other:
+                connected_topics.append(other.title)
+
+        context = "\n\n".join([c.text for c in chunks[:8]])
+
+        cross_topic_hint = ""
+        if connected_topics:
+            cross_topic_hint = f"\nRelated topics David is also studying: {', '.join(connected_topics[:3])}\nFeel free to ask about connections across these topics."
+
+        prompt = f"""You are a learning coach testing David's ability to connect concepts.
+
+Topic: {topic.title}
+{cross_topic_hint}
+
+Source material:
+{context[:4000]}
+
+Pick TWO concepts from this material (or one from this topic and one from a related topic) and ask David to explain how they relate to each other. The goal is to test whether he sees the structural connections, not just recalls facts.
+
+Output ONLY valid JSON:
+{{
+  "concept": "Connection between concept A and concept B",
+  "prompt": "The question asking David to map the connection (2-3 sentences)",
+  "concept_a": "First concept",
+  "concept_b": "Second concept",
+  "hints": ["hint if stuck"],
+  "ideal_response_elements": ["key connection 1", "key connection 2", "insight about relationship"]
+}}"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm_client.chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        return self._parse_review_response(result, "connection_map")
+
+    async def _generate_gap_detection(
+        self, topic, chunks: List, anchors: List, user_id: str, db: Session
+    ) -> Dict[str, Any]:
+        """Spot the deliberate error."""
+        from app.core.llm import llm_client
+
+        context = "\n\n".join([c.text for c in chunks[:8]])
+
+        prompt = f"""You are a learning coach creating a "spot the error" exercise for David.
+
+Topic: {topic.title}
+
+Source material:
+{context[:4000]}
+
+Write a short explanation (3-5 sentences) about a concept from this topic that contains ONE deliberate but subtle error. The error should require real understanding to catch — not a typo, but a conceptual mistake (wrong relationship, incorrect assumption, mixed-up cause/effect, etc.).
+
+Output ONLY valid JSON:
+{{
+  "concept": "The concept being tested",
+  "prompt": "Read this explanation and find what's wrong with it:",
+  "explanation_with_error": "The 3-5 sentence explanation containing one deliberate error",
+  "error_description": "What the error is and why it's wrong",
+  "hints": ["hint pointing toward the error area"],
+  "ideal_response_elements": ["identify the error", "explain why it's wrong", "state the correct version"]
+}}"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = await llm_client.chat_completion(messages=messages, max_tokens=1200, temperature=0.7)
+        return self._parse_review_response(result, "gap_detection")
+
+    def _parse_review_response(self, llm_result: Dict, mode: str) -> Dict[str, Any]:
+        """Parse LLM response for review generation."""
+        import json as _json
+        import re as _re
+
+        response = llm_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        json_match = _re.search(r'\{[\s\S]*\}', response)
+        if not json_match:
+            return {"status": "error", "error": f"Failed to generate {mode} review"}
+
+        try:
+            data = _json.loads(json_match.group())
+            data["status"] = "success"
+            return data
+        except _json.JSONDecodeError:
+            return {"status": "error", "error": f"Failed to parse {mode} review"}
+
+    async def submit_review_answer(
+        self,
+        topic_id: str,
+        concept: str,
+        review_mode: str,
+        response: str,
+        quality: Optional[int],
+        user_id: str,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Submit a review response with mode metadata and update progress.
+        If quality is not provided, uses LLM to assess response quality.
+        """
+        try:
+            # Get or create progress for this concept
+            progress = db.query(LearningProgress).filter(
+                LearningProgress.topic_id == topic_id,
+                LearningProgress.user_id == user_id,
+                LearningProgress.concept == concept
+            ).first()
+
+            if not progress:
+                progress = LearningProgress(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    topic_id=topic_id,
+                    concept=concept,
+                    ease_factor=2.5,
+                    interval_days=1,
+                    repetitions=0,
+                    quality_history=[],
+                    review_mode_history=[]
+                )
+                db.add(progress)
+
+            # Use provided quality or default to 3 (correct with difficulty)
+            q = quality if quality is not None else 3
+
+            # Update SM-2 parameters
+            progress.repetitions += 1
+            progress.last_reviewed_at = datetime.now(timezone.utc)
+            progress.review_mode = review_mode
+
+            if q < 3:
+                progress.repetitions = 0
+                progress.interval_days = 1
+            else:
+                if progress.repetitions == 1:
+                    progress.interval_days = 1
+                elif progress.repetitions == 2:
+                    progress.interval_days = 6
+                else:
+                    progress.interval_days = int(progress.interval_days * progress.ease_factor)
+
+            progress.ease_factor = max(
+                1.3,
+                progress.ease_factor + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+            )
+
+            from datetime import timedelta
+            progress.next_review_at = datetime.now(timezone.utc) + timedelta(days=progress.interval_days)
+
+            # Update quality history
+            history = progress.quality_history or []
+            history.append({
+                "date": datetime.now(timezone.utc).isoformat(),
+                "quality": q,
+                "mode": review_mode,
+                "concept": concept,
+            })
+            progress.quality_history = history[-50:]
+
+            # Update review mode history
+            mode_history = progress.review_mode_history or []
+            mode_history.append({
+                "mode": review_mode,
+                "quality": q,
+                "date": datetime.now(timezone.utc).isoformat()
+            })
+            progress.review_mode_history = mode_history[-30:]
+
+            # Update topic mastery
+            recent_scores = [h["quality"] for h in history[-10:]]
+            if recent_scores:
+                avg_quality = sum(recent_scores) / len(recent_scores)
+                new_mastery = avg_quality / 5.0
+                topic = db.query(LearningTopic).filter(LearningTopic.id == topic_id).first()
+                if topic:
+                    current_mastery = topic.mastery_level or 0.0
+                    topic.mastery_level = (current_mastery * 0.7) + (new_mastery * 0.3)
+
+            db.commit()
+
+            return {
+                "status": "success",
+                "quality": q,
+                "review_mode": review_mode,
+                "concept": concept,
+                "progress": {
+                    "repetitions": progress.repetitions,
+                    "ease_factor": round(progress.ease_factor, 3),
+                    "interval_days": progress.interval_days,
+                    "next_review": progress.next_review_at.isoformat() if progress.next_review_at else None
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error submitting review answer: {e}")
+            db.rollback()
+            return {"status": "error", "error": str(e)}
+
     async def get_review_flashcards(
         self,
         user_id: str,

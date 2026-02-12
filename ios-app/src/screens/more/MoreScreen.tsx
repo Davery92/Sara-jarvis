@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
+import apiClient from '../../services/api';
 import { colors, fontSizes } from '../../styles/theme';
 
 interface MenuItem {
@@ -11,10 +13,13 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
+  { name: 'Notes', icon: '📝', label: 'Notes', screen: 'Notes' },
+  { name: 'Calendar', icon: '📅', label: 'Calendar', screen: 'Calendar' },
+  { name: 'Inbox', icon: '📥', label: 'Inbox', screen: 'Inbox' },
+  { name: 'SaraActivity', icon: '🧠', label: "Sara's Mind", screen: 'SaraActivity' },
+  { name: 'Documents', icon: '📄', label: 'Documents', screen: 'Documents' },
   { name: 'Projects', icon: '📋', label: 'Projects', screen: 'Projects' },
   { name: 'Recipes', icon: '🍳', label: 'Recipes', screen: 'Recipes' },
-  { name: 'Documents', icon: '📄', label: 'Documents', screen: 'Documents' },
-  { name: 'Calendar', icon: '📅', label: 'Calendar', screen: 'Calendar' },
   { name: 'Briefings', icon: '☀️', label: 'Morning Brief', screen: 'Briefings' },
   { name: 'Health', icon: '⚕️', label: 'Apple Health', screen: 'Health' },
   { name: 'Settings', icon: '⚙️', label: 'Settings', screen: 'Settings' },
@@ -22,6 +27,19 @@ const menuItems: MenuItem[] = [
 
 export default function MoreScreen() {
   const navigation = useNavigation();
+  const [inboxUnread, setInboxUnread] = useState(0);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      const loadBadges = async () => {
+        try {
+          const stats = await apiClient.getInboxStats();
+          setInboxUnread(stats?.unread || 0);
+        } catch {}
+      };
+      loadBadges();
+    }, [])
+  );
 
   const handleItemPress = (screen: string) => {
     (navigation as any).navigate(screen);
@@ -37,7 +55,14 @@ export default function MoreScreen() {
             style={styles.menuItem}
             onPress={() => handleItemPress(item.screen)}
           >
-            <Text style={styles.menuIcon}>{item.icon}</Text>
+            <View>
+              <Text style={styles.menuIcon}>{item.icon}</Text>
+              {item.name === 'Inbox' && inboxUnread > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{inboxUnread}</Text>
+                </View>
+              )}
+            </View>
             <Text style={styles.menuLabel}>{item.label}</Text>
           </TouchableOpacity>
         ))}
@@ -83,5 +108,22 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: 'center',
     fontWeight: '500',
+  },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -8,
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

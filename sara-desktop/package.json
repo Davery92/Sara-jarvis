@@ -1,6 +1,6 @@
 {
   "name": "sara-desktop",
-  "version": "1.0.39",
+  "version": "1.0.41",
   "description": "Sara Desktop Companion - Activity tracking, screenshots, and cross-device commands",
   "author": "Sara AI <sara@avery.cloud>",
   "type": "commonjs",
@@ -29,18 +29,25 @@
       {
         "from": "sidecar",
         "to": "sidecar",
-        "filter": ["**/*.py", "requirements.txt"]
+        "filter": [
+          "**/*.py",
+          "requirements.txt"
+        ]
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -48,23 +55,31 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://sara-api.avery.cloud/api/updates"
     }
   },
   "dependencies": {
+    "electron-updater": "^6.7.3",
     "ws": "^8.16.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.10",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
+    "@types/ws": "^8.5.10",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
     "concurrently": "^8.2.2",

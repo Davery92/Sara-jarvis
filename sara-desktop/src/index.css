@@ -22,6 +22,8 @@ html, body, #root {
 /* Only the circle window should be draggable */
 .circle-window {
   -webkit-app-region: drag;
+  /* Near-invisible background so Windows doesn't make transparent pixels click-through */
+  background: rgba(0, 0, 0, 0.01);
 }
 
 /* The circle button itself should be clickable, not draggable */

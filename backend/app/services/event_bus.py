@@ -79,6 +79,19 @@ class EventType(str, Enum):
     SHADOW_SUGGESTION_ACCEPTED = "shadow.suggestion_accepted"
     SHADOW_SUGGESTION_DISMISSED = "shadow.suggestion_dismissed"
 
+    # Home Assistant events (reactive engine)
+    HOME_STATE_CHANGED = "home.state_changed"
+    HOME_MOTION_DETECTED = "home.motion_detected"
+    HOME_DOOR_CHANGED = "home.door_changed"
+    HOME_LIGHT_CHANGED = "home.light_changed"
+    HOME_CLIMATE_CHANGED = "home.climate_changed"
+    HOME_ANOMALY_DETECTED = "home.anomaly_detected"
+
+    # Activity & presence events
+    ACTIVITY_STATE_CHANGED = "activity.state_changed"
+    PRESENCE_ROOM_CHANGED = "presence.room_changed"
+    INTERRUPTIBILITY_CHANGED = "interruptibility.changed"
+
     # System events
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"
@@ -132,7 +145,10 @@ class EventBus:
     Enables reactive features like shadow agents, notifications, etc.
     """
 
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+    def __init__(self, redis_url: str = None):
+        if redis_url is None:
+            import os
+            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self.redis_url = redis_url
         self.redis_client: Optional[redis.Redis] = None
         self.pubsub: Optional[redis.client.PubSub] = None

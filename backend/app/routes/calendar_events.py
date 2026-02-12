@@ -2,6 +2,7 @@
 import uuid
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -20,6 +21,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/calendar", tags=["Calendar"])
 
 
+def _to_naive_local(dt: datetime, tz: ZoneInfo) -> datetime:
+    """Convert to naive local time. If already naive, treat as local (no conversion)."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(tz).replace(tzinfo=None)
+    return dt
+
+
 @router.get("/events", response_model=List[CalendarEventResponse])
 async def list_calendar_events(
     start_date: Optional[str] = None,
@@ -28,18 +36,20 @@ async def list_calendar_events(
     db: Session = Depends(get_db)
 ):
     """Get all calendar events."""
+    import os
+    local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
     query = db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id)
 
     if start_date:
         try:
-            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            start_dt = _to_naive_local(datetime.fromisoformat(start_date.replace('Z', '+00:00')), local_tz)
             query = query.filter(CalendarEvent.start_time >= start_dt)
         except:
             pass
 
     if end_date:
         try:
-            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end_dt = _to_naive_local(datetime.fromisoformat(end_date.replace('Z', '+00:00')), local_tz)
             query = query.filter(CalendarEvent.start_time <= end_dt)
         except:
             pass
@@ -51,8 +61,8 @@ async def list_calendar_events(
             id=event.id,
             title=event.title,
             description=event.description,
-            start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
-            end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
+            start_time=event.start_time.isoformat(),
+            end_time=event.end_time.isoformat(),
             location=event.location or None,
             all_day=event.all_day,
             reminder_minutes=event.reminder_minutes,
@@ -64,8 +74,8 @@ async def list_calendar_events(
             ios_calendar_id=getattr(event, 'ios_calendar_id', None),
             ios_calendar_name=getattr(event, 'ios_calendar_name', None),
             read_only=getattr(event, 'read_only', False) or False,
-            created_at=event.created_at.isoformat() + 'Z',
-            updated_at=event.updated_at.isoformat() + 'Z'
+            created_at=event.created_at.isoformat(),
+            updated_at=event.updated_at.isoformat()
         )
         for event in events
     ]
@@ -78,8 +88,11 @@ async def create_calendar_event(
     db: Session = Depends(get_db)
 ):
     """Create a calendar event."""
-    start_dt = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
-    end_dt = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+    import os
+    local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+    # Convert to local time for naive DateTime storage
+    start_dt = _to_naive_local(datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00')), local_tz)
+    end_dt = _to_naive_local(datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00')), local_tz)
 
     # Handle recurrence - use provided rrule or build from friendly recurrence value
     rrule = event_data.rrule
@@ -109,8 +122,8 @@ async def create_calendar_event(
         id=event.id,
         title=event.title,
         description=event.description,
-        start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
-        end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
         location=event.location or None,
         all_day=event.all_day,
         reminder_minutes=event.reminder_minutes,
@@ -122,8 +135,8 @@ async def create_calendar_event(
         ios_calendar_id=getattr(event, 'ios_calendar_id', None),
         ios_calendar_name=getattr(event, 'ios_calendar_name', None),
         read_only=getattr(event, 'read_only', False) or False,
-        created_at=event.created_at.isoformat() + 'Z',
-        updated_at=event.updated_at.isoformat() + 'Z'
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
     )
 
 
@@ -148,9 +161,13 @@ async def update_calendar_event(
     if event_data.description is not None:
         event.description = event_data.description
     if event_data.start_time is not None:
-        event.start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+        import os
+        local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+        event.start_time = _to_naive_local(datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00')), local_tz)
     if event_data.end_time is not None:
-        event.end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+        import os
+        local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+        event.end_time = _to_naive_local(datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00')), local_tz)
     if event_data.location is not None:
         event.location = event_data.location
     if event_data.all_day is not None:
@@ -181,8 +198,8 @@ async def update_calendar_event(
         id=event.id,
         title=event.title,
         description=event.description,
-        start_time=event.start_time.isoformat() + 'Z',  # Indicate UTC
-        end_time=event.end_time.isoformat() + 'Z',  # Indicate UTC
+        start_time=event.start_time.isoformat(),
+        end_time=event.end_time.isoformat(),
         location=event.location or None,
         all_day=event.all_day,
         reminder_minutes=event.reminder_minutes,
@@ -194,8 +211,8 @@ async def update_calendar_event(
         ios_calendar_id=getattr(event, 'ios_calendar_id', None),
         ios_calendar_name=getattr(event, 'ios_calendar_name', None),
         read_only=getattr(event, 'read_only', False) or False,
-        created_at=event.created_at.isoformat() + 'Z',
-        updated_at=event.updated_at.isoformat() + 'Z'
+        created_at=event.created_at.isoformat(),
+        updated_at=event.updated_at.isoformat()
     )
 
 
@@ -228,14 +245,21 @@ async def sync_ios_calendar_events(
     db: Session = Depends(get_db)
 ):
     """Sync events from iOS calendar to Sara."""
+    import os
+    local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+
     synced = 0
     errors = 0
     processed_keys = set()
 
     for event_data in sync_request.events:
         try:
-            start_time = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
-            end_time = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+            # Parse UTC times and convert to local timezone for storage
+            # (DB columns are naive DateTime, so we store local times)
+            start_utc = datetime.fromisoformat(event_data.start_time.replace('Z', '+00:00'))
+            end_utc = datetime.fromisoformat(event_data.end_time.replace('Z', '+00:00'))
+            start_time = _to_naive_local(start_utc, local_tz)
+            end_time = _to_naive_local(end_utc, local_tz)
 
             event_key = f"{event_data.ios_event_id}_{start_time.isoformat()}"
 

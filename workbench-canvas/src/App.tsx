@@ -293,6 +293,49 @@ function App() {
         } catch (err) {
           console.error('Failed to upload 3D model:', err)
         }
+      } else if (ext === 'pdf' || file.type === 'application/pdf') {
+        // Handle PDFs specially - create a blob URL for viewing
+        const blobUrl = URL.createObjectURL(file)
+        const fileData: FileViewerWindowData = {
+          filename: file.name,
+          content: blobUrl,
+          mimeType: 'application/pdf',
+          source: 'local',
+        }
+        openWindow('fileviewer', fileData, {
+          title: file.name,
+          position: { x: 100 + index * 30, y: 100 + index * 30 },
+          width: 800,
+          height: 900,
+        })
+      } else if (file.type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
+        // Handle images - create a blob URL
+        const blobUrl = URL.createObjectURL(file)
+        const fileData: FileViewerWindowData = {
+          filename: file.name,
+          content: blobUrl,
+          mimeType: file.type || `image/${ext}`,
+          source: 'local',
+        }
+        openWindow('fileviewer', fileData, {
+          title: file.name,
+          position: { x: 100 + index * 30, y: 100 + index * 30 },
+          width: 600,
+          height: 500,
+        })
+      } else if (['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt'].includes(ext)) {
+        // Handle Office documents - create blob URL for download
+        const blobUrl = URL.createObjectURL(file)
+        const fileData: FileViewerWindowData = {
+          filename: file.name,
+          content: blobUrl,
+          mimeType: file.type || 'application/octet-stream',
+          source: 'local',
+        }
+        openWindow('fileviewer', fileData, {
+          title: file.name,
+          position: { x: 100 + index * 30, y: 100 + index * 30 },
+        })
       } else {
         const reader = new FileReader()
         reader.onload = (event) => {

@@ -59,6 +59,28 @@ function getLanguageFromFilename(filename: string): string {
   return languageMap[ext] || 'text'
 }
 
+// Check if file is a PDF
+function isPdfFile(filename: string, mimeType?: string): boolean {
+  if (mimeType === 'application/pdf') return true
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return ext === 'pdf'
+}
+
+// Check if file is an image
+function isImageFile(filename: string, mimeType?: string): boolean {
+  if (mimeType?.startsWith('image/')) return true
+  const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico']
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return imageExtensions.includes(ext)
+}
+
+// Check if file is a Word document
+function isWordFile(filename: string, mimeType?: string): boolean {
+  if (mimeType?.includes('wordprocessingml') || mimeType?.includes('msword')) return true
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return ext === 'docx' || ext === 'doc'
+}
+
 // Check if file is likely text-based
 function isTextFile(filename: string, mimeType?: string): boolean {
   if (mimeType?.startsWith('text/')) return true
@@ -84,6 +106,9 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
   const { filename, mimeType, source, projectId, fileId } = data
   const language = getLanguageFromFilename(filename)
   const isMarkdown = language === 'markdown'
+  const isPdf = isPdfFile(filename, mimeType)
+  const isImage = isImageFile(filename, mimeType)
+  const isWord = isWordFile(filename, mimeType)
   const isText = isTextFile(filename, mimeType)
 
   // Fetch content if not provided
@@ -165,6 +190,127 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
     )
   }
 
+  // PDF viewer
+  if (isPdf && content) {
+    // For blob URLs, use object tag; for regular URLs, can use iframe
+    const isBlobUrl = content.startsWith('blob:')
+
+    return (
+      <div className="flex flex-col h-full bg-canvas-bg">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-canvas-border bg-canvas-surface/50">
+          <div className="flex items-center gap-3">
+            <FileText size={18} className="text-red-400" />
+            <span className="text-white font-medium">{filename}</span>
+            <span className="text-xs text-canvas-muted px-2 py-0.5 bg-canvas-elevated rounded">
+              PDF
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={content}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Open in new tab"
+            >
+              <FileText size={18} />
+            </a>
+            <a
+              href={content}
+              download={filename}
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Download file"
+            >
+              <Download size={18} />
+            </a>
+          </div>
+        </div>
+        {/* PDF Embed */}
+        <div className="flex-1 overflow-hidden bg-gray-800">
+          <object
+            data={content}
+            type="application/pdf"
+            className="w-full h-full"
+          >
+            <div className="flex flex-col items-center justify-center h-full text-canvas-muted p-8">
+              <FileText size={64} className="mb-4 opacity-30" />
+              <p className="text-lg mb-2">PDF Preview not available</p>
+              <p className="text-sm text-center mb-4">Your browser may not support inline PDF viewing</p>
+              <a
+                href={content}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2 bg-purple-500 hover:bg-purple-600 rounded-lg text-white transition-colors"
+              >
+                Open PDF in New Tab
+              </a>
+            </div>
+          </object>
+        </div>
+      </div>
+    )
+  }
+
+  // Image viewer
+  if (isImage && content) {
+    return (
+      <div className="flex flex-col h-full bg-canvas-bg">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-canvas-border bg-canvas-surface/50">
+          <div className="flex items-center gap-3">
+            <FileText size={18} className="text-green-400" />
+            <span className="text-white font-medium">{filename}</span>
+            <span className="text-xs text-canvas-muted px-2 py-0.5 bg-canvas-elevated rounded">
+              Image
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={content}
+              download={filename}
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Download file"
+            >
+              <Download size={18} />
+            </a>
+          </div>
+        </div>
+        {/* Image Display */}
+        <div className="flex-1 overflow-auto flex items-center justify-center p-4 bg-gray-900">
+          <img
+            src={content}
+            alt={filename}
+            className="max-w-full max-h-full object-contain"
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // Word document - show download prompt
+  if (isWord) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-canvas-muted">
+        <FileText size={64} className="mb-4 opacity-30 text-blue-400" />
+        <p className="text-lg">Word Document</p>
+        <p className="text-sm mt-1">{filename}</p>
+        <p className="text-sm text-canvas-muted mt-2 text-center max-w-md">
+          Word documents cannot be previewed in the browser.
+          Download to view in Microsoft Word or another compatible app.
+        </p>
+        <a
+          href={content || '#'}
+          download={filename}
+          className="mt-6 px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg text-white transition-colors flex items-center gap-2"
+        >
+          <Download size={16} />
+          Download Document
+        </a>
+      </div>
+    )
+  }
+
   if (!isText) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-canvas-muted">
@@ -172,13 +318,14 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
         <p className="text-lg">Binary file</p>
         <p className="text-sm mt-1">{filename}</p>
         <p className="text-sm text-canvas-muted mt-1">{mimeType || 'Unknown type'}</p>
-        <button
-          onClick={handleDownload}
+        <a
+          href={content || '#'}
+          download={filename}
           className="mt-6 px-4 py-2 bg-purple-500 hover:bg-purple-600 rounded-lg text-white transition-colors flex items-center gap-2"
         >
           <Download size={16} />
           Download File
-        </button>
+        </a>
       </div>
     )
   }

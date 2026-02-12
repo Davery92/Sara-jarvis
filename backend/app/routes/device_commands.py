@@ -43,10 +43,19 @@ class DeviceInfo(BaseModel):
     device_id: str
     hostname: Optional[str]
     platform: Optional[str]
+    friendly_name: Optional[str] = None
     is_online: bool
     is_connected: bool  # Has active WebSocket
     activity_level: str
     last_activity_at: Optional[datetime]
+
+    @property
+    def status(self) -> str:
+        if self.is_connected:
+            return "connected"
+        if self.is_online:
+            return "online"
+        return "offline"
 
 
 class HeartbeatRequest(BaseModel):
@@ -301,15 +310,17 @@ async def get_connected_devices(
 
     devices = []
     for machine in machines:
-        devices.append(DeviceInfo(
+        info = DeviceInfo(
             device_id=machine.device_id,
             hostname=machine.hostname,
             platform=machine.platform,
+            friendly_name=getattr(machine, 'friendly_name', None),
             is_online=machine.is_online,
             is_connected=machine.device_id in connected_ids,
             activity_level=machine.activity_level or "idle",
-            last_activity_at=machine.last_activity_at
-        ))
+            last_activity_at=machine.last_activity_at,
+        )
+        devices.append(info)
 
     return devices
 

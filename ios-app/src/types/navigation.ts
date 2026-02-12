@@ -65,25 +65,28 @@ export type QuickReplyContext = {
   title?: string;
 };
 
+// Heartbeat context passed when opening chat from heartbeat notification (proactive check-ins from Sara)
+export type HeartbeatContext = {
+  title: string;
+  message: string;
+  priority: string;  // 'low', 'normal', 'high'
+};
+
+// Chat screen params (used by Sara tab)
+export type ChatScreenParams = {
+  healthAlert?: HealthAlertContext;
+  nudge?: NudgeContext;
+  quickReply?: QuickReplyContext;
+  heartbeat?: HeartbeatContext;
+  inboxItem?: { id: string; title: string };
+};
+
 // Main Tab Navigator
 export type MainTabParamList = {
-  Home: undefined;
-  Chat: {
-    healthAlert?: HealthAlertContext;
-    nudge?: NudgeContext;
-    quickReply?: QuickReplyContext;
-  } | undefined;
-  Learning: undefined;
-  Notes: undefined;
+  Sara: ChatScreenParams | undefined;
   Fitness: undefined;
+  Learning: undefined;
   More: undefined;
-  Recipes: undefined;
-  Documents: undefined;
-  Calendar: undefined;
-  Briefings: undefined;
-  Health: undefined;
-  Settings: undefined;
-  Projects: undefined;
 };
 
 // Screen Props Types

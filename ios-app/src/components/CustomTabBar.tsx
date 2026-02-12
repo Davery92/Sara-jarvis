@@ -1,19 +1,52 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { colors } from '../styles/theme';
+import apiClient from '../services/api';
+
+// Hook to poll for badge data
+function useSaraBadges() {
+  const [chatBadge, setChatBadge] = useState(false);
+  const [moreBadge, setMoreBadge] = useState(0);
+
+  const fetchBadges = useCallback(async () => {
+    try {
+      const [statusData, inboxData] = await Promise.allSettled([
+        apiClient.get('/api/sara/status'),
+        apiClient.getInboxStats(),
+      ]);
+
+      if (statusData.status === 'fulfilled') {
+        const status = statusData.value as any;
+        setChatBadge((status?.pending_observations || 0) > 0);
+      }
+      if (inboxData.status === 'fulfilled') {
+        const inbox = inboxData.value as any;
+        setMoreBadge(inbox?.unread || 0);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchBadges();
+    const interval = setInterval(fetchBadges, 60000);
+    return () => clearInterval(interval);
+  }, [fetchBadges]);
+
+  return { chatBadge, moreBadge };
+}
 
 export default function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+  const { chatBadge, moreBadge } = useSaraBadges();
+
   return (
     <View style={styles.tabBar}>
       {state.routes.map((route, index) => {
         const { options } = descriptors[route.key];
-        // Ensure label is always a string - tabBarLabel can be a function or React element
         const rawLabel = options.tabBarLabel ?? options.title ?? route.name;
         const label = typeof rawLabel === 'string' ? rawLabel : route.name;
         const isFocused = state.index === index;
 
-        // Get the icon from options
         const icon = options.tabBarIcon
           ? options.tabBarIcon({
               focused: isFocused,
@@ -21,6 +54,10 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
               size: 28,
             })
           : null;
+
+        // Determine badge for this tab
+        const showDot = route.name === 'Sara' && chatBadge;
+        const badgeCount = route.name === 'More' ? moreBadge : 0;
 
         const onPress = () => {
           const event = navigation.emit({
@@ -46,6 +83,14 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
           >
             <View style={styles.iconContainer}>
               {icon}
+              {showDot && <View style={styles.badgeDot} />}
+              {badgeCount > 0 && (
+                <View style={styles.badgeCount}>
+                  <Text style={styles.badgeCountText}>
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                  </Text>
+                </View>
+              )}
             </View>
             <Text
               style={[
@@ -89,5 +134,31 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  badgeDot: {
+    position: 'absolute',
+    top: 4,
+    right: -2,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.error,
+  },
+  badgeCount: {
+    position: 'absolute',
+    top: 0,
+    right: -8,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 3,
+  },
+  badgeCountText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
   },
 });

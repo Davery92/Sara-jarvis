@@ -396,3 +396,418 @@ async def get_recent_audio_events(
     except Exception as e:
         logger.error(f"Failed to get recent audio: {e}")
         return {"events": [], "error": str(e)}
+
+
+# ==========================================
+# SPEAKER ENROLLMENT MANAGEMENT
+# ==========================================
+
+class RecordingRequest(BaseModel):
+    duration_seconds: int = 10  # How long to record
+    prompt: Optional[str] = None  # What the user should say
+
+
+class EnrollmentStatus(BaseModel):
+    status: str  # 'idle', 'recording', 'processing', 'complete', 'error'
+    speaker_id: Optional[str] = None
+    progress: Optional[float] = None  # 0-100
+    samples_collected: int = 0
+    samples_needed: int = 3
+    message: Optional[str] = None
+
+
+# Store recording state in Redis
+ENROLLMENT_STATE_KEY = "sensory:enrollment_state"
+ENROLLMENT_SAMPLES_DIR = "/tmp/enrollment_samples"
+
+
+@router.get("/speakers/enrollment-status")
+async def get_enrollment_status(current_user=Depends(get_current_user)):
+    """Get current enrollment recording status."""
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        state = r.get(ENROLLMENT_STATE_KEY)
+
+        if state:
+            return json.loads(state)
+        return EnrollmentStatus(status="idle").dict()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/speakers/{speaker_id}/start-recording")
+async def start_speaker_recording(
+    speaker_id: str,
+    request: RecordingRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Start recording audio on Jetson for speaker enrollment.
+
+    The Jetson will record for the specified duration and save the audio file.
+    Poll /speakers/enrollment-status for progress.
+    """
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+        # Check if already recording
+        current_state = r.get(ENROLLMENT_STATE_KEY)
+        if current_state:
+            state = json.loads(current_state)
+            if state.get("status") == "recording":
+                return {"status": "error", "message": "Already recording"}
+
+        # Initialize enrollment state
+        state = {
+            "status": "recording",
+            "speaker_id": speaker_id,
+            "progress": 0,
+            "samples_collected": 0,
+            "samples_needed": 3,
+            "duration_seconds": request.duration_seconds,
+            "started_at": datetime.utcnow().isoformat(),
+            "message": f"Recording... Please speak naturally for {request.duration_seconds} seconds."
+        }
+        r.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))  # 5 min TTL
+
+        # Trigger Jetson to record via SSH
+        # The recording script will update Redis with progress
+        import asyncio
+        asyncio.create_task(record_on_jetson(speaker_id, request.duration_seconds, r))
+
+        return {"status": "started", "speaker_id": speaker_id, "duration": request.duration_seconds}
+
+    except Exception as e:
+        logger.error(f"Failed to start recording: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def record_on_jetson(speaker_id: str, duration: int, redis_client):
+    """Background task to trigger Jetson recording."""
+    import shutil
+
+    try:
+        # Create local directory for samples
+        sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
+        os.makedirs(sample_dir, exist_ok=True)
+
+        # Count existing samples
+        existing = len([f for f in os.listdir(sample_dir) if f.endswith('.wav')]) if os.path.exists(sample_dir) else 0
+        sample_num = existing
+
+        # Update state
+        state = {
+            "status": "recording",
+            "speaker_id": speaker_id,
+            "progress": 10,
+            "samples_collected": existing,
+            "samples_needed": 3,
+            "message": f"Recording sample {sample_num + 1}..."
+        }
+        redis_client.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))
+
+        # SSH to Jetson and record using arecord
+        output_file = f"/tmp/enrollment_{speaker_id}_{sample_num}.wav"
+
+        process = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "ConnectTimeout=5", f"david@{JETSON_IP}",
+            f"arecord -d {duration} -f cd -t wav {output_file}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        # Wait for recording with progress updates
+        for i in range(duration):
+            await asyncio.sleep(1)
+            progress = 10 + int((i / duration) * 70)
+            state["progress"] = progress
+            state["message"] = f"Recording... {duration - i - 1}s remaining"
+            redis_client.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))
+
+        await process.wait()
+
+        # Copy file from Jetson
+        state["status"] = "processing"
+        state["progress"] = 85
+        state["message"] = "Transferring audio..."
+        redis_client.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))
+
+        local_file = f"{sample_dir}/sample_{sample_num}.wav"
+        scp_process = await asyncio.create_subprocess_exec(
+            "scp", f"david@{JETSON_IP}:{output_file}", local_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await scp_process.wait()
+
+        # Clean up on Jetson
+        await asyncio.create_subprocess_exec(
+            "ssh", f"david@{JETSON_IP}", f"rm -f {output_file}"
+        )
+
+        # Update final state
+        samples_now = len([f for f in os.listdir(sample_dir) if f.endswith('.wav')])
+        state["status"] = "complete"
+        state["progress"] = 100
+        state["samples_collected"] = samples_now
+        state["message"] = f"Sample {sample_num + 1} recorded. {3 - samples_now} more needed." if samples_now < 3 else "All samples collected! Ready to enroll."
+        redis_client.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))
+
+        logger.info(f"Recording complete for {speaker_id}, sample {sample_num}")
+
+    except Exception as e:
+        logger.error(f"Recording failed: {e}")
+        state = {
+            "status": "error",
+            "speaker_id": speaker_id,
+            "progress": 0,
+            "message": f"Recording failed: {str(e)}"
+        }
+        redis_client.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))
+
+
+@router.post("/speakers/{speaker_id}/enroll")
+async def enroll_speaker(
+    speaker_id: str,
+    display_name: Optional[str] = None,
+    current_user=Depends(get_current_user)
+):
+    """
+    Enroll a speaker using collected audio samples.
+
+    Must have at least 1 sample (3 recommended) in the samples directory.
+    """
+    try:
+        sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
+
+        if not os.path.exists(sample_dir):
+            return {"status": "error", "message": "No samples found. Record samples first."}
+
+        samples = [f for f in os.listdir(sample_dir) if f.endswith('.wav')]
+        if len(samples) == 0:
+            return {"status": "error", "message": "No audio samples found."}
+
+        # Copy samples to GPU cluster
+        gpu_sample_dir = f"/home/david/data/speakers/{speaker_id}_samples"
+
+        # Create directory on GPU cluster
+        mkdir_result = subprocess.run(
+            ["ssh", f"david@{GPU_CLUSTER_IP}", f"mkdir -p {gpu_sample_dir}"],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Copy all samples
+        audio_paths = []
+        for sample in samples:
+            local_path = f"{sample_dir}/{sample}"
+            remote_path = f"{gpu_sample_dir}/{sample}"
+
+            scp_result = subprocess.run(
+                ["scp", local_path, f"david@{GPU_CLUSTER_IP}:{remote_path}"],
+                capture_output=True,
+                timeout=30
+            )
+
+            if scp_result.returncode == 0:
+                # Path inside NeMo container
+                audio_paths.append(f"/data/speakers/{speaker_id}_samples/{sample}")
+
+        if len(audio_paths) == 0:
+            return {"status": "error", "message": "Failed to transfer samples to GPU cluster."}
+
+        # Call NeMo enrollment API
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{NEMO_URL}/enroll",
+                json={
+                    "speaker_id": speaker_id,
+                    "audio_paths": audio_paths
+                }
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Speaker {speaker_id} enrolled successfully")
+
+                # Clear enrollment state
+                r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+                r.delete(ENROLLMENT_STATE_KEY)
+
+                return {
+                    "status": "success",
+                    "speaker_id": speaker_id,
+                    "display_name": display_name or speaker_id,
+                    "num_samples": len(audio_paths)
+                }
+            else:
+                return {"status": "error", "message": f"NeMo enrollment failed: {response.text}"}
+
+    except Exception as e:
+        logger.error(f"Enrollment failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.delete("/speakers/{speaker_id}")
+async def delete_speaker(
+    speaker_id: str,
+    current_user=Depends(get_current_user)
+):
+    """Delete an enrolled speaker."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.delete(f"{NEMO_URL}/speakers/{speaker_id}")
+
+            if response.status_code == 200:
+                # Also clean up local samples
+                sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
+                if os.path.exists(sample_dir):
+                    import shutil
+                    shutil.rmtree(sample_dir)
+
+                # Clean up on GPU cluster
+                subprocess.run(
+                    ["ssh", f"david@{GPU_CLUSTER_IP}",
+                     f"rm -rf /home/david/data/speakers/{speaker_id}_samples /home/david/data/speakers/{speaker_id}.json"],
+                    capture_output=True,
+                    timeout=10
+                )
+
+                return {"status": "success", "message": f"Speaker {speaker_id} deleted"}
+            else:
+                return {"status": "error", "message": f"Failed to delete: {response.text}"}
+
+    except Exception as e:
+        logger.error(f"Delete speaker failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/speakers/{speaker_id}/clear-samples")
+async def clear_speaker_samples(
+    speaker_id: str,
+    current_user=Depends(get_current_user)
+):
+    """Clear recorded samples for a speaker (to start over)."""
+    try:
+        sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
+        if os.path.exists(sample_dir):
+            import shutil
+            shutil.rmtree(sample_dir)
+            os.makedirs(sample_dir)
+
+        # Reset enrollment state
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        state = {
+            "status": "idle",
+            "speaker_id": speaker_id,
+            "samples_collected": 0,
+            "samples_needed": 3,
+            "message": "Samples cleared. Ready to record."
+        }
+        r.setex(ENROLLMENT_STATE_KEY, 60, json.dumps(state))
+
+        return {"status": "success", "message": "Samples cleared"}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/speakers/{speaker_id}/samples")
+async def get_speaker_samples(
+    speaker_id: str,
+    current_user=Depends(get_current_user)
+):
+    """Get info about collected samples for a speaker."""
+    try:
+        sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
+
+        if not os.path.exists(sample_dir):
+            return {"samples": [], "count": 0}
+
+        samples = []
+        for f in sorted(os.listdir(sample_dir)):
+            if f.endswith('.wav'):
+                path = os.path.join(sample_dir, f)
+                samples.append({
+                    "filename": f,
+                    "size_bytes": os.path.getsize(path),
+                    "created": datetime.fromtimestamp(os.path.getctime(path)).isoformat()
+                })
+
+        return {"samples": samples, "count": len(samples)}
+
+    except Exception as e:
+        return {"samples": [], "count": 0, "error": str(e)}
+
+
+# WebSocket connection to Jetson for wake word control
+import websockets
+
+@router.post("/voice-agent/listening")
+async def set_voice_listening(
+    request: Request,
+    current_user=Depends(get_current_user)
+):
+    """Enable or disable wake word listening on the Jetson voice agent."""
+    try:
+        body = await request.json()
+        enabled = body.get("enabled", True)
+
+        # Connect to Jetson voice agent WebSocket
+        uri = f"ws://{JETSON_IP}:8765"
+
+        async with websockets.connect(uri, close_timeout=5) as ws:
+            # Send command
+            await ws.send(json.dumps({
+                "type": "set_listening",
+                "enabled": enabled
+            }))
+
+            # Wait for confirmation
+            try:
+                response = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                data = json.loads(response)
+                if data.get("type") == "listening_status":
+                    return {
+                        "status": "success",
+                        "listening_enabled": data.get("enabled", enabled)
+                    }
+            except asyncio.TimeoutError:
+                pass
+
+            return {
+                "status": "success",
+                "listening_enabled": enabled
+            }
+
+    except Exception as e:
+        logger.error(f"Failed to set voice listening: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/voice-agent/listening")
+async def get_voice_listening(current_user=Depends(get_current_user)):
+    """Get current wake word listening status from Jetson voice agent."""
+    try:
+        uri = f"ws://{JETSON_IP}:8765"
+
+        async with websockets.connect(uri, close_timeout=5) as ws:
+            # Request status
+            await ws.send(json.dumps({"type": "get_status"}))
+
+            try:
+                response = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                data = json.loads(response)
+                if data.get("type") == "listening_status":
+                    return {
+                        "status": "success",
+                        "listening_enabled": data.get("enabled", True)
+                    }
+            except asyncio.TimeoutError:
+                pass
+
+            return {"status": "unknown", "listening_enabled": True}
+
+    except Exception as e:
+        logger.error(f"Failed to get voice listening status: {e}")
+        return {"status": "error", "listening_enabled": True}

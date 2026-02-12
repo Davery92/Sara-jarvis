@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface FloatingCircleProps {
   chatOpen?: boolean
@@ -145,6 +145,26 @@ class SmokeRing {
 export default function FloatingCircle({ chatOpen, onClick, onRightClick }: FloatingCircleProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const smokeRingRef = useRef<SmokeRing | null>(null)
+  const [attentionCount, setAttentionCount] = useState(0)
+
+  // Fetch attention count periodically
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const baseUrl = (window as any).__SARA_API_URL__ || 'http://10.185.1.180:8000'
+        const res = await fetch(`${baseUrl}/autonomy/attention/count`, { credentials: 'include' })
+        if (res.ok) {
+          const data = await res.json()
+          setAttentionCount(data.unread || 0)
+        }
+      } catch {
+        // Best-effort
+      }
+    }
+    fetchCount()
+    const interval = setInterval(fetchCount, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -180,8 +200,8 @@ export default function FloatingCircle({ chatOpen, onClick, onRightClick }: Floa
 
   return (
     <div className="w-full h-full flex items-center justify-center p-2" style={{ background: 'transparent' }}>
-      {/* Container for smoke ring and buttons - p-2 on parent creates draggable border */}
-      <div className="flex items-center gap-4 no-drag">
+      {/* Container: parent div is draggable (inherits from .circle-window), only buttons/canvas are no-drag */}
+      <div className="flex items-center gap-4">
         {/* Quick Note button - left side */}
         <button
           onClick={handleQuickNote}
@@ -211,6 +231,15 @@ export default function FloatingCircle({ chatOpen, onClick, onRightClick }: Floa
             className="absolute inset-0 w-full h-full"
             style={{ width: '100px', height: '100px', background: 'transparent' }}
           />
+          {/* Attention count badge */}
+          {attentionCount > 0 && (
+            <div
+              className="absolute -top-1 -right-1 min-w-[20px] h-5 rounded-full flex items-center justify-center text-xs font-bold text-white no-drag"
+              style={{ background: 'rgba(20, 184, 166, 0.9)', padding: '0 5px' }}
+            >
+              {attentionCount > 9 ? '9+' : attentionCount}
+            </div>
+          )}
         </button>
 
         {/* Quick Timer button - right side */}

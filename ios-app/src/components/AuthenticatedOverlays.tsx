@@ -2,20 +2,21 @@
  * AuthenticatedOverlays Component
  *
  * Container for overlay components that should only be visible when authenticated.
- * Includes TimerOverlayContainer and PushToTalkButton.
+ * Includes TimerOverlayContainer and FloatingAssistant (Sara orb/mini-chat overlay).
  * Also handles authenticated-only initialization like push notifications.
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Platform, AppState, AppStateStatus } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import TimerOverlayContainer from './TimerOverlayContainer';
-import { PushToTalkButton } from './PushToTalkButton';
+import FloatingAssistant from './sara/FloatingAssistant';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
 import { navigateToChat } from '../services/navigation';
+import apiClient from '../services/api';
 
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -63,6 +64,14 @@ export const AuthenticatedOverlays: React.FC = () => {
             console.log('[AuthenticatedOverlays] Quick reply from notification:', message);
             navigateToChat({
               quickReply: { message, nudgeType: context?.nudgeType, title: context?.title }
+            });
+          });
+
+          // Set up heartbeat tap handler - proactive check-ins from Sara
+          pushNotificationService.setOnHeartbeatTapped((title, message, priority) => {
+            console.log('[AuthenticatedOverlays] Heartbeat notification tapped:', title);
+            navigateToChat({
+              heartbeat: { title, message, priority }
             });
           });
 
@@ -125,15 +134,42 @@ export const AuthenticatedOverlays: React.FC = () => {
       }
     };
 
+    // Log presence — tells Sara the app is open
+    const logPresence = async (activityType: string) => {
+      try {
+        await apiClient.post('/api/presence', { activity_type: activityType, platform: 'ios' });
+      } catch {}
+    };
+
+    // Check backend health on startup
+    const checkHealth = async () => {
+      try {
+        const data = await apiClient.get('/health');
+        if ((data as any)?.status === 'degraded') {
+          console.log('[AuthenticatedOverlays] Backend health: degraded');
+        }
+      } catch {}
+    };
+
     // Run all initializations
     initNotifications();
     initBackgroundHealthSync();
     syncHealth();
     syncIOSCalendar();
+    logPresence('app_open');
+    checkHealth();
+
+    // Log presence on app resume
+    const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      if (nextState === 'active') {
+        logPresence('app_resume');
+      }
+    });
 
     // Cleanup on unmount
     return () => {
       pushNotificationService.cleanup();
+      appStateSubscription.remove();
     };
   }, [isAuthenticated]);
 
@@ -145,7 +181,7 @@ export const AuthenticatedOverlays: React.FC = () => {
   return (
     <>
       <TimerOverlayContainer />
-      <PushToTalkButton />
+      <FloatingAssistant />
     </>
   );
 };

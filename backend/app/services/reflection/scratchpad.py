@@ -5,6 +5,7 @@ Manages observations, patterns, and hypotheses that enable
 the reflection agent to identify trends and propose improvements.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -154,9 +155,9 @@ class ReflectionScratchpad:
                 "agent": subject_agent,
                 "dimension": subject_dimension,
                 "summary": summary,
-                "details": details,
+                "details": json.dumps(details) if details else None,
                 "confidence": confidence,
-                "evidence": evidence_refs,
+                "evidence": json.dumps(evidence_refs) if evidence_refs else None,
                 "pattern_id": pattern_id,
                 "expires": expires_at,
             }
@@ -323,7 +324,7 @@ class ReflectionScratchpad:
                 "dimension": affected_dimension,
                 "confidence": confidence,
                 "proposed_action": proposed_action,
-                "metadata": metadata,
+                "metadata": json.dumps(metadata) if metadata else None,
             }
         )
         await self.db.commit()

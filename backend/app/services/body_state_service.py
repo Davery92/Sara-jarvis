@@ -228,7 +228,9 @@ class BodyStateService:
         signals['workouts'] = [dict(w._mapping) for w in workouts]
 
         # First activity today
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Convert to UTC for DB comparisons (DB stores timestamps in UTC)
+        today_start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = today_start_local.astimezone(ZoneInfo('UTC'))
         first_activity = db.execute(text("""
             SELECT MIN(activity_time) as first_activity FROM (
                 SELECT created_at as activity_time FROM presence_log
@@ -241,8 +243,11 @@ class BodyStateService:
 
         if first_activity and first_activity.first_activity:
             signals['first_activity'] = first_activity.first_activity
+            # DB returns UTC - if naive, treat as UTC then convert to user TZ
             if signals['first_activity'].tzinfo is None:
-                signals['first_activity'] = signals['first_activity'].replace(tzinfo=self.tz)
+                signals['first_activity'] = signals['first_activity'].replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+            else:
+                signals['first_activity'] = signals['first_activity'].astimezone(self.tz)
 
         # Message count today (for cognitive load)
         msg_count = db.execute(text("""
@@ -277,7 +282,9 @@ class BodyStateService:
         user_tz = 'America/New_York'
 
         # Average wake time - IMPORTANT: Convert to user's timezone before extracting hour/date
-        # Otherwise late-night activity (11 PM local) becomes next day's "first activity" in UTC
+        # Normalize timestamps in UNION: presence_log is tz-aware, episode is naive (UTC)
+        # Then convert uniformly to user timezone for grouping and extraction
+        # Filter: >= 4 AM (exclude late night), <= 10 AM (exclude days user didn't use app until later)
         wake_times = db.execute(text("""
             SELECT EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) +
                    EXTRACT(MINUTE FROM MIN(activity_time AT TIME ZONE :tz))/60.0 as wake_hour,
@@ -286,11 +293,12 @@ class BodyStateService:
                 SELECT created_at as activity_time FROM presence_log
                 WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL '14 days'
                 UNION ALL
-                SELECT created_at as activity_time FROM episode
+                SELECT created_at AT TIME ZONE 'UTC' as activity_time FROM episode
                 WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL '14 days' AND role = 'user'
             ) combined
             GROUP BY DATE(activity_time AT TIME ZONE :tz)
-            HAVING EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) >= 4  -- Filter out late night activity (before 4 AM)
+            HAVING EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) >= 4
+               AND EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) <= 10
         """), {"user_id": user_id, "tz": user_tz}).fetchall()
 
         if wake_times:
@@ -300,16 +308,17 @@ class BodyStateService:
                 patterns['avg_wake_hour'] = sum(wake_hours) / len(wake_hours)
                 patterns['wake_hour_std'] = self._calculate_std(wake_hours)
 
-        # Average meal times by type - also convert to user timezone
+        # Average meal times by type
+        # NOTE: food_log stores naive timestamps in EASTERN time (not UTC!) - extract hour directly
         for meal_type in ['breakfast', 'lunch', 'dinner']:
             meal_times = db.execute(text("""
-                SELECT EXTRACT(HOUR FROM logged_at AT TIME ZONE :tz) +
-                       EXTRACT(MINUTE FROM logged_at AT TIME ZONE :tz)/60.0 as meal_hour
+                SELECT EXTRACT(HOUR FROM logged_at) +
+                       EXTRACT(MINUTE FROM logged_at)/60.0 as meal_hour
                 FROM food_log
                 WHERE user_id = :user_id
                   AND meal_type = :meal_type
                   AND logged_at >= NOW() - INTERVAL '14 days'
-            """), {"user_id": user_id, "meal_type": meal_type, "tz": user_tz}).fetchall()
+            """), {"user_id": user_id, "meal_type": meal_type}).fetchall()
 
             if meal_times:
                 meal_hours = [float(m.meal_hour) for m in meal_times if m.meal_hour is not None]
@@ -317,13 +326,14 @@ class BodyStateService:
                     patterns[f'avg_{meal_type}_hour'] = sum(meal_hours) / len(meal_hours)
 
         # Average daily message count - also use user timezone for date grouping
+        # Use double AT TIME ZONE for consistent handling of naive timestamps
         daily_msgs = db.execute(text("""
-            SELECT COUNT(*) as count, DATE(created_at AT TIME ZONE :tz) as day
+            SELECT COUNT(*) as count, DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE :tz) as day
             FROM episode
             WHERE user_id = :user_id
               AND created_at >= NOW() - INTERVAL '14 days'
               AND role = 'user'
-            GROUP BY DATE(created_at AT TIME ZONE :tz)
+            GROUP BY DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE :tz)
         """), {"user_id": user_id, "tz": user_tz}).fetchall()
 
         if daily_msgs:
@@ -802,10 +812,10 @@ class BodyStateService:
 
         # Check meal timing
         meals = signals.get('meals', [])
-        # Convert meal timestamps to user timezone for comparison
+        # food_log stores naive timestamps in EASTERN time (not UTC!)
         for meal in meals:
             if meal['logged_at'].tzinfo is None:
-                meal['logged_at'] = meal['logged_at'].replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+                meal['logged_at'] = meal['logged_at'].replace(tzinfo=self.tz)
             else:
                 meal['logged_at'] = meal['logged_at'].astimezone(self.tz)
         meals_today = [m for m in meals if m['logged_at'].date() == now.date()]

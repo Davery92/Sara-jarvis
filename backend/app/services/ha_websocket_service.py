@@ -197,6 +197,20 @@ class HAWebsocketService:
         except Exception as e:
             logger.debug(f"Could not send to raw buffer: {e}")
 
+        # Bridge to reactive engine (event bus + activity state machine)
+        try:
+            from app.services.ha_reactive_bridge import bridge_ha_event
+            await bridge_ha_event(
+                entity_id=entity_id,
+                domain=domain,
+                from_state=from_state,
+                to_state=to_state,
+                attributes=attributes,
+                changed_at=changed_at,
+            )
+        except Exception as e:
+            logger.debug(f"Reactive bridge failed: {e}")
+
         logger.debug(f"Logged: {entity_id} {from_state} -> {to_state}")
 
     async def _log_activity(

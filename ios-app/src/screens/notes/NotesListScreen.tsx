@@ -25,6 +25,8 @@ export default function NotesListScreen({ navigation }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [folderNoteCounts, setFolderNoteCounts] = useState<Record<number, number>>({});
+
   useEffect(() => {
     loadData();
   }, [selectedFolder]);
@@ -32,14 +34,24 @@ export default function NotesListScreen({ navigation }: Props) {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [notesData, foldersData] = await Promise.all([
+      const [notesData, foldersData, allNotes] = await Promise.all([
         selectedFolder
           ? notesService.getNotesByFolder(selectedFolder)
-          : notesService.getRootNotes(), // Only show root-level notes when not in a folder
+          : notesService.getRootNotes(),
         notesService.getAllFolders(),
+        notesService.getAllNotes(),
       ]);
       setNotes(notesData);
       setFolders(foldersData);
+
+      // Count notes per folder
+      const counts: Record<number, number> = {};
+      for (const note of allNotes) {
+        if (note.folder_id) {
+          counts[note.folder_id] = (counts[note.folder_id] || 0) + 1;
+        }
+      }
+      setFolderNoteCounts(counts);
     } catch (error) {
       console.error('Failed to load notes:', error);
       Alert.alert('Error', 'Failed to load notes');
@@ -137,16 +149,20 @@ export default function NotesListScreen({ navigation }: Props) {
 
   const filteredNotes = notes;
 
-  const renderFolder = ({ item }: { item: Folder }) => (
-    <TouchableOpacity
-      style={styles.folderItem}
-      onPress={() => handleFolderPress(item)}
-    >
-      <Text style={styles.folderIcon}>📁</Text>
-      <Text style={styles.folderName}>{item.name}</Text>
-      <Text style={styles.chevron}>›</Text>
-    </TouchableOpacity>
-  );
+  const renderFolder = ({ item }: { item: Folder }) => {
+    const count = folderNoteCounts[item.id] || 0;
+    return (
+      <TouchableOpacity
+        style={styles.folderItem}
+        onPress={() => handleFolderPress(item)}
+      >
+        <Text style={styles.folderIcon}>📁</Text>
+        <Text style={styles.folderName}>{item.name}</Text>
+        {count > 0 && <Text style={styles.folderCount}>({count})</Text>}
+        <Text style={styles.chevron}>›</Text>
+      </TouchableOpacity>
+    );
+  };
 
   const renderNote = ({ item }: { item: Note }) => (
     <NoteListItem
@@ -338,6 +354,11 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: fontSizes.md,
     fontWeight: '500',
+  },
+  folderCount: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    marginRight: spacing.sm,
   },
   chevron: {
     color: colors.textMuted,

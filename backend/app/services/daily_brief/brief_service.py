@@ -27,8 +27,8 @@ class DailyBriefService:
         self.moment_layer = MomentLayer()
 
         # LLM settings - use LOCAL_LLM_URL for heavy synthesis, falls back to local Ollama
-        self.fast_model = "gpt-oss:20b"
-        self.full_model = "gpt-oss:120b"
+        self.fast_model = "qwen3-coder-next"
+        self.full_model = "qwen3-coder-next"
         # Use dedicated local LLM for synthesis (not the configured OPENAI_BASE_URL which may be Gemini)
         self.llm_base_url = os.environ.get("LOCAL_LLM_URL", "http://100.104.68.115:11434/v1")
 

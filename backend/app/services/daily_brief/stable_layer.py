@@ -62,7 +62,8 @@ class StableLayer:
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=1500,
-                temperature=0.7
+                temperature=0.7,
+                model="qwen3-coder-next"
             )
             return response["choices"][0]["message"]["content"]
         except Exception as e:

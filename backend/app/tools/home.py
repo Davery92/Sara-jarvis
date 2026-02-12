@@ -10,9 +10,25 @@ from app.services.ha_control_service import ha_control
 from app.core.config import settings
 from app.core.timezone import USER_TIMEZONE
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+import os
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _get_async_session_maker():
+    """Create async session maker for database operations."""
+    database_url = os.getenv("DATABASE_URL")
+    if database_url.startswith("postgresql://"):
+        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+    elif database_url.startswith("postgresql+psycopg://"):
+        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    else:
+        async_url = database_url
+    engine = create_async_engine(async_url, echo=False)
+    return sessionmaker(engine, class_=AsyncSession, expire_on_commit=False), engine
 
 
 class HomeGetDevicesTool(BaseTool):
@@ -790,7 +806,7 @@ class HomeScheduleActionTool(BaseTool):
                 description = f"{action.capitalize()} {name}"
 
             # Insert into database
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 result = await session.execute(
@@ -816,6 +832,7 @@ class HomeScheduleActionTool(BaseTool):
                 )
                 action_id = result.scalar()
                 await session.commit()
+            await engine.dispose()
 
             # Format time for response
             time_str = scheduled_dt.strftime("%I:%M %p on %B %d")
@@ -874,7 +891,7 @@ class HomeListScheduledActionsTool(BaseTool):
 
     async def execute(self, user_id: str, include_executed: bool = False) -> ToolResult:
         try:
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 if include_executed:
@@ -897,6 +914,7 @@ class HomeListScheduledActionsTool(BaseTool):
 
                 result = await session.execute(query, {"user_id": user_id})
                 rows = result.fetchall()
+            await engine.dispose()
 
             if not rows:
                 return ToolResult(
@@ -970,7 +988,7 @@ class HomeCancelScheduledActionTool(BaseTool):
 
     async def execute(self, user_id: str, action_id: int) -> ToolResult:
         try:
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 # Check if action exists and belongs to user
@@ -984,9 +1002,11 @@ class HomeCancelScheduledActionTool(BaseTool):
                 row = result.fetchone()
 
                 if not row:
+                    await engine.dispose()
                     return ToolResult(success=False, message="Scheduled action not found")
 
                 if row.status != 'pending':
+                    await engine.dispose()
                     return ToolResult(success=False, message=f"Action already {row.status}")
 
                 # Cancel it
@@ -999,6 +1019,7 @@ class HomeCancelScheduledActionTool(BaseTool):
                     {"id": action_id}
                 )
                 await session.commit()
+            await engine.dispose()
 
             return ToolResult(
                 success=True,
@@ -1084,8 +1105,8 @@ class HomeStatusTool(BaseTool):
                         "state": state  # locked/unlocked
                     })
 
-                # Climate/thermostat
-                elif domain == "climate":
+                # Climate/thermostat (skip unavailable entities — removed devices)
+                elif domain == "climate" and state not in ("unavailable", "unknown"):
                     attrs = entity.get("attributes", {})
                     status["climate"].append({
                         "name": name,

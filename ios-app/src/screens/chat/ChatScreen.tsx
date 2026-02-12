@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import {
   View,
   FlatList,
@@ -11,32 +11,49 @@ import {
   ActivityIndicator,
   Modal,
   Pressable,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext } from '../../types/navigation';
+import * as Haptics from 'expo-haptics';
+import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext } from '../../types/navigation';
 import { Message } from '../../types/api';
+import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
 import { chatService } from '../../services/chat';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
 import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
+import ContentCard from '../../components/cards/ContentCard';
+import SuggestedActions from '../../components/chat/SuggestedActions';
+import ToolStatusIndicator from '../../components/chat/ToolStatusIndicator';
 import { colors, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
 
-type Props = MainTabScreenProps<'Chat'> | { isEmbedded?: boolean };
+type Props = MainTabScreenProps<'Sara'> | MainTabScreenProps<'Chat'> | {
+  isEmbedded?: boolean;
+  onBriefCollapse?: () => void;
+  navigation?: any;
+  route?: any;
+};
 
-export default function ChatScreen(props: Props) {
+function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   // Handle both standalone and embedded modes
   const isEmbedded = 'isEmbedded' in props && props.isEmbedded;
+  const onBriefCollapse = 'onBriefCollapse' in props ? props.onBriefCollapse : undefined;
   const navigation = 'navigation' in props ? props.navigation : undefined;
   const route = 'route' in props ? props.route : undefined;
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  // Content cards and suggested actions state
+  const [pendingCards, setPendingCards] = useState<ContentCardType[]>([]);
+  const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
+  const [activeToolStatus, setActiveToolStatus] = useState<ToolStatus | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [voiceInitialized, setVoiceInitialized] = useState(false);
   const [continuousVoiceMode, setContinuousVoiceMode] = useState(false);
@@ -48,6 +65,7 @@ export default function ChatScreen(props: Props) {
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+  const messagesRef = useRef<Message[]>([]);
   const streamingMessageRef = useRef('');
   const isRecordingRef = useRef(false);
   const shouldResumeListening = useRef(false);
@@ -55,11 +73,42 @@ export default function ChatScreen(props: Props) {
   const handledHealthAlertRef = useRef<string | null>(null);
   const handledNudgeRef = useRef<string | null>(null);
   const handledQuickReplyRef = useRef<string | null>(null);
+  const handledHeartbeatRef = useRef<string | null>(null);
+
+  // Track background state for resuming chat
+  const wasStreamingWhenBackgroundedRef = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   // Track pending contexts to send after component is ready
   const pendingHealthAlertRef = useRef<HealthAlertContext | null>(null);
   const pendingNudgeRef = useRef<NudgeContext | null>(null);
   const pendingQuickReplyRef = useRef<QuickReplyContext | null>(null);
+  const pendingHeartbeatRef = useRef<HeartbeatContext | null>(null);
+  // Counter to trigger the processing effect when a pending ref is set
+  const [pendingContextTrigger, setPendingContextTrigger] = useState(0);
+  const pendingInboxItemRef = useRef<{ id: string; title: string } | null>(null);
+  const handledInboxItemRef = useRef<string | null>(null);
+
+  // Keep latest messages in a ref so async voice/text handlers don't use stale closures.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // Handle inbox item discussion from navigation params
+  useEffect(() => {
+    if (!route || !navigation) return;
+    const inboxItem = route.params?.inboxItem as { id: string; title: string } | undefined;
+    if (!inboxItem) return;
+
+    if (handledInboxItemRef.current === inboxItem.id) return;
+    handledInboxItemRef.current = inboxItem.id;
+
+    console.log('[Chat] Inbox item received, queuing for discussion:', inboxItem);
+    pendingInboxItemRef.current = inboxItem;
+    setPendingContextTrigger(t => t + 1);
+
+    navigation.setParams({ inboxItem: undefined });
+  }, [route?.params?.inboxItem, navigation]);
 
   // Handle health alert from push notification
   useEffect(() => {
@@ -74,6 +123,7 @@ export default function ChatScreen(props: Props) {
 
     console.log('[Chat] Health alert received, queuing for conversation:', healthAlert);
     pendingHealthAlertRef.current = healthAlert;
+    setPendingContextTrigger(t => t + 1);
 
     // Clear the params
     navigation.setParams({ healthAlert: undefined });
@@ -92,6 +142,7 @@ export default function ChatScreen(props: Props) {
 
     console.log('[Chat] Nudge received, queuing for conversation:', nudge);
     pendingNudgeRef.current = nudge;
+    setPendingContextTrigger(t => t + 1);
 
     // Clear the params
     navigation.setParams({ nudge: undefined });
@@ -110,10 +161,30 @@ export default function ChatScreen(props: Props) {
 
     console.log('[Chat] Quick reply received:', quickReply);
     pendingQuickReplyRef.current = quickReply;
+    setPendingContextTrigger(t => t + 1);
 
     // Clear the params
     navigation.setParams({ quickReply: undefined });
   }, [route?.params?.quickReply, navigation]);
+
+  // Handle heartbeat notification (proactive check-ins from Sara)
+  useEffect(() => {
+    if (!route || !navigation) return;
+    const heartbeat = route.params?.heartbeat;
+    if (!heartbeat) return;
+
+    // Don't re-handle the same heartbeat
+    const heartbeatKey = `${heartbeat.title}-${heartbeat.message.slice(0, 20)}`;
+    if (handledHeartbeatRef.current === heartbeatKey) return;
+    handledHeartbeatRef.current = heartbeatKey;
+
+    console.log('[Chat] Heartbeat notification received, queuing for conversation:', heartbeat);
+    pendingHeartbeatRef.current = heartbeat;
+    setPendingContextTrigger(t => t + 1);
+
+    // Clear the params
+    navigation.setParams({ heartbeat: undefined });
+  }, [route?.params?.heartbeat, navigation]);
 
   // Load conversation history on mount
   useEffect(() => {
@@ -124,9 +195,24 @@ export default function ChatScreen(props: Props) {
       try {
         setIsLoadingHistory(true);
 
-        // Get active conversation from backend
-        const activeResponse = await apiClient.get('/api/conversations/active');
-        const savedConversationId = activeResponse.data?.conversation_id;
+        let savedConversationId: string | null = null;
+
+        // First, check for a cross-device active session (e.g. started on desktop)
+        try {
+          const sessionData = await chatService.getActiveSession();
+          if (sessionData.active && sessionData.session?.conversation_id) {
+            savedConversationId = sessionData.session.conversation_id;
+            console.log('[Chat] Resuming cross-device session:', savedConversationId, 'from', sessionData.session.last_device);
+          }
+        } catch {
+          // Non-critical — fall through to conversations/active
+        }
+
+        // Fall back to the per-device active conversation
+        if (!savedConversationId) {
+          const activeResponse = await apiClient.get('/api/conversations/active');
+          savedConversationId = (activeResponse as any)?.conversation_id || null;
+        }
 
         if (!savedConversationId) {
           console.log('[Chat] No active conversation found');
@@ -140,7 +226,7 @@ export default function ChatScreen(props: Props) {
           `/api/conversations/${savedConversationId}/messages?limit=100`
         );
 
-        const messagesData = messagesResponse.data;
+        const messagesData = messagesResponse as any;
 
         if (messagesData && messagesData.length > 0) {
           // Convert Episode format to Message format
@@ -182,6 +268,106 @@ export default function ChatScreen(props: Props) {
     fetchModels();
   }, []);
 
+  // Handle app state changes (background/foreground)
+  // When app goes to background while streaming, we need to reload conversation
+  // when returning to get the completed response
+  useEffect(() => {
+    const reloadConversationHistory = async () => {
+      try {
+        let reloadId = conversationId;
+
+        // If we don't have a conversationId yet (new conversation where the
+        // final_response SSE event never arrived), discover it from the backend.
+        if (!reloadId) {
+          console.log('[Chat] No conversationId — discovering from backend...');
+          // Try the stored active conversation first
+          try {
+            const activeResponse = await apiClient.get('/api/conversations/active');
+            reloadId = (activeResponse as any)?.conversation_id || null;
+          } catch {
+            // ignore — best-effort
+          }
+          // Fall back to the most recent conversation
+          if (!reloadId) {
+            try {
+              const convList = await apiClient.get('/api/conversations/list?limit=1') as any[];
+              if (convList?.length > 0) {
+                reloadId = convList[0].conversation_id;
+              }
+            } catch {
+              // ignore — best-effort
+            }
+          }
+          if (!reloadId) {
+            console.log('[Chat] No conversation found, cannot reload');
+            return;
+          }
+          // Persist the discovered id so future reloads and saves work
+          setConversationId(reloadId);
+        }
+
+        console.log('[Chat] Reloading conversation after returning from background...', reloadId);
+        const messagesResponse = await apiClient.get(
+          `/api/conversations/${reloadId}/messages?limit=100`
+        );
+
+        const messagesData = messagesResponse as any;
+
+        if (messagesData && messagesData.length > 0) {
+          const loadedMessages: Message[] = messagesData.map((ep: any) => ({
+            id: ep.id,
+            role: ep.role,
+            content: ep.content,
+            created_at: ep.created_at,
+            episode_id: ep.id,
+          }));
+
+          setMessages(loadedMessages);
+          console.log(`[Chat] Reloaded ${loadedMessages.length} messages`);
+        }
+      } catch (error) {
+        console.error('[Chat] Error reloading conversation history:', error);
+      }
+    };
+
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      console.log('[Chat] AppState changed:', appStateRef.current, '->', nextAppState);
+
+      // App is going to background
+      if (appStateRef.current === 'active' && nextAppState.match(/inactive|background/)) {
+        if (isStreaming) {
+          console.log('[Chat] App backgrounded while streaming - will reload on return');
+          wasStreamingWhenBackgroundedRef.current = true;
+        }
+      }
+
+      // App is returning to foreground
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        if (wasStreamingWhenBackgroundedRef.current) {
+          console.log('[Chat] App returned from background - reloading conversation');
+          // Don't reset flag yet — the XHR error callback may fire after this handler.
+          // Delay the reset so the error handler can still see the flag and suppress the alert.
+          setTimeout(() => {
+            wasStreamingWhenBackgroundedRef.current = false;
+          }, 2000);
+          setIsStreaming(false);
+          setStreamingMessage('');
+          streamingMessageRef.current = '';
+          // Reload conversation to get completed response
+          reloadConversationHistory();
+        }
+      }
+
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+
+    return () => {
+      subscription.remove();
+    };
+  }, [conversationId, isStreaming]);
+
   // Save active conversation when conversation_id changes
   useEffect(() => {
     const saveActiveConversation = async () => {
@@ -214,16 +400,25 @@ export default function ChatScreen(props: Props) {
     };
   }, []);
 
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
-    }
-  }, [messages, streamingMessage]);
+  // Expose sendMessage to parent via ref
+  useImperativeHandle(ref, () => ({
+    sendMessage: (text: string) => handleSendMessage(text),
+  }));
 
-  const handleSendMessage = async (messageText: string, images?: ImageAttachment[]) => {
+  const handleSendMessage = async (messageText: string, images?: ImageAttachment[], inboxItemId?: string) => {
+    // Clear previous suggestions when sending new message
+    setSuggestedActions([]);
+    setPendingCards([]);
+    setActiveToolStatus(null);
+
+    // Collapse brief when typing (embedded mode)
+    if (isEmbedded && onBriefCollapse) {
+      onBriefCollapse();
+    }
+
+    // Haptic feedback
+    try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
+
     // Add user message immediately
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -232,7 +427,7 @@ export default function ChatScreen(props: Props) {
       created_at: new Date().toISOString(),
     };
 
-    const updatedMessages = [...messages, userMessage];
+    const updatedMessages = [...messagesRef.current, userMessage];
     setMessages(updatedMessages);
     setIsStreaming(true);
     setStreamingMessage('');
@@ -251,6 +446,17 @@ export default function ChatScreen(props: Props) {
         images,  // Pass images to the service
         model: selectedModel,  // Pass selected model
         ephemeral: isEphemeral,  // Pass ephemeral mode
+        inboxItemId,  // Pass inbox item for discussion context
+        source: isEmbedded ? 'ios' : 'ios',
+        onContentCard: (card: any) => {
+          setPendingCards(prev => [...prev, card]);
+        },
+        onToolStatus: (status: ToolStatus) => {
+          setActiveToolStatus(status.status === 'executing' ? status : null);
+        },
+        onSuggestedActions: (actions: SuggestedAction[]) => {
+          setSuggestedActions(actions);
+        },
       },
       // onChunk - called for each piece of streaming text
       (chunk: string) => {
@@ -259,20 +465,26 @@ export default function ChatScreen(props: Props) {
       },
       // onComplete - called when streaming finishes
       (newConversationId: string, episodeId?: string) => {
-        // Add the complete assistant message with episode_id for rating
+        // Haptic feedback on complete
+        try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+
+        // Add the complete assistant message with episode_id and cards
         const assistantMessage: Message = {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
           content: streamingMessageRef.current,
           created_at: new Date().toISOString(),
           episode_id: episodeId,  // Include episode_id for star rating
+          cards: [...pendingCards],  // Attach accumulated cards
         };
 
-        console.log('[Chat] 📝 Creating assistant message with episode_id:', episodeId);
+        console.log('[Chat] 📝 Creating assistant message with episode_id:', episodeId, 'cards:', pendingCards.length);
         setMessages((prev) => [...prev, assistantMessage]);
         setStreamingMessage('');
         streamingMessageRef.current = '';
         setIsStreaming(false);
+        setPendingCards([]);
+        setActiveToolStatus(null);
 
         // Always update conversation_id if backend provides one
         console.log('[Chat] 📨 Received conversation_id from backend:', newConversationId);
@@ -293,6 +505,15 @@ export default function ChatScreen(props: Props) {
         console.error('Chat error:', error);
         setIsStreaming(false);
         setStreamingMessage('');
+        streamingMessageRef.current = '';
+
+        // If the app was backgrounded during streaming, don't show error -
+        // the AppState handler will reload the completed response
+        if (wasStreamingWhenBackgroundedRef.current) {
+          console.log('[Chat] Suppressing error - app was backgrounded during stream, will reload on foreground');
+          return;
+        }
+
         Alert.alert(
           'Error',
           'Failed to send message. Please check your connection and try again.'
@@ -336,7 +557,7 @@ export default function ChatScreen(props: Props) {
       pendingNudgeRef.current = null;
 
       setTimeout(() => {
-        // Add Sara's nudge as her message first, then user responds
+        // Add Sara's nudge as her message — user can reply naturally
         const saraMessage: Message = {
           id: `sara-nudge-${Date.now()}`,
           role: 'assistant',
@@ -344,28 +565,7 @@ export default function ChatScreen(props: Props) {
           created_at: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, saraMessage]);
-
-        // Build contextual response based on nudge type
-        let userResponse: string;
-        switch (nudge.nudgeType) {
-          case 'morning_checkin':
-            userResponse = "Hey Sara! I saw your check-in. What's on my schedule today?";
-            break;
-          case 'missed_meal':
-          case 'late_breakfast':
-          case 'late_lunch':
-          case 'late_dinner':
-            userResponse = "Thanks for the reminder about eating. What should I have?";
-            break;
-          case 'bedtime':
-            userResponse = "I know, I know... I should go to bed. What do I have tomorrow morning?";
-            break;
-          default:
-            userResponse = `I got your message: "${nudge.title}". What do you think I should do?`;
-        }
-
-        console.log('[Chat] Sending nudge response:', userResponse);
-        handleSendMessage(userResponse);
+        console.log('[Chat] Added nudge message from Sara');
       }, 300);
       return;
     }
@@ -381,7 +581,39 @@ export default function ChatScreen(props: Props) {
       }, 300);
       return;
     }
-  }, [isStreaming, isLoadingHistory]);
+
+    // Process heartbeat notification (proactive check-ins from Sara)
+    if (pendingHeartbeatRef.current) {
+      const heartbeat = pendingHeartbeatRef.current;
+      pendingHeartbeatRef.current = null;
+
+      setTimeout(() => {
+        // Add Sara's heartbeat message to the chat - user can respond naturally
+        const saraMessage: Message = {
+          id: `sara-heartbeat-${Date.now()}`,
+          role: 'assistant',
+          content: heartbeat.message,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, saraMessage]);
+        console.log('[Chat] Added heartbeat message from Sara');
+      }, 300);
+      return;
+    }
+
+    // Process inbox item discussion
+    if (pendingInboxItemRef.current) {
+      const inboxItem = pendingInboxItemRef.current;
+      pendingInboxItemRef.current = null;
+
+      setTimeout(() => {
+        const userMessage = `Let's talk about this: ${inboxItem.title}`;
+        console.log('[Chat] Sending inbox item discussion:', inboxItem.id);
+        handleSendMessage(userMessage, undefined, inboxItem.id);
+      }, 300);
+      return;
+    }
+  }, [isStreaming, isLoadingHistory, pendingContextTrigger]);
 
   const handleVoiceMessage = async (audioUri: string) => {
     if (!voiceInitialized) {
@@ -393,7 +625,7 @@ export default function ChatScreen(props: Props) {
       setIsStreaming(true);
       setStreamingMessage('Transcribing...');
 
-      // Transcribe audio using native iOS speech recognition
+      // Transcribe audio with backend Whisper endpoint.
       const transcribedText = await voiceService.transcribeAudio(audioUri);
 
       if (!transcribedText || transcribedText.trim().length === 0) {
@@ -418,9 +650,10 @@ export default function ChatScreen(props: Props) {
 
       setMessages((prev) => [...prev, userMessage]);
       setStreamingMessage('Thinking...');
+      streamingMessageRef.current = '';
 
       // Send transcribed text through regular chat (same as text messages)
-      const updatedMessages = [...messages, userMessage];
+      const updatedMessages = [...messagesRef.current, userMessage];
       const conversationMessages = updatedMessages.filter(m => m.id !== 'welcome');
 
       await chatService.sendMessage(
@@ -454,14 +687,19 @@ export default function ChatScreen(props: Props) {
           streamingMessageRef.current = '';
           setIsStreaming(false);
 
-          if (newConversationId && !conversationId) {
+          if (newConversationId && newConversationId !== conversationId) {
             setConversationId(newConversationId);
           }
 
           // Speak the response using native iOS TTS (emojis will be stripped)
           setIsPlayingAudio(true);
-          await voiceService.speak(responseText);
-          setIsPlayingAudio(false);
+          try {
+            await voiceService.speak(responseText);
+          } catch (ttsError) {
+            console.error('[Chat] TTS playback failed:', ttsError);
+          } finally {
+            setIsPlayingAudio(false);
+          }
 
           // Resume listening if in continuous mode
           console.log('[Chat] TTS finished. Checking resume:', {
@@ -606,12 +844,33 @@ export default function ChatScreen(props: Props) {
       <View>
         {streamingMessage ? (
           <MessageBubble message={tempMessage} />
+        ) : activeToolStatus ? (
+          <ToolStatusIndicator toolName={activeToolStatus.tool} status={activeToolStatus.status} />
         ) : (
           <StreamingIndicator />
         )}
       </View>
     );
   };
+
+  // Handle card actions (navigate or send message)
+  const handleCardAction = useCallback((action: any) => {
+    if (action.action === 'navigate' && action.target && navigation) {
+      navigation.navigate(action.target, action.params || {});
+    } else if (action.message) {
+      handleSendMessage(action.message);
+    }
+  }, [navigation]);
+
+  // Handle suggested action tap
+  const handleSuggestedAction = useCallback((action: SuggestedAction) => {
+    if (action.action === 'navigate' && action.target && navigation) {
+      navigation.navigate(action.target);
+    } else if (action.message) {
+      handleSendMessage(action.message);
+    }
+    setSuggestedActions([]);
+  }, [navigation]);
 
   // Get display name for selected model
   const selectedModelName = availableModels?.models?.find(m => m.id === selectedModel)?.name || selectedModel;
@@ -624,7 +883,7 @@ export default function ChatScreen(props: Props) {
   }, {} as Record<string, ChatModel[]>) || {};
 
   return (
-    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={['bottom']}>
+    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={isEmbedded ? [] : ['bottom']}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -705,6 +964,9 @@ export default function ChatScreen(props: Props) {
           </Pressable>
         </Modal>
 
+        {/* Sara Status Bar - hidden in embedded mode (shown in IntelligentBrief) */}
+        {!isEmbedded && <SaraStatusBar />}
+
         {/* Messages List */}
         <FlatList
           ref={flatListRef}
@@ -735,6 +997,11 @@ export default function ChatScreen(props: Props) {
           </TouchableOpacity>
         )}
 
+        {/* Suggested Actions */}
+        {suggestedActions.length > 0 && !isStreaming && (
+          <SuggestedActions actions={suggestedActions} onAction={handleSuggestedAction} />
+        )}
+
         {/* Input */}
         <ChatInput
           onSend={handleSendMessage}
@@ -749,6 +1016,92 @@ export default function ChatScreen(props: Props) {
     </SafeAreaView>
   );
 }
+
+const ChatScreen = forwardRef(ChatScreenInner);
+export default ChatScreen;
+
+// --- Sara Status Bar Component ---
+const EMOTION_EMOJI: Record<string, string> = {
+  curious: '🤔', calm: '😌', alert: '⚡', concerned: '😟',
+  happy: '😊', focused: '🎯', neutral: '😐', reflective: '🪞', attentive: '👀',
+};
+
+function SaraStatusBar() {
+  const [status, setStatus] = useState<any>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const data = await apiClient.get('/api/sara/status');
+        setStatus(data);
+      } catch {
+        // Graceful degradation - renders nothing
+      }
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!status) return null;
+
+  const emoji = EMOTION_EMOJI[status.emotional_state] || '🤖';
+  const thought = status.latest_thought
+    ? (status.latest_thought.length > 60 ? status.latest_thought.slice(0, 60) + '...' : status.latest_thought)
+    : null;
+
+  return (
+    <TouchableOpacity
+      onPress={() => setExpanded(!expanded)}
+      style={statusBarStyles.container}
+      activeOpacity={0.7}
+    >
+      <View style={statusBarStyles.row}>
+        <Text style={statusBarStyles.emoji}>{emoji}</Text>
+        <Text style={statusBarStyles.state}>Sara is {status.emotional_state}</Text>
+        {thought && <Text style={statusBarStyles.thought} numberOfLines={1}>{thought}</Text>}
+        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color="rgba(255,255,255,0.3)" />
+      </View>
+      {expanded && (
+        <View style={statusBarStyles.details}>
+          {status.watching_for && (
+            <Text style={statusBarStyles.detail}>👀 {status.watching_for}</Text>
+          )}
+          {status.last_action && (
+            <Text style={statusBarStyles.detail}>⚡ Last: {status.last_action.slice(0, 80)}</Text>
+          )}
+          {status.david_energy != null && (
+            <Text style={statusBarStyles.detail}>🔋 Your energy: {(status.david_energy * 100).toFixed(0)}%</Text>
+          )}
+          {status.pkg_facts_count > 0 && (
+            <Text style={statusBarStyles.detail}>🧠 {status.pkg_facts_count} facts about you</Text>
+          )}
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+const statusBarStyles = StyleSheet.create({
+  container: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  emoji: { fontSize: 14 },
+  state: { color: 'rgba(255,255,255,0.5)', fontSize: 12 },
+  thought: { flex: 1, color: 'rgba(255,255,255,0.3)', fontSize: 11, fontStyle: 'italic' },
+  details: { marginTop: 6, gap: 3 },
+  detail: { color: 'rgba(255,255,255,0.4)', fontSize: 11 },
+});
 
 const styles = StyleSheet.create({
   container: {

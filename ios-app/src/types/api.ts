@@ -56,6 +56,7 @@ export interface Message {
   episode_id?: string;  // For rating episodes
   metadata?: Record<string, any>;
   attachments?: Attachment[];
+  cards?: any[];  // Content cards from tool execution
 }
 
 export interface Attachment {

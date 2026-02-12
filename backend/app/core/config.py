@@ -9,14 +9,14 @@ class Settings(BaseSettings):
     domain: str = "sara.avery.cloud"
     frontend_url: str = "https://sara.avery.cloud"
     backend_url: str = "https://sara.avery.cloud/api"
-    
+
     # LLM Configuration
     ai_provider: str = "local"  # Options: local, gemini, openai, claude, custom
     openai_base_url: str = "http://100.104.68.115:11434/v1"
     openai_model: str = "gpt-oss:120b"
-    openai_api_key: str = "dummy"
-    anthropic_api_key: str = ""  # Separate key for Anthropic Claude API
-    gemini_api_key: str = ""  # Separate key for Google Gemini API
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
     embedding_base_url: str = "http://10.185.1.8:11434"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     # LLM Failover Configuration
     llm_primary_url: str = "http://100.104.68.115:11434/v1"
     llm_fallback_url: str = "http://10.185.1.8:11434/v1"
-    llm_request_timeout: float = 8.0  # Short timeout for failover detection
+    llm_fallback_model: str = "gpt-oss:latest"  # Model available on fallback endpoint
+    llm_request_timeout: float = 60.0  # Timeout for LLM requests (120B model needs time)
     llm_health_check_interval: int = 30  # seconds between health checks
     llm_health_check_timeout: float = 5.0  # timeout for health check requests
     llm_recovery_checks_required: int = 3  # successful checks to mark as healthy
@@ -34,10 +35,10 @@ class Settings(BaseSettings):
     bg_llm_primary_model: str = "gpt-oss:120b"
     bg_llm_fallback_url: str = "http://100.104.68.115:11434/v1"
     bg_llm_fallback_model: str = "gpt-oss:20b"
-    
+
     # Search / Reranker / Caching
     search_provider: str = "tavily"  # Options: searxng, tavily
-    tavily_api_key: str = "REDACTED_TAVILY_KEY"
+    tavily_api_key: str = ""
     searxng_base_url: str = "http://10.185.1.8:4000"
     searxng_timeout_s: float = 3.0
     searxng_language: str = "en"
@@ -51,9 +52,9 @@ class Settings(BaseSettings):
     # Domain policy
     domain_boosts: Dict[str, float] = {}
     domain_denylist: List[str] = []
-    
-    # Security
-    jwt_secret: str = "sara-hub-jwt-secret-change-in-production"
+
+    # Security — secrets loaded from .env, no hardcoded defaults
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24 * 7  # 1 week
     cookie_domain: str = ".sara.avery.cloud"
@@ -69,24 +70,24 @@ class Settings(BaseSettings):
         "http://10.185.1.180",
         "http://10.185.1.188",
     ]
-    
-    # Database
-    database_url: str = "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    
+
+    # Database — loaded from .env
+    database_url: str = ""
+
     # Storage
     minio_url: str = "http://minio:9000"
     minio_bucket: str = "sara-docs"
     minio_access_key: str = "sara"
-    minio_secret_key: str = "sara1234"
-    
+    minio_secret_key: str = ""
+
     # Scheduling
     timezone: str = "America/New_York"
 
-    # Home Assistant
+    # Home Assistant — token loaded from .env
     ha_host: str = "10.185.1.61"
     ha_port: int = 8123
-    ha_token: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjODhkZGQ0ZWVlOWI0ODNjOTIwMTU1YTA0ZTM3YTk0NCIsImlhdCI6MTc2NTU2OTczNiwiZXhwIjoyMDgwOTI5NzM2fQ.oLO_hR-RzJFP-TsrKWEteDZbUReVEUdtENIeMAE5Teg"
-    
+    ha_token: str = ""
+
     # Memory settings
     memory_chunk_size: int = 700
     memory_chunk_overlap: int = 150
@@ -96,7 +97,32 @@ class Settings(BaseSettings):
     memory_compaction_daily_minute: int = 10
     memory_compaction_weekly_day: int = 6  # Sunday
     memory_compaction_weekly_hour: int = 3  # 3 AM
-    
+
+    # Microsoft Graph Email Integration — secrets loaded from .env
+    msgraph_client_id: str = ""
+    msgraph_client_secret: str = ""
+    msgraph_tenant_id: str = ""
+    msgraph_mailboxes: List[str] = ["davery@riskninja.ai", "devadmin@riskninja.ai"]
+    email_sync_interval_minutes: int = 3
+
+    # Sentry Error Tracking
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+    sentry_traces_sample_rate: float = 0.1
+
+    # Skills System Configuration
+    skills_enabled: bool = True
+    skills_dirs: List[str] = ["backend/skills"]
+    skills_hot_reload: bool = True
+
+    # Autonomy Evolution Feature Flags (Cortana Evolution)
+    autonomy_traces_enabled: bool = True         # Phase 0: action tracing
+    autonomy_structured_plan: bool = False        # Phase 1: 6-phase cycle with structured plan
+    autonomy_policy_engine: bool = False          # Phase 1: policy gating on tool execution
+    autonomy_attention_enabled: bool = False       # Phase 2: attention queue for deferred items
+    autonomy_missions_enabled: bool = False        # Phase 2: mission engine
+    autonomy_policy_candidates_enabled: bool = False  # Phase 3: dream→policy candidates
+
     class Config:
         env_file = ".env"
 

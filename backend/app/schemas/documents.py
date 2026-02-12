@@ -15,6 +15,17 @@ class DocumentResponse(BaseModel):
     updated_at: str
 
 
+class Model3DResponse(BaseModel):
+    id: str
+    filename: str
+    display_name: str
+    file_format: str
+    file_size: int
+    download_url: str
+    created_at: str
+    updated_at: str
+
+
 class DocumentChunkResponse(BaseModel):
     id: str
     document_id: str

@@ -21,9 +21,9 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
   const [clarificationTask, setClarificationTask] = useState<BackgroundTask | null>(null);
   const [dismissedTaskId, setDismissedTaskId] = useState<string | null>(null);
 
-  // Start polling when provider mounts
+  // Start polling when provider mounts (30s default, scales to 60s when idle)
   useEffect(() => {
-    backgroundTaskService.startPolling(5000);
+    backgroundTaskService.startPolling(30000);
 
     return () => {
       backgroundTaskService.stopPolling();

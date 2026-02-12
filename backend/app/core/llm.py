@@ -80,6 +80,7 @@ class LLMClientWithFailover:
         self.primary_url = settings.llm_primary_url
         self.fallback_url = settings.llm_fallback_url
         self.model = settings.openai_model
+        self.fallback_model = getattr(settings, 'llm_fallback_model', None) or self.model
         self.api_key = settings.openai_api_key
 
         # Timeout configuration
@@ -251,7 +252,8 @@ class LLMClientWithFailover:
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Send chat completion with automatic failover.
@@ -270,7 +272,9 @@ class LLMClientWithFailover:
             )
 
         client, url = self._get_active_client_and_url()
-        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens)
+        model_for_url = self.fallback_model if url == self.fallback_url else None
+        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens, model_override=model_for_url)
+        req_timeout = timeout or self.request_timeout
 
         try:
             # Track request count for the endpoint being used
@@ -279,7 +283,7 @@ class LLMClientWithFailover:
             else:
                 self.fallback_status.total_requests += 1
 
-            response = await client.post("/chat/completions", json=payload)
+            response = await client.post("/chat/completions", json=payload, timeout=req_timeout)
             response.raise_for_status()
 
             result = response.json()
@@ -307,7 +311,11 @@ class LLMClientWithFailover:
                     self.primary_status.failover_events += 1
                     self.fallback_status.total_requests += 1
 
-                    response = await self._fallback_client.post("/chat/completions", json=payload)
+                    fallback_payload = self._build_payload(
+                        messages, tools, tool_choice, temperature, max_tokens,
+                        model_override=self.fallback_model
+                    )
+                    response = await self._fallback_client.post("/chat/completions", json=fallback_payload, timeout=req_timeout)
                     response.raise_for_status()
 
                     result = response.json()
@@ -335,11 +343,12 @@ class LLMClientWithFailover:
         tools: Optional[List[Dict]],
         tool_choice: str,
         temperature: float,
-        max_tokens: Optional[int]
+        max_tokens: Optional[int],
+        model_override: Optional[str] = None
     ) -> Dict[str, Any]:
         """Build request payload for OpenAI-compatible endpoint"""
         payload = {
-            "model": self.model,
+            "model": model_override or self.model,
             "messages": messages,
             "temperature": temperature,
         }
@@ -732,7 +741,7 @@ class BackgroundLLMClient:
             try:
                 fallback_payload = {
                     **payload,
-                    "model": self.fallback_model
+                    "model": model if model else self.fallback_model
                 }
                 logger.debug(f"Background LLM failover to {self.fallback_url} with model {self.fallback_model}")
                 response = await self._fallback_client.post("/chat/completions", json=fallback_payload)

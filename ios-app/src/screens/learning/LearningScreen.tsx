@@ -276,8 +276,13 @@ export default function LearningScreen() {
       // Speak in ambient mode
       if (ambientMode && streamingMessageRef.current) {
         setIsPlayingAudio(true);
-        await voiceService.speak(streamingMessageRef.current);
-        setIsPlayingAudio(false);
+        try {
+          await voiceService.speak(streamingMessageRef.current);
+        } catch (ttsError) {
+          console.error('[Learning] TTS playback failed:', ttsError);
+        } finally {
+          setIsPlayingAudio(false);
+        }
 
         if (shouldResumeListening.current) {
           startContinuousListening();

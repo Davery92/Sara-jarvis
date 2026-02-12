@@ -375,7 +375,7 @@ class ToolIntentClassifier:
     BASE_TOOLS = ['memory', 'notes', 'time']
 
     # Extended default tools for general/unclear intent
-    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning']
+    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning', 'home']
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {
@@ -416,9 +416,18 @@ class ToolIntentClassifier:
             'what did', 'when did', 'told you', 'mentioned'
         ],
         'HOME': [
-            'lights', 'thermostat', 'home assistant', 'turn on', 'turn off',
-            'temperature', 'fan', 'switch', 'door', 'lock', 'garage',
-            'automation', 'sensor', 'smart home'
+            'lights', 'light', 'lamp', 'lamps', 'thermostat', 'home assistant',
+            'turn on', 'turn off', 'shut off', 'switch on', 'switch off',
+            'temperature', 'fan', 'switch', 'door', 'lock', 'unlock', 'garage',
+            'automation', 'sensor', 'smart home', 'home status',
+            'dim', 'bright', 'brighten', 'darken',
+            'air conditioning', 'ac', 'heat', 'heating', 'cooling',
+            'blinds', 'shades', 'curtains', 'cover',
+            'scene', 'goodnight', 'movie mode',
+            'porch', 'bedroom light', 'kitchen light', 'living room light',
+            'is the', 'are the lights', 'house', 'my home',
+            'all lights', 'lights off', 'lights on',
+            'what lights', 'which lights', 'home overview',
         ],
         'CHESS': [
             'chess', 'checkmate', 'chess opening', 'chess endgame', 'chess tactics',
@@ -458,6 +467,64 @@ class ToolIntentClassifier:
             'show the map', 'hide the map', 'create a map', 'add node',
             'connect nodes', 'visualization', 'visualize'
         ],
+        'EMAIL': [
+            'email', 'emails', 'mail', 'email inbox', 'message', 'unread',
+            'sender', 'from', 'attachment', 'attachments', 'riskninja',
+            'mailbox', 'outlook', 'sent', 'received'
+        ],
+        'AUTOMATION': [
+            'automation', 'automate', 'every hour', 'every day', 'every minute',
+            'schedule this', 'recurring', 'automatically', 'auto', 'trigger',
+            'when the', 'if the', 'alert me', 'notify me when',
+            'confirm', 'activate', 'activate it', 'yes activate', 'do it',
+            'start it', 'enable it', 'turn it on'
+        ],
+        'SOUL': [
+            'soul', 'your soul', 'identity', 'your identity', 'who you are',
+            'operating principles', 'principles', 'boundaries', 'your boundaries',
+            'growth areas', 'how you operate', 'your rules', 'change yourself',
+            'propose a change', 'soul change', 'self-modification', 'your personality',
+            'personality', 'what are you', 'define yourself', 'evolution'
+        ],
+        'HEARTBEAT': [
+            'heartbeat', 'monitoring', 'what are you watching', 'what are you tracking',
+            'add a monitor', 'remind me about', 'keep an eye on', 'watch for',
+            'check on', 'alert if', 'heartbeat items', 'your checklist',
+            'what are you checking', 'periodic checks', 'daily checks'
+        ],
+        'HEALTH': [
+            'health', 'hrv', 'heart rate', 'resting heart rate', 'blood pressure',
+            'steps today', 'calories burned', 'health metrics', 'health data',
+            'health trends', 'sleep quality', 'sleep score', 'body temperature',
+            'oxygen', 'spo2', 'vo2', 'respiratory'
+        ],
+        'INBOX': [
+            'saved articles', 'reading list', 'what i saved', 'saved links',
+            'shared content', 'content inbox', 'stuff i saved', 'articles i saved'
+        ],
+        'PATTERNS': [
+            'patterns', 'correlations', 'trends over time', 'notice any pattern',
+            'relationship between', 'behavioral pattern', 'what have you noticed',
+            'any trends', 'data correlations'
+        ],
+        'PERSONAL_KNOWLEDGE': [
+            'what do you know about me', 'my preferences', 'about me',
+            'you know that i', 'my routine', 'my goals', 'facts about me',
+            'what have you learned about me', 'my habits'
+        ],
+        'STANDING_ORDERS': [
+            'standing order', 'pre-authorize', 'always do this', 'from now on always',
+            'automatic action', 'pre-approved', 'blanket permission'
+        ],
+        'BEHAVIOR_CONFIG': [
+            'change how you', 'act differently', 'be more', 'be less',
+            'stop being so', 'when coaching', 'your approach to',
+            'modify your behavior', 'change your style'
+        ],
+        'KNOWLEDGE_GRAPH': [
+            'connections between', 'related to', 'how is.*connected',
+            'knowledge clusters', 'linked notes', 'note connections'
+        ],
     }
 
     # Map intents to tool categories
@@ -468,7 +535,7 @@ class ToolIntentClassifier:
         'TIME': ['time'],
         'WEB': ['web'],
         'MEMORY': ['memory', 'knowledge_graph'],
-        'HOME': ['home'],
+        'HOME': ['home', 'automation'],
         'CHESS': ['chess'],
         'LEARNING': ['learning', 'web'],
         'PROJECTS': ['projects'],
@@ -476,7 +543,18 @@ class ToolIntentClassifier:
         'AGENTS': ['agents', 'web'],
         'DEVICES': ['devices'],  # Cross-device commands
         'WORKSPACE': ['workspace', 'maps'],  # Canvas and map control
-        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices'],  # Expanded fallback with devices
+        'EMAIL': ['email'],  # Email search and reading
+        'AUTOMATION': ['standing_orders', 'home'],  # Routed to standing orders
+        'SOUL': ['soul', 'self_knowledge'],  # Sara's identity and self-modification
+        'HEARTBEAT': ['heartbeat'],  # Sara's monitoring checklist
+        'HEALTH': ['health', 'fitness'],
+        'INBOX': ['inbox'],
+        'PATTERNS': ['patterns', 'fitness'],
+        'PERSONAL_KNOWLEDGE': ['personal_knowledge', 'memory'],
+        'STANDING_ORDERS': ['standing_orders', 'home'],
+        'BEHAVIOR_CONFIG': ['behavior', 'soul'],
+        'KNOWLEDGE_GRAPH': ['knowledge_graph', 'notes'],
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home'],  # Expanded fallback
     }
 
     # How many recent turns to preserve context from
@@ -649,6 +727,33 @@ class ToolIntentClassifier:
 
         logger.info(f"[ToolIntent] '{message[:50]}...' -> {explicit_intent}, tools={tools}")
         return explicit_intent, tools
+
+    def classify_multi(self, message: str, max_intents: int = 3) -> List[Tuple[str, float]]:
+        """
+        Return top N intents with confidence scores for multi-intent messages.
+
+        Scores all intents against the message and returns those above threshold.
+        Used when messages contain conjunctions ("and", "also", "then", "plus").
+        """
+        import re
+        message_lower = message.lower()
+        scores: Dict[str, float] = {}
+
+        for intent, keywords in self.INTENT_PATTERNS.items():
+            match_count = 0
+            for keyword in keywords:
+                if len(keyword) <= 3:
+                    if re.search(rf'\b{re.escape(keyword)}\b', message_lower):
+                        match_count += 1
+                else:
+                    if keyword in message_lower:
+                        match_count += 1
+            if match_count > 0:
+                scores[intent] = match_count / len(keywords)
+
+        # Sort by score descending, take top N with score > 0
+        sorted_intents = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted_intents[:max_intents]
 
     def classify_with_categories(self, message: str) -> Tuple[str, List[str]]:
         """

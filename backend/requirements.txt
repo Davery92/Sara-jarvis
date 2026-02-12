@@ -27,6 +27,7 @@ numpy==1.25.2
 tiktoken==0.5.1
 neo4j==5.15.0
 python-dateutil==2.8.2
+icalendar>=5.0.0
 redis>=4.5.2,<5.0.0
 celery[redis]==5.3.4
 aiohttp==3.9.5
@@ -39,3 +40,6 @@ torch>=2.0.0
 torchaudio>=2.0.0
 onnx>=1.14.0
 onnxscript>=0.1.0
+watchdog>=3.0.0
+pyyaml>=6.0
+sentry-sdk[fastapi,celery]>=2.0.0

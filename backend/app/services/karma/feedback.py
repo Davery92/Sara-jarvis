@@ -38,6 +38,14 @@ class FeedbackType(str, Enum):
     PROACTIVE_HIT = "proactive_hit"  # Proactive action was useful
     PROACTIVE_MISS = "proactive_miss"  # Proactive action was unwanted
 
+    # Implicit feedback (detected from user messages)
+    IMPLICIT_POSITIVE = "implicit_positive"  # User showed satisfaction
+    IMPLICIT_NEGATIVE = "implicit_negative"  # User showed dissatisfaction
+
+    # Learning feedback (lesson effectiveness)
+    LESSON_APPLIED_SUCCESS = "lesson_applied_success"  # Lesson helped
+    LESSON_APPLIED_FAILURE = "lesson_applied_failure"  # Lesson didn't help
+
     # System feedback
     REFLECTION_AUDIT = "reflection_audit"
     CONSOLIDATION_QUALITY = "consolidation_quality"
@@ -86,6 +94,25 @@ FEEDBACK_DIMENSION_MAP = {
     ],
     FeedbackType.PROACTIVE_MISS: [
         ("sara", "proactivity", -2.0),
+    ],
+
+    # Implicit feedback from user messages
+    FeedbackType.IMPLICIT_POSITIVE: [
+        ("sara", "helpfulness", 1.5),
+        ("sara", "accuracy", 1.0),
+    ],
+    FeedbackType.IMPLICIT_NEGATIVE: [
+        ("sara", "helpfulness", -2.0),
+        ("sara", "accuracy", -1.5),
+    ],
+
+    # Learning effectiveness feedback
+    FeedbackType.LESSON_APPLIED_SUCCESS: [
+        ("sara", "learning", 2.0),
+        ("sara", "helpfulness", 1.0),
+    ],
+    FeedbackType.LESSON_APPLIED_FAILURE: [
+        ("sara", "learning", -1.0),
     ],
 
     # Consolidation agent dimensions
@@ -194,6 +221,10 @@ class FeedbackCollector:
             FeedbackType.RESPONSE_TIMING: "Response timing feedback",
             FeedbackType.PROACTIVE_HIT: "Proactive action was useful",
             FeedbackType.PROACTIVE_MISS: "Proactive action was not helpful",
+            FeedbackType.IMPLICIT_POSITIVE: "User showed implicit satisfaction",
+            FeedbackType.IMPLICIT_NEGATIVE: "User showed implicit dissatisfaction",
+            FeedbackType.LESSON_APPLIED_SUCCESS: "Applied lesson was effective",
+            FeedbackType.LESSON_APPLIED_FAILURE: "Applied lesson was not effective",
             FeedbackType.REFLECTION_AUDIT: "Reflection agent audit",
             FeedbackType.CONSOLIDATION_QUALITY: "Consolidation quality assessment",
             FeedbackType.ACCURACY_CHECK: "Accuracy verification",
@@ -363,6 +394,82 @@ async def record_reflection_audit(
         },
         evidence_id=audit_id,
         evidence_type="reflection_audit"
+    )
+
+    await collector.collect(signal)
+
+
+async def record_implicit_feedback(
+    db: AsyncSession,
+    is_positive: bool,
+    trigger_phrase: str,
+    strength: str,  # "strong", "moderate", "weak"
+    message_id: Optional[str] = None,
+    context: Optional[Dict] = None
+) -> None:
+    """
+    Record implicit feedback detected from user message patterns.
+
+    Args:
+        db: Database session
+        is_positive: True for positive signals, False for negative
+        trigger_phrase: The phrase that triggered detection
+        strength: Signal strength
+        message_id: Associated message ID
+        context: Additional context
+    """
+    collector = FeedbackCollector(db)
+
+    # Scale value by strength
+    strength_scale = {"strong": 1.0, "moderate": 0.7, "weak": 0.4}
+    value = strength_scale.get(strength, 0.5)
+
+    signal = FeedbackSignal(
+        feedback_type=FeedbackType.IMPLICIT_POSITIVE if is_positive else FeedbackType.IMPLICIT_NEGATIVE,
+        agent_id="sara",
+        value=value,
+        context={
+            "trigger_phrase": trigger_phrase,
+            "strength": strength,
+            **(context or {})
+        },
+        evidence_id=message_id,
+        evidence_type="implicit_feedback"
+    )
+
+    await collector.collect(signal)
+
+
+async def record_lesson_outcome(
+    db: AsyncSession,
+    lesson_id: str,
+    was_successful: bool,
+    feedback_signal: Optional[str] = None,
+    context: Optional[Dict] = None
+) -> None:
+    """
+    Record the outcome of applying a lesson.
+
+    Args:
+        db: Database session
+        lesson_id: ID of the lesson that was applied
+        was_successful: True if positive feedback after lesson, False otherwise
+        feedback_signal: The feedback phrase that indicated success/failure
+        context: Additional context
+    """
+    collector = FeedbackCollector(db)
+
+    signal = FeedbackSignal(
+        feedback_type=FeedbackType.LESSON_APPLIED_SUCCESS if was_successful else FeedbackType.LESSON_APPLIED_FAILURE,
+        agent_id="sara",
+        value=1.0,
+        context={
+            "lesson_id": lesson_id,
+            "feedback_signal": feedback_signal,
+            **(context or {})
+        },
+        evidence_id=lesson_id,
+        evidence_type="lesson_application"
     )
 
     await collector.collect(signal)

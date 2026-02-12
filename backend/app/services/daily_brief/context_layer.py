@@ -53,7 +53,6 @@ class ContextLayer:
     async def _call_llm(self, prompt: str) -> str:
         """Call background LLM for context analysis (uses fallback/fast model)."""
         from app.core.llm import get_background_llm_client
-        from app.core.config import settings
 
         try:
             bg_client = get_background_llm_client()
@@ -65,7 +64,7 @@ class ContextLayer:
                 ],
                 max_tokens=800,
                 temperature=0.7,
-                model=settings.bg_llm_fallback_model  # Use fast model for context layer
+                model="qwen3-coder-next"
             )
             return response["choices"][0]["message"]["content"]
         except Exception as e:

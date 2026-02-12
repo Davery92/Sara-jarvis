@@ -34,7 +34,7 @@ export interface SceneObject {
 }
 
 // Window types
-export type WindowType = 'note' | 'chat' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report'
+export type WindowType = 'note' | 'chat' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report' | 'email' | 'automation' | 'pkg'
 
 export interface Position {
   x: number
@@ -107,6 +107,15 @@ export interface ReportWindowData {
   content: string
 }
 
+export interface EmailWindowData {
+  emailId?: string
+}
+
+export interface AutomationWindowData {
+  taskId?: string  // Optional: open specific task details
+  initialTab?: 'list' | 'endpoints'  // Which view to show
+}
+
 export type WindowData =
   | NoteWindowData
   | ChatWindowData
@@ -118,6 +127,13 @@ export type WindowData =
   | ModelViewerWindowData
   | ResearchWindowData
   | ReportWindowData
+  | EmailWindowData
+  | AutomationWindowData
+  | PKGWindowData
+
+export interface PKGWindowData {
+  category?: string  // Filter by category on open
+}
 
 // API types
 export interface Note {

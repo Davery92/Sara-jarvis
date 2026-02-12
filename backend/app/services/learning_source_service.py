@@ -483,12 +483,157 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
 
         return min(score, 1.0)
 
+    async def process_uploaded_content(
+        self,
+        source: TopicSource,
+        content: str,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Process content from an uploaded file (already extracted text).
+        Skips the fetch step and goes directly to chunking and embedding.
+
+        Args:
+            source: The TopicSource record (already created)
+            content: The extracted text content from the file
+            db: Database session
+
+        Returns:
+            Dict with status, chunk_count, and any error message
+        """
+        try:
+            if not content or not content.strip():
+                source.fetch_status = "failed"
+                source.meta = {**(source.meta or {}), "error": "Empty content"}
+                db.commit()
+                return {"status": "failed", "error": "Empty content"}
+
+            # Store the content
+            source.content_text = content
+
+            # Delete existing chunks for this source (in case of re-processing)
+            db.query(SourceChunk).filter(SourceChunk.source_id == source.id).delete()
+
+            # Chunk the content
+            chunks = self._chunk_content(content)
+            logger.info(f"Created {len(chunks)} chunks from uploaded source {source.id}")
+
+            # Generate embeddings and store chunks
+            chunk_records = []
+            for idx, (chunk_text, breadcrumb) in enumerate(chunks):
+                if idx >= self.MAX_CHUNKS_PER_SOURCE:
+                    logger.warning(f"Uploaded source {source.id} exceeded max chunks, truncating")
+                    break
+
+                # Generate embedding
+                embedding = await embedding_service.generate_embedding(chunk_text)
+
+                if embedding:
+                    # Extract concepts using LLM (only for first few chunks)
+                    concept_tags = []
+                    if idx < 5:
+                        concept_tags = await self._extract_concepts(chunk_text)
+
+                    chunk_record = SourceChunk(
+                        id=str(uuid.uuid4()),
+                        source_id=source.id,
+                        chunk_idx=idx,
+                        text=chunk_text,
+                        breadcrumb=breadcrumb,
+                        embedding=embedding,
+                        concept_tags=concept_tags
+                    )
+                    chunk_records.append(chunk_record)
+                    db.add(chunk_record)
+
+            # Update source status
+            source.fetch_status = "fetched"
+            source.quality_score = self._calculate_quality_score(content, len(chunk_records))
+            db.commit()
+
+            return {
+                "status": "success",
+                "chunk_count": len(chunk_records),
+                "content_length": len(content),
+                "title": source.title
+            }
+
+        except Exception as e:
+            logger.error(f"Error processing uploaded content for source {source.id}: {e}")
+            source.fetch_status = "failed"
+            source.meta = {**(source.meta or {}), "error": str(e)}
+            db.commit()
+            return {"status": "failed", "error": str(e)}
+
+    def extract_text_from_pdf_bytes(self, pdf_bytes: bytes) -> Tuple[str, Optional[str], Dict]:
+        """
+        Extract text content from PDF bytes (for file uploads).
+
+        Args:
+            pdf_bytes: Raw PDF file bytes
+
+        Returns:
+            Tuple of (content, title, metadata)
+        """
+        if not PDF_SUPPORT:
+            return "", None, {"error": "PDF support not available - install pypdf"}
+
+        try:
+            pdf_file = io.BytesIO(pdf_bytes)
+            reader = pypdf.PdfReader(pdf_file)
+
+            # Extract text from all pages
+            text_parts = []
+            for page_num, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(f"## Page {page_num + 1}\n\n{page_text}")
+
+            content = "\n\n".join(text_parts)
+
+            # Try to get title from metadata
+            title = None
+            if reader.metadata:
+                title = reader.metadata.get('/Title')
+                if title and isinstance(title, str):
+                    title = title.strip()
+
+            # If no title in metadata, try to get from first line
+            if not title and content:
+                first_line = content.split('\n')[0][:100]
+                if first_line and len(first_line) > 5:
+                    title = first_line.strip()
+
+            # Build metadata
+            meta = {
+                "content_type": "application/pdf",
+                "page_count": len(reader.pages),
+                "source_type": "pdf",
+                "uploaded": True
+            }
+
+            if reader.metadata:
+                if reader.metadata.get('/Author'):
+                    meta["author"] = str(reader.metadata.get('/Author'))
+                if reader.metadata.get('/Subject'):
+                    meta["subject"] = str(reader.metadata.get('/Subject'))
+
+            # Clean the extracted text
+            content = self._clean_text(content)
+
+            return content, title, meta
+
+        except Exception as e:
+            logger.error(f"Error extracting PDF content: {e}")
+            return "", None, {"error": str(e)}
+
     async def search_chunks(
         self,
         topic_id: str,
         query: str,
         db: Session,
-        limit: int = 5
+        limit: int = 5,
+        prefer_analogy: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Search for relevant chunks across all sources in a topic using vector similarity.
@@ -498,6 +643,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
             query: The search query
             db: Database session
             limit: Maximum number of results
+            prefer_analogy: If True, return analogy_version text when available
 
         Returns:
             List of matching chunks with similarity scores
@@ -522,6 +668,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
                     sc.id,
                     sc.text,
                     sc.breadcrumb,
+                    sc.analogy_version,
                     ts.title as source_title,
                     ts.url as source_url,
                     1 - (sc.embedding <=> cast(:query_embedding as vector)) as similarity
@@ -539,9 +686,18 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
 
             chunks = []
             for row in result:
+                # Prefer analogy version when available
+                display_text = row.text
+                if prefer_analogy and row.analogy_version:
+                    analogy = row.analogy_version
+                    if isinstance(analogy, dict) and analogy.get("text"):
+                        display_text = analogy["text"]
+
                 chunks.append({
                     "id": row.id,
-                    "text": row.text,
+                    "text": display_text,
+                    "original_text": row.text,
+                    "has_analogy": row.analogy_version is not None,
                     "breadcrumb": row.breadcrumb,
                     "source_title": row.source_title,
                     "source_url": row.source_url,
@@ -553,6 +709,135 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
         except Exception as e:
             logger.error(f"Error searching chunks: {e}")
             return []
+
+    async def generate_analogy_version(
+        self,
+        chunk: SourceChunk,
+        anchor_points: List[Dict],
+        known_domains: List[Dict],
+        db: Session
+    ) -> Optional[Dict]:
+        """
+        Generate an analogy-rewritten version of a chunk using anchor points.
+
+        Args:
+            chunk: The source chunk to transform
+            anchor_points: Active anchors for the topic
+            known_domains: David's known domains
+            db: Database session
+
+        Returns:
+            Dict with text, domain, unknown_terms, or None on failure
+        """
+        try:
+            llm_client = self._get_llm_client()
+
+            # Build anchor context
+            anchors_text = ""
+            for a in anchor_points[:3]:
+                anchors_text += f"- {a.get('anchor_concept')} (from {a.get('anchor_domain')}): {a.get('bridge_description', '')}\n"
+
+            domains_text = ", ".join(d.get("domain_name", "") for d in known_domains[:5])
+
+            prompt = f"""Rewrite this technical content using analogies from domains David already knows.
+
+Original content:
+{chunk.text}
+
+Available analogies to use:
+{anchors_text}
+
+David's known domains: {domains_text}
+
+Rules:
+1. Keep the same information but explain it using familiar concepts
+2. Use "think of it like..." or "this is similar to..." phrasing
+3. Keep technical terms but explain them via analogy on first use
+4. Flag any terms that have no good analogy as unknown_terms
+
+Output as JSON:
+{{
+  "text": "The rewritten content using analogies",
+  "domain": "Primary anchor domain used",
+  "unknown_terms": ["terms with no good analogy"]
+}}
+
+Return ONLY valid JSON."""
+
+            response = await llm_client.generate(prompt=prompt, max_tokens=400)
+            if not response:
+                return None
+
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if not json_match:
+                return None
+
+            import json
+            data = json.loads(json_match.group())
+
+            # Store on chunk
+            chunk.analogy_version = data
+            db.commit()
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Failed to generate analogy version for chunk {chunk.id}: {e}")
+            return None
+
+    async def transform_topic_chunks(
+        self,
+        topic_id: str,
+        user_id: str,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Batch-transform all chunks for a topic that don't have analogy versions.
+
+        Args:
+            topic_id: Topic to transform
+            user_id: User ID
+            db: Database session
+
+        Returns:
+            Dict with count of transformed chunks
+        """
+        import asyncio
+
+        try:
+            # Get anchor points and known domains
+            from app.services.anchor_service import anchor_service
+            from app.models.known_domain import KnownDomain
+
+            anchor_points = await anchor_service.get_active_anchors(topic_id, user_id, db)
+            if not anchor_points:
+                return {"transformed": 0, "message": "No anchor points available for transformation"}
+
+            domains = db.query(KnownDomain).filter(KnownDomain.user_id == user_id).all()
+            known_domains = [d.to_dict() for d in domains]
+
+            # Get chunks without analogy versions
+            chunks = db.query(SourceChunk).join(TopicSource).filter(
+                TopicSource.topic_id == topic_id,
+                SourceChunk.analogy_version.is_(None)
+            ).limit(20).all()
+
+            transformed = 0
+            for i, chunk in enumerate(chunks):
+                result = await self.generate_analogy_version(chunk, anchor_points, known_domains, db)
+                if result:
+                    transformed += 1
+
+                # Rate limit: pause every 5 chunks
+                if (i + 1) % 5 == 0:
+                    await asyncio.sleep(1)
+
+            return {"transformed": transformed, "total_chunks": len(chunks)}
+
+        except Exception as e:
+            logger.error(f"Failed to transform topic chunks: {e}")
+            return {"transformed": 0, "error": str(e)}
 
 
 # Global service instance

@@ -24,10 +24,12 @@ import MorningBrief from './components/MorningBrief'
 import OrchestratorLab from './components/OrchestratorLab'
 import NotificationBanner from './components/NotificationBanner'
 import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
+import AutomationTasksIndicator from './components/AutomationTasksIndicator'
 import MiniChatOverlay from './components/MiniChatOverlay'
 import HealthAlertChat from './components/HealthAlertChat'
-import { PatternsDashboard } from './components/patterns'
 import SensoryMonitor from './components/SensoryMonitor'
+import EmailPage from './components/EmailPage'
+import ContentInbox from './components/ContentInbox'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -106,6 +108,18 @@ function App() {
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
 
+  // Dashboard state
+  const [morningBrief, setMorningBrief] = useState<any>(null)
+  const [morningBriefLoading, setMorningBriefLoading] = useState(false)
+  const [weather, setWeather] = useState<any>(null)
+  const [calendarEvents, setCalendarEvents] = useState<any[]>([])
+  const [saraStatus, setSaraStatus] = useState<any>(null)
+  const [connectedDevices, setConnectedDevices] = useState<any[]>([])
+  const [standingOrders, setStandingOrders] = useState<any[]>([])
+  const [journalEntries, setJournalEntries] = useState<any[]>([])
+  const [briefAudioPlaying, setBriefAudioPlaying] = useState(false)
+  const briefAudioRef = useRef<HTMLAudioElement>(null)
+
   // Health alert chat state
   const [activeHealthAlert, setActiveHealthAlert] = useState<{
     severity: string
@@ -131,11 +145,20 @@ function App() {
     return new Set()
   })
 
+  // Ref for scrolling main content to top on view change
+  const mainContentRef = useRef<HTMLDivElement>(null)
+
   // Ref for auto-scrolling chat messages
   const chatMessagesEndRef = useRef(null)
 
   // Ref to track and cancel ongoing chat requests
   const abortControllerRef = useRef(null)
+
+  // Scroll main content to top on view change
+  useEffect(() => {
+    const scrollable = mainContentRef.current?.querySelector('.overflow-y-auto')
+    scrollable?.scrollTo(0, 0)
+  }, [view])
 
   // Activity monitoring for autonomous behaviors
   const { activityState, getIdleMinutes } = useActivityMonitor({
@@ -259,13 +282,10 @@ function App() {
     return () => clearInterval(interval)
   }, [isAuthenticated, dismissedHealthAlertIds, activeHealthAlert])
 
-  // Load analytics and notes when view changes to dashboard
+  // Load dashboard data when view changes to dashboard
   useEffect(() => {
     if (isAuthenticated && view === 'dashboard') {
-      console.log('Dashboard view activated, loading analytics, notes, timers, and reminders...')
-      loadAnalytics()
-      loadNotes()
-      loadTimersAndReminders()
+      loadDashboardData()
     }
   }, [isAuthenticated, view])
 
@@ -795,6 +815,119 @@ function App() {
     }
   }
 
+  // Dashboard data loading
+  const getGreeting = () => {
+    const h = new Date().getHours()
+    if (h < 12) return 'Good morning'
+    if (h < 17) return 'Good afternoon'
+    return 'Good evening'
+  }
+
+  const formatRelativeTime = (ts: string) => {
+    const diff = Date.now() - new Date(ts).getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins}m ago`
+    const hrs = Math.floor(mins / 60)
+    if (hrs < 24) return `${hrs}h ago`
+    return `${Math.floor(hrs / 24)}d ago`
+  }
+
+  const WEATHER_EMOJI: Record<string, string> = {
+    'clear-day': '\u2600\ufe0f', 'clear-night': '\ud83c\udf19', 'cloudy': '\u2601\ufe0f',
+    'partly-cloudy-day': '\u26c5', 'partly-cloudy-night': '\ud83c\udf24\ufe0f',
+    'rain': '\ud83c\udf27\ufe0f', 'snow': '\u2744\ufe0f', 'wind': '\ud83c\udf2c\ufe0f',
+    'fog': '\ud83c\udf2b\ufe0f', 'thunderstorm': '\u26c8\ufe0f',
+  }
+
+  const EMOTION_EMOJI: Record<string, string> = {
+    'neutral': '\ud83d\ude10', 'curious': '\ud83e\uddd0', 'concerned': '\ud83d\ude1f',
+    'pleased': '\ud83d\ude0a', 'alert': '\u26a0\ufe0f', 'reflective': '\ud83d\udcad',
+    'focused': '\ud83c\udfaf', 'calm': '\ud83e\uddd8', 'energetic': '\u26a1',
+  }
+
+  const loadMorningBrief = async () => {
+    setMorningBriefLoading(true)
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/morning-brief/today`, { credentials: 'include' })
+      if (res.ok) setMorningBrief(await res.json())
+    } catch (e) { console.error('Failed to load morning brief:', e) }
+    finally { setMorningBriefLoading(false) }
+  }
+
+  const loadWeather = async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/morning-brief/weather`, { credentials: 'include' })
+      if (res.ok) setWeather(await res.json())
+    } catch (e) { console.error('Failed to load weather:', e) }
+  }
+
+  const loadTodayCalendar = async () => {
+    try {
+      const today = new Date().toISOString().split('T')[0]
+      const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0]
+      const res = await fetch(`${APP_CONFIG.apiUrl}/calendar/events?start_date=${today}&end_date=${tomorrow}`, { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setCalendarEvents(Array.isArray(data) ? data : data.events || [])
+      }
+    } catch (e) { console.error('Failed to load calendar:', e) }
+  }
+
+  const loadSaraStatus = async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/sara/status`, { credentials: 'include' })
+      if (res.ok) setSaraStatus(await res.json())
+    } catch (e) { console.error('Failed to load Sara status:', e) }
+  }
+
+  const loadConnectedDevices = async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/devices/connected`, { credentials: 'include' })
+      if (res.ok) setConnectedDevices(await res.json())
+    } catch (e) { setConnectedDevices([]) }
+  }
+
+  const loadStandingOrders = async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/standing-orders?status=active`, { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setStandingOrders(data.orders || [])
+      }
+    } catch (e) { setStandingOrders([]) }
+  }
+
+  const loadJournalEntries = async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/sara/activity?hours=24&limit=20&activity_type=journal`, { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json()
+        setJournalEntries(Array.isArray(data) ? data : data.activities || [])
+      }
+    } catch (e) { setJournalEntries([]) }
+  }
+
+  const loadDashboardData = () => {
+    Promise.allSettled([
+      loadMorningBrief(),
+      loadWeather(),
+      loadTodayCalendar(),
+      loadSaraStatus(),
+      loadConnectedDevices(),
+      loadStandingOrders(),
+      loadJournalEntries(),
+      loadTimersAndReminders(),
+    ])
+  }
+
+  const playBriefAudio = () => {
+    const el = briefAudioRef.current
+    if (!el) return
+    if (briefAudioPlaying) { el.pause(); setBriefAudioPlaying(false) }
+    else { el.play(); setBriefAudioPlaying(true) }
+  }
+
   const uploadDocument = async (file) => {
     if (!file) return
     
@@ -1038,7 +1171,7 @@ function App() {
   }
 
   return (
-    <div className="p-4 md:p-8 pb-20 md:pb-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9', minHeight: '100vh'}}>
+    <div className="p-4 md:p-6 pb-20 md:pb-4 h-screen overflow-hidden flex flex-col" style={{backgroundColor: '#0d1117', color: '#c9d1d9'}}>
       {/* Command Palette */}
       <CommandPalette
         isOpen={commandPaletteOpen}
@@ -1047,7 +1180,7 @@ function App() {
         currentView={view}
       />
 
-      <div className="flex flex-col md:flex-row md:space-x-8">
+      <div className="flex flex-col md:flex-row md:space-x-6 flex-1 min-h-0">
         
         {/* Mobile Header */}
         <div className="md:hidden flex justify-between items-center mb-4">
@@ -1070,7 +1203,7 @@ function App() {
               </div>
               <nav className="flex-1 overflow-y-auto p-4 space-y-2">
                 <button
-                  onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); setIsMobileMenuOpen(false); }}
+                  onClick={() => { setView('dashboard'); loadDashboardData(); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="material-icons">home</span>
@@ -1112,6 +1245,13 @@ function App() {
                   <span>Calendar</span>
                 </button>
                 <button
+                  onClick={() => { setView('email'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'email' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">email</span>
+                  <span>Email</span>
+                </button>
+                <button
                   onClick={() => { setView('fitness'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
@@ -1147,18 +1287,18 @@ function App() {
                   <span>Morning Brief</span>
                 </button>
                 <button
-                  onClick={() => { setView('patterns'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'patterns' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">insights</span>
-                  <span>Patterns</span>
-                </button>
-                <button
                   onClick={() => { setView('sensory-monitor'); setIsMobileMenuOpen(false); }}
                   className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'sensory-monitor' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
                 >
                   <span className="material-icons">sensors</span>
                   <span>Sensory</span>
+                </button>
+                <button
+                  onClick={() => { setView('inbox'); setIsMobileMenuOpen(false); }}
+                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'inbox' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                >
+                  <span className="material-icons">inbox</span>
+                  <span>Inbox</span>
                 </button>
                 <button
                   onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
@@ -1180,11 +1320,11 @@ function App() {
         )}
 
         {/* Desktop Sidebar */}
-        <aside className="hidden md:flex flex-col items-center space-y-6 bg-card border border-card rounded-xl p-4" style={{height: 'fit-content'}}>
-          <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl">S</div>
-          <nav className="flex flex-col items-center space-y-6">
+        <aside className="hidden md:flex flex-col items-center bg-card border border-card rounded-xl p-4 max-h-full overflow-y-auto scrollbar-hidden flex-shrink-0">
+          <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl flex-shrink-0">S</div>
+          <nav className="flex flex-col items-center space-y-4 mt-4">
             <button
-              onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
+              onClick={() => { setView('dashboard'); loadDashboardData(); }}
               className={`flex flex-col items-center ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
               <span className="material-icons">home</span>
@@ -1226,6 +1366,13 @@ function App() {
               <span className="text-xs">Calendar</span>
             </button>
             <button
+              onClick={() => setView('email')}
+              className={`flex flex-col items-center ${view === 'email' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">email</span>
+              <span className="text-xs">Email</span>
+            </button>
+            <button
               onClick={() => setView('fitness')}
               className={`flex flex-col items-center ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
@@ -1261,18 +1408,18 @@ function App() {
               <span className="text-xs">Brief</span>
             </button>
             <button
-              onClick={() => setView('patterns')}
-              className={`flex flex-col items-center ${view === 'patterns' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">insights</span>
-              <span className="text-xs">Patterns</span>
-            </button>
-            <button
               onClick={() => setView('sensory-monitor')}
               className={`flex flex-col items-center ${view === 'sensory-monitor' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
             >
               <span className="material-icons">sensors</span>
               <span className="text-xs">Sensory</span>
+            </button>
+            <button
+              onClick={() => setView('inbox')}
+              className={`flex flex-col items-center ${view === 'inbox' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+            >
+              <span className="material-icons">inbox</span>
+              <span className="text-xs">Inbox</span>
             </button>
             <button
               onClick={() => setView('settings')}
@@ -1293,10 +1440,13 @@ function App() {
         </aside>
 
         {/* Main Content */}
-        <main className="flex-1 min-w-0">
-          <header className="hidden md:flex justify-between items-center mb-8">
+        <main ref={mainContentRef} className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
+          <header className="hidden md:flex justify-between items-center mb-4 flex-shrink-0">
             <h1 className="text-4xl font-bold">{APP_CONFIG.assistantName}</h1>
             <div className="flex items-center space-x-4">
+              <AutomationTasksIndicator
+                onOpenAutomations={() => setView('orchestrator')}
+              />
               <BackgroundTasksIndicator
                 onNavigateToWorkspace={(noteId) => {
                   setView('notes')
@@ -1308,333 +1458,274 @@ function App() {
           </header>
 
           {view === 'dashboard' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
-              <div className="lg:col-span-2 space-y-4 md:space-y-8">
-                {/* System Monitoring & Analytics */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-semibold">SYSTEM MONITORING & ANALYTICS</h2>
-                    <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                      analytics?.system_health?.status === 'healthy' 
-                        ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
-                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                    }`}>
-                      {analytics?.system_health?.status?.toUpperCase() || 'LOADING...'}
+            <div className="flex-1 overflow-y-auto min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+              {/* ===== LEFT COLUMN (2/3) ===== */}
+              <div className="lg:col-span-2 space-y-4 md:space-y-6">
+
+                {/* Morning Brief Hero Card */}
+                <div className="bg-gradient-to-br from-[#161b22] to-[#1a2332] border border-gray-700/50 rounded-xl p-6 md:p-8">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <h1 className="text-2xl md:text-3xl font-bold text-white">
+                        {getGreeting()}, David
+                      </h1>
+                      {weather && (
+                        <p className="text-gray-400 mt-1 text-sm md:text-base">
+                          {WEATHER_EMOJI[weather.icon] || WEATHER_EMOJI['clear-day']}{' '}
+                          {Math.round(weather.temperature || weather.temp || 0)}&deg;F &mdash; {weather.description || weather.summary || 'Clear'}
+                        </p>
+                      )}
                     </div>
+                    {morningBrief && (
+                      <button
+                        onClick={playBriefAudio}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 text-teal-400 border border-teal-500/30 transition-colors"
+                      >
+                        <span className="material-icons text-sm">{briefAudioPlaying ? 'pause' : 'play_arrow'}</span>
+                        <span className="text-sm font-medium">{briefAudioPlaying ? 'Pause' : 'Listen'}</span>
+                      </button>
+                    )}
                   </div>
-                  
-                  {analytics ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">Memory System</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Total Messages:</span>
-                            <span className="text-white font-medium">{analytics.memory.total_messages.toLocaleString()}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Conversations:</span>
-                            <span className="text-white font-medium">{analytics.memory.total_conversations}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Archived:</span>
-                            <span className="text-white font-medium">{analytics.memory.archived_count} ({analytics.memory.archival_percentage}%)</span>
-                          </div>
-                        </div>
+
+                  {morningBrief && (
+                    <audio
+                      ref={briefAudioRef}
+                      src={`${APP_CONFIG.apiUrl}/api/morning-brief/${morningBrief.brief_date}/audio`}
+                      onEnded={() => setBriefAudioPlaying(false)}
+                      style={{ display: 'none' }}
+                    />
+                  )}
+
+                  {morningBriefLoading ? (
+                    <div className="flex items-center gap-2 text-gray-500 py-4">
+                      <div className="animate-spin w-4 h-4 border-2 border-gray-500 border-t-transparent rounded-full"></div>
+                      <span className="text-sm">Loading brief...</span>
+                    </div>
+                  ) : morningBrief ? (
+                    <div>
+                      <div className="text-gray-300 text-sm md:text-base leading-relaxed prose prose-invert prose-sm max-w-none
+                        prose-headings:text-gray-200 prose-headings:text-base prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1
+                        prose-p:my-1 prose-ul:my-1 prose-li:my-0 prose-strong:text-gray-200">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {(morningBrief.full_text || morningBrief.summary || '').slice(0, 800)}
+                        </ReactMarkdown>
                       </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">AI System Performance</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Responses (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.successful_responses_7d}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Tool Calls (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.tool_calls_successful_7d}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Embedding Service:</span>
-                            <span className={`font-medium ${analytics.ai_system.embedding_service_health ? 'text-green-400' : 'text-red-400'}`}>
-                              {analytics.ai_system.embedding_service_health ? 'HEALTHY' : 'DOWN'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">Database Health</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Size:</span>
-                            <span className="text-white font-medium">{analytics.database.size}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Connections:</span>
-                            <span className="text-white font-medium">{analytics.database.connections}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Status:</span>
-                            <span className={`font-medium ${analytics.database.health ? 'text-green-400' : 'text-red-400'}`}>
-                              {analytics.database.health ? 'HEALTHY' : 'ERROR'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">User Activity</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Active Timers:</span>
-                            <span className="text-white font-medium">{analytics.user_data.active_timers}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Pending Reminders:</span>
-                            <span className="text-white font-medium">{analytics.user_data.active_reminders}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Last Activity:</span>
-                            <span className="text-white font-medium">
-                              {analytics.ai_system.last_activity 
-                                ? new Date(analytics.ai_system.last_activity).toLocaleDateString()
-                                : 'Never'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
+                      {(morningBrief.full_text || '').length > 800 && (
+                        <button
+                          onClick={() => setView('briefings')}
+                          className="text-teal-400 hover:text-teal-300 text-sm mt-3 inline-flex items-center gap-1"
+                        >
+                          Read full brief <span className="material-icons text-sm">arrow_forward</span>
+                        </button>
+                      )}
                     </div>
                   ) : (
-                    <div className="text-center text-gray-400 py-8">
-                      <div className="animate-spin inline-block w-6 h-6 border-2 border-gray-400 border-t-transparent rounded-full mb-2"></div>
-                      <p>Loading analytics...</p>
-                    </div>
+                    <p className="text-gray-500 text-sm py-2">No brief available yet today.</p>
                   )}
                 </div>
 
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-8">
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">NOTES</h3>
-                    <p className="text-5xl font-bold my-2">{notes.length}</p>
-                    <p className="text-sm text-gray-500">notes</p>
+                {/* Today's Calendar */}
+                <div className="bg-card border border-card rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                      {currentTime.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                    </h2>
+                    <button onClick={() => setView('calendar')} className="text-gray-500 hover:text-teal-400 transition-colors">
+                      <span className="material-icons text-sm">open_in_new</span>
+                    </button>
                   </div>
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">REMINDERS</h3>
-                    <p className="text-5xl font-bold my-2">{reminders.length}</p>
-                    <p className="text-sm text-gray-500">reminders</p>
-                  </div>
-                  <div className="bg-card border border-card rounded-xl p-6">
-                    <h3 className="text-gray-400 font-medium mb-2">CALENDAR</h3>
-                    <p className="text-white font-semibold">{currentTime.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
-                    <div className="text-xs text-gray-500 mt-2">
-                      <div className="text-2xl font-bold text-white">
-                        {currentTime.getDate()}
-                      </div>
-                      <div className="text-gray-400">
-                        {currentTime.toLocaleDateString('en-US', { weekday: 'long' })}
-                      </div>
+                  {calendarEvents.length > 0 ? (
+                    <div className="space-y-2">
+                      {calendarEvents.map((evt: any, i: number) => {
+                        const start = new Date(evt.start_time || evt.start || evt.dtstart)
+                        const end = new Date(evt.end_time || evt.end || evt.dtend)
+                        const now = new Date()
+                        const isNow = now >= start && now <= end
+                        return (
+                          <div key={evt.id || i} className="flex items-stretch gap-3">
+                            <div className={`w-1 rounded-full flex-shrink-0 ${isNow ? 'bg-teal-400' : 'bg-gray-600'}`}></div>
+                            <div className="flex-1 py-1">
+                              <div className="flex items-baseline justify-between">
+                                <span className={`font-medium text-sm ${isNow ? 'text-teal-400' : 'text-gray-200'}`}>
+                                  {evt.title || evt.summary}
+                                </span>
+                                <span className="text-xs text-gray-500 ml-2 flex-shrink-0">
+                                  {start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                                  {' - '}
+                                  {end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                                </span>
+                              </div>
+                              {evt.location && (
+                                <span className="text-xs text-gray-500">{evt.location}</span>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
-                  </div>
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">TIMER</h3>
-                    {timers.length > 0 ? (
-                      <div>
-                        <p className="text-3xl font-mono my-2 text-teal-400">
-                          <LiveTimer endTime={timers[0].end_time} />
-                        </p>
-                        <p className="text-sm text-gray-500">{timers[0].title}</p>
-                        <button
-                          onClick={() => stopTimer(timers[0].id)}
-                          className="mt-2 text-xs bg-red-600/20 hover:bg-red-600/30 text-red-400 px-2 py-1 rounded"
-                        >
-                          Stop
-                        </button>
-                      </div>
-                    ) : (
-                      <div>
-                        <p className="text-3xl font-mono my-2 text-gray-500">--:--:--</p>
-                        <p className="text-sm text-gray-500">no timer</p>
-                      </div>
-                    )}
-                  </div>
+                  ) : (
+                    <p className="text-gray-500 text-sm text-center py-3">No events today</p>
+                  )}
                 </div>
 
-                {/* Quick Chat */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">QUICK CHAT</h2>
-                  <form onSubmit={(e) => sendMessage(e, true)}>
-                    <div className="flex">
-                      <input
-                        type="text"
-                        value={message}
-                        onChange={(e) => setMessage(e.target.value)}
-                        placeholder="How can I assist you today?"
-                        className="flex-grow bg-gray-800 border border-gray-700 rounded-l-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white"
-                        disabled={loading}
-                      />
-                      <button
-                        type="submit"
-                        disabled={loading}
-                        className="bg-gray-700 text-white font-semibold px-6 rounded-r-lg hover:bg-gray-600"
-                      >
-                        SEND
-                      </button>
-                    </div>
-                  </form>
-                  
-                  {showQuickResponse && (
-                    <div className="mt-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="flex items-center">
-                          <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-medium mr-2">
-                            S
+                {/* Sara's Journal */}
+                <div className="bg-card border border-card rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Sara's Journal</h2>
+                  </div>
+                  {journalEntries.length > 0 ? (
+                    <div className="space-y-3">
+                      {journalEntries.slice(0, 5).map((entry: any, i: number) => (
+                        <div key={entry.id || i} className="flex gap-3">
+                          <span className="text-xs text-gray-500 flex-shrink-0 w-14 pt-0.5 text-right">
+                            {entry.timestamp || entry.created_at
+                              ? new Date(entry.timestamp || entry.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                              : ''}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-300 leading-relaxed">
+                              {entry.summary || entry.content || entry.text || ''}
+                            </p>
+                            {entry.emotional_state && (
+                              <span className="text-xs text-gray-500 mt-0.5 inline-block">
+                                {EMOTION_EMOJI[entry.emotional_state] || ''} {entry.emotional_state}
+                              </span>
+                            )}
                           </div>
-                          <span className="text-sm text-gray-400">Sara</span>
                         </div>
-                        <button
-                          onClick={() => setShowQuickResponse(false)}
-                          className="text-gray-400 hover:text-white"
-                        >
-                          <span className="material-icons text-sm">close</span>
-                        </button>
-                      </div>
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        skipHtml={false}
-                        components={{
-                          code({node, inline, className, children, ...props}) {
-                            const match = /language-(\w+)/.exec(className || '')
-                            const language = match ? match[1] : ''
-                            const codeContent = String(children).replace(/\n$/, '')
-                            
-                            // Handle Mermaid diagrams - temporarily disabled
-                            if (!inline && language === 'mermaid') {
-                              return (
-                                <div className="my-2 p-3 bg-blue-900/20 border border-blue-500 rounded">
-                                  <p className="text-blue-300 text-xs mb-1">🎨 Mermaid Diagram</p>
-                                  <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{codeContent}</code>
-                                </div>
-                              )
-                            }
-                            
-                            return (
-                              <code className="bg-gray-600 px-1 py-0.5 rounded text-xs" {...props}>
-                                {children}
-                              </code>
-                            )
-                          },
-                          p: ({children}) => <p className="text-gray-100 text-sm">{children}</p>,
-                          ul: ({children}) => <ul className="list-disc list-inside text-gray-100 text-sm">{children}</ul>,
-                          ol: ({children}) => <ol className="list-decimal list-inside text-gray-100 text-sm">{children}</ol>,
-                          table: ({children}) => (
-                            <div className="overflow-x-auto my-4">
-                              <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
-                                {children}
-                              </table>
-                            </div>
-                          ),
-                          thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
-                          tbody: ({children}) => <tbody>{children}</tbody>,
-                          tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
-                          th: ({children}) => (
-                            <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
-                              {children}
-                            </th>
-                          ),
-                          td: ({children}) => (
-                            <td className="border border-gray-600 px-3 py-2 text-gray-300">
-                              {children}
-                            </td>
-                          ),
-                        }}
-                      >
-                        {quickChatResponse}
-                      </ReactMarkdown>
+                      ))}
                     </div>
+                  ) : (
+                    <p className="text-gray-500 text-sm text-center py-3">No journal entries in the last 24 hours</p>
                   )}
                 </div>
               </div>
 
-              {/* Right Sidebar */}
-              <div className="lg:col-span-1 space-y-4 md:space-y-8">
-                {/* Active Items */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">ACTIVE TIMERS</h2>
-                  {timers.length > 0 ? (
-                    <div className="space-y-3">
-                      {timers.map((timer) => (
-                        <div key={timer.id} className="bg-gray-800 p-3 rounded-lg">
-                          <div className="flex justify-between items-center">
-                            <span className="font-medium">{timer.title}</span>
-                            <LiveTimer 
-                              endTime={timer.end_time} 
-                              className="text-teal-400 font-mono text-sm"
-                            />
-                          </div>
-                        </div>
-                      ))}
+              {/* ===== RIGHT COLUMN (1/3) ===== */}
+              <div className="lg:col-span-1 space-y-4 md:space-y-6">
+
+                {/* Activity & Devices */}
+                <div className="bg-card border border-card rounded-xl p-5">
+                  <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Activity & Devices</h2>
+                  {saraStatus && (
+                    <div className="mb-4">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-lg">{EMOTION_EMOJI[saraStatus.emotional_state] || EMOTION_EMOJI['neutral']}</span>
+                        <span className="text-sm text-gray-300 capitalize">{saraStatus.emotional_state || 'neutral'}</span>
+                      </div>
+                      {saraStatus.latest_thought && (
+                        <p className="text-xs text-gray-500 italic leading-relaxed">
+                          "{(saraStatus.latest_thought || '').slice(0, 120)}{(saraStatus.latest_thought || '').length > 120 ? '...' : ''}"
+                        </p>
+                      )}
                     </div>
-                  ) : (
-                    <p className="text-gray-400 text-center py-4">No active timers</p>
                   )}
+                  <div className="space-y-2">
+                    {connectedDevices.length > 0 ? connectedDevices.map((dev: any, i: number) => (
+                      <div key={dev.device_id || i} className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          dev.is_connected ? 'bg-green-400' :
+                          dev.is_online ? 'bg-yellow-400' : 'bg-gray-600'
+                        }`}></div>
+                        <span className="text-sm text-gray-300">{dev.friendly_name || dev.hostname || 'Unknown'}</span>
+                        <span className="text-xs text-gray-500 ml-auto">{dev.platform || ''}</span>
+                      </div>
+                    )) : (
+                      <p className="text-gray-500 text-xs">No devices connected</p>
+                    )}
+                  </div>
                 </div>
 
-                {/* Recent Reminders */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">REMINDERS</h2>
-                  {reminders.length > 0 ? (
-                    <div className="space-y-3">
-                      {reminders.slice(0, 3).map((reminder) => (
-                        <div key={reminder.id} className="bg-gray-800 p-3 rounded-lg">
-                          <div className="flex justify-between items-start">
-                            <div className="flex-1">
-                              <div className="font-medium">{reminder.title}</div>
-                              <div className="text-xs text-gray-400 mt-1">
-                                {new Date(reminder.reminder_time).toLocaleDateString()}
-                              </div>
+                {/* Standing Orders */}
+                <div className="bg-card border border-card rounded-xl p-5">
+                  <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Standing Orders</h2>
+                  {standingOrders.length > 0 ? (
+                    <div className="space-y-2">
+                      {standingOrders.slice(0, 5).map((order: any) => (
+                        <div key={order.id} className="flex items-start gap-2">
+                          <span className="material-icons text-sm text-gray-500 mt-0.5" style={{fontSize: '16px'}}>
+                            {order.trigger_type === 'timer' ? 'timer' :
+                             order.trigger_type === 'time' ? 'schedule' :
+                             order.trigger_type === 'climate' ? 'thermostat' :
+                             order.trigger_type === 'presence' ? 'sensors' : 'auto_awesome'}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-300 leading-tight">{order.description}</p>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              {order.fires_at && (
+                                <span className="text-xs text-amber-400">
+                                  {new Date(order.fires_at).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})}
+                                </span>
+                              )}
+                              {order.scheduled_time && (
+                                <span className="text-xs text-blue-400">
+                                  {order.scheduled_time}{order.scheduled_days ? ` (${order.scheduled_days.join(', ')})` : ' daily'}
+                                </span>
+                              )}
+                              {!order.fires_at && !order.scheduled_time && (
+                                <span className="text-xs text-gray-500">{order.execution_count || 0} runs</span>
+                              )}
+                              {order.last_executed_at && (
+                                <span className="text-xs text-gray-600">&middot; {formatRelativeTime(order.last_executed_at)}</span>
+                              )}
+                              {order.trigger_config?.one_shot && (
+                                <span className="text-xs text-gray-600">&middot; one-time</span>
+                              )}
                             </div>
-                            <button
-                              onClick={() => completeReminder(reminder.id)}
-                              className="text-xs bg-green-600/20 hover:bg-green-600/30 text-green-400 px-2 py-1 rounded"
-                            >
-                              ✓
-                            </button>
                           </div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-gray-400 text-center py-4">No reminders</p>
+                    <p className="text-gray-500 text-xs text-center py-2">No active standing orders</p>
                   )}
                 </div>
 
-                {/* Recent Notes */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">RECENT NOTES</h2>
-                  {notes.slice(0, 3).length > 0 ? (
-                    <div className="space-y-3">
-                      {notes.slice(0, 3).map((note) => (
-                        <div key={note.id} className="bg-gray-800 p-3 rounded-lg">
-                          <p className="text-sm text-gray-300 font-medium">
-                            {note.title || 'Untitled Note'}
-                          </p>
-                          <div className="text-xs text-gray-500 mt-1">
-                            {new Date(note.created_at).toLocaleDateString()}
-                          </div>
+                {/* Quick Actions */}
+                <div className="bg-card border border-card rounded-xl p-5">
+                  <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Quick Actions</h2>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { icon: 'chat', label: 'Chat', view: 'chat', color: 'text-teal-400' },
+                      { icon: 'edit_note', label: 'Notes', view: 'notes', color: 'text-blue-400' },
+                      { icon: 'calendar_month', label: 'Calendar', view: 'calendar', color: 'text-purple-400' },
+                      { icon: 'summarize', label: 'Briefs', view: 'briefings', color: 'text-amber-400' },
+                    ].map(action => (
+                      <button
+                        key={action.view}
+                        onClick={() => setView(action.view)}
+                        className="flex flex-col items-center gap-1 py-3 rounded-lg bg-gray-800/50 hover:bg-gray-700/50 transition-colors"
+                      >
+                        <span className={`material-icons ${action.color}`}>{action.icon}</span>
+                        <span className="text-xs text-gray-400">{action.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Active Timers (conditional) */}
+                {timers.length > 0 && (
+                  <div className="bg-card border border-card rounded-xl p-5">
+                    <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Active Timers</h2>
+                    <div className="space-y-2">
+                      {timers.map((timer: any) => (
+                        <div key={timer.id} className="flex items-center justify-between bg-gray-800/50 p-2 rounded-lg">
+                          <span className="text-sm text-gray-300 truncate mr-2">{timer.title}</span>
+                          <LiveTimer
+                            endTime={timer.end_time}
+                            className="text-teal-400 font-mono text-sm flex-shrink-0"
+                          />
                         </div>
                       ))}
                     </div>
-                  ) : (
-                    <p className="text-gray-400 text-center py-4">No notes yet</p>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {view === 'chat' && (
+            <div className="flex-1 min-h-0">
             <ChatInterface
               messages={chatMessages}
               setMessages={setChatMessages}
@@ -1645,9 +1736,11 @@ function App() {
               setMessage={setMessage}
               abortControllerRef={abortControllerRef}
             />
+            </div>
           )}
 
           {view === 'notes' && (
+            <div className="flex-1 min-h-0">
             <Notes
               notes={notes}
               setNotes={setNotes}
@@ -1658,10 +1751,11 @@ function App() {
               editNoteTitle={editNoteTitle}
               setEditNoteTitle={setEditNoteTitle}
             />
+            </div>
           )}
 
           {view === 'documents' && (
-            <div className="space-y-6">
+            <div className="flex-1 overflow-y-auto min-h-0 space-y-6">
               {/* Document Upload Section */}
               <div className="bg-card border border-card rounded-xl p-6">
                 <h2 className="text-lg font-semibold mb-4">UPLOAD DOCUMENT</h2>
@@ -1827,11 +1921,13 @@ function App() {
           )}
 
           {view === 'calendar' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <CalendarView />
+            </div>
           )}
 
           {view === 'habits' && (
-            <div className="space-y-6">
+            <div className="flex-1 overflow-y-auto min-h-0 space-y-6">
               {/* Habit Sub-Navigation */}
               <div className="bg-card border border-card rounded-xl p-4">
                 <div className="flex items-center justify-between">
@@ -1896,25 +1992,33 @@ function App() {
           )}
 
           {view === 'fitness' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <FitnessSection />
+            </div>
           )}
 
           {view === 'learn' && (
+            <div className="flex-1 min-h-0">
             <LearningSection />
+            </div>
           )}
 
           {view === 'projects' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <ProjectSection />
+            </div>
           )}
 
           {view === 'recipes' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <RecipesSection />
+            </div>
           )}
 
           {/* GTKY now managed within Settings; reflection views removed */}
 
           {view === 'privacy-dashboard' && (
-            <div className="max-w-4xl mx-auto">
+            <div className="flex-1 overflow-y-auto min-h-0 max-w-4xl mx-auto">
               <PrivacyDashboard
                 onToast={(message, type) => {
                   showToast(message, type || 'info')
@@ -1924,26 +2028,49 @@ function App() {
           )}
 
           {view === 'settings' && (
-            <div className="space-y-6">
+            <div className="flex-1 overflow-y-auto min-h-0 space-y-6">
               <Settings />
 
             </div>
           )}
 
           {view === 'orchestrator-lab' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <OrchestratorLab onBack={() => setView('settings')} />
+            </div>
           )}
 
           {view === 'briefings' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <MorningBrief />
-          )}
-
-          {view === 'patterns' && (
-            <PatternsDashboard />
+            </div>
           )}
 
           {view === 'sensory-monitor' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
             <SensoryMonitor />
+            </div>
+          )}
+
+          {view === 'email' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+            <EmailPage />
+            </div>
+          )}
+
+          {view === 'inbox' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+            <ContentInbox
+              onNavigateToChat={(inboxItemId, title) => {
+                // Navigate to chat with inbox item context
+                setMessage(`Let's talk about this: ${title}`);
+                setChatMessages([]);
+                setView('chat');
+                // Store inbox_item_id for next chat request
+                (window as any).__inboxItemId = inboxItemId;
+              }}
+            />
+            </div>
           )}
         </main>
       </div>
@@ -1952,7 +2079,7 @@ function App() {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40 overflow-x-auto scrollbar-hidden">
         <div className="flex py-2 px-2 gap-1" style={{minWidth: 'fit-content'}}>
           <button
-            onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
+            onClick={() => { setView('dashboard'); loadDashboardData(); }}
             className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
           >
             <span className="material-icons text-lg">home</span>
@@ -1978,6 +2105,13 @@ function App() {
           >
             <span className="material-icons text-lg">calendar_today</span>
             <span className="text-xs whitespace-nowrap">Calendar</span>
+          </button>
+          <button
+            onClick={() => setView('email')}
+            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'email' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
+          >
+            <span className="material-icons text-lg">email</span>
+            <span className="text-xs whitespace-nowrap">Email</span>
           </button>
           <button
             onClick={() => setView('fitness')}

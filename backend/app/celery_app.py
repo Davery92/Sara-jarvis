@@ -10,9 +10,28 @@ This provides the unified task scheduling and worker management for:
 - Memory consolidation
 """
 
+import logging
 import os
 from celery import Celery
 from celery.schedules import crontab
+
+logger = logging.getLogger(__name__)
+
+# Sentry error tracking for Celery workers (no-op if DSN not configured)
+_sentry_dsn = os.getenv("SENTRY_DSN", "")
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.celery import CeleryIntegration
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            environment=os.getenv("SENTRY_ENVIRONMENT", "development"),
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+            send_default_pii=False,
+            integrations=[CeleryIntegration()],
+        )
+    except Exception:
+        pass
 
 # Get Redis URL from environment
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -30,6 +49,10 @@ celery_app = Celery(
         "app.tasks.karma",
         "app.tasks.reflection",
         "app.tasks.autonomy",
+        "app.tasks.email_sync",
+        "app.tasks.automation",
+        "app.tasks.content_inbox",
+        "app.tasks.learning",
     ]
 )
 
@@ -151,10 +174,12 @@ celery_app.conf.beat_schedule = {
     # PHASE 4: Autonomy
     # ============================================
 
-    # Proactive check - consider if action needed (every 15 minutes)
-    "proactive-check": {
-        "task": "app.tasks.autonomy.proactive_check",
-        "schedule": 900.0,
+    # Unified agent - consolidated sensing + thinking + acting
+    # Replaces both subconscious worker (systemd) and unified heartbeat (Celery)
+    # Runs every 15 min with 4-phase cycle: SENSE → THINK → ACT → RECORD
+    "unified-agent": {
+        "task": "app.tasks.autonomy.unified_agent",
+        "schedule": 900.0,  # 15 minutes
         "options": {"queue": "cognitive"}
     },
 
@@ -186,11 +211,108 @@ celery_app.conf.beat_schedule = {
         "options": {"queue": "reflection"}
     },
 
+    # PKG deep extraction - mine conversations for personal knowledge (12 PM + 6 PM)
+    "pkg-midday-extract": {
+        "task": "app.tasks.autonomy.pkg_deep_extract",
+        "schedule": crontab(hour=12, minute=0),
+        "kwargs": {"since_hours": 6},
+        "options": {"queue": "cognitive"}
+    },
+
+    "pkg-evening-extract": {
+        "task": "app.tasks.autonomy.pkg_deep_extract",
+        "schedule": crontab(hour=18, minute=0),
+        "kwargs": {"since_hours": 6},
+        "options": {"queue": "cognitive"}
+    },
+
     # Idle processing - productive use of quiet time (every 10 minutes)
     "idle-processing": {
         "task": "app.tasks.autonomy.idle_processing",
         "schedule": 600.0,
         "options": {"queue": "low_priority"}
+    },
+
+    # Weather context refresh - update temperature/conditions in unified snapshot (every 30 min)
+    "weather-context-refresh": {
+        "task": "app.tasks.autonomy.weather_context_refresh",
+        "schedule": 1800.0,  # 30 minutes
+        "options": {"queue": "low_priority"}
+    },
+
+    # Home state hourly summary - aggregate HA events for pattern analysis
+    "home-state-summary": {
+        "task": "app.tasks.autonomy.home_state_hourly_summary",
+        "schedule": crontab(minute=5),  # 5 min past each hour
+        "options": {"queue": "low_priority"}
+    },
+
+    # Daily autonomy digest - summary of agent runs and notifications (9 PM)
+    "daily-autonomy-digest": {
+        "task": "app.tasks.autonomy.daily_autonomy_digest",
+        "schedule": crontab(hour=21, minute=0),
+        "options": {"queue": "low_priority"}
+    },
+
+    # ============================================
+    # PHASE 5: Email Integration
+    # ============================================
+
+    # Email sync - fetch new emails from MS Graph (every 3 minutes)
+    "email-sync": {
+        "task": "app.tasks.email_sync.sync_emails",
+        "schedule": 180.0,  # 3 minutes
+        "options": {"queue": "cognitive"}
+    },
+
+    # RiskNinja attachment filing - process important attachments (every 5 minutes)
+    "riskninja-attachment-filing": {
+        "task": "app.tasks.email_sync.process_riskninja_attachments",
+        "schedule": 300.0,  # 5 minutes
+        "options": {"queue": "cognitive"}
+    },
+
+    # ============================================
+    # PHASE 6: Natural Language Automation
+    # ============================================
+
+    # Automation watcher - finds and dispatches due automation tasks (every 30 seconds)
+    "automation-watcher": {
+        "task": "app.tasks.automation.automation_watcher",
+        "schedule": 30.0,
+        "options": {"queue": "cognitive"}
+    },
+
+    # ============================================
+    # PHASE 7: Learning System
+    # ============================================
+
+    # Deep research poller - processes queued research jobs (every 60 seconds)
+    "deep-research-poller": {
+        "task": "app.tasks.learning.deep_research_worker",
+        "schedule": 60.0,
+        "options": {"queue": "cognitive"}
+    },
+
+    # Pending source fetcher - auto-fetch sources with fetch_status='pending' (every 2 minutes)
+    "pending-source-fetcher": {
+        "task": "app.tasks.learning.fetch_pending_sources",
+        "schedule": 120.0,
+        "options": {"queue": "cognitive"}
+    },
+
+    # Autonomy retention cleanup - daily at 4 AM (Phase 0 — Cortana Evolution)
+    "autonomy-retention-cleanup": {
+        "task": "app.tasks.autonomy.autonomy_retention_cleanup",
+        "schedule": crontab(hour=4, minute=0),
+        "options": {"queue": "maintenance"}
+    },
+
+    # Mission worker - advance runnable missions (Phase 2 — Cortana Evolution)
+    "mission-worker": {
+        "task": "app.tasks.autonomy.mission_worker",
+        "schedule": 30.0,
+        "options": {"queue": "cognitive"}
     },
 }
 
@@ -203,6 +325,10 @@ celery_app.conf.task_routes = {
     "app.tasks.reflection.*": {"queue": "reflection"},
     "app.tasks.karma.*": {"queue": "maintenance"},
     "app.tasks.autonomy.*": {"queue": "cognitive"},
+    "app.tasks.email_sync.*": {"queue": "cognitive"},
+    "app.tasks.automation.*": {"queue": "cognitive"},
+    "app.tasks.content_inbox.*": {"queue": "cognitive"},
+    "app.tasks.learning.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities
@@ -217,3 +343,40 @@ celery_app.conf.task_queues = {
 
 # Default queue
 celery_app.conf.task_default_queue = "cognitive"
+
+
+def _validate_queue_topology():
+    """Startup check: all queues used in routing/scheduling are declared and consumed."""
+    declared_queues = set(celery_app.conf.task_queues.keys()) if celery_app.conf.task_queues else set()
+
+    # Collect queues targeted by beat schedule
+    beat_queues = set()
+    for name, entry in (celery_app.conf.beat_schedule or {}).items():
+        q = (entry.get("options") or {}).get("queue")
+        if q:
+            beat_queues.add(q)
+            if q not in declared_queues:
+                logger.warning(f"Queue topology: beat task '{name}' targets queue '{q}' not in task_queues")
+
+    # Collect queues targeted by task routes
+    route_queues = set()
+    for pattern, route in (celery_app.conf.task_routes or {}).items():
+        q = route.get("queue") if isinstance(route, dict) else route
+        if q:
+            route_queues.add(q)
+            if q not in declared_queues:
+                logger.warning(f"Queue topology: route '{pattern}' targets queue '{q}' not in task_queues")
+
+    # Check worker subscription covers required queues (from env)
+    required_queues = beat_queues | route_queues
+    worker_queues_str = os.environ.get("CELERY_WORKER_QUEUES", "")
+    if worker_queues_str:
+        worker_queues = {q.strip() for q in worker_queues_str.split(",")}
+        uncovered = required_queues - worker_queues
+        if uncovered:
+            logger.warning(f"Queue topology: required queues {uncovered} not in worker subscription")
+
+    logger.info(f"Queue topology validated: {len(required_queues)} required queues, {len(declared_queues)} declared")
+
+
+_validate_queue_topology()

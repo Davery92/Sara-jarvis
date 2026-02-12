@@ -23,6 +23,13 @@ export interface ChatModelsResponse {
 export interface ChatOptions {
   model?: string;
   ephemeral?: boolean;
+  notifyOnComplete?: boolean;  // Send push notification when response is ready (for background completion)
+  inboxItemId?: string;  // Pre-load inbox item content for discussion
+  source?: string;  // 'ios' | 'ios_overlay' | 'workspace'
+  currentScreen?: string;  // Current iOS screen for context-aware tool loading
+  onContentCard?: (card: any) => void;  // Content card callback
+  onToolStatus?: (status: { tool: string; status: string }) => void;  // Tool execution status
+  onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
 }
 
 class ApiClient {
@@ -209,6 +216,14 @@ class ApiClient {
                   } else {
                     console.warn('[API] ⚠️ No episode_id in final_response!');
                   }
+                } else if (parsed.type === 'content_card' && options?.onContentCard) {
+                  options.onContentCard(parsed.data);
+                } else if (parsed.type === 'tool_executing' && options?.onToolStatus) {
+                  options.onToolStatus({ tool: parsed.data?.tool, status: 'executing' });
+                } else if (parsed.type === 'tool_completed' && options?.onToolStatus) {
+                  options.onToolStatus({ tool: parsed.data?.tool, status: 'completed' });
+                } else if (parsed.type === 'suggested_actions' && options?.onSuggestedActions) {
+                  options.onSuggestedActions(parsed.data?.actions || []);
                 } else if (parsed.content) {
                   // Fallback for other formats
                   onChunk(parsed.content);
@@ -280,6 +295,18 @@ class ApiClient {
         }
         if (options?.ephemeral) {
           requestBody.ephemeral = options.ephemeral;
+        }
+        if (options?.notifyOnComplete) {
+          requestBody.notify_on_complete = options.notifyOnComplete;
+        }
+        if (options?.inboxItemId) {
+          requestBody.inbox_item_id = options.inboxItemId;
+        }
+        if (options?.source) {
+          requestBody.source = options.source;
+        }
+        if (options?.currentScreen) {
+          requestBody.current_screen = options.currentScreen;
         }
         xhr.send(JSON.stringify(requestBody));
       });
@@ -374,6 +401,45 @@ class ApiClient {
     return response.data;
   }
 
+  // ==================== CONTENT INBOX ====================
+
+  async getInboxItems(status?: string, limit: number = 50): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    params.set('limit', String(limit));
+    const response = await this.client.get(`/api/inbox?${params.toString()}`);
+    return response.data;
+  }
+
+  async getInboxStats(): Promise<{ unread: number; read: number; kept: number; total: number }> {
+    const response = await this.client.get('/api/inbox/stats');
+    return response.data;
+  }
+
+  async getInboxItem(id: string): Promise<any> {
+    const response = await this.client.get(`/api/inbox/${id}`);
+    return response.data;
+  }
+
+  async shareToInbox(url: string, title?: string): Promise<any> {
+    const response = await this.client.post('/api/inbox/share', { url, title });
+    return response.data;
+  }
+
+  async shareTextToInbox(text: string, title?: string): Promise<any> {
+    const response = await this.client.post('/api/inbox/share/text', { text, title });
+    return response.data;
+  }
+
+  async updateInboxItemStatus(id: string, status: 'kept' | 'discarded'): Promise<any> {
+    const response = await this.client.patch(`/api/inbox/${id}/status`, { status });
+    return response.data;
+  }
+
+  async deleteInboxItem(id: string): Promise<void> {
+    await this.client.delete(`/api/inbox/${id}`);
+  }
+
   // ==================== PRESENCE LOGGING ====================
 
   /**
@@ -390,6 +456,73 @@ class ApiClient {
       // Don't throw - presence logging is best-effort
       console.warn('[API] Failed to log presence:', error);
     }
+  }
+
+  // ==================== AUTONOMY (Cortana Evolution) ====================
+
+  async getAttentionItems(status?: string, limit: number = 50): Promise<any[]> {
+    const params = new URLSearchParams({ limit: limit.toString() });
+    if (status) params.append('status', status);
+    const response = await this.client.get(`/autonomy/attention?${params}`);
+    return (response.data as any)?.items || [];
+  }
+
+  async getAttentionCount(): Promise<{ counts: Record<string, number>; unread: number }> {
+    const response = await this.client.get('/autonomy/attention/count');
+    return response.data as any;
+  }
+
+  async markAttentionRead(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/read`);
+  }
+
+  async archiveAttentionItem(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/archive`);
+  }
+
+  async getMissions(state?: string): Promise<any[]> {
+    const params = state ? `?state=${state}` : '';
+    const response = await this.client.get(`/autonomy/missions${params}`);
+    return (response.data as any)?.missions || [];
+  }
+
+  async getMission(id: string): Promise<any> {
+    const response = await this.client.get(`/autonomy/missions/${id}`);
+    return response.data;
+  }
+
+  async cancelMission(id: string): Promise<void> {
+    await this.client.post(`/autonomy/missions/${id}/cancel`);
+  }
+
+  async confirmMission(id: string): Promise<void> {
+    await this.client.post(`/autonomy/missions/${id}/confirm`);
+  }
+
+  async getActionTraces(hours: number = 24, limit: number = 50): Promise<any[]> {
+    const response = await this.client.get(`/autonomy/traces?hours=${hours}&limit=${limit}`);
+    return (response.data as any)?.traces || [];
+  }
+
+  async getTraceStats(hours: number = 24): Promise<any> {
+    const response = await this.client.get(`/autonomy/traces/stats?hours=${hours}`);
+    return response.data;
+  }
+
+  async getPolicyCandidates(status?: string): Promise<any[]> {
+    const params = status ? `?status=${status}` : '';
+    const response = await this.client.get(`/autonomy/policy-candidates${params}`);
+    return (response.data as any)?.candidates || [];
+  }
+
+  async acceptPolicyCandidate(id: string): Promise<any> {
+    const response = await this.client.post(`/autonomy/policy-candidates/${id}/accept`);
+    return response.data;
+  }
+
+  async rejectPolicyCandidate(id: string): Promise<any> {
+    const response = await this.client.post(`/autonomy/policy-candidates/${id}/reject`);
+    return response.data;
   }
 }
 

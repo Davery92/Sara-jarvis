@@ -442,6 +442,23 @@ class SchedulerService:
         )
         
         db.commit()
+
+        # Emit timer completed event for standing order evaluation
+        try:
+            from app.services.event_bus import emit_event, EventType
+            await emit_event(
+                event_type=EventType.TIMER_COMPLETED,
+                user_id=str(timer.user_id),
+                payload={
+                    "timer_id": str(timer.id),
+                    "timer_title": timer.label or "",
+                    "duration_minutes": duration_minutes,
+                },
+                source="scheduler",
+            )
+        except Exception as e:
+            logger.debug(f"Timer event emit failed: {e}")
+
         logger.info(f"Processed expired timer: {timer.label} ({duration_minutes}m)")
 
 

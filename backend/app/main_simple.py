@@ -36,7 +36,7 @@ from app.services.search_service import search_service
 from app.services.embedding_service import embedding_service
 from app.services.insight_injection import InsightInjectionService
 from app.services.intent_classifier import get_tool_intent_classifier
-from app.services.body_state_calibration import calibration_service
+# body_state_calibration removed — body state no longer injected into chat
 from app.services.sara_journal_service import sara_journal
 from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
@@ -235,15 +235,8 @@ ALLOWED_MIME_TYPES = [
     "text/csv"
 ]
 
-# Startup health tracking - monitors critical service status
-STARTUP_HEALTH = {
-    "database": {"status": "unknown", "message": None},
-    "embedding_service": {"status": "unknown", "message": None, "dimension": None},
-    "llm_service": {"status": "unknown", "message": None},
-    "neo4j": {"status": "unknown", "message": None},
-    "startup_time": None,
-    "critical_failures": []
-}
+# Startup health tracking — shared with routes/core.py
+from app.core.health_state import STARTUP_HEALTH
 
 # Database setup
 if DATABASE_URL.startswith("sqlite"):
@@ -253,1150 +246,66 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Models
-class User(Base):
-    __tablename__ = "app_user"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    email = Column(String, unique=True, nullable=False, index=True)
-    password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
+# ===================== MODEL IMPORTS =====================
+# Models extracted to backend/app/models/ (Phase 2)
+from app.models.user import User
+from app.models.note import Note
+from app.models.note_connection import NoteConnection
+from app.models.folder import Folder
+from app.models.reminder import Reminder, Timer
+from app.models.episode import Episode
+from app.models.episode_rating import EpisodeRating
+from app.models.conversation import Conversation, ConversationTurn
+from app.models.background_task import BackgroundTask
+from app.models.memory_trace import MemoryTrace, MemoryEmbedding, MemoryEdge
+from app.models.context import ContextWindow, ContextMode
+from app.models.dream import DreamInsight
+from app.models.briefing import DailyBriefing, BriefingSettings
+from app.models.intelligence import IntelligenceReport, ProactiveSuggestion, DetectedPattern
+from app.models.insight import AutonomousInsight, InsightNudge, ActivitySession, BackgroundSweep
+from app.models.event_outbox import EventOutbox
+from app.models.push_token import PushToken
+from app.models.calendar_event import CalendarEvent
+from app.models.document_chunk import DocumentChunk
+from app.models.doc import Document
+from app.models.habit import Habit, HabitItem, HabitInstance, HabitLog, HabitStreak, HabitLink
+from app.models.profile import UserProfile
+
+# ===================== SCHEMA IMPORTS =====================
+# Schemas extracted to backend/app/schemas/ (Phase 2)
+from app.schemas.auth import UserCreate, UserLogin, UserResponse
+from app.schemas.notes import (
+    NoteCreate, NoteResponse, NoteConnectionCreate, NoteConnectionResponse,
+    FolderCreate, FolderUpdate, FolderResponse, TreeNodeResponse,
+)
+from app.schemas.reminders import ReminderCreate, ReminderUpdate, ReminderResponse, TimerCreate, TimerResponse
+from app.schemas.calendar import (
+    CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
+    IOSCalendarEventSync as IOSCalendarEvent, IOSCalendarSyncRequest, IOSCalendarSyncResponse,
+)
+from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, UserSettings
+from app.schemas.documents import DocumentResponse, DocumentChunkResponse, Model3DResponse
+from app.schemas.memory import (
+    ConversationResponse, ConversationTurnResponse, ConversationSummaryResponse,
+    SetActiveConversationRequest, EpisodeMessageResponse,
+)
+from app.schemas.habits import (
+    HabitCreate, HabitResponse, HabitItemCreate, HabitItemResponse,
+    HabitInstanceResponse, HabitLogCreate, HabitTodayStats,
+)
+from app.schemas.insights import (
+    UserProfileCreate, UserProfileResponse,
+    AutonomousInsightResponse, InsightFeedbackRequest,
+    ActivitySessionResponse, BackgroundSweepResponse,
+)
+from app.schemas.reflection import (
+    ReflectionStartResponse,
+    ReflectionResponseRequest, ReflectionResponseReply,
+    ReflectionHistoryResponse, ReflectionInsightsResponse,
+    ReflectionSettingsRequest,
+)
+from app.schemas.ai_settings import AISettingsResponse, AISettingsUpdate
 
-class Note(Base):
-    __tablename__ = "note"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    folder_id = Column(String, nullable=True)  # Foreign key to folder
-    title = Column(String, default="")
-    content = Column(Text, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Folder(Base):
-    __tablename__ = "folder"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    name = Column(String, nullable=False)
-    parent_id = Column(String, nullable=True)  # Self-referencing for hierarchy
-    sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class NoteConnection(Base):
-    __tablename__ = "note_connection"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    source_note_id = Column(String, nullable=False)  # Note that contains the link/reference
-    target_note_id = Column(String, nullable=False)  # Note being referenced
-    connection_type = Column(String, nullable=False)  # 'reference', 'semantic', 'temporal'
-    strength = Column(Integer, default=50)  # 0-100 strength score
-    auto_generated = Column(String, default="true")  # true for auto-detected, false for manual
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class BackgroundTask(Base):
-    """Tracks background agent tasks that run independently of user sessions"""
-    __tablename__ = "background_task"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)
-    status = Column(String, nullable=False, default="pending")  # pending, running, completed, failed, needs_clarification
-    task_type = Column(String, nullable=False, default="research")  # research, analysis, etc.
-    original_query = Column(Text, nullable=False)  # The user's original request
-    result_note_id = Column(String, nullable=True)  # Link to workspace note with results
-    workspace_folder_id = Column(String, nullable=True)  # Agent workspace folder
-    clarification_question = Column(Text, nullable=True)  # If status is needs_clarification
-    clarification_response = Column(Text, nullable=True)  # User's response to clarification
-    error_message = Column(Text, nullable=True)  # If status is failed
-    task_metadata = Column(JSONB, default={})  # orchestrator state, worker count, progress, etc.
-    created_at = Column(DateTime, server_default=func.now())
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-class Reminder(Base):
-    __tablename__ = "reminder"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    description = Column(Text, default="")
-    reminder_time = Column(DateTime, nullable=False)
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Timer(Base):
-    __tablename__ = "timer"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    duration_minutes = Column(Integer, nullable=False)
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
-    is_active = Column(Boolean, default=True)  # PostgreSQL boolean
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    created_at = Column(DateTime, server_default=func.now())
-
-class CalendarEvent(Base):
-    __tablename__ = "calendar_event"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    description = Column(Text, default="")
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
-    location = Column(String, default="")
-    all_day = Column(Boolean, default=False)
-    reminder_minutes = Column(Integer)
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    # iOS calendar sync fields
-    source = Column(String, default="sara")  # 'sara' or 'ios_calendar'
-    ios_event_id = Column(String, nullable=True)  # iOS event identifier for deduplication
-    ios_calendar_id = Column(String, nullable=True)  # iOS calendar identifier
-    ios_calendar_name = Column(String, nullable=True)  # Human-readable calendar name
-    read_only = Column(Boolean, default=False)  # iOS synced events are read-only
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Document(Base):
-    __tablename__ = "document"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    filename = Column(String, nullable=False)
-    original_filename = Column(String, nullable=False)
-    title = Column(String, default="")  # User-editable title
-    file_path = Column(String, nullable=False)
-    file_size = Column(Integer, nullable=False)
-    mime_type = Column(String, nullable=False)
-    content_text = Column(Text, default="")  # Extracted text content
-    is_processed = Column(String, default="false")  # SQLite compatibility
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class DocumentChunk(Base):
-    __tablename__ = "document_chunk"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    document_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
-    chunk_text = Column(Text, nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-class Conversation(Base):
-    __tablename__ = "conversation"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, default="")  # Auto-generated conversation title
-    summary = Column(Text, default="")  # Auto-generated conversation summary
-    total_messages = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ConversationTurn(Base):
-    __tablename__ = "conversation_turn"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "user" or "assistant"
-    content = Column(Text, nullable=False)
-    message_index = Column(Integer, nullable=False)  # Order in conversation
-    # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL  
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-# ===================== HUMAN-LIKE MEMORY TABLES =====================
-class MemoryTrace(Base):
-    __tablename__ = "memory_trace"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)
-    content = Column(Text, nullable=False)
-    role = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    salience = Column(Float, nullable=True)
-    # Store JSON as text for portability; services can json.loads when needed
-    source = Column(Text, nullable=True)
-    meta = Column(Text, nullable=True)
-
-class MemoryEmbedding(Base):
-    __tablename__ = "memory_embedding"
-    trace_id = Column(String, primary_key=True)
-    head = Column(String, primary_key=True)
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class MemoryEdge(Base):
-    __tablename__ = "memory_edge"
-    src = Column(String, primary_key=True)
-    dst = Column(String, primary_key=True)
-    type = Column(String, primary_key=True)
-    weight = Column(Float, nullable=True)
-    ts = Column(DateTime(timezone=True), server_default=func.now())
-
-# Episodic Memory Models for Advanced Intelligence
-class Episode(Base):
-    """Enhanced episodic memory model with emotional and contextual metadata"""
-    __tablename__ = "episode"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id = Column(String, nullable=True)  # Link to conversation if applicable
-    user_id = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "user" or "assistant"
-    content = Column(Text, nullable=False)
-    
-    # Intelligence metadata
-    importance = Column(Float, default=0.5)  # AI-scored importance (0-1)
-    emotional_tone = Column(Text, nullable=True)  # JSON: {"primary": "positive", "intensity": 0.7, "emotions": [...]}
-    topics = Column(Text, nullable=True)  # JSON: ["work", "fitness", "learning"]
-    context_tags = Column(Text, nullable=True)  # JSON: ["planning", "reflection", "problem_solving"]
-    
-    # Memory metadata
-    access_count = Column(Integer, default=0)  # How often this episode is retrieved
-    last_accessed = Column(DateTime, nullable=True)
-    memory_type = Column(String, default="conversation")  # conversation, note_creation, action, etc.
-    source = Column(String, default="chat")  # chat, note, document, timer, etc.
-    
-    # Vector embedding for similarity search
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-
-    # Rating system columns (pre-computed for fast retrieval)
-    rating_boost = Column(Float, default=0.0)  # Pre-computed Wilson score + temporal decay
-    exploration_bonus = Column(Float, default=0.0)  # Thompson Sampling bonus for cold-start
-
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class EpisodeRating(Base):
-    """Episode rating system for user feedback and memory quality scoring"""
-    __tablename__ = "episode_rating"
-    episode_id = Column(String, ForeignKey('episode.id', ondelete='CASCADE'), primary_key=True)
-    user_rating = Column(Integer, nullable=True)  # 1-5 star rating from user
-    rating_count = Column(Integer, default=0)  # Number of ratings (for multi-user future)
-    average_rating = Column(Float, default=0.0)  # Average rating (for multi-user future)
-    rating_sum = Column(Integer, default=0)  # Sum of all ratings for Wilson score
-    last_rated = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ContextWindow(Base):
-    """Context window configurations for dynamic memory retrieval"""
-    __tablename__ = "context_window"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    window_type = Column(String, nullable=False)  # temporal, topic, emotional, importance, hybrid
-    
-    # Window parameters stored as JSON
-    parameters = Column(Text, nullable=False)  # JSON: {"size": "1d", "topic": "fitness", "min_importance": 0.6}
-    
-    # Usage tracking
-    last_used = Column(DateTime, nullable=True)
-    use_count = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, server_default=func.now())
-
-class DreamInsight(Base):
-    """Background consolidation insights from Sara's dreaming process"""
-    __tablename__ = "dream_insight"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Dream metadata
-    dream_date = Column(DateTime, nullable=False)
-    insight_type = Column(String, nullable=False)  # pattern, connection, summary, trend, forgotten_gem
-    confidence = Column(Float, nullable=False)  # AI confidence in insight (0-1)
-
-    # Insight content
-    title = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    related_episodes = Column(Text, nullable=True)  # JSON list of episode IDs
-    embedding = Column(Vector(1024), nullable=True) if PGVECTOR_AVAILABLE else Column(Text, nullable=True)  # Embedding for semantic search
-
-    # User interaction
-    surfaced_at = Column(DateTime, nullable=True)  # When shown to user
-    user_feedback = Column(String, nullable=True)  # relevant, not_relevant, interesting
-
-    created_at = Column(DateTime, server_default=func.now())
-
-# Phase 4 Intelligence Models
-class DailyBriefing(Base):
-    """Daily briefings (morning/evening) with personalized insights"""
-    __tablename__ = "daily_briefings"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    briefing_type = Column(String, nullable=False)  # "morning" or "evening"
-    briefing_date = Column(DateTime, nullable=False)
-    content = Column(Text, nullable=False)  # Markdown formatted briefing
-    delivered = Column(Integer, default=0)  # boolean: sent to user
-    read = Column(Integer, default=0)  # boolean: user opened/read
-    created_at = Column(DateTime, server_default=func.now())
-
-class BriefingSettings(Base):
-    """User preferences for daily briefings"""
-    __tablename__ = "briefing_settings"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-
-    # Morning briefing settings
-    morning_enabled = Column(Integer, default=1)  # boolean
-    morning_time = Column(String, default="07:00:00")  # HH:MM:SS
-
-    # Evening briefing settings
-    evening_enabled = Column(Integer, default=1)  # boolean
-    evening_time = Column(String, default="21:00:00")  # HH:MM:SS
-
-    # Content preferences (what to include)
-    include_recovery = Column(Integer, default=1)  # fitness recovery status
-    include_schedule = Column(Integer, default=1)  # today's calendar
-    include_goals = Column(Integer, default=1)  # progress toward goals
-    include_suggestions = Column(Integer, default=1)  # proactive suggestions
-    include_workout_rec = Column(Integer, default=1)  # workout recommendations
-    include_accomplishments = Column(Integer, default=1)  # daily wins
-    include_insights = Column(Integer, default=1)  # AI insights
-    include_reflection = Column(Integer, default=1)  # reflection prompts
-
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ContextMode(Base):
-    """User's current context mode for dynamic memory retrieval"""
-    __tablename__ = "context_modes"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-    current_mode = Column(String, default="full")  # full, recent, minimal, fitness, work, learning
-    updated_at = Column(DateTime, server_default=func.now())
-
-class IntelligenceReport(Base):
-    """Periodic intelligence reports (weekly/monthly/quarterly)"""
-    __tablename__ = "intelligence_reports"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    report_type = Column(String, nullable=False)  # weekly, monthly, quarterly
-    report_date = Column(DateTime, nullable=False)
-
-    # Report content
-    title = Column(String, nullable=False)
-    summary = Column(Text, nullable=False)  # Markdown summary
-    full_content = Column(Text, nullable=True)  # Full markdown report
-
-    # Metadata
-    key_insights = Column(Text, nullable=True)  # JSON array of insights
-    metrics = Column(Text, nullable=True)  # JSON object with metrics
-
-    created_at = Column(DateTime, server_default=func.now())
-
-class ProactiveSuggestion(Base):
-    """AI-generated proactive suggestions based on patterns"""
-    __tablename__ = "proactive_suggestions"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Suggestion content
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-    category = Column(String, nullable=False)  # health, productivity, learning, relationships, etc.
-    priority = Column(String, default="medium")  # high, medium, low
-    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
-
-    # Reasoning
-    reasoning = Column(Text, nullable=True)  # Why this suggestion was made
-    related_patterns = Column(Text, nullable=True)  # JSON array of pattern IDs
-
-    # User interaction
-    status = Column(String, default="pending")  # pending, accepted, dismissed
-    actioned_at = Column(DateTime, nullable=True)
-
-    created_at = Column(DateTime, server_default=func.now())
-
-class DetectedPattern(Base):
-    """Automatically detected behavioral/temporal patterns"""
-    __tablename__ = "detected_patterns"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Pattern details
-    pattern_type = Column(String, nullable=False)  # temporal, behavioral, correlational, anomaly
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-
-    # Pattern metadata
-    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
-    frequency = Column(String, nullable=True)  # daily, weekly, monthly
-    data_points = Column(Integer, nullable=True)  # How many observations
-
-    # Evidence
-    evidence = Column(Text, nullable=True)  # JSON array of evidence examples
-    related_episodes = Column(Text, nullable=True)  # JSON array of episode IDs
-
-    # Discovery
-    first_detected = Column(DateTime, server_default=func.now())
-    last_confirmed = Column(DateTime, nullable=True)
-
-    created_at = Column(DateTime, server_default=func.now())
-
-
-# Habit Tracking Models
-class Habit(Base):
-    """Core habit definition with scheduling and configuration"""
-    __tablename__ = "habits"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(Text, nullable=False)
-    type = Column(String, nullable=False)  # binary, quantitative, checklist, time
-    target_numeric = Column(Float, nullable=True)  # for quantitative/time
-    unit = Column(Text, nullable=True)  # oz, min, reps, pages
-    rrule = Column(Text, nullable=False)  # RRULE string for expected days
-    weekly_minimum = Column(Integer, nullable=True)  # e.g., 3 times/week
-    monthly_minimum = Column(Integer, nullable=True)  # optional
-    windows = Column(Text, nullable=True)  # JSON: [{"name":"Morning","start":"05:00","end":"11:30"}]
-    checklist_mode = Column(String, nullable=True)  # all, percent
-    checklist_threshold = Column(Float, nullable=True)  # e.g., 0.7 for 70%
-    grace_days = Column(Integer, default=0)
-    retro_hours = Column(Integer, default=24)
-    paused = Column(Integer, default=0)  # boolean
-    pause_from = Column(DateTime, nullable=True)
-    pause_to = Column(DateTime, nullable=True)
-    vacation_from = Column(DateTime, nullable=True)  # vacation periods
-    vacation_to = Column(DateTime, nullable=True)
-    notes = Column(Text, nullable=True)  # optional description
-    current_streak = Column(Integer, default=0)
-    best_streak = Column(Integer, default=0)
-    last_completed = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitItem(Base):
-    """Checklist items for checklist-type habits"""
-    __tablename__ = "habit_items"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    label = Column(Text, nullable=False)
-    sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-
-class HabitInstance(Base):
-    """Materialized daily instances for fast UI queries"""
-    __tablename__ = "habit_instances"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    user_id = Column(String, nullable=False)
-    date = Column(DateTime, nullable=False)  # date for this instance
-    window = Column(Text, nullable=True)  # optional window name
-    expected = Column(Integer, default=1)  # boolean: expected on this day
-    status = Column(String, nullable=False, default='pending')  # pending, complete, skipped
-    progress = Column(Float, default=0.0)  # 0..1 for binary/checklist; scaled for quantitative
-    total_amount = Column(Float, nullable=True)  # raw sum for quantitative
-    target = Column(Float, nullable=True)  # snapshot of target for the day
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitLog(Base):
-    """Individual completion logs with source tracking"""
-    __tablename__ = "habit_logs"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    instance_id = Column(String, nullable=True)  # foreign key to habit_instances.id
-    user_id = Column(String, nullable=False)
-    ts = Column(DateTime, nullable=False, server_default=func.now())
-    source = Column(String, nullable=False)  # manual, voice, timer, calendar, ntfy, health
-    payload = Column(Text, nullable=True)  # JSON: {amount:12, unit:'oz'} or {timer_id:...}
-    created_at = Column(DateTime, server_default=func.now())
-
-class HabitStreak(Base):
-    """Streak tracking per habit"""
-    __tablename__ = "habit_streaks"
-    habit_id = Column(String, primary_key=True)  # foreign key to habits.id
-    current_streak = Column(Integer, default=0)
-    best_streak = Column(Integer, default=0)
-    last_completed = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitLink(Base):
-    """Links to notes/concepts/documents for graph integration"""
-    __tablename__ = "habit_links"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    target_type = Column(String, nullable=False)  # note, concept, document
-    target_id = Column(String, nullable=False)
-    meta = Column(Text, nullable=True)  # JSON metadata
-    created_at = Column(DateTime, server_default=func.now())
-
-class EventOutbox(Base):
-    """Outbox pattern for Neo4j sync - guarantees eventual consistency between Postgres and Neo4j.
-
-    Event Types:
-    - episode_created: Sync episode to Neo4j, then queue for deep analysis
-    - note_created/note_updated: Sync note to Neo4j
-    - document_uploaded: Sync document to Neo4j
-    - episode_deep_analysis: Run LLM extraction for entities/topics
-    - insight_generated: Backpropagate importance to source episodes
-    """
-    __tablename__ = "event_outbox"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # Event identification
-    event_type = Column(String, nullable=False)  # episode_created, note_created, etc.
-    aggregate_type = Column(String, nullable=False)  # Episode, Note, Document
-    aggregate_id = Column(String, nullable=False)  # UUID of the source record
-
-    # Payload and operation
-    op = Column(String, nullable=False, default="UPSERT")  # UPSERT, DELETE
-    payload = Column(Text, nullable=False)  # JSON with full event data
-
-    # Processing status
-    status = Column(String, nullable=False, default="pending")  # pending, processing, completed, failed
-    retry_count = Column(Integer, nullable=False, default=0)
-    max_retries = Column(Integer, nullable=False, default=5)
-    last_error = Column(Text, nullable=True)
-
-    # Timestamps
-    created_at = Column(DateTime, server_default=func.now())
-    processed_at = Column(DateTime, nullable=True)
-    next_retry_at = Column(DateTime, nullable=True)  # For exponential backoff
-
-# Sara Autonomous System Models
-class UserProfile(Base):
-    """User personality profile and autonomous preferences"""
-    __tablename__ = "user_profile"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-    
-    # Personality mode preferences
-    current_mode = Column(String, default="companion")  # coach, analyst, companion, guardian, concierge, librarian
-    mode_preferences = Column(Text, nullable=True)  # JSON: {"coach": {"enabled": true, "intensity": 0.7}, ...}
-    
-    # Autonomy settings
-    autonomy_level = Column(String, default="moderate")  # minimal, moderate, high (matches actual DB schema)
-    quiet_hours_start = Column(String, nullable=True)  # "22:00"
-    quiet_hours_end = Column(String, nullable=True)    # "07:00"
-    idle_thresholds = Column(Text, nullable=True)  # JSON: {"quickSweep": 1800000, "standardSweep": 7200000, "digestSweep": 86400000}
-    
-    # Notification preferences
-    ntfy_enabled = Column(Boolean, default=True)
-    ntfy_topics = Column(Text, nullable=True)  # JSON: {"insights": "sara-insights", "reminders": "sara"}
-    sprite_notifications = Column(Boolean, default=True)
-    
-    # Additional columns from models/profile.py (GTKY service)
-    profile_data = Column(JSONB, nullable=True, default=dict)  # JSON: Goals, preferences, personality settings
-    communication_style = Column(String, default="balanced")  # reserved, balanced, chatty
-    notification_channels = Column(Text, nullable=True)  # JSON: ntfy topics, quiet hours, etc.
-    gtky_completed_at = Column(DateTime, nullable=True)
-    
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class AutonomousInsight(Base):
-    """Insights generated by Sara's autonomous background processes"""
-    __tablename__ = "autonomous_insight"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Insight metadata
-    insight_type = Column(String, nullable=False)  # pattern, suggestion, summary, reminder, connection, analysis
-    sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
-    priority_score = Column(Float, nullable=False)  # 0-1, relevance × impact × novelty × timing - annoyance
-    
-    # Insight content
-    title = Column(String, nullable=False)
-    message = Column(Text, nullable=False)
-    action_suggestion = Column(String, nullable=True)  # JSON: {"primary": "Open Chat", "secondary": "View Notes"}
-    related_data = Column(Text, nullable=True)  # JSON: {"note_ids": [...], "episode_ids": [...], "context": {...}}
-    
-    # User interaction tracking
-    surfaced_at = Column(DateTime, nullable=True)  # When shown to user
-    user_action = Column(String, nullable=True)  # dismissed, acted_on, saved, snoozed
-    feedback_score = Column(Integer, nullable=True)  # -1, 0, 1 (unhelpful, neutral, helpful)
-    
-    # System tracking
-    generated_at = Column(DateTime, server_default=func.now())
-    expires_at = Column(DateTime, nullable=True)  # Optional expiration for time-sensitive insights
-
-class InsightNudge(Base):
-    """Nudges/notifications sent to user based on insights"""
-    __tablename__ = "insight_nudge"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    insight_id = Column(String, nullable=False)  # Foreign key to autonomous_insight
-    
-    # Nudge delivery
-    delivery_method = Column(String, nullable=False)  # sprite_toast, sprite_badge, ntfy_push
-    delivered_at = Column(DateTime, server_default=func.now())
-    
-    # User response tracking
-    clicked = Column(Boolean, default=False)
-    dismissed_at = Column(DateTime, nullable=True)
-    action_taken = Column(String, nullable=True)  # reply, open, ignore
-
-class ActivitySession(Base):
-    """Track user activity sessions for autonomous behavior triggers"""
-    __tablename__ = "activity_session"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Session timing
-    session_start = Column(DateTime, nullable=False)
-    session_end = Column(DateTime, nullable=True)
-    idle_duration = Column(Integer, default=0)  # milliseconds
-    
-    # Activity context
-    active_view = Column(String, nullable=True)  # chat, notes, dashboard, etc.
-    interaction_count = Column(Integer, default=0)
-    
-    # Autonomous triggers during this session
-    quick_sweep_triggered = Column(Boolean, default=False)
-    standard_sweep_triggered = Column(Boolean, default=False) 
-    digest_sweep_triggered = Column(Boolean, default=False)
-    insights_generated = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, server_default=func.now())
-
-class BackgroundSweep(Base):
-    """Log of background sweep executions and their results"""
-    __tablename__ = "background_sweep"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Sweep metadata
-    sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
-    triggered_by = Column(String, nullable=False)  # idle_threshold, manual, scheduled
-
-    # Execution results
-    execution_time_ms = Column(Integer, nullable=False)
-    insights_generated = Column(Integer, default=0)
-    errors_encountered = Column(Text, nullable=True)  # JSON array of error messages
-
-    # Context data processed
-    episodes_analyzed = Column(Integer, default=0)
-    notes_analyzed = Column(Integer, default=0)
-    patterns_found = Column(Text, nullable=True)  # JSON summary of patterns discovered
-
-    executed_at = Column(DateTime, server_default=func.now())
-
-class PushToken(Base):
-    """Store push notification tokens for iOS/Android devices"""
-    __tablename__ = "push_token"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    token = Column(String, nullable=False, unique=True)  # Expo push token
-    platform = Column(String, nullable=False)  # ios or android
-    device_name = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-# Ensure pgvector extension exists on Postgres before creating tables
-try:
-    if DATABASE_URL.startswith("postgresql"):
-        with engine.connect() as conn:
-            try:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                conn.commit()
-                logger.info("✅ Ensured pgvector extension is available")
-            except Exception as e:
-                logger.warning(f"Could not create pgvector extension: {e}")
-except Exception as e:
-    logger.warning(f"Postgres extension check failed: {e}")
-
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Optional: create ANN index for pgvector on hot tier
-try:
-    if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-        with engine.connect() as conn:
-            try:
-                # Prefer HNSW with explicit operator class
-                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_hnsw ON memory_embedding USING hnsw (embedding vector_l2_ops)"))
-                conn.commit()
-                logger.info("✅ HNSW index ensured on memory_embedding(embedding vector_l2_ops)")
-            except Exception as e:
-                logger.warning(f"Could not create HNSW index, falling back to IVFFLAT: {e}")
-                try:
-                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_ivfflat ON memory_embedding USING ivfflat (embedding vector_l2_ops) WITH (lists = 100)"))
-                    conn.commit()
-                    logger.info("✅ IVFFLAT index ensured on memory_embedding(embedding vector_l2_ops)")
-                except Exception as e2:
-                    logger.warning(f"Could not create IVFFLAT index: {e2}")
-except Exception as e:
-    logger.warning(f"HNSW index ensure failed: {e}")
-
-# Pydantic models
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    created_at: str
-    access_token: Optional[str] = None
-
-class NoteCreate(BaseModel):
-    title: str = ""
-    content: str
-    folder_id: Optional[str] = None
-
-class NoteResponse(BaseModel):
-    id: str
-    title: str
-    content: str
-    folder_id: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-class NoteConnectionCreate(BaseModel):
-    target_note_id: str
-    connection_type: str  # 'reference', 'semantic', 'temporal'
-    strength: int = 50  # 0-100
-    auto_generated: bool = True
-
-class NoteConnectionResponse(BaseModel):
-    id: str
-    source_note_id: str
-    target_note_id: str
-    connection_type: str
-    strength: int
-    auto_generated: bool
-    created_at: str
-    updated_at: str
-
-class FolderCreate(BaseModel):
-    name: str
-    parent_id: Optional[str] = None
-
-class FolderUpdate(BaseModel):
-    name: Optional[str] = None
-    parent_id: Optional[str] = None
-
-class FolderResponse(BaseModel):
-    id: str
-    name: str
-    parent_id: Optional[str] = None
-    notes_count: int = 0
-    subfolders_count: int = 0
-    created_at: str
-    updated_at: str
-
-class TreeNodeResponse(BaseModel):
-    id: str
-    name: str
-    type: str  # "folder" or "note"
-    parent_id: str = None
-    children: list = []
-    created_at: str
-    updated_at: str
-
-class ReminderCreate(BaseModel):
-    title: str
-    description: str = ""
-    reminder_time: str  # ISO format datetime string
-
-class ReminderUpdate(BaseModel):
-    title: str = None
-    description: str = None
-    reminder_time: str = None
-    is_completed: bool = None
-
-class ReminderResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    reminder_time: str
-    is_completed: bool
-    created_at: str
-    updated_at: str
-
-class TimerCreate(BaseModel):
-    title: str
-    duration_minutes: int = None  # Optional for backward compatibility
-    duration_seconds: int = None  # New field for seconds precision
-
-class TimerResponse(BaseModel):
-    id: str
-    title: str
-    duration_minutes: int
-    start_time: str
-    end_time: str
-    is_active: bool
-    is_completed: bool
-    created_at: str
-
-class CalendarEventCreate(BaseModel):
-    title: str
-    description: str = ""
-    start_time: str  # ISO format datetime string
-    end_time: str    # ISO format datetime string
-    location: Optional[str] = None
-    all_day: Optional[bool] = False
-    reminder_minutes: Optional[int] = None
-
-class CalendarEventUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    location: Optional[str] = None
-    all_day: Optional[bool] = None
-    reminder_minutes: Optional[int] = None
-    is_completed: Optional[bool] = None
-
-class CalendarEventResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    start_time: str
-    end_time: str
-    location: Optional[str] = None
-    all_day: bool
-    reminder_minutes: Optional[int] = None
-    is_completed: bool
-    # iOS calendar sync fields
-    source: str = "sara"
-    ios_event_id: Optional[str] = None
-    ios_calendar_id: Optional[str] = None
-    ios_calendar_name: Optional[str] = None
-    read_only: bool = False
-    created_at: str
-    updated_at: str
-
-# iOS Calendar Sync models
-class IOSCalendarEventSync(BaseModel):
-    ios_event_id: str
-    ios_calendar_id: str
-    ios_calendar_name: str
-    title: str
-    description: Optional[str] = None
-    start_time: str
-    end_time: str
-    location: Optional[str] = None
-    all_day: bool = False
-
-class IOSCalendarSyncRequest(BaseModel):
-    events: list[IOSCalendarEventSync]
-
-class IOSCalendarSyncResponse(BaseModel):
-    synced: int
-    errors: int
-
-class UserSettings(BaseModel):
-    theme: Optional[str] = "dark"
-    notifications_enabled: Optional[bool] = True
-    language: Optional[str] = "en"
-    timezone: Optional[str] = "America/New_York"
-
-class ImageContent(BaseModel):
-    """Image content for multimodal messages"""
-    type: str = "image"
-    data: str  # Base64 encoded image data
-    media_type: str = "image/jpeg"  # e.g., "image/jpeg", "image/png"
-
-class TextContent(BaseModel):
-    """Text content for multimodal messages"""
-    type: str = "text"
-    text: str
-
-class ChatMessage(BaseModel):
-    role: str
-    content: Union[str, List[Dict[str, Any]]]  # Support both text-only and multimodal
-
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    conversation_id: Optional[str] = None
-    model: Optional[str] = None  # Override default model
-    ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
-    source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
-
-class ChatResponse(BaseModel):
-    message: ChatMessage
-
-class DocumentResponse(BaseModel):
-    id: str
-    filename: str
-    original_filename: str
-    title: str = ""  # User-editable title
-    file_size: int
-    mime_type: str
-    content_text: str = ""
-    is_processed: str  # String to match database storage ("true", "false", "error")
-    created_at: str
-    updated_at: str
-
-class Model3DResponse(BaseModel):
-    id: str
-    filename: str
-    display_name: str
-    file_format: str
-    file_size: int
-    download_url: str
-    created_at: str
-    updated_at: str
-
-class DocumentChunkResponse(BaseModel):
-    id: str
-    document_id: str
-    chunk_text: str
-    chunk_index: int
-    created_at: str
-
-class ConversationResponse(BaseModel):
-    id: str
-    title: str
-    summary: str
-    total_messages: int
-    created_at: str
-    updated_at: str
-
-class ConversationTurnResponse(BaseModel):
-    id: str
-    conversation_id: str
-    role: str
-    content: str
-    message_index: int
-    created_at: str
-
-# Episode-based conversation models
-class EpisodeMessageResponse(BaseModel):
-    id: str
-    role: str
-    content: str
-    created_at: str
-    importance: Optional[float] = None
-
-class ConversationSummaryResponse(BaseModel):
-    conversation_id: str
-    first_message: str
-    message_count: int
-    last_activity: str
-    created_at: str
-
-class SetActiveConversationRequest(BaseModel):
-    conversation_id: Optional[str] = None
-
-# Habit Tracking Pydantic Models
-class HabitCreate(BaseModel):
-    title: str
-    type: str  # binary, quantitative, checklist, time
-    target_numeric: Optional[float] = None
-    unit: Optional[str] = None
-    rrule: str = "FREQ=DAILY"  # Default to daily
-    weekly_minimum: Optional[int] = None
-    monthly_minimum: Optional[int] = None
-    windows: Optional[str] = None  # JSON string
-    checklist_mode: Optional[str] = "all"  # all, percent
-    checklist_threshold: Optional[float] = 1.0
-    grace_days: int = 0
-    retro_hours: int = 24
-    notes: Optional[str] = None
-
-class HabitResponse(BaseModel):
-    id: str
-    title: str
-    type: str
-    target_numeric: Optional[float] = None
-    unit: Optional[str] = None
-    rrule: str
-    weekly_minimum: Optional[int] = None
-    monthly_minimum: Optional[int] = None
-    windows: Optional[str] = None
-    checklist_mode: Optional[str] = None
-    checklist_threshold: Optional[float] = None
-    grace_days: int
-    retro_hours: int
-    paused: bool
-    pause_from: Optional[str] = None
-    pause_to: Optional[str] = None
-    notes: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-class HabitItemCreate(BaseModel):
-    label: str
-    sort_order: int = 0
-
-class HabitItemResponse(BaseModel):
-    id: str
-    habit_id: str
-    label: str
-    sort_order: int
-    created_at: str
-
-class HabitInstanceResponse(BaseModel):
-    id: str
-    habit_id: str
-    date: str
-    window: Optional[str] = None
-    expected: bool
-    status: str  # pending, complete, skipped
-    progress: float
-    total_amount: Optional[float] = None
-    target: Optional[float] = None
-    # Include habit details for Today view
-    title: str
-    type: str
-    unit: Optional[str] = None
-
-class HabitTodayStats(BaseModel):
-    total: int
-    completed: int
-    in_progress: int
-    completion_rate: float
-
-class HabitTodayResponse(BaseModel):
-    date: str
-    habits: list[HabitInstanceResponse]
-    stats: HabitTodayStats
-
-class HabitInsightsOverview(BaseModel):
-    total_habits: int
-    active_habits: int
-    total_completions: int
-    average_completion_rate: float
-    current_streaks: int
-    longest_streak: int
-
-class HabitInsightsWeeklyStats(BaseModel):
-    this_week: dict
-    last_week: dict
-    trend: str
-
-class HabitInsightsPerformance(BaseModel):
-    habit_id: str
-    title: str
-    type: str
-    completion_rate: float
-    current_streak: int
-    best_streak: int
-    total_completions: int
-
-class HabitInsightsPatterns(BaseModel):
-    best_day_of_week: str
-    best_time_of_day: str
-    most_consistent_habit: str
-    improvement_suggestions: list[str]
-
-class HabitInsightsResponse(BaseModel):
-    overview: HabitInsightsOverview
-    weekly_stats: HabitInsightsWeeklyStats
-    habit_performance: list[HabitInsightsPerformance]
-    patterns: HabitInsightsPatterns
-
-class HabitLogCreate(BaseModel):
-    amount: Optional[float] = None
-    source: str = "manual"
-    payload: Optional[str] = None  # JSON string
-
-class HabitLogResponse(BaseModel):
-    id: str
-    habit_id: str
-    instance_id: Optional[str] = None
-    ts: str
-    source: str
-    payload: Optional[str] = None
-    created_at: str
-
-class HabitStreakResponse(BaseModel):
-    habit_id: str
-    current_streak: int
-    best_streak: int
-    last_completed: Optional[str] = None
-
-class HabitLinkCreate(BaseModel):
-    target_type: str  # note, concept, document
-    target_id: str
-    meta: Optional[str] = None  # JSON string
-
-class HabitLinkResponse(BaseModel):
-    id: str
-    habit_id: str
-    target_type: str
-    target_id: str
-    meta: Optional[str] = None
-    created_at: str
-
-class HabitPauseRequest(BaseModel):
-    pause_from: str  # ISO datetime
-    pause_to: str    # ISO datetime
-
-# Sara Autonomous System Pydantic Models
-class UserProfileCreate(BaseModel):
-    current_mode: Optional[str] = "companion"
-    mode_preferences: Optional[Dict[str, Any]] = None
-    autonomy_level: Optional[str] = "moderate"  # minimal, moderate, high
-    quiet_hours_start: Optional[str] = None
-    quiet_hours_end: Optional[str] = None
-    idle_thresholds: Optional[Dict[str, int]] = None
-    ntfy_enabled: Optional[bool] = True
-    ntfy_topics: Optional[Dict[str, str]] = None
-    sprite_notifications: Optional[bool] = True
-    profile_data: Optional[Dict[str, Any]] = None
-    communication_style: Optional[str] = "balanced"
-    notification_channels: Optional[Dict[str, Any]] = None
-
-class UserProfileResponse(BaseModel):
-    id: str
-    user_id: str
-    current_mode: str
-    mode_preferences: Optional[Dict[str, Any]]
-    autonomy_level: str  # minimal, moderate, high
-    quiet_hours_start: Optional[str]
-    quiet_hours_end: Optional[str]
-    idle_thresholds: Optional[Dict[str, int]]
-    ntfy_enabled: bool
-    ntfy_topics: Optional[Dict[str, str]]
-    sprite_notifications: bool
-    profile_data: Optional[Dict[str, Any]]
-    communication_style: str
-    notification_channels: Optional[Dict[str, Any]]
-    gtky_completed_at: Optional[datetime]
-    created_at: datetime
-    updated_at: datetime
-
-class AutonomousInsightResponse(BaseModel):
-    id: str
-    user_id: str
-    insight_type: str
-    sweep_type: str
-    priority_score: float
-    title: str
-    message: str
-    action_suggestion: Optional[Dict[str, str]]
-    related_data: Optional[Dict[str, Any]]
-    surfaced_at: Optional[datetime]
-    user_action: Optional[str]
-    feedback_score: Optional[int]
-    generated_at: datetime
-    expires_at: Optional[datetime]
-
-class InsightFeedbackRequest(BaseModel):
-    feedback_score: int  # -1, 0, 1
-    user_action: str     # dismissed, acted_on, saved, snoozed
-
-class ActivitySessionResponse(BaseModel):
-    id: str
-    user_id: str
-    session_start: datetime
-    session_end: Optional[datetime]
-    idle_duration: int
-    active_view: Optional[str]
-    interaction_count: int
-    quick_sweep_triggered: bool
-    standard_sweep_triggered: bool
-    digest_sweep_triggered: bool
-    insights_generated: int
-    created_at: datetime
-
-class BackgroundSweepResponse(BaseModel):
-    id: str
-    user_id: str
-    sweep_type: str
-    triggered_by: str
-    execution_time_ms: int
-    insights_generated: int
-    errors_encountered: Optional[list]
-    episodes_analyzed: int
-    notes_analyzed: int
-    patterns_found: Optional[Dict[str, Any]]
-    executed_at: datetime
 
 # Auth utilities - imported from app.core.auth
 # pwd_context, create_access_token, verify_token, get_cookie_domain imported at top
@@ -2296,12 +1205,7 @@ class SimpleLLMClient:
                             else:
                                 # All retries failed - synthesize a completion response from tool results
                                 logger.warning(f"❌ All {max_retries + 1} attempts failed. Synthesizing completion from tool results.")
-                                # Build a summary from tool responses
-                                tool_summary = []
-                                for tr in tool_responses:
-                                    if tr.get("content"):
-                                        tool_summary.append(str(tr["content"])[:200])
-                                completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                                completion_msg = _summarize_tool_results(tool_responses)
                                 message = {
                                     "content": completion_msg,
                                     "tool_calls": None
@@ -2309,12 +1213,7 @@ class SimpleLLMClient:
                         except Exception as e:
                             # Other errors should be caught but not crash - fallback to tool results
                             logger.error(f"❌ Unexpected error during LLM call: {e}")
-                            # Create a fallback message from tool results
-                            tool_summary = []
-                            for tr in tool_responses:
-                                if tr.get("content"):
-                                    tool_summary.append(str(tr["content"])[:200])
-                            completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                            completion_msg = _summarize_tool_results(tool_responses)
                             message = {
                                 "content": completion_msg,
                                 "tool_calls": None
@@ -2503,6 +1402,12 @@ class SimpleLLMClient:
 
         logger.info(f"Executing tool {function_name} with arguments: {arguments}")
 
+        # Emit tool_executing event for iOS status indicator
+        try:
+            await self.emit_event("tool_executing", {"tool": function_name})
+        except Exception:
+            pass
+
         # CHECK CACHE FIRST
         cached_result = None
         if session_cache and conversation_id:
@@ -2597,6 +1502,28 @@ class SimpleLLMClient:
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
         if function_name == "search_documents":
             logger.info(f"Search result preview: {str(result)[:500]}...")
+
+        # Emit tool_completed event
+        try:
+            await self.emit_event("tool_completed", {"tool": function_name})
+        except Exception:
+            pass
+
+        # Emit content_card SSE event for rich iOS rendering
+        try:
+            from app.services.content_card_builder import build_card
+            card = build_card(function_name, str(result))
+            if card:
+                await self.emit_event("content_card", card)
+                logger.info(f"🃏 Emitted content_card: {card.get('card_type')}")
+        except Exception as e:
+            logger.debug(f"Content card build skipped: {e}")
+
+        # Track tool usage for suggested actions
+        if not hasattr(self, '_tool_history'):
+            self._tool_history = []
+        self._tool_history.append(function_name)
+
         return {
             "role": "tool",
             "tool_call_id": tool_call["id"],
@@ -3048,11 +1975,44 @@ class SimpleLLMClient:
                 timer.is_active = False
                 timer.is_completed = True
                 db.commit()
-                
+
+                # Evaluate standing orders triggered by this timer
+                try:
+                    from app.services.standing_order_service import standing_order_service
+                    executed = await standing_order_service.evaluate_trigger(
+                        trigger_type="timer",
+                        context={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        db=db,
+                    )
+                    if executed:
+                        logger.info(f"Timer '{timer.title}' triggered {len(executed)} standing order(s)")
+                except Exception as e:
+                    logger.warning(f"Timer standing order eval failed: {e}")
+
+                # Also emit event for reactive engine subscribers
+                try:
+                    from app.services.event_bus import emit_event, EventType
+                    await emit_event(
+                        event_type=EventType.TIMER_COMPLETED,
+                        user_id=user_id,
+                        payload={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        source="stop_timer_tool",
+                    )
+                except Exception as e:
+                    logger.debug(f"Timer event emit failed: {e}")
+
                 # Send AI-generated NTFY notification for timer completion
                 duration_str = f"{timer.duration_minutes}min"
                 await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, user_id)
-                
+
                 return f"Stopped timer '{timer.title}'"
             finally:
                 db.close()
@@ -6028,6 +4988,21 @@ class NotificationScheduler:
 # Initialize notification scheduler
 notification_scheduler = NotificationScheduler()
 
+# Sentry error tracking (no-op if DSN not configured)
+try:
+    from app.core.config import settings as _sentry_settings
+    if _sentry_settings.sentry_dsn:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_sentry_settings.sentry_dsn,
+            environment=_sentry_settings.sentry_environment,
+            traces_sample_rate=_sentry_settings.sentry_traces_sample_rate,
+            send_default_pii=False,
+        )
+        logger.info(f"Sentry initialized (env={_sentry_settings.sentry_environment})")
+except Exception as _sentry_err:
+    logger.debug(f"Sentry init skipped: {_sentry_err}")
+
 # FastAPI app
 app = FastAPI(
     title=f"{ASSISTANT_NAME} Personal Hub API",
@@ -6298,6 +5273,110 @@ try:
 except Exception as e:
     logger.error(f"❌ Research routes failed to load: {e}")
 
+# Phase 5: Extracted route modules (batch A — core, downloads, presence)
+from app.routes.core import router as core_router
+from app.routes.downloads import router as downloads_router
+from app.routes.presence import router as presence_router, log_presence
+
+app.include_router(core_router)
+app.include_router(downloads_router)
+app.include_router(presence_router)
+
+# Phase 5: Extracted route modules (batch C — workers, daily brief)
+from app.routes.workers import router as workers_router
+from app.routes.daily_brief import router as daily_brief_router
+
+app.include_router(workers_router)
+app.include_router(daily_brief_router)
+
+# Phase 3: Extracted route modules
+from app.routes.briefings import router as briefings_router
+from app.routes.push_tokens import router as push_tokens_router, send_push_to_user
+from app.routes.conversations import router as conversations_router
+from app.routes.documents import router as documents_router
+from app.routes.episodes import router as episodes_router
+
+app.include_router(briefings_router)
+app.include_router(push_tokens_router)
+app.include_router(conversations_router)
+app.include_router(documents_router)
+app.include_router(episodes_router)
+
+# Phase 3: Extracted route modules (batch 2)
+from app.routes.knowledge_graph import router as knowledge_graph_router
+from app.routes.autonomous import router as autonomous_router
+from app.routes.reflection import router as reflection_router
+from app.routes.fitness_inline import router as fitness_inline_router
+
+app.include_router(knowledge_graph_router)
+app.include_router(autonomous_router)
+app.include_router(reflection_router)
+app.include_router(fitness_inline_router)
+
+# Sara autonomy + PKG routes
+from app.routes.sara_status import router as sara_status_router
+from app.routes.sara_observations import router as sara_observations_router
+from app.routes.sara_activity import router as sara_activity_router
+from app.routes.personal_knowledge import router as personal_knowledge_router
+
+app.include_router(sara_status_router)
+app.include_router(sara_observations_router)
+app.include_router(sara_activity_router)
+app.include_router(personal_knowledge_router)
+
+# Automation routes
+from app.routes.automation import router as automation_router
+from app.routes.automation_admin import router as automation_admin_router
+app.include_router(automation_router)
+app.include_router(automation_admin_router)
+
+# Standing orders route
+from app.routes.standing_orders import router as standing_orders_router
+app.include_router(standing_orders_router)
+
+# Autonomy control (quiet mode etc.)
+from app.routes.autonomy_control import router as autonomy_control_router
+app.include_router(autonomy_control_router)
+
+# Autonomy traces (Phase 0 — Cortana Evolution)
+from app.routes.autonomy_traces import router as autonomy_traces_router
+app.include_router(autonomy_traces_router)
+
+# Autonomy simulation (Phase 1 — Cortana Evolution)
+from app.routes.autonomy_simulation import router as autonomy_simulation_router
+app.include_router(autonomy_simulation_router)
+
+# Autonomy attention queue (Phase 2 — Cortana Evolution)
+from app.routes.autonomy_attention import router as autonomy_attention_router
+app.include_router(autonomy_attention_router)
+
+# Autonomy missions (Phase 2 — Cortana Evolution)
+from app.routes.autonomy_missions import router as autonomy_missions_router
+app.include_router(autonomy_missions_router)
+
+# Autonomy policy candidates (Phase 3 — Cortana Evolution)
+from app.routes.autonomy_policy_candidates import router as autonomy_policy_candidates_router
+app.include_router(autonomy_policy_candidates_router)
+
+# Email routes
+from app.routes.email import router as email_router
+app.include_router(email_router, prefix="/api")
+
+# Content Inbox routes
+from app.routes.content_inbox import router as content_inbox_router
+app.include_router(content_inbox_router)
+
+# Desktop app update server (no auth — electron-updater needs pre-login access)
+from app.routes.desktop_updates import router as desktop_updates_router
+app.include_router(desktop_updates_router)
+
+# Session/cross-device routes
+try:
+    from app.routes.session import router as session_router
+    app.include_router(session_router)
+except Exception as e:
+    logger.warning(f"Session routes not available: {e}")
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -6325,298 +5404,10 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
         raise
 
 # Daily Briefings routes
-@app.get("/api/briefings")
-async def get_briefings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get all daily briefings for the user"""
-    try:
-        user_id = current_user.id
-        briefings = db.query(DailyBriefing).filter(
-            DailyBriefing.user_id == user_id
-        ).order_by(DailyBriefing.briefing_date.desc()).limit(30).all()
-
-        return [{
-            "id": b.id,
-            "user_id": b.user_id,
-            "briefing_type": b.briefing_type,
-            "briefing_date": b.briefing_date.isoformat(),
-            "content": b.content,
-            "delivered": bool(b.delivered),
-            "read": bool(b.read),
-            "created_at": b.created_at.isoformat()
-        } for b in briefings]
-    except Exception as e:
-        logger.error(f"Error getting briefings: {e}")
-        return []
-
-@app.get("/api/briefings/settings")
-async def get_briefing_settings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get briefing settings for the user"""
-    try:
-        user_id = current_user.id
-        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
-
-        if not settings:
-            # Create default settings
-            settings = BriefingSettings(user_id=user_id)
-            db.add(settings)
-            db.commit()
-            db.refresh(settings)
-
-        return {
-            "id": settings.id,
-            "user_id": settings.user_id,
-            "morning_enabled": bool(settings.morning_enabled),
-            "morning_time": settings.morning_time,
-            "evening_enabled": bool(settings.evening_enabled),
-            "evening_time": settings.evening_time,
-            "include_recovery": bool(settings.include_recovery),
-            "include_schedule": bool(settings.include_schedule),
-            "include_goals": bool(settings.include_goals),
-            "include_suggestions": bool(settings.include_suggestions),
-            "include_workout_rec": bool(settings.include_workout_rec),
-            "include_accomplishments": bool(settings.include_accomplishments),
-            "include_insights": bool(settings.include_insights),
-            "include_reflection": bool(settings.include_reflection)
-        }
-    except Exception as e:
-        logger.error(f"Error getting briefing settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/api/briefings/settings")
-async def update_briefing_settings(settings_data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Update briefing settings"""
-    try:
-        user_id = current_user.id
-        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
-
-        if not settings:
-            settings = BriefingSettings(user_id=user_id)
-            db.add(settings)
-
-        # Update fields
-        for key, value in settings_data.items():
-            if hasattr(settings, key) and key != "id" and key != "user_id":
-                setattr(settings, key, 1 if value else 0 if key.startswith("include_") or key.endswith("_enabled") else value)
-
-        settings.updated_at = datetime.now()
-        db.commit()
-        db.refresh(settings)
-
-        return {"success": True, "settings": settings_data}
-    except Exception as e:
-        logger.error(f"Error updating briefing settings: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/briefings/generate")
-async def generate_briefing_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Generate a new briefing"""
-    try:
-        user_id = current_user.id
-        briefing_type = data.get("briefing_type", "morning")
-
-        # Use the intelligence service to generate briefing
-        briefing = await generate_daily_briefing(
-            db=db,
-            user_id=user_id,
-            briefing_type=briefing_type,
-            llm_call_fn=call_llm_simple,
-            Episode=Episode,
-            Note=Note,
-            CalendarEvent=CalendarEvent,
-            DailyBriefing=DailyBriefing,
-            BriefingSettings=BriefingSettings
-        )
-
-        return briefing
-    except Exception as e:
-        logger.error(f"Error generating briefing: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.patch("/api/briefings/{briefing_id}/read")
-async def mark_briefing_read(briefing_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Mark briefing as read"""
-    try:
-        user_id = current_user.id
-        briefing = db.query(DailyBriefing).filter(
-            DailyBriefing.id == briefing_id,
-            DailyBriefing.user_id == user_id
-        ).first()
-
-        if briefing:
-            briefing.read = 1
-            db.commit()
-            return {"success": True}
-
-        raise HTTPException(status_code=404, detail="Briefing not found")
-    except Exception as e:
-        logger.error(f"Error marking briefing as read: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
 # Context Mode routes
-@app.get("/api/context/mode")
-async def get_context_mode_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get current context mode"""
-    try:
-        user_id = current_user.id
-        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
-
-        if not context_mode:
-            context_mode = ContextMode(user_id=user_id, current_mode="full")
-            db.add(context_mode)
-            db.commit()
-            db.refresh(context_mode)
-
-        return {"mode": context_mode.current_mode}
-    except Exception as e:
-        logger.error(f"Error getting context mode: {e}")
-        return {"mode": "full"}
-
-@app.put("/api/context/mode")
-async def set_context_mode_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Set context mode"""
-    try:
-        user_id = current_user.id
-        new_mode = data.get("mode", "full")
-
-        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
-
-        if not context_mode:
-            context_mode = ContextMode(user_id=user_id, current_mode=new_mode)
-            db.add(context_mode)
-        else:
-            context_mode.current_mode = new_mode
-            context_mode.updated_at = datetime.now()
-
-        db.commit()
-        return {"mode": new_mode}
-    except Exception as e:
-        logger.error(f"Error setting context mode: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/context/stats")
-async def get_context_stats_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get context statistics"""
-    user_id = current_user.id
-    return get_context_stats(db, user_id, Episode, Note, Document, CalendarEvent)
 
 # Smart Insights routes
-@app.get("/api/reports/list")
-async def get_reports_list(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get list of intelligence reports"""
-    try:
-        user_id = current_user.id
-        reports = db.query(IntelligenceReport).filter(
-            IntelligenceReport.user_id == user_id
-        ).order_by(IntelligenceReport.report_date.desc()).limit(20).all()
-
-        return [{
-            "id": r.id,
-            "user_id": r.user_id,
-            "report_type": r.report_type,
-            "report_date": r.report_date.isoformat(),
-            "title": r.title,
-            "summary": r.summary,
-            "created_at": r.created_at.isoformat()
-        } for r in reports]
-    except Exception as e:
-        logger.error(f"Error getting reports list: {e}")
-        return []
-
-@app.post("/api/reports/generate")
-async def generate_report_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Generate an intelligence report"""
-    try:
-        user_id = current_user.id
-        report_type = data.get("report_type", "weekly")
-
-        report = await generate_intelligence_report(
-            db=db,
-            user_id=user_id,
-            report_type=report_type,
-            llm_call_fn=call_llm_simple,
-            Episode=Episode,
-            IntelligenceReport=IntelligenceReport
-        )
-
-        return report
-    except Exception as e:
-        logger.error(f"Error generating intelligence report: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/suggestions")
-async def get_suggestions(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get proactive suggestions"""
-    try:
-        user_id = current_user.id
-        suggestions = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.user_id == user_id,
-            ProactiveSuggestion.status == "pending"
-        ).order_by(ProactiveSuggestion.created_at.desc()).limit(10).all()
-
-        return [{
-            "id": s.id,
-            "title": s.title,
-            "description": s.description,
-            "category": s.category,
-            "priority": s.priority,
-            "confidence": s.confidence,
-            "status": s.status,
-            "created_at": s.created_at.isoformat()
-        } for s in suggestions]
-    except Exception as e:
-        logger.error(f"Error getting suggestions: {e}")
-        return []
-
-@app.patch("/api/suggestions/{suggestion_id}")
-async def update_suggestion(suggestion_id: str, data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Update suggestion status"""
-    try:
-        user_id = current_user.id
-        status = data.get("status", "pending")
-
-        suggestion = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.id == suggestion_id,
-            ProactiveSuggestion.user_id == user_id
-        ).first()
-
-        if suggestion:
-            suggestion.status = status
-            suggestion.actioned_at = datetime.now() if status in ["accepted", "dismissed"] else None
-            db.commit()
-            return {"id": suggestion_id, "status": status}
-
-        raise HTTPException(status_code=404, detail="Suggestion not found")
-    except Exception as e:
-        logger.error(f"Error updating suggestion: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/patterns")
-async def get_patterns(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get detected patterns"""
-    try:
-        user_id = current_user.id
-        patterns = db.query(DetectedPattern).filter(
-            DetectedPattern.user_id == user_id
-        ).order_by(DetectedPattern.confidence.desc()).limit(10).all()
-
-        return [{
-            "id": p.id,
-            "pattern_type": p.pattern_type,
-            "title": p.title,
-            "description": p.description,
-            "confidence": p.confidence,
-            "frequency": p.frequency,
-            "data_points": p.data_points,
-            "first_detected": p.first_detected.isoformat(),
-            "created_at": p.created_at.isoformat()
-        } for p in patterns]
-    except Exception as e:
-        logger.error(f"Error getting patterns: {e}")
-        return []
 
 logger.info("✅ Phase 4 intelligence routes loaded successfully")
 
@@ -7087,6 +5878,38 @@ async def get_pi_dashboard_timers(
                 timer.is_active = False
                 timer.is_completed = True
                 db.commit()
+                # Evaluate standing orders triggered by this timer
+                try:
+                    from app.services.standing_order_service import standing_order_service
+                    executed = await standing_order_service.evaluate_trigger(
+                        trigger_type="timer",
+                        context={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        db=db,
+                    )
+                    if executed:
+                        logger.info(f"Timer '{timer.title}' triggered {len(executed)} standing order(s)")
+                except Exception as e:
+                    logger.warning(f"Timer standing order eval failed: {e}")
+
+                # Also emit event for reactive engine subscribers
+                try:
+                    from app.services.event_bus import emit_event, EventType
+                    await emit_event(
+                        event_type=EventType.TIMER_COMPLETED,
+                        user_id=str(timer.user_id),
+                        payload={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        source="timer_expiry",
+                    )
+                except Exception as e:
+                    logger.debug(f"Timer event emit failed: {e}")
                 continue
 
             timer_list.append({
@@ -7199,6 +6022,207 @@ CANVAS_TRIGGERS = [
     "work mode",
     "time to work",
 ]
+
+async def _build_learning_recall_context(user_id: str, message: str, db) -> Optional[str]:
+    """Build learning recall context for the system prompt.
+
+    When David asks about something he's actively studying, Sara should
+    briefly test his recall before answering directly.
+    """
+    from sqlalchemy import text as sql_text
+    from datetime import datetime, timedelta
+
+    if not message or len(message) < 20:
+        return None
+
+    message_lower = message.lower()
+
+    try:
+        # Check if we've already tested recall recently (last 2 hours)
+        recent_recall = db.execute(sql_text("""
+            SELECT COUNT(*) as cnt FROM episode
+            WHERE user_id = :user_id
+              AND role = 'assistant'
+              AND (content LIKE :pattern1 OR content LIKE :pattern2)
+              AND created_at >= NOW() - INTERVAL '2 hours'
+        """), {"user_id": user_id, "pattern1": "%what do you remember about%", "pattern2": "%remember how we compared%"})
+        recall_row = recent_recall.fetchone()
+        if recall_row and (recall_row.cnt or 0) >= 2:
+            return None  # Already tested recall recently
+
+        # Get active learning topics
+        topics_result = db.execute(sql_text("""
+            SELECT id, title, mastery_level FROM learning_topic
+            WHERE user_id = :user_id AND status = 'active'
+        """), {"user_id": user_id})
+        topics = topics_result.fetchall()
+
+        if not topics:
+            return None
+
+        # Simple keyword matching: check if any topic title words appear in the message
+        matched_topic = None
+        for t in topics:
+            title_words = [w.lower() for w in t.title.split() if len(w) > 3]
+            if any(word in message_lower for word in title_words):
+                matched_topic = t
+                break
+
+        if not matched_topic:
+            return None
+
+        # Get concepts due for review or with low mastery for this topic
+        progress_result = db.execute(sql_text("""
+            SELECT concept, repetitions, next_review_at
+            FROM learning_progress
+            WHERE user_id = :user_id AND topic_id = :topic_id
+            ORDER BY next_review_at ASC NULLS FIRST
+            LIMIT 5
+        """), {"user_id": user_id, "topic_id": matched_topic.id})
+        progress_items = progress_result.fetchall()
+
+        if not progress_items:
+            return None
+
+        concepts = [p.concept for p in progress_items if p.concept]
+        if not concepts:
+            return None
+
+        mastery_pct = int((matched_topic.mastery_level or 0) * 100)
+
+        # Pick the most due concept for the recall question
+        test_concept = concepts[0]
+
+        # Try to get an anchor analogy for the topic
+        anchor_hint = ""
+        try:
+            anchor_row = db.execute(sql_text("""
+                SELECT anchor_concept, anchor_domain, bridge_description
+                FROM anchor_point
+                WHERE topic_id = :topic_id AND rejected = false
+                ORDER BY validated DESC, confidence DESC
+                LIMIT 1
+            """), {"topic_id": matched_topic.id}).fetchone()
+            if anchor_row and anchor_row.bridge_description:
+                anchor_hint = f'\nYou previously mapped this through an analogy: "{anchor_row.anchor_concept}" from {anchor_row.anchor_domain} ({anchor_row.bridge_description}). Reference that analogy in your recall prompt.'
+        except Exception:
+            pass
+
+        # Record passive mastery signal: David used a learning concept in main chat
+        try:
+            # Find a progress record for this topic to log natural usage
+            progress_row = db.execute(sql_text("""
+                SELECT id, quality_history FROM learning_progress
+                WHERE topic_id = :topic_id AND user_id = :user_id
+                LIMIT 1
+            """), {"topic_id": matched_topic.id, "user_id": user_id}).fetchone()
+            if progress_row:
+                import json as _json
+                history = _json.loads(progress_row.quality_history) if isinstance(progress_row.quality_history, str) else (progress_row.quality_history or [])
+                history.append({
+                    "type": "natural_usage",
+                    "date": datetime.now().isoformat(),
+                    "context": message[:100]
+                })
+                # Keep last 50 entries
+                db.execute(sql_text("""
+                    UPDATE learning_progress SET quality_history = :history
+                    WHERE id = :id
+                """), {"history": _json.dumps(history[-50:]), "id": progress_row.id})
+                db.commit()
+        except Exception as e:
+            logger.debug(f"Passive mastery signal failed (non-critical): {e}")
+
+        return f"""## Learning Recall Opportunity
+David is studying "{matched_topic.title}" (mastery: {mastery_pct}%). He has {len(concepts)} concepts tracked.
+Related concepts: {', '.join(concepts[:4])}{anchor_hint}
+
+Remember the analogy we used for {test_concept}? Reference it and ask David how it applies here — e.g., "You've been studying this — remember how we compared {test_concept} to...? How does that map to what you're asking about?"
+Then fill in gaps and correct any misconceptions. Keep it natural and brief — don't force it if the question isn't closely related to {test_concept}."""
+
+    except Exception as e:
+        logger.debug(f"Learning recall context build failed: {e}")
+        return None
+
+
+def _build_activity_context(
+    activity_state: str,
+    confidence: float = 0.5,
+    room: str = None,
+    interruptibility: float = 0.5,
+    # Conversation signals
+    turn_count: int = 1,
+    conversation_depth: int = 0,
+    # Memory nudges
+    memory_nudges: list = None,
+) -> str:
+    """Build adaptive personality context for system prompt injection.
+
+    Combines activity state, interruptibility, and conversation
+    depth into a coherent personality directive via the PersonalityEngine.
+    Body state (blood sugar, stress, alertness) is intentionally excluded.
+    """
+    try:
+        from app.services.personality_engine import build_personality_context
+
+        ctx = build_personality_context(
+            activity_state=activity_state,
+            activity_confidence=confidence,
+            room=room,
+            interruptibility=interruptibility,
+            turn_count=turn_count,
+            conversation_depth=conversation_depth,
+            memory_nudges=memory_nudges,
+        )
+        return ctx.render()
+    except Exception as e:
+        logger.warning(f"Personality engine failed, falling back to basic tone: {e}")
+        # Fallback: basic tone directive
+        tone_map = {
+            "sleeping": "Be extremely brief.",
+            "waking": "Gentle, warm, brief.",
+            "focused_work": "Concise and direct.",
+            "in_meeting": "Ultra-brief only.",
+        }
+        tone = tone_map.get(activity_state, "Normal conversational tone.")
+        return f"[Activity: {activity_state}]\nTone: {tone}"
+
+
+def _summarize_tool_results(tool_responses: list) -> str:
+    """Convert raw tool responses into a human-readable fallback message.
+
+    Used when the follow-up LLM call fails and we need to tell the user
+    what happened without dumping JSON.
+    """
+    actions = []
+    for tr in tool_responses:
+        content = tr.get("content")
+        if not content:
+            continue
+        # Parse JSON tool results into readable text
+        if isinstance(content, str):
+            try:
+                data = json.loads(content)
+            except (json.JSONDecodeError, ValueError):
+                data = {"message": content}
+        elif isinstance(content, dict):
+            data = content
+        else:
+            continue
+
+        msg = data.get("message", "")
+        success = data.get("success", True)
+        if msg:
+            actions.append(msg)
+        elif not success:
+            actions.append("One action didn't go through — I'll try again.")
+
+    if not actions:
+        return "Done!"
+    if len(actions) == 1:
+        return actions[0]
+    return "Done! " + " ".join(actions)
+
 
 def _is_canvas_trigger(message: str) -> bool:
     """Check if message is a workspace/canvas trigger."""
@@ -8034,278 +7058,9 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
 
 logger.info("✅ Apple Health sync routes loaded successfully")
 
-# ===================== PUSH NOTIFICATIONS =====================
-class PushTokenRequest(BaseModel):
-    token: str
-    platform: str
-    device_name: Optional[str] = None
 
-@app.post("/api/push-tokens")
-async def register_push_token(request: PushTokenRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Register or update a push notification token for the user's device
-    """
-    try:
-        user_id = current_user.id
-
-        # Check if token already exists
-        existing_token = db.query(PushToken).filter(PushToken.token == request.token).first()
-
-        if existing_token:
-            # Update existing token
-            existing_token.user_id = user_id
-            existing_token.platform = request.platform
-            existing_token.device_name = request.device_name
-            existing_token.is_active = True
-            existing_token.updated_at = datetime.now()
-            db.commit()
-            logger.info(f"✅ Updated push token for user {user_id}: {request.token[:20]}...")
-            return {"success": True, "message": "Push token updated"}
-        else:
-            # Create new token
-            new_token = PushToken(
-                user_id=user_id,
-                token=request.token,
-                platform=request.platform,
-                device_name=request.device_name,
-                is_active=True,
-            )
-            db.add(new_token)
-            db.commit()
-            logger.info(f"✅ Registered new push token for user {user_id}: {request.token[:20]}...")
-            return {"success": True, "message": "Push token registered"}
-
-    except Exception as e:
-        logger.error(f"❌ Error registering push token: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to register push token: {str(e)}")
-
-@app.get("/api/push-tokens")
-async def get_push_tokens(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Get all registered push tokens for the current user
-    """
-    try:
-        user_id = current_user.id
-        tokens = db.query(PushToken).filter(
-            PushToken.user_id == user_id,
-            PushToken.is_active == True
-        ).all()
-
-        return [{
-            "id": t.id,
-            "token": t.token[:20] + "..." if len(t.token) > 20 else t.token,
-            "platform": t.platform,
-            "device_name": t.device_name,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        } for t in tokens]
-
-    except Exception as e:
-        logger.error(f"❌ Error getting push tokens: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get push tokens: {str(e)}")
-
-@app.delete("/api/push-tokens/{token_id}")
-async def delete_push_token(token_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Deactivate a push token
-    """
-    try:
-        user_id = current_user.id
-        token = db.query(PushToken).filter(
-            PushToken.id == token_id,
-            PushToken.user_id == user_id
-        ).first()
-
-        if not token:
-            raise HTTPException(status_code=404, detail="Push token not found")
-
-        token.is_active = False
-        db.commit()
-
-        return {"success": True, "message": "Push token deactivated"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error deleting push token: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete push token: {str(e)}")
-
-@app.post("/api/push-notifications/send")
-async def send_push_notification(
-    data: dict,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Send a push notification to a user's devices (for testing or internal use)
-    Uses Expo's push notification service
-    """
-    try:
-        user_id = data.get("user_id", current_user.id)
-        title = data.get("title", "Sara")
-        body = data.get("body", "")
-        notification_data = data.get("data", {})
-
-        # Get all active tokens for the user
-        tokens = db.query(PushToken).filter(
-            PushToken.user_id == user_id,
-            PushToken.is_active == True
-        ).all()
-
-        if not tokens:
-            return {"success": False, "message": "No push tokens found for user"}
-
-        # Prepare messages for Expo push API
-        messages = []
-        for token in tokens:
-            messages.append({
-                "to": token.token,
-                "sound": "default",
-                "title": title,
-                "body": body,
-                "data": notification_data,
-            })
-
-        # Send to Expo push notification service
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://exp.host/--/api/v2/push/send",
-                json=messages,
-                headers={
-                    "Accept": "application/json",
-                    "Accept-Encoding": "gzip, deflate",
-                    "Content-Type": "application/json",
-                }
-            )
-
-        result = response.json()
-        logger.info(f"✅ Sent push notification to {len(tokens)} devices: {result}")
-
-        return {
-            "success": True,
-            "devices_notified": len(tokens),
-            "result": result
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Error sending push notification: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to send push notification: {str(e)}")
-
-logger.info("✅ Push notification routes loaded successfully")
-
-# ===================== PUSH NOTIFICATION HELPER =====================
-async def send_push_to_user(user_id: str, title: str, body: str, notification_data: dict = None, db: Session = None):
-    """
-    Send a push notification to all of a user's registered devices via Expo.
-    Returns True if at least one device was notified, False otherwise.
-    """
-    try:
-        # Get a database session if not provided
-        if db is None:
-            db = SessionLocal()
-            close_db = True
-        else:
-            close_db = False
-
-        try:
-            # Get all active tokens for the user
-            tokens = db.query(PushToken).filter(
-                PushToken.user_id == user_id,
-                PushToken.is_active == True
-            ).all()
-
-            if not tokens:
-                logger.info(f"📱 No push tokens found for user {user_id}")
-                return False
-
-            # Prepare messages for Expo push API
-            messages = []
-            for token in tokens:
-                messages.append({
-                    "to": token.token,
-                    "sound": "default",
-                    "title": title,
-                    "body": body,
-                    "data": notification_data or {},
-                    "priority": "high",
-                })
-
-            # Send to Expo push notification service
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={
-                        "Accept": "application/json",
-                        "Accept-Encoding": "gzip, deflate",
-                        "Content-Type": "application/json",
-                    }
-                )
-
-            result = response.json()
-            logger.info(f"📱 Sent push notification to {len(tokens)} devices for user {user_id}: {title}")
-            return True
-
-        finally:
-            if close_db:
-                db.close()
-
-    except Exception as e:
-        logger.error(f"❌ Error sending push notification to user {user_id}: {e}")
-        return False
-
-# ===================== PRESENCE LOGGING =====================
-async def log_presence(user_id: str, activity_type: str, platform: str = None, db: Session = None):
-    """
-    Log a presence/activity event for the user.
-    Called from various endpoints to track when the user is active.
-    """
-    try:
-        if db is None:
-            db = SessionLocal()
-            close_db = True
-        else:
-            close_db = False
-
-        try:
-            db.execute(text("""
-                INSERT INTO presence_log (id, user_id, activity_type, platform, created_at)
-                VALUES (:id, :user_id, :activity_type, :platform, NOW())
-            """), {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "activity_type": activity_type,
-                "platform": platform
-            })
-            db.commit()
-            logger.debug(f"📍 Logged presence: {user_id} - {activity_type} ({platform})")
-        finally:
-            if close_db:
-                db.close()
-
-    except Exception as e:
-        logger.error(f"❌ Error logging presence: {e}")
-
-
-@app.post("/api/presence")
-async def log_presence_endpoint(
-    data: dict,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Log user presence/activity. Call this when app opens, resumes, or on significant actions.
-    """
-    activity_type = data.get("activity_type", "app_open")
-    platform = data.get("platform", "unknown")
-
-    await log_presence(current_user.id, activity_type, platform, db)
-
-    return {"success": True, "message": "Presence logged"}
-
-
-logger.info("✅ Presence logging routes loaded successfully")
+# Presence logging extracted to app/routes/presence.py
+# log_presence() is imported from presence module in router registration section
 
 # ===================== NIGHTLY MEMORY CONSOLIDATION =====================
 class MemoryConsolidationScheduler:
@@ -8591,10 +7346,13 @@ async def startup_event():
     else:
         STARTUP_HEALTH["neo4j"]["status"] = "disabled"
 
+    intelligence_pipeline_started = False
+
     # 7. Initialize intelligence pipeline (non-critical)
     try:
         from app.services.intelligence_pipeline import intelligence_pipeline
         await intelligence_pipeline.start_workers()
+        intelligence_pipeline_started = True
         logger.info("🧠 Intelligence pipeline workers started")
     except Exception as intel_err:
         logger.warning(f"⚠️ Intelligence pipeline failed to start: {intel_err}")
@@ -8605,14 +7363,17 @@ async def startup_event():
     except Exception as notif_err:
         logger.warning(f"⚠️ Notification scheduler failed to start: {notif_err}")
 
-    # 9. Initialize nightly dream service (non-critical)
-    try:
-        from app.services.nightly_dream_service import NightlyDreamService
-        dream_service = NightlyDreamService()
-        asyncio.create_task(dream_service.start_dream_scheduler())
-        logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
-    except Exception as dream_err:
-        logger.warning(f"⚠️ Nightly dream service failed to start: {dream_err}")
+    # 9. Initialize nightly dream service only if pipeline worker did not start.
+    # The intelligence pipeline already runs the singleton scheduler.
+    if not intelligence_pipeline_started:
+        try:
+            from app.services.nightly_dream_service import nightly_dream_service
+            asyncio.create_task(nightly_dream_service.start_dream_scheduler())
+            logger.info("🌙 Nightly dream service initialized (fallback mode)")
+        except Exception as dream_err:
+            logger.warning(f"⚠️ Nightly dream service failed to start: {dream_err}")
+    else:
+        logger.info("🌙 Nightly dream service managed by intelligence pipeline worker")
 
     # 10. Start memory consolidation scheduler (non-critical)
     try:
@@ -8638,6 +7399,17 @@ async def startup_event():
     except Exception as rescore_err:
         logger.warning(f"⚠️ Nightly rescoring scheduler failed to start: {rescore_err}")
 
+    # 13. Start Reactive Engine (non-critical)
+    try:
+        from app.services.event_bus import event_bus
+        from app.services.reactive_engine import start_reactive_engine
+        await event_bus.connect()
+        await event_bus.start_listening()
+        await start_reactive_engine(event_bus)
+        logger.info("Reactive engine started with event bus")
+    except Exception as reactive_err:
+        logger.warning(f"Reactive engine failed to start (non-critical): {reactive_err}")
+
     # Log startup health summary
     critical_count = len(STARTUP_HEALTH["critical_failures"])
     if critical_count > 0:
@@ -8660,6 +7432,17 @@ async def shutdown_event():
             await daily_brief_scheduler.stop()
             logger.info("📋 Daily Brief scheduler stopped")
 
+        # Stop reactive engine and event bus
+        try:
+            from app.services.reactive_engine import get_reactive_engine
+            from app.services.event_bus import event_bus
+            engine = get_reactive_engine()
+            if engine:
+                await engine.stop()
+            await event_bus.disconnect()
+        except Exception:
+            pass
+
         # Stop LLM failover client
         from app.core.llm import get_llm_client
         llm_failover_client = get_llm_client()
@@ -8672,90 +7455,8 @@ async def shutdown_event():
     except Exception as e:
         logger.warning(f"Neo4j shutdown warning: {e}")
 
-# Routes
-@app.get("/")
-async def root():
-    return {"message": f"Welcome to {ASSISTANT_NAME} Personal Hub API", "version": "1.0.0-simple"}
-
-@app.get("/health")
-async def health():
-    from app.services.solo_mode_service import solo_mode_service
-
-    # Determine overall status based on critical service health
-    critical_failures = STARTUP_HEALTH.get("critical_failures", [])
-    if critical_failures:
-        overall_status = "degraded"
-    else:
-        overall_status = "healthy"
-
-    response = {
-        "status": overall_status,
-        "assistant": ASSISTANT_NAME,
-        "services": {
-            "database": STARTUP_HEALTH["database"]["status"],
-            "embedding": STARTUP_HEALTH["embedding_service"]["status"],
-            "llm": STARTUP_HEALTH["llm_service"]["status"],
-            "neo4j": STARTUP_HEALTH["neo4j"]["status"]
-        },
-        "startup_time": STARTUP_HEALTH.get("startup_time"),
-        "critical_failures": critical_failures
-    }
-
-    # Add Jarvis mode information
-    if solo_mode_service.is_solo_mode():
-        response.update({
-            "mode": "jarvis",
-            "user": "owner",
-            "solo_mode": True
-        })
-    else:
-        response.update({
-            "mode": "sara",
-            "user": "multi-tenant",
-            "solo_mode": False
-        })
-
-    return response
-
-@app.get("/api/health/llm-status")
-async def get_llm_status(current_user: dict = Depends(get_current_user)):
-    """Get LLM endpoint failover status for monitoring."""
-    from app.core.llm import get_llm_client
-    llm_failover_client = get_llm_client()
-    return llm_failover_client.get_status()
-
-# ================ Diagnostics & Tools =================
-@app.get("/tools")
-async def list_tools():
-    """List available AI tools (name and description)"""
-    tools = []
-    try:
-        for t in tool_registry.get_all_tools():
-            tools.append({
-                "name": getattr(t, "name", "unknown"),
-                "description": getattr(t, "description", "")
-            })
-    except Exception as e:
-        logger.error(f"Failed to enumerate tools: {e}")
-    return {"tools": tools}
-
-@app.get("/search/health")
-async def search_health():
-    """Check connectivity to SearXNG and reranker endpoints"""
-    searx_url = f"{search_service.searx_base}/search"
-    status = {"searxng": {"base": search_service.searx_base, "ok": False, "error": None}}
-    try:
-        r = await search_service.http.get(searx_url, params={"q": "ping", "format": "json", "language": search_service.lang})
-        status["searxng"]["ok"] = r.status_code == 200
-        if r.status_code != 200:
-            status["searxng"]["error"] = f"HTTP {r.status_code}"
-    except Exception as e:
-        status["searxng"]["error"] = str(e)
-
-    status["reranker"] = {"base": search_service.reranker_base, "model": search_service.reranker_model}
-    return status
-
-# Auth endpoints moved to app/routes/auth.py
+# Routes — core endpoints extracted to app/routes/core.py
+# Auth endpoints extracted to app/routes/auth.py
 
 def get_system_prompt(assistant_name: str, user_email: str) -> str:
     """Generate Sara's system prompt - single unified personality"""
@@ -8851,6 +7552,24 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 
 **log_workout** — Log exercise with sets/reps/weight
 - ONLY use when David asks to log a workout
+
+### Home Control Tools
+
+You can control David's smart home via Home Assistant. These tools are loaded automatically when David asks about home-related things.
+
+**home_status** — Quick overview of entire home (lights, climate, locks, etc.) — use this first!
+**home_get_devices** — List devices by type or area
+**home_light_control** — Turn on/off, dim, change color of lights
+**home_switch_control** — Toggle switches and outlets
+**home_climate_control** — Set thermostat, fan modes, temperature
+**home_cover_control** — Open/close blinds, garage doors, shades
+**home_lock_control** — Lock/unlock doors
+**home_scene_activate** — Activate scenes (e.g., "movie mode", "goodnight")
+**home_media_control** — Control media players (play, pause, volume)
+**home_all_lights_off** — Turn off all lights at once
+**home_schedule_action** — Schedule a home action for later (e.g., "turn off porch light at 11pm")
+
+When David asks about his home, lights, temperature, locks, garage, or anything smart-home related, use these tools. Start with **home_status** to get the lay of the land.
 
 ### The "Read a Note" Pattern
 
@@ -9272,20 +7991,6 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
         # Continue without memory context if retrieval fails
 
-    # Check if user's message is calibration feedback for body state estimation
-    try:
-        if request.messages and last_user_message:
-            calibration_result = calibration_service.analyze_user_response(
-                user_message=last_user_message,
-                user_id=current_user.id,
-                db=db
-            )
-            if calibration_result:
-                logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
-                           f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
-                           f"{calibration_result.get('adjustment', 0):+.3f}")
-    except Exception as e:
-        logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
 
     # Surface relevant dream insights proactively
     insight_context = ""
@@ -9378,21 +8083,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         logger.warning(f"⚠️ Cognitive context building failed (non-critical): {e}")
         # Continue without cognitive context if retrieval fails
 
-    # Retrieve body state context (physiological awareness)
-    body_state_context = ""
-    try:
-        subconscious_result = db.execute(text("""
-            SELECT body_state_context
-            FROM subconscious_state
-            WHERE user_id = :user_id
-        """), {"user_id": current_user.id}).fetchone()
-
-        if subconscious_result and subconscious_result.body_state_context:
-            body_state_context = f"\n\n{subconscious_result.body_state_context}"
-            logger.info(f"🫀 Retrieved body state context: {len(body_state_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Body state context retrieval failed (non-critical): {e}")
-        # Continue without body state context if retrieval fails
+    # Body state context removed — no longer injected into chat
 
     # Retrieve Sara's inner monologue (journal entries)
     journal_context = ""
@@ -9469,9 +8160,6 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     if cognitive_context:
         enhanced_content += cognitive_context
         logger.info(f"🧠 Injected {len(cognitive_context)} chars of cognitive context into system prompt")
-    if body_state_context:
-        enhanced_content += body_state_context
-        logger.info(f"🫀 Injected {len(body_state_context)} chars of body state context into system prompt")
     if journal_context:
         enhanced_content += f"\n\n{journal_context}"
         logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
@@ -9485,7 +8173,31 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         enhanced_content += f"\n\n{karma_context}"
         logger.info(f"⚖️ Injected {len(karma_context)} chars of karma context into system prompt")
 
-    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context or working_memory_context or karma_context:
+    # ADAPTIVE PERSONALITY: Inject personality context into non-streaming chat path (no body state)
+    personality_ctx = ""
+    try:
+        activity_result = db.execute(text("""
+            SELECT activity_state, activity_confidence, activity_room,
+                   interruptibility_score
+            FROM subconscious_state
+            WHERE user_id = :user_id
+        """), {"user_id": current_user.id}).fetchone()
+
+        if activity_result and activity_result.activity_state:
+            personality_ctx = _build_activity_context(
+                activity_state=activity_result.activity_state,
+                confidence=activity_result.activity_confidence,
+                room=activity_result.activity_room,
+                interruptibility=activity_result.interruptibility_score or 0.5,
+                turn_count=len(request.messages),
+            )
+            if personality_ctx:
+                enhanced_content += f"\n\n{personality_ctx}"
+                logger.info(f"🎭 Personality context injected (non-streaming): state={activity_result.activity_state}")
+    except Exception as e:
+        logger.warning(f"Personality context injection failed (non-streaming, non-critical): {e}")
+
+    if memory_context or insight_context or cognitive_context or journal_context or workout_context or working_memory_context or karma_context or personality_ctx:
         system_message = ChatMessage(role="system", content=enhanced_content)
 
     all_messages = [system_message] + request.messages
@@ -9507,20 +8219,6 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
     )
     
     logger.info(f"🔍 ChatResponse created: message.content length={len(chat_response.message.content) if chat_response.message.content else 0}")
-
-    # Check if Sara's response mentions body state (for calibration feedback loop)
-    try:
-        if response_content:
-            pending = calibration_service.detect_body_state_mention(
-                sara_response=response_content,
-                user_id=current_user.id,
-                current_body_state=None  # Let calibration service use defaults
-            )
-            if pending:
-                logger.info(f"📊 Body state mention detected in response: {pending.estimate_type}={pending.estimated_label}, "
-                           f"awaiting user feedback")
-    except Exception as e:
-        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
 
     # Store conversation in episodic memory
     try:
@@ -9556,6 +8254,15 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         ))
     except Exception as e:
         logger.warning(f"⚠️ Failed to start cognitive processing task: {e}")
+
+    # Extract conversation threads for follow-up (fire-and-forget)
+    try:
+        asyncio.create_task(_extract_conversation_threads(
+            messages=request.messages,
+            user_id=str(current_user.id),
+        ))
+    except Exception:
+        pass
 
     return chat_response
 
@@ -9617,6 +8324,43 @@ async def _process_conversation_for_cognitive_learning(messages, response_conten
     except Exception as e:
         logger.error(f"❌ Cognitive processing failed: {e}")
 
+
+async def _extract_conversation_threads(messages, user_id: str):
+    """Background: extract open threads from conversation for follow-up."""
+    try:
+        from app.services.thread_extractor import thread_extractor
+        from app.db.base import SessionLocal as ThreadSessionLocal
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        # Use sync session wrapped for the thread extractor
+        # The thread extractor uses async DB via sqlalchemy text() queries
+        bg_db = ThreadSessionLocal()
+        try:
+            # Create a simple async-compatible wrapper
+            class _SyncAsAsyncDB:
+                """Minimal wrapper to let sync SessionLocal work with async code."""
+                def __init__(self, sync_db):
+                    self._db = sync_db
+                async def execute(self, stmt, params=None):
+                    return self._db.execute(stmt, params)
+                async def commit(self):
+                    self._db.commit()
+                async def rollback(self):
+                    self._db.rollback()
+                @property
+                def rowcount(self):
+                    return self._db
+
+            db_wrapper = _SyncAsAsyncDB(bg_db)
+            await thread_extractor.extract_threads(messages, user_id, db_wrapper)
+            await thread_extractor.resolve_threads_from_conversation(messages, user_id, db_wrapper)
+            await db_wrapper.commit()
+        finally:
+            bg_db.close()
+    except Exception as e:
+        logger.debug(f"Thread extraction failed (non-critical): {e}")
+
+
 # Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
 
 @app.post("/chat/stream")
@@ -9624,6 +8368,43 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     """Streaming chat endpoint with real-time tool usage indicators"""
     logger.info(f"💬 Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
     logger.info(f"📋 Received conversation_id: {request.conversation_id}")
+
+    # Signal activity state machine: David is actively chatting
+    try:
+        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
+        activity_state_machine.process_signal(ActivitySignal(
+            signal_type="interaction",
+            source="chat_stream",
+            value="message",
+        ))
+    except Exception:
+        pass  # Non-critical
+
+    # Update unified context snapshot: David is chatting now
+    try:
+        from app.services.context_writer import update_fields as _ctx_update, clear_changes as _ctx_clear
+        from app.services.unified_context import read_changes as _ctx_read_changes
+        import asyncio as _aio
+        _device = getattr(request, 'source', None) or 'unknown'
+        _aio.ensure_future(_ctx_update(
+            str(current_user.id), source="chat_stream",
+            last_chat_at=datetime.utcnow().isoformat(),
+            hours_since_last_chat=0.0,
+            has_chatted_today=True,
+            turn_count=len(request.messages),
+            active_conversation_id=request.conversation_id,
+            active_conversation_device=_device,
+        ))
+        # Update cross-device active session
+        from app.routes.session import update_active_session
+        _aio.ensure_future(update_active_session(
+            user_id=str(current_user.id),
+            conversation_id=request.conversation_id or "unknown",
+            device=_device,
+            turn_count=len(request.messages),
+        ))
+    except Exception:
+        pass  # Non-critical
     
     async def generate_events():
         try:
@@ -9666,6 +8447,30 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Use conversation-aware classification to preserve tool context across turns
             session_id = request.conversation_id or str(current_user.id)
             user_intent, tool_categories = tool_classifier.classify_with_context(last_user_message, session_id)
+
+            # Screen-aware tool loading: auto-include tools for the user's current screen
+            _screen_to_categories = {
+                'Fitness': ['fitness'], 'Learning': ['learning', 'web'],
+                'Calendar': ['time'], 'Notes': ['notes'], 'Health': ['health', 'fitness'],
+                'Inbox': ['inbox'], 'Recipes': ['fitness'],
+            }
+            if request.current_screen and request.current_screen in _screen_to_categories:
+                screen_cats = _screen_to_categories[request.current_screen]
+                tool_categories = list(set(tool_categories + screen_cats))
+                logger.info(f"📱 Screen-aware: added {screen_cats} for screen={request.current_screen}")
+
+            # Multi-intent detection: for long messages with conjunctions, merge tool categories
+            _conjunction_words = {'and', 'also', 'then', 'plus', 'as well as', 'along with'}
+            if len(last_user_message.split()) > 10 and any(w in last_user_message.lower() for w in _conjunction_words):
+                multi_intents = tool_classifier.classify_multi(last_user_message, max_intents=3)
+                if len(multi_intents) > 1:
+                    extra_cats = []
+                    for mi_intent, mi_score in multi_intents:
+                        if mi_intent != user_intent:
+                            extra_cats.extend(tool_classifier.INTENT_TO_TOOL_CATEGORIES.get(mi_intent, []))
+                    if extra_cats:
+                        tool_categories = list(set(tool_categories + extra_cats))
+                        logger.info(f"🔀 Multi-intent detected: {[i for i, _ in multi_intents]}, merged categories: {tool_categories}")
             turn_count = len(request.messages)
 
             # WORK MODE DETECTION
@@ -9695,6 +8500,32 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 in_work_mode=is_work_mode
             )
             logger.info(f"🎯 Intent={user_intent}, {context_decision.reason}")
+
+            # IMPLICIT FEEDBACK DETECTION: Detect satisfaction/correction signals from user message
+            implicit_feedback = None
+            previous_assistant_response = None
+            injected_lesson_ids = []
+            try:
+                if request.messages and len(request.messages) >= 2:
+                    # Find previous assistant response
+                    for m in reversed(request.messages[:-1]):
+                        if m.role == "assistant":
+                            previous_assistant_response = m.content
+                            break
+                    if previous_assistant_response:
+                        from app.services.implicit_feedback_detector import analyze_message_for_feedback
+                        implicit_feedback = await analyze_message_for_feedback(
+                            message=last_user_message,
+                            previous_response=previous_assistant_response,
+                        )
+                        if implicit_feedback and implicit_feedback.is_actionable():
+                            logger.info(
+                                f"Implicit feedback: {implicit_feedback.signal_type.value} "
+                                f"({implicit_feedback.strength.value}, confidence={implicit_feedback.confidence:.2f}) "
+                                f"trigger='{implicit_feedback.trigger_phrase}'"
+                            )
+            except Exception as e:
+                logger.debug(f"Implicit feedback detection failed (non-critical): {e}")
 
             # LAZY MEMORY RETRIEVAL: Only retrieve when ContextRouter says so
             memory_context = ""
@@ -9739,6 +8570,42 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 enhanced_system_content = system_message.content + memory_context
                 system_message = ChatMessage(role="system", content=enhanced_system_content)
                 logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
+
+            # PKG CONTEXT: Inject personal knowledge about David
+            if context_decision.inject_pkg:
+                try:
+                    from app.services.pkg_context_provider import pkg_context
+                    pkg_text = await pkg_context.get_relevant_context(
+                        user_id=current_user.id,
+                        message=last_user_message,
+                        intent=user_intent
+                    )
+                    if pkg_text:
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + pkg_text)
+                        logger.info(f"🧠 Injected {len(pkg_text)} chars of PKG context into system prompt")
+                except Exception as e:
+                    logger.warning(f"⚠️ PKG context injection failed (non-critical): {e}")
+
+            # PATTERN CONTEXT: Inject discovered behavioral patterns
+            if context_decision.inject_patterns:
+                try:
+                    from sqlalchemy import text as sa_text
+                    patterns_result = db.execute(sa_text("""
+                        SELECT description, confidence
+                        FROM behavioral_pattern
+                        WHERE user_id = :uid AND status = 'active'
+                        ORDER BY confidence DESC LIMIT 5
+                    """), {"uid": current_user.id}).fetchall()
+                    if patterns_result:
+                        pattern_text = "\n\n## Active Patterns Sara Has Noticed\n"
+                        for p in patterns_result:
+                            pattern_text += f"- {p.description} (confidence: {p.confidence:.0%})\n"
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + pattern_text)
+                        logger.info(f"📊 Injected {len(pattern_text)} chars of pattern context into system prompt")
+                except Exception as e:
+                    logger.warning(f"⚠️ Pattern context injection failed (non-critical): {e}")
 
             # CHESS CONTEXT: Inject chess game state if user is in chess mode
             if CHESS_COMMANDS_AVAILABLE:
@@ -9787,27 +8654,89 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 logger.warning(f"⚠️ Daily brief injection failed (non-critical): {e}")
                 # Continue without daily brief if it fails
 
-            # BODY STATE CONTEXT: Conditionally inject physiological awareness
-            if context_decision.inject_body_state:
-                try:
-                    subconscious_result = db.execute(text("""
-                        SELECT body_state_context
-                        FROM subconscious_state
-                        WHERE user_id = :user_id
-                    """), {"user_id": current_user.id}).fetchone()
+            # Body state context removed — no longer injected into chat
 
-                    if subconscious_result and subconscious_result.body_state_context:
-                        current_content = system_message.content
-                        system_message = ChatMessage(
-                            role="system",
-                            content=current_content + f"\n\n{subconscious_result.body_state_context}"
+            # ADAPTIVE PERSONALITY: Inject activity state, verbosity, memory nudges (no body state)
+            if context_decision.inject_activity_context:
+                try:
+                    # Try unified context snapshot first (Redis — fast)
+                    _snap = None
+                    try:
+                        from app.services.unified_context import read_snapshot as _read_snap
+                        _snap = await _read_snap(str(current_user.id))
+                    except Exception:
+                        pass
+
+                    _act_state = _act_conf = _act_room = _interrupt = None
+                    if _snap and _snap.activity_state != "UNKNOWN":
+                        _act_state = _snap.activity_state
+                        _act_conf = _snap.activity_confidence
+                        _act_room = _snap.room
+                        _interrupt = _snap.interruptibility
+                    else:
+                        # Fall back to DB query
+                        activity_result = db.execute(text("""
+                            SELECT activity_state, activity_confidence, activity_room,
+                                   interruptibility_score
+                            FROM subconscious_state
+                            WHERE user_id = :user_id
+                        """), {"user_id": current_user.id}).fetchone()
+                        if activity_result and activity_result.activity_state:
+                            _act_state = activity_result.activity_state
+                            _act_conf = activity_result.activity_confidence
+                            _act_room = activity_result.activity_room
+                            _interrupt = activity_result.interruptibility_score or 0.5
+
+                    if _act_state:
+                        # Extract proactive memory nudges (fast, non-blocking)
+                        memory_nudges = []
+                        try:
+                            from app.services.personality_engine import extract_memory_nudges
+                            memory_nudges = await extract_memory_nudges(
+                                user_id=str(current_user.id),
+                                message=last_user_message,
+                                db=db,
+                                max_nudges=3,
+                            )
+                        except Exception as nudge_err:
+                            logger.debug(f"Memory nudge extraction skipped: {nudge_err}")
+
+                        # Count conversation depth (back-and-forth exchanges)
+                        conv_depth = len(conversation_history) // 2 if conversation_history else 0
+
+                        activity_ctx = _build_activity_context(
+                            activity_state=_act_state,
+                            confidence=_act_conf,
+                            room=_act_room,
+                            interruptibility=_interrupt or 0.5,
+                            turn_count=turn_count,
+                            conversation_depth=conv_depth,
+                            memory_nudges=memory_nudges,
                         )
-                        logger.info(f"🫀 Injected body state context into system prompt")
+                        if activity_ctx:
+                            current_content = system_message.content
+                            system_message = ChatMessage(
+                                role="system",
+                                content=current_content + f"\n\n{activity_ctx}"
+                            )
+                            logger.info(f"🎭 Personality context injected: state={_act_state}, "
+                                       f"nudges={len(memory_nudges)}, depth={conv_depth}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Body state context injection failed (non-critical): {e}")
-                    # Continue without body state context if it fails
-            else:
-                logger.info("⏭️ Skipping body state (work mode)")
+                    logger.warning(f"Personality context injection failed (non-critical): {e}")
+
+            # DEVICE AWARENESS: Inject multi-device context so Sara knows which devices are available
+            try:
+                from app.services.device_orchestrator import device_orchestrator
+                device_ctx = await device_orchestrator.get_device_context_for_chat(db, str(current_user.id))
+                if device_ctx:
+                    current_content = system_message.content
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + f"\n\n{device_ctx}"
+                    )
+                    logger.info(f"📱 Device awareness context injected ({len(device_ctx)} chars)")
+            except Exception as e:
+                logger.debug(f"Device context injection skipped: {e}")
 
             # SARA'S INNER MONOLOGUE: Inject journal context
             try:
@@ -9839,20 +8768,84 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.warning(f"⚠️ Workout context injection failed (non-critical): {e}")
 
-            # Check if user's message is calibration feedback for body state estimation
-            try:
-                if last_user_message:
-                    calibration_result = calibration_service.analyze_user_response(
-                        user_message=last_user_message,
-                        user_id=current_user.id,
-                        db=db
+            # LEARNING RECALL: Test David's recall on topics he's studying
+            if context_decision.inject_learning_recall:
+                try:
+                    recall_context = await _build_learning_recall_context(
+                        str(current_user.id), last_user_message, db
                     )
-                    if calibration_result:
-                        logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
-                                   f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
-                                   f"{calibration_result.get('adjustment', 0):+.3f}")
-            except Exception as e:
-                logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
+                    if recall_context:
+                        current_content = system_message.content
+                        system_message = ChatMessage(
+                            role="system",
+                            content=current_content + f"\n\n{recall_context}"
+                        )
+                        logger.info(f"📚 Injected learning recall context")
+                except Exception as e:
+                    logger.debug(f"Learning recall context failed: {e}")
+
+            # CHANGES BRIEF: Inject "what happened while you were away" on first message or explicit request
+            if context_decision.inject_changes_brief:
+                try:
+                    from app.services.unified_context import read_changes as _read_ctx_changes
+                    from app.services.unified_context import read_snapshot as _read_ctx_snap
+                    _snap = await _read_ctx_snap(str(current_user.id))
+                    _changes = await _read_ctx_changes(str(current_user.id))
+                    if _changes and _snap.hours_since_last_chat > 0.5:
+                        changes_ctx = "\n\n## What's Happened Recently\n"
+                        for ch in _changes[-8:]:
+                            changes_ctx += f"- {ch}\n"
+                        if _snap.next_event_title and _snap.next_event_minutes_away and _snap.next_event_minutes_away < 120:
+                            changes_ctx += f"\n**Coming up:** {_snap.next_event_title} in {_snap.next_event_minutes_away} minutes\n"
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + changes_ctx)
+                        logger.info(f"📋 Injected changes brief ({len(_changes)} changes, {len(changes_ctx)} chars)")
+                except Exception as e:
+                    logger.debug(f"Changes brief injection failed (non-critical): {e}")
+
+            # LESSONS: Inject relevant lessons from past mistakes into system prompt
+            if context_decision.inject_lessons:
+                try:
+                    from app.services.lesson_injection_service import lesson_injection_service
+                    lessons_text, injected_lesson_ids = await lesson_injection_service.get_lessons_for_injection(
+                        db=db,
+                        query=last_user_message,
+                        domain_hint=user_intent,
+                        limit=3
+                    )
+                    if lessons_text:
+                        current_content = system_message.content
+                        system_message = ChatMessage(
+                            role="system",
+                            content=current_content + "\n\n" + lessons_text
+                        )
+                        logger.info(f"Injected {len(injected_lesson_ids)} lessons into system prompt")
+                except Exception as e:
+                    logger.debug(f"Lesson injection failed (non-critical): {e}")
+
+            # CONTENT INBOX: Inject inbox item content when discussing a shared item
+            if request.inbox_item_id:
+                try:
+                    inbox_row = db.execute(text("""
+                        SELECT id, title, content_type, original_url, extracted_text, meta
+                        FROM shared_content
+                        WHERE id = :id AND user_id = :uid
+                    """), {"id": request.inbox_item_id, "uid": current_user.id}).fetchone()
+                    if inbox_row and inbox_row.extracted_text:
+                        truncated = inbox_row.extracted_text[:8000]
+                        inbox_ctx = f"\n\n## Content David Wants to Discuss\n"
+                        inbox_ctx += f"**Title:** {inbox_row.title}\n"
+                        inbox_ctx += f"**Source:** {inbox_row.original_url or 'shared file'} ({inbox_row.content_type})\n\n"
+                        inbox_ctx += truncated
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + inbox_ctx)
+                        # Mark as discussed
+                        db.execute(text("UPDATE shared_content SET discussed = TRUE WHERE id = :id"),
+                                   {"id": request.inbox_item_id})
+                        db.commit()
+                        logger.info(f"📥 Injected inbox item context: {inbox_row.title} ({len(truncated)} chars)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Inbox context injection failed (non-critical): {e}")
 
             # SESSION GAP DETECTION: Detect gaps and summarize for day layer
             try:
@@ -9896,6 +8889,82 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             logger.info(f"📔 Queued conversation close journal entry")
                         except Exception as je:
                             logger.warning(f"⚠️ Failed to write journal entry: {je}")
+
+                    # Build re-entry context from unified snapshot changes + agent memory + journal + PKG
+                    try:
+                        hours_away = (datetime.now() - last_message_time).total_seconds() / 3600
+                        reentry_context = f"\n\n## Re-Entry Context\nDavid just returned after {hours_away:.1f} hours away.\n"
+
+                        # Read changes_since_last_chat from unified context snapshot
+                        try:
+                            from app.services.context_writer import clear_changes as _clear_ctx_changes
+                            recent_changes = await _clear_ctx_changes(str(current_user.id))
+                            if recent_changes:
+                                reentry_context += "\n**What happened while David was away:**\n"
+                                for change in recent_changes[-10:]:  # Last 10 changes
+                                    reentry_context += f"- {change}\n"
+                        except Exception:
+                            pass
+
+                        # Get recent agent actions while David was away
+                        try:
+                            from app.services.agent_memory import get_recent_actions
+                            from sqlalchemy.ext.asyncio import AsyncSession as _ASession
+                            # agent_memory needs async session — wrap sync db
+                            agent_actions = []
+                            # Use a simplified approach: query directly with sync db
+                            action_rows = db.execute(text("""
+                                SELECT source, context_summary, run_at
+                                FROM agent_run_log
+                                WHERE user_id = :uid
+                                  AND run_at >= :since
+                                  AND context_summary IS NOT NULL
+                                ORDER BY run_at DESC LIMIT 5
+                            """), {
+                                "uid": current_user.id,
+                                "since": datetime.now() - timedelta(hours=max(hours_away, 1)),
+                            }).fetchall()
+                            if action_rows:
+                                reentry_context += "\n**Agent activity while you were away:**\n"
+                                for ar in action_rows:
+                                    reentry_context += f"- [{ar.source}] {(ar.context_summary or '')[:120]}\n"
+                        except Exception:
+                            pass
+
+                        # Get recent journal entries for Sara's recent thoughts
+                        from app.services.sara_journal_service import sara_journal
+                        recent_journal_entries = db.execute(text("""
+                            SELECT content, emotional_state, entry_type, created_at
+                            FROM sara_journal
+                            WHERE user_id = :uid
+                            AND created_at >= :since
+                            ORDER BY created_at DESC
+                            LIMIT 3
+                        """), {
+                            "uid": current_user.id,
+                            "since": datetime.now() - timedelta(hours=max(hours_away, 1))
+                        }).fetchall()
+
+                        if recent_journal_entries:
+                            reentry_context += "\nYour recent thoughts while David was away:\n"
+                            for entry in recent_journal_entries:
+                                content_preview = (entry.content or "")[:150]
+                                reentry_context += f"- [{entry.entry_type}] {content_preview}\n"
+
+                        # Get brief PKG summary for rapport
+                        try:
+                            from app.services.pkg_context_provider import pkg_context
+                            pkg_brief = pkg_context.get_david_summary_brief(current_user.id, max_facts=5)
+                            if pkg_brief:
+                                reentry_context += f"\nRelevant knowledge about David:\n{pkg_brief}\n"
+                        except Exception:
+                            pass
+
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + reentry_context)
+                        logger.info(f"🔄 Injected re-entry context ({len(reentry_context)} chars, {hours_away:.1f}h away)")
+                    except Exception as re_e:
+                        logger.warning(f"⚠️ Re-entry context injection failed (non-critical): {re_e}")
 
             except Exception as e:
                 logger.warning(f"⚠️ Session gap detection failed (non-critical): {e}")
@@ -9963,19 +9032,6 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
 
-                    # Check if Sara's response mentions body state (for calibration feedback loop)
-                    try:
-                        if response_content:
-                            pending = calibration_service.detect_body_state_mention(
-                                sara_response=response_content,
-                                user_id=current_user.id,
-                                current_body_state=None
-                            )
-                            if pending:
-                                logger.info(f"📊 Body state mention detected: {pending.estimate_type}={pending.estimated_label}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
-
                     # Send final response and done IMMEDIATELY to close the stream
                     final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
                     final_episode_id = streaming_client.current_episode_id if hasattr(streaming_client, 'current_episode_id') else None
@@ -9991,11 +9047,108 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         }
                     })
                     logger.info("✅ final_response event queued")
+
+                    # Emit suggested actions based on tools used and response
+                    try:
+                        from app.services.action_suggester import suggest as suggest_actions
+                        tool_history = getattr(streaming_client, '_tool_history', [])
+                        suggestions = suggest_actions(tool_history, response_content or "")
+                        if suggestions:
+                            await event_queue.put({
+                                "type": "suggested_actions",
+                                "data": {"actions": suggestions}
+                            })
+                            logger.info(f"💡 Emitted {len(suggestions)} suggested actions")
+                    except Exception as e:
+                        logger.debug(f"Suggested actions skipped: {e}")
+
                     await event_queue.put({"type": "done"})
                     logger.info("✅ done event queued")
 
+                    # Send push notification if requested (for background completion)
+                    if request.notify_on_complete and response_content:
+                        try:
+                            from app.services.notification_service import notification_service
+                            preview = response_content[:100].replace('\n', ' ')
+                            if len(response_content) > 100:
+                                preview += '...'
+                            await notification_service.send_notification(
+                                user_id=str(current_user.id),
+                                title="Sara",
+                                message=preview,
+                                data={
+                                    "type": "chat_response",
+                                    "conversation_id": final_conv_id or "",
+                                },
+                            )
+                            logger.info("📱 Sent chat completion push notification")
+                        except Exception as push_err:
+                            logger.warning(f"⚠️ Push notification failed (non-critical): {push_err}")
+
                     # Note: conversation storage already happened inside chat_with_tools
                     # No additional storage needed here
+
+                    # SELF-LEARNING LOOP: Extract lessons from negative feedback, track lesson effectiveness
+                    try:
+                        # If negative feedback detected, extract a lesson from the mistake
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "negative"):
+                            from app.services.lesson_extractor import create_lesson_from_feedback
+                            messages_for_extraction = [
+                                {"role": m.role, "content": m.content}
+                                for m in (request.messages or [])
+                            ]
+                            lesson = await create_lesson_from_feedback(
+                                db=db,
+                                feedback=implicit_feedback,
+                                messages=messages_for_extraction,
+                                previous_response=previous_assistant_response,
+                            )
+                            if lesson:
+                                logger.info(f"Extracted lesson: {lesson.lesson[:80]}... (confidence={lesson.confidence:.2f})")
+
+                        # Record that lessons were injected (for effectiveness tracking)
+                        if injected_lesson_ids:
+                            from app.services.lesson_injection_service import lesson_injection_service as _lis
+                            await _lis.record_lesson_application(
+                                db=db,
+                                lesson_ids=injected_lesson_ids,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                message_id=str(final_episode_id) if final_episode_id else None,
+                            )
+                            logger.info(f"Recorded application of {len(injected_lesson_ids)} lessons")
+
+                        # If positive feedback and lessons were injected, mark them as successful
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "positive"
+                                and injected_lesson_ids):
+                            from app.services.lesson_tracker import lesson_tracker
+                            updated = await lesson_tracker.update_pending_applications(
+                                db=db,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                was_successful=True,
+                                feedback_signal=implicit_feedback.trigger_phrase,
+                            )
+                            if updated:
+                                logger.info(f"Marked {len(updated)} lessons as successful")
+
+                        # If negative feedback on a conversation with prior lessons, mark them as failed
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "negative"
+                                and not injected_lesson_ids):
+                            # Check if previous conversation had lessons — update those
+                            from app.services.lesson_tracker import lesson_tracker
+                            updated = await lesson_tracker.update_pending_applications(
+                                db=db,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                was_successful=False,
+                                feedback_signal=implicit_feedback.trigger_phrase,
+                            )
+                            if updated:
+                                logger.info(f"Marked {len(updated)} lessons as failed")
+                    except Exception as e:
+                        logger.debug(f"Self-learning loop failed (non-critical): {e}")
+
                 except Exception as e:
                     logger.error(f"❌ Exception in process_chat: {e}", exc_info=True)
                     await event_queue.put({"type": "error", "data": {"message": str(e)}})
@@ -10183,107 +9336,7 @@ async def speak_text(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==================== DESKTOP APP DOWNLOADS ====================
-
-DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "downloads")
-
-@app.get("/api/downloads")
-async def list_downloads(
-    current_user: User = Depends(get_current_user)
-):
-    """List available desktop app downloads"""
-    downloads = []
-
-    if os.path.exists(DOWNLOADS_DIR):
-        for filename in os.listdir(DOWNLOADS_DIR):
-            filepath = os.path.join(DOWNLOADS_DIR, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-
-                # Determine platform and arch
-                platform = "unknown"
-                arch = "x64"
-                agent_type = "desktop"  # desktop or headless
-
-                if "mac" in filename.lower():
-                    platform = "macOS"
-                    if "arm64" in filename.lower():
-                        arch = "arm64"
-                elif "win" in filename.lower():
-                    platform = "Windows"
-                elif "linux" in filename.lower() or "agent" in filename.lower():
-                    platform = "Linux"
-                    agent_type = "headless"
-                elif filename.endswith(".asar"):
-                    platform = "Windows"  # asar files are for Windows updates
-
-                # Determine file type
-                file_type = "archive"
-                if filename.endswith(".exe"):
-                    file_type = "installer"
-                elif filename.endswith(".dmg"):
-                    file_type = "installer"
-                elif filename.endswith(".zip") or filename.endswith(".tar.gz"):
-                    file_type = "portable"
-                elif filename.endswith(".asar"):
-                    file_type = "update"
-
-                downloads.append({
-                    "filename": filename,
-                    "platform": platform,
-                    "arch": arch,
-                    "type": file_type,
-                    "agent_type": agent_type,
-                    "size_bytes": stat.st_size,
-                    "size_mb": round(stat.st_size / (1024 * 1024), 1),
-                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-                })
-
-    # Sort by platform, then arch
-    downloads.sort(key=lambda x: (x["platform"], x["arch"]))
-
-    # Get version from latest file or package.json if available
-    version = "1.0.36"
-    for d in downloads:
-        if "1.0." in d["filename"]:
-            try:
-                v = d["filename"].split("-")[1]
-                if v > version:
-                    version = v
-            except:
-                pass
-    return {"downloads": downloads, "version": version}
-
-
-@app.get("/api/downloads/{filename}")
-async def download_file(
-    filename: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Download a desktop app installer"""
-    # Sanitize filename to prevent directory traversal
-    safe_filename = os.path.basename(filename)
-    filepath = os.path.join(DOWNLOADS_DIR, safe_filename)
-
-    if not os.path.exists(filepath) or not os.path.isfile(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Determine media type
-    media_type = "application/octet-stream"
-    if safe_filename.endswith(".zip"):
-        media_type = "application/zip"
-    elif safe_filename.endswith(".tar.gz"):
-        media_type = "application/gzip"
-    elif safe_filename.endswith(".exe"):
-        media_type = "application/x-msdownload"
-    elif safe_filename.endswith(".dmg"):
-        media_type = "application/x-apple-diskimage"
-
-    return FileResponse(
-        filepath,
-        media_type=media_type,
-        filename=safe_filename
-    )
+# Desktop app downloads extracted to app/routes/downloads.py
 
 
 @app.get("/api/notes/search")
@@ -10347,673 +9400,10 @@ async def search_notes_api(
 
 
 # Memory Management endpoints
-@app.get("/memory/episodes")
-async def get_episodes(
-    page: int = 1,
-    per_page: int = 20,
-    min_importance: float = None,
-    max_importance: float = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get episodes with pagination and filtering"""
-    try:
-        # Build base query
-        query = db.query(Episode).filter(Episode.user_id == current_user.id)
-        
-        # Apply importance filters
-        if min_importance is not None:
-            query = query.filter(Episode.importance >= min_importance)
-        if max_importance is not None:
-            query = query.filter(Episode.importance <= max_importance)
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        episodes = query.order_by(Episode.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
-        
-        # Format episodes for frontend
-        episode_data = []
-        for episode in episodes:
-            episode_data.append({
-                "id": episode.id,
-                "source": episode.source or "chat",
-                "role": episode.role,
-                "content": episode.content,
-                "importance": episode.importance,
-                "meta": {
-                    "memory_type": episode.memory_type,
-                    "topics": episode.topics,
-                    "emotional_tone": episode.emotional_tone,
-                    "context_tags": episode.context_tags,
-                    "access_count": episode.access_count
-                },
-                "created_at": format_iso_utc(episode.created_at)
-            })
-        
-        return {
-            "episodes": episode_data,
-            "total": total,
-            "page": page,
-            "per_page": per_page
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve episodes")
-
-@app.delete("/memory/episodes/{episode_id}")
-async def delete_episode(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a specific episode"""
-    try:
-        # Find the episode
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == current_user.id
-        ).first()
-        
-        if not episode:
-            raise HTTPException(status_code=404, detail="Episode not found")
-        
-        # Delete the episode
-        db.delete(episode)
-        db.commit()
-        
-        logger.info(f"Deleted episode {episode_id} for user {current_user.id}")
-        return {"message": "Episode deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting episode {episode_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete episode")
-
-@app.patch("/memory/episodes/{episode_id}")
-async def update_episode(
-    episode_id: str,
-    importance: float,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update episode importance"""
-    try:
-        # Validate importance value
-        if not (0.0 <= importance <= 1.0):
-            raise HTTPException(status_code=400, detail="Importance must be between 0.0 and 1.0")
-        
-        # Find the episode
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == current_user.id
-        ).first()
-        
-        if not episode:
-            raise HTTPException(status_code=404, detail="Episode not found")
-        
-        # Update the importance
-        episode.importance = importance
-        episode.updated_at = func.now()
-        db.commit()
-        
-        logger.info(f"Updated episode {episode_id} importance to {importance} for user {current_user.id}")
-        return {"message": "Episode importance updated successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating episode {episode_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update episode importance")
-
-@app.post("/memory/search")
-async def search_episodes(
-    search_request: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Search episodes with POST request body"""
-    try:
-        query = search_request.get("query", "")
-        scopes = search_request.get("scopes", ["episodes"])
-        limit = search_request.get("limit", 50)
-        
-        if not query.strip():
-            return {"results": []}
-        
-        # Search episodes by content using LIKE for now (could be enhanced with vector search)
-        episodes = db.query(Episode).filter(
-            Episode.user_id == current_user.id,
-            Episode.content.ilike(f"%{query}%")
-        ).order_by(Episode.created_at.desc()).limit(limit).all()
-        
-        # Format results for frontend
-        results = []
-        for episode in episodes:
-            results.append({
-                "text": episode.content,
-                "metadata": {
-                    "episode_id": episode.id,
-                    "id": episode.id,
-                    "importance": episode.importance,
-                    "role": episode.role,
-                    "source": episode.source or "chat",
-                    "timestamp": format_iso_utc(episode.created_at),
-                    "memory_type": episode.memory_type,
-                    "topics": episode.topics,
-                    "emotional_tone": episode.emotional_tone,
-                    "context_tags": episode.context_tags
-                }
-            })
-        
-        return {"results": results}
-        
-    except Exception as e:
-        logger.error(f"Error searching episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search episodes")
 
 # Episode Rating endpoints
-@app.post("/api/episodes/{episode_id}/rate")
-async def rate_episode(
-    episode_id: str,
-    rating_data: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Rate an episode (1-5 stars)"""
-    try:
-        from app.services.rating_service import get_rating_service
-        from app.services.rating_events import get_rating_publisher
-
-        rating = rating_data.get("rating")
-        if not rating or not (1 <= rating <= 5):
-            raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
-
-        # Get rating service
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-
-        # Rate the episode
-        result = await rating_service.rate_episode(
-            episode_id=episode_id,
-            user_id=current_user.id,
-            rating=rating
-        )
-
-        # Publish event for real-time updates
-        publisher = get_rating_publisher(redis_url=config.settings.redis_url)
-        await publisher.publish_episode_rated(
-            episode_id=episode_id,
-            user_id=current_user.id,
-            rating=rating,
-            net_score=result["rating_sum"],
-            rating_count=result["rating_count"],
-            average_rating=result["average_rating"]
-        )
-
-        return {
-            "success": True,
-            "message": "Episode rated successfully",
-            "rating": result
-        }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error rating episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to rate episode")
-
-@app.get("/api/episodes/{episode_id}/rating")
-async def get_episode_rating(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get rating data for an episode"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        rating_data = await rating_service.get_episode_rating(episode_id)
-
-        if not rating_data:
-            return {"rated": False}
-
-        # Also get user's specific rating
-        user_rating = await rating_service.get_user_rating(current_user.id, episode_id)
-        rating_data["user_rating"] = user_rating
-        rating_data["rated"] = True
-
-        return rating_data
-
-    except Exception as e:
-        logger.error(f"Error getting rating for episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get episode rating")
-
-@app.delete("/api/episodes/{episode_id}/rating")
-async def delete_episode_rating(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete user's rating for an episode"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        success = await rating_service.delete_rating(episode_id, current_user.id)
-
-        if not success:
-            raise HTTPException(status_code=404, detail="Rating not found")
-
-        return {
-            "success": True,
-            "message": "Rating deleted successfully"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting rating for episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete rating")
-
-@app.get("/api/rating/stats")
-async def get_rating_stats(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get rating system statistics"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        stats = await rating_service.get_rating_stats()
-
-        return stats
-
-    except Exception as e:
-        logger.error(f"Error getting rating stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get rating stats")
-
-@app.post("/api/episodes/find-by-content")
-async def find_episodes_by_content(
-    request: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Find episode IDs by conversation_id and content (for rating UI)"""
-    try:
-        conversation_id = request.get("conversation_id")
-        messages = request.get("messages", [])  # [{role, content}]
-
-        if not conversation_id or not messages:
-            return {"episodes": []}
-
-        # Find episodes matching the conversation and content
-        result_episodes = []
-        for msg in messages:
-            episode = db.query(Episode).filter(
-                Episode.conversation_id == conversation_id,
-                Episode.user_id == current_user.id,
-                Episode.role == msg["role"],
-                Episode.content == msg["content"]
-            ).first()
-
-            if episode:
-                result_episodes.append({
-                    "role": episode.role,
-                    "content": episode.content[:100],  # Preview
-                    "episode_id": episode.id
-                })
-            else:
-                result_episodes.append({
-                    "role": msg["role"],
-                    "content": msg["content"][:100],
-                    "episode_id": None
-                })
-
-        return {"episodes": result_episodes}
-
-    except Exception as e:
-        logger.error(f"Error finding episodes by content: {e}")
-        raise HTTPException(status_code=500, detail="Failed to find episodes")
 
 # Document API endpoints
-@app.post("/documents", response_model=DocumentResponse)
-async def upload_document(
-    file: UploadFile,
-    chat_context: bool = False,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload a document with Neo4j-first intelligent processing"""
-    doc_id = str(uuid.uuid4())
-    
-    try:
-        # Create uploads directory if it doesn't exist
-        uploads_dir = "uploads"
-        os.makedirs(uploads_dir, exist_ok=True)
-        
-        # Generate unique filename while preserving extension
-        file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(uploads_dir, unique_filename)
-        
-        # Save file to disk
-        file_content = await file.read()
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(file_content)
-        
-        # Extract text immediately
-        processor = DocumentProcessor()
-        extracted_text = ""
-        
-        if file.content_type == "application/pdf":
-            try:
-                extracted_text = processor.extract_text(file_path, file.content_type)
-                if not extracted_text or len(extracted_text.strip()) < 10:
-                    extracted_text = f"PDF document: {file.filename} (text extraction may have limited success)"
-            except Exception as e:
-                logger.warning(f"PDF extraction failed: {e}")
-                extracted_text = f"PDF document: {file.filename} (text extraction failed)"
-        elif file.content_type in ["text/plain", "text/markdown"]:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    extracted_text = f.read()
-            except Exception as e:
-                logger.warning(f"Text file extraction failed: {e}")
-                extracted_text = "Could not extract text from file"
-        elif "word" in (file.content_type or "") or file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            try:
-                extracted_text = processor.extract_text(file_path, file.content_type)
-                if not extracted_text:
-                    extracted_text = f"Word document: {file.filename}"
-            except Exception as e:
-                logger.warning(f"Word document extraction failed: {e}")
-                extracted_text = f"Word document: {file.filename}"
-        else:
-            extracted_text = f"Document: {file.filename}"
-        
-        # Neo4j-first approach: Create document in Neo4j immediately
-        try:
-            from app.services.neo4j_service import neo4j_service
-            from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-            
-            # Ensure Neo4j connection
-            if not neo4j_service.driver:
-                await neo4j_service.connect()
-            
-            # Create document in Neo4j graph with extracted content
-            neo4j_result = await neo4j_service.create_document(
-                doc_id=doc_id,
-                user_id=current_user.id,
-                title=file.filename or "Untitled Document",
-                content_text=extracted_text,
-                mime_type=file.content_type or "application/octet-stream",
-                file_path=file_path
-            )
-            
-            # Start intelligence pipeline workers if not already running
-            await intelligence_pipeline.start_workers()
-            
-            # Queue for fast processing (embeddings, obvious connections)
-            await intelligence_pipeline.queue_fast_processing(
-                content_id=doc_id,
-                content_type=ContentType.DOCUMENT,
-                metadata={
-                    "user_id": current_user.id,
-                    "title": file.filename,
-                    "mime_type": file.content_type,
-                    "file_path": file_path,
-                    "file_size": len(file_content)
-                }
-            )
-            
-            logger.info(f"✅ Document {doc_id} created in Neo4j and queued for intelligent processing")
-            
-        except Exception as neo_error:
-            logger.error(f"❌ Neo4j document creation failed: {neo_error}")
-            # Continue with PostgreSQL fallback
-        
-        # Background sync to PostgreSQL (backup)
-        document = Document(
-            id=doc_id,
-            user_id=current_user.id,
-            filename=unique_filename,
-            original_filename=file.filename or "unknown",
-            title=file.filename or "Untitled Document",  # Add title for backward compatibility
-            file_path=file_path,
-            file_size=len(file_content),
-            mime_type=file.content_type or "application/octet-stream",
-            content_text=extracted_text[:50000] if extracted_text else "",  # Store 50KB preview
-            is_processed="true"  # Mark as processed since we extracted text
-        )
-        
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        
-        # Legacy chunking for PostgreSQL compatibility (reduced priority)
-        try:
-            chunks = processor.chunk_text(extracted_text) if extracted_text else []
-            max_chunks = 100  # Reduced since Neo4j is primary
-            processed_chunks = chunks[:max_chunks]
-            
-            if processed_chunks:
-                # Generate embeddings for chunks
-                chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
-
-                # Save chunks to PostgreSQL (skip chunks with failed embeddings)
-                saved_chunks = 0
-                skipped_chunks = 0
-                for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
-                    if embedding is None:
-                        # Skip chunks where embedding failed - don't pollute search with zero vectors
-                        skipped_chunks += 1
-                        continue
-
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = embedding
-                    else:
-                        embedding_data = json.dumps(embedding)
-
-                    chunk = DocumentChunk(
-                        document_id=document.id,
-                        user_id=current_user.id,
-                        chunk_index=i,
-                        chunk_text=chunk_text,
-                        embedding=embedding_data
-                    )
-                    db.add(chunk)
-                    saved_chunks += 1
-
-                db.commit()
-                if skipped_chunks > 0:
-                    logger.warning(f"📄 Legacy chunking: {saved_chunks} chunks saved, {skipped_chunks} skipped (embedding failures)")
-                else:
-                    logger.info(f"📄 Legacy chunking completed: {saved_chunks} chunks")
-        
-        except Exception as chunk_error:
-            logger.warning(f"⚠️ Legacy chunking failed (Neo4j processing continues): {chunk_error}")
-        
-        return DocumentResponse(
-            id=document.id,
-            filename=document.filename,
-            original_filename=document.original_filename,
-            title=document.title or document.original_filename,
-            file_size=document.file_size,
-            mime_type=document.mime_type,
-            content_text=document.content_text,
-            is_processed=document.is_processed,
-            created_at=document.created_at.isoformat(),
-            updated_at=document.updated_at.isoformat()
-        )
-        
-    except Exception as e:
-        logger.error(f"Document upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
-
-
-@app.get("/documents", response_model=list[DocumentResponse])
-async def get_documents(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get all documents for the current user"""
-    documents = db.query(Document).filter(Document.user_id == current_user.id).order_by(Document.created_at.desc()).all()
-    
-    return [
-        DocumentResponse(
-            id=doc.id,
-            filename=doc.filename,
-            original_filename=doc.original_filename,
-            title=getattr(doc, 'title', '') or doc.original_filename,  # Fallback for existing docs
-            file_size=doc.file_size,
-            mime_type=doc.mime_type,
-            content_text=doc.content_text,
-            is_processed=doc.is_processed,
-            created_at=doc.created_at.isoformat(),
-            updated_at=doc.updated_at.isoformat()
-        )
-        for doc in documents
-    ]
-
-@app.get("/documents/{document_id}/file")
-async def download_document(
-    document_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Download the original document file"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    if not os.path.exists(document.file_path):
-        raise HTTPException(status_code=404, detail="Document file not found on disk")
-    
-    async with aiofiles.open(document.file_path, 'rb') as f:
-        file_content = await f.read()
-    
-    return Response(
-        content=file_content,
-        media_type=document.mime_type,
-        headers={
-            "Content-Disposition": f"attachment; filename=\"{document.original_filename}\""
-        }
-    )
-
-@app.delete("/documents/{document_id}")
-async def delete_document(
-    document_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a document and its chunks"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # Delete chunks first
-    db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
-    
-    # Skip vector deletion for now to avoid crashes
-    logger.info(f"Skipped vector deletion for document {document_id} (disabled for stability)")
-    
-    # Delete file from disk
-    try:
-        if os.path.exists(document.file_path):
-            os.remove(document.file_path)
-    except Exception as e:
-        logger.warning(f"Could not delete file {document.file_path}: {e}")
-    
-    # Delete from Neo4j first
-    try:
-        from app.services.neo4j_service import neo4j_service
-        await neo4j_service.delete_document(document_id, current_user.id)
-        logger.info(f"✅ Document {document_id} deleted from Neo4j")
-    except Exception as e:
-        logger.warning(f"Failed to delete document from Neo4j: {e}")
-    
-    # Delete document record
-    db.delete(document)
-    db.commit()
-    
-    return {"message": "Document deleted successfully"}
-
-@app.put("/documents/{document_id}", response_model=DocumentResponse)
-async def update_document(
-    document_id: str,
-    title: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update document title"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # Update document title
-    document.title = title
-    db.commit()
-    db.refresh(document)
-    
-    # Update Neo4j if available
-    try:
-        from app.services.neo4j_service import neo4j_service
-        if neo4j_service.driver:
-            await neo4j_service.update_document_title(document_id, title)
-    except Exception as e:
-        logger.warning(f"Failed to update document title in Neo4j: {e}")
-    
-    return DocumentResponse(
-        id=document.id,
-        filename=document.filename,
-        original_filename=document.original_filename,
-        title=document.title,
-        mime_type=document.mime_type,
-        file_size=document.file_size,
-        is_processed=document.is_processed,
-        content_text=document.content_text,
-        created_at=document.created_at.isoformat(),
-        updated_at=document.updated_at.isoformat()
-    )
-
-@app.get("/documents/search")
-async def search_documents(
-    query: str,
-    limit: int = 5,
-    current_user: User = Depends(get_current_user)
-):
-    """Search for relevant document chunks using vector similarity"""
-    if not query.strip():
-        return {"results": []}
-    
-    try:
-        search_results = document_processor.search_documents(query, current_user.id, limit)
-        
-        return {
-            "query": query,
-            "results": search_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Document search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 # 3D Model API endpoints
 ALLOWED_3D_FORMATS = {'stl', 'obj', 'gltf', 'glb'}
@@ -11024,760 +9414,12 @@ MODEL_MIME_TYPES = {
     'glb': 'model/gltf-binary',
 }
 
-@app.post("/models/upload", response_model=Model3DResponse)
-async def upload_3d_model(
-    file: UploadFile,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload a 3D model file (STL, OBJ, GLTF, GLB)"""
-    model_id = str(uuid.uuid4())
-
-    try:
-        # Validate file extension
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="Filename is required")
-
-        file_extension = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
-        if file_extension not in ALLOWED_3D_FORMATS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file format. Allowed: {', '.join(ALLOWED_3D_FORMATS)}"
-            )
-
-        # Create models directory if it doesn't exist
-        models_dir = "uploads/models"
-        os.makedirs(models_dir, exist_ok=True)
-
-        # Generate unique filename
-        unique_filename = f"{model_id}.{file_extension}"
-        file_path = os.path.join(models_dir, unique_filename)
-
-        # Save file to disk
-        file_content = await file.read()
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(file_content)
-
-        # Create database record
-        now = datetime.utcnow()
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            INSERT INTO models_3d (id, user_id, filename, display_name, file_format, minio_key, file_size, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (model_id, current_user.id, file.filename, file.filename.rsplit('.', 1)[0], file_extension, file_path, len(file_content), now, now))
-        db.commit()
-
-        logger.info(f"3D model uploaded: {model_id} ({file.filename})")
-
-        return Model3DResponse(
-            id=model_id,
-            filename=file.filename,
-            display_name=file.filename.rsplit('.', 1)[0],
-            file_format=file_extension,
-            file_size=len(file_content),
-            download_url=f"/models/{model_id}/file",
-            created_at=now.isoformat(),
-            updated_at=now.isoformat()
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"3D model upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload 3D model: {str(e)}")
-
-
-@app.get("/models", response_model=list[Model3DResponse])
-async def list_3d_models(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """List all 3D models for the current user"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
-            FROM models_3d WHERE user_id = %s ORDER BY created_at DESC
-        """, (current_user.id,))
-        rows = cursor.fetchall()
-
-        return [
-            Model3DResponse(
-                id=row[0],
-                filename=row[1],
-                display_name=row[2],
-                file_format=row[3],
-                file_size=row[4],
-                download_url=f"/models/{row[0]}/file",
-                created_at=row[5].isoformat() if row[5] else "",
-                updated_at=row[6].isoformat() if row[6] else ""
-            )
-            for row in rows
-        ]
-    except Exception as e:
-        logger.error(f"Error listing 3D models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
-
-
-@app.get("/models/{model_id}", response_model=Model3DResponse)
-async def get_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get metadata for a specific 3D model"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
-            FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        return Model3DResponse(
-            id=row[0],
-            filename=row[1],
-            display_name=row[2],
-            file_format=row[3],
-            file_size=row[4],
-            download_url=f"/models/{row[0]}/file",
-            created_at=row[5].isoformat() if row[5] else "",
-            updated_at=row[6].isoformat() if row[6] else ""
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get model: {str(e)}")
-
-
-@app.get("/models/{model_id}/file")
-async def download_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Download a 3D model file"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT minio_key, filename, file_format FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        file_path, filename, file_format = row
-
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Model file not found on disk")
-
-        async with aiofiles.open(file_path, 'rb') as f:
-            file_content = await f.read()
-
-        mime_type = MODEL_MIME_TYPES.get(file_format, 'application/octet-stream')
-
-        return Response(
-            content=file_content,
-            media_type=mime_type,
-            headers={
-                "Content-Disposition": f"inline; filename=\"{filename}\"",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error downloading 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
-
-
-@app.delete("/models/{model_id}")
-async def delete_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a 3D model"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT minio_key FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        file_path = row[0]
-
-        # Delete file from disk
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        # Delete database record
-        cursor.execute("DELETE FROM models_3d WHERE id = %s", (model_id,))
-        db.commit()
-
-        logger.info(f"3D model deleted: {model_id}")
-        return {"message": "Model deleted successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
-
 
 # Conversation memory API endpoints
-@app.get("/conversations", response_model=list[ConversationResponse])
-async def get_conversations(
-    limit: int = 20,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get recent conversations for the current user"""
-    conversations = db.query(Conversation).filter(
-        Conversation.user_id == current_user.id
-    ).order_by(Conversation.updated_at.desc()).limit(limit).all()
-    
-    return [
-        ConversationResponse(
-            id=conv.id,
-            title=conv.title or "Conversation",
-            summary=conv.summary or "",
-            total_messages=conv.total_messages,
-            created_at=conv.created_at.isoformat(),
-            updated_at=conv.updated_at.isoformat()
-        )
-        for conv in conversations
-    ]
-
-@app.get("/conversations/{conversation_id}/turns", response_model=list[ConversationTurnResponse])
-async def get_conversation_turns(
-    conversation_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get all turns/messages for a specific conversation"""
-    # Verify the conversation belongs to the user
-    conversation = db.query(Conversation).filter(
-        Conversation.id == conversation_id,
-        Conversation.user_id == current_user.id
-    ).first()
-    
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    
-    turns = db.query(ConversationTurn).filter(
-        ConversationTurn.conversation_id == conversation_id
-    ).order_by(ConversationTurn.message_index).all()
-    
-    return [
-        ConversationTurnResponse(
-            id=turn.id,
-            conversation_id=turn.conversation_id,
-            role=turn.role,
-            content=turn.content,
-            message_index=turn.message_index,
-            created_at=turn.created_at.isoformat()
-        )
-        for turn in turns
-    ]
-
-@app.delete("/conversations/{conversation_id}")
-async def delete_conversation(
-    conversation_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a conversation and all its turns"""
-    try:
-        logger.info(f"Delete request for conversation {conversation_id} by user {current_user.id}")
-
-        # Verify the conversation belongs to the user
-        conversation = db.query(Conversation).filter(
-            Conversation.id == conversation_id,
-            Conversation.user_id == current_user.id
-        ).first()
-
-        if not conversation:
-            logger.warning(f"Conversation {conversation_id} not found for user {current_user.id}")
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        # Delete all conversation turns first (due to foreign key constraints)
-        db.query(ConversationTurn).filter(
-            ConversationTurn.conversation_id == conversation_id
-        ).delete()
-
-        # Delete the conversation
-        db.delete(conversation)
-        db.commit()
-
-        logger.info(f"Deleted conversation {conversation_id} and its turns for user {current_user.id}")
-        return {"message": "Conversation deleted successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting conversation {conversation_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete conversation")
 
 # ==================== EPISODE-BASED CONVERSATION ENDPOINTS ====================
 
-@app.get("/api/conversations/list", response_model=list[ConversationSummaryResponse])
-async def list_conversations(
-    limit: int = 50,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get list of conversations based on Episodes"""
-    try:
-        # Query for distinct conversation_ids with aggregated data
-        from sqlalchemy import func, distinct
-
-        conversations = db.query(
-            Episode.conversation_id,
-            func.min(Episode.content).label('first_message'),
-            func.count(Episode.id).label('message_count'),
-            func.max(Episode.created_at).label('last_activity'),
-            func.min(Episode.created_at).label('created_at')
-        ).filter(
-            Episode.user_id == current_user.id,
-            Episode.conversation_id.isnot(None),
-            Episode.role.in_(['user', 'assistant'])
-        ).group_by(
-            Episode.conversation_id
-        ).order_by(
-            func.max(Episode.created_at).desc()
-        ).limit(limit).all()
-
-        return [
-            ConversationSummaryResponse(
-                conversation_id=conv.conversation_id,
-                first_message=conv.first_message[:100] if conv.first_message else "",
-                message_count=conv.message_count,
-                last_activity=conv.last_activity.isoformat(),
-                created_at=conv.created_at.isoformat()
-            )
-            for conv in conversations
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching conversations list: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch conversations")
-
-@app.get("/api/conversations/{conversation_id}/messages", response_model=list[EpisodeMessageResponse])
-async def get_conversation_messages(
-    conversation_id: str,
-    limit: int = 100,
-    offset: int = 0,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get messages for a specific conversation from Episodes"""
-    try:
-        # Verify at least one episode in this conversation belongs to the user
-        episode_exists = db.query(Episode).filter(
-            Episode.conversation_id == conversation_id,
-            Episode.user_id == current_user.id
-        ).first()
-
-        if not episode_exists:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        # Get messages for this conversation
-        episodes = db.query(Episode).filter(
-            Episode.conversation_id == conversation_id,
-            Episode.user_id == current_user.id,
-            Episode.role.in_(['user', 'assistant'])
-        ).order_by(
-            Episode.created_at.asc()
-        ).offset(offset).limit(limit).all()
-
-        return [
-            EpisodeMessageResponse(
-                id=ep.id,
-                role=ep.role,
-                content=ep.content,
-                created_at=format_iso_utc(ep.created_at),
-                importance=ep.importance
-            )
-            for ep in episodes
-        ]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching conversation messages: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch conversation messages")
-
-@app.post("/api/conversations/active")
-async def set_active_conversation(
-    request: SetActiveConversationRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Set the user's current active conversation"""
-    try:
-        # Get or create user profile
-        user_profile = db.query(UserProfile).filter(
-            UserProfile.user_id == current_user.id
-        ).first()
-
-        if not user_profile:
-            user_profile = UserProfile(
-                user_id=current_user.id,
-                profile_data={}
-            )
-            db.add(user_profile)
-
-        # Store active conversation_id in profile_data field (JSONB)
-        if not user_profile.profile_data:
-            user_profile.profile_data = {}
-
-        # Make a copy to ensure SQLAlchemy detects the change
-        profile_data_copy = dict(user_profile.profile_data) if user_profile.profile_data else {}
-        profile_data_copy['active_conversation_id'] = request.conversation_id
-        user_profile.profile_data = profile_data_copy
-
-        # Mark as modified for SQLAlchemy to detect the change
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(user_profile, "profile_data")
-
-        db.commit()
-
-        return {"message": "Active conversation set", "conversation_id": request.conversation_id}
-    except Exception as e:
-        logger.error(f"Error setting active conversation: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to set active conversation")
-
-@app.get("/api/conversations/active")
-async def get_active_conversation(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get the user's current active conversation"""
-    try:
-        user_profile = db.query(UserProfile).filter(
-            UserProfile.user_id == current_user.id
-        ).first()
-
-        active_conversation_id = None
-        if user_profile and user_profile.profile_data:
-            active_conversation_id = user_profile.profile_data.get('active_conversation_id')
-
-        return {
-            "conversation_id": active_conversation_id
-        }
-    except Exception as e:
-        logger.error(f"Error getting active conversation: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get active conversation")
-
-@app.get("/memory/search")
-async def search_memory(
-    query: str,
-    limit: int = 10,
-    current_user: User = Depends(get_current_user)
-):
-    """Search through conversation memory"""
-    if not query.strip():
-        return {"results": []}
-    
-    try:
-        # Use the existing search_memory_tool method
-        search_results = await llm_client.search_memory_tool(query, current_user.id)
-        
-        return {
-            "query": query,
-            "results": search_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Memory search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Memory search failed: {str(e)}")
-
-@app.get("/memory/insights")
-async def get_dream_insights(
-    limit: int = 10,
-    insight_type: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get AI-generated insights from background dreaming/consolidation"""
-    try:
-        db = SessionLocal()
-        try:
-            query_filter = [DreamInsight.user_id == current_user.id]
-            
-            if insight_type:
-                query_filter.append(DreamInsight.insight_type == insight_type)
-            
-            insights = db.query(DreamInsight).filter(*query_filter).order_by(
-                DreamInsight.dream_date.desc()
-            ).limit(limit).all()
-            
-            insights_data = []
-            for insight in insights:
-                insight_dict = {
-                    "id": insight.id,
-                    "type": insight.insight_type,
-                    "title": insight.title,
-                    "content": insight.content,
-                    "confidence": insight.confidence,
-                    "dream_date": insight.dream_date.isoformat(),
-                    "surfaced_at": insight.surfaced_at.isoformat() if insight.surfaced_at else None,
-                    "user_feedback": insight.user_feedback,
-                    "related_episodes": json.loads(insight.related_episodes) if insight.related_episodes else []
-                }
-                insights_data.append(insight_dict)
-            
-            return {
-                "insights": insights_data,
-                "total": len(insights_data)
-            }
-        finally:
-            db.close()
-            
-    except Exception as e:
-        logger.error(f"Error fetching dream insights: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch insights")
-
-@app.patch("/memory/insights/{insight_id}/feedback")
-async def update_insight_feedback(
-    insight_id: str,
-    feedback: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Update user feedback on a dream insight"""
-    try:
-        db = SessionLocal()
-        try:
-            insight = db.query(DreamInsight).filter(
-                DreamInsight.id == insight_id,
-                DreamInsight.user_id == current_user.id
-            ).first()
-            
-            if not insight:
-                raise HTTPException(status_code=404, detail="Insight not found")
-            
-            insight.user_feedback = feedback
-            insight.surfaced_at = datetime.now(timezone.utc)
-            db.commit()
-            
-            return {"status": "updated", "feedback": feedback}
-        finally:
-            db.close()
-            
-    except Exception as e:
-        logger.error(f"Error updating insight feedback: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update feedback")
-
 # Knowledge Graph Endpoints
-@app.get("/knowledge-graph/health")
-async def knowledge_graph_health():
-    """Check Neo4j connection health"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        logger.info(f"Neo4j driver status: {neo4j_service.driver}")
-        if not neo4j_service.driver:
-            logger.info("Attempting to connect to Neo4j...")
-            await neo4j_service.connect()
-            logger.info(f"After connect, driver status: {neo4j_service.driver}")
-        await neo4j_service.verify_connection()
-        return {
-            "status": "healthy",
-            "neo4j_connected": True,
-            "message": "Knowledge graph is operational"
-        }
-    except Exception as e:
-        logger.error(f"Neo4j health check failed: {e}")
-        return {
-            "status": "unhealthy", 
-            "neo4j_connected": False,
-            "error": str(e),
-            "message": "Knowledge graph connection failed"
-        }
-
-@app.get("/knowledge-graph/")
-async def get_user_knowledge_graph(
-    depth: int = 2,
-    current_user: User = Depends(get_current_user)
-):
-    """Get the complete knowledge graph for the current user"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        graph_data = await neo4j_service.get_user_knowledge_graph(
-            user_id=current_user.id,
-            depth=depth
-        )
-        
-        # If Neo4j returns empty results, fall back to PostgreSQL data
-        nodes = graph_data.get("nodes", [])
-        relationships = graph_data.get("relationships", [])
-        
-        if not nodes:
-            logger.info("Neo4j graph is empty, falling back to PostgreSQL episode data")
-            # Fetch episodes from PostgreSQL as fallback
-            from sqlalchemy import select, and_, func
-            
-            db = SessionLocal()
-            try:
-                # Get meaningful episodes (content longer than 50 chars) using synchronous query
-                episodes = db.query(Episode).filter(
-                    and_(
-                        Episode.user_id == current_user.id,
-                        func.length(Episode.content) > 50
-                    )
-                ).order_by(Episode.created_at.desc()).limit(20).all()
-                
-                # Convert episodes to graph nodes
-                fallback_nodes = []
-                for episode in episodes:
-                    fallback_nodes.append({
-                        "id": f"episode_{episode.id}",
-                        "labels": ["Episode"],
-                        "properties": {
-                            "id": episode.id,
-                            "title": f"{episode.role}: {episode.content[:50]}..." if len(episode.content) > 50 else episode.content,
-                            "content": episode.content,
-                            "type": "episode",
-                            "role": episode.role,
-                            "source": episode.source,
-                            "importance": episode.importance or 0.5,
-                            "created_at": format_iso_utc(episode.created_at),
-                            "group": 1 if episode.role == "user" else 2
-                        }
-                    })
-                
-                nodes = fallback_nodes
-                logger.info(f"Generated {len(nodes)} fallback nodes from episodes")
-            finally:
-                db.close()
-        
-        return {
-            "nodes": nodes,
-            "relationships": relationships,
-            "total_nodes": len(nodes),
-            "total_relationships": len(relationships)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get knowledge graph: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge graph: {str(e)}")
-
-@app.post("/knowledge-graph/search")
-async def search_knowledge_graph(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Search across all content types in the knowledge graph"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        query = request.get("query")
-        content_types = request.get("content_types")
-        limit = request.get("limit", 20)
-        
-        if not query:
-            raise HTTPException(status_code=400, detail="Search query is required")
-        
-        search_results = await neo4j_service.search_knowledge_graph(
-            user_id=current_user.id,
-            query=query,
-            content_types=content_types,
-            limit=limit
-        )
-        
-        # Format results for frontend consumption
-        formatted_results = []
-        for item in search_results:
-            # Determine primary content type
-            primary_type = item.get("node_types", ["Unknown"])[0].lower()
-            
-            formatted_results.append({
-                "id": item.get("id"),
-                "type": primary_type,
-                "title": item.get("title") or item.get("content", "")[:50] + "...",
-                "content": item.get("content") or item.get("content_text", ""),
-                "created_at": item.get("created_at"),
-                "metadata": {
-                    "node_types": item.get("node_types", []),
-                    "properties": {k: v for k, v in item.items() if k not in ["id", "content", "content_text", "title", "created_at"]}
-                }
-            })
-        
-        return {
-            "query": query,
-            "results": formatted_results,
-            "total_found": len(formatted_results)
-        }
-        
-    except Exception as e:
-        logger.error(f"Knowledge graph search failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
-@app.post("/knowledge-graph/connection-details")
-async def get_connection_details(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Get detailed information about a specific connection"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        source_id = request.get("source_id")
-        target_id = request.get("target_id")
-        
-        if not source_id or not target_id:
-            raise HTTPException(status_code=400, detail="Both source_id and target_id are required")
-        
-        # Get detailed connection info including shared content analysis
-        connection_details = await neo4j_service.get_connection_details(
-            source_id=source_id,
-            target_id=target_id,
-            user_id=current_user.id
-        )
-        
-        return connection_details
-        
-    except Exception as e:
-        logger.error(f"Failed to get connection details: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get connection details: {str(e)}")
-
-@app.post("/knowledge-graph/connected-content")
-async def get_connected_content(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Find all content connected to a specific node"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        node_id = request.get("node_id")
-        depth = request.get("depth", 2)
-        relationship_types = request.get("relationship_types")
-        
-        if not node_id:
-            raise HTTPException(status_code=400, detail="Node ID is required")
-        
-        connected_items = await neo4j_service.find_connected_content(
-            node_id=node_id,
-            user_id=current_user.id,
-            depth=depth,
-            relationship_types=relationship_types
-        )
-        
-        return {
-            "source_node_id": node_id,
-            "connected_content": connected_items,
-            "total_connections": len(connected_items)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get connected content: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get connected content: {str(e)}")
-
 @app.get("/analytics/dashboard")
 async def get_analytics_dashboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get comprehensive analytics dashboard data"""
@@ -11911,22 +9553,6 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
         "bg_llm_fallback_url": BG_LLM_FALLBACK_URL,
         "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL
     }
-
-class AISettingsUpdate(BaseModel):
-    ai_provider: Optional[str] = None
-    openai_api_key: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    openai_model: Optional[str] = None
-    openai_notification_model: Optional[str] = None
-    embedding_base_url: Optional[str] = None
-    embedding_model: Optional[str] = None
-    embedding_dimension: Optional[int] = None
-    # Background processing settings
-    bg_llm_primary_url: Optional[str] = None
-    bg_llm_primary_model: Optional[str] = None
-    bg_llm_fallback_url: Optional[str] = None
-    bg_llm_fallback_model: Optional[str] = None
 
 @app.put("/settings/ai")
 async def update_ai_settings(
@@ -12161,886 +9787,17 @@ async def update_user_preferences(settings: UserSettings, current_user: User = D
     return await update_user_settings(settings, current_user)
 
 # Documents categories endpoint
-@app.get("/documents/categories")
-async def get_document_categories(current_user: User = Depends(get_current_user)):
-    """Get all unique document categories"""
-    # Document model doesn't have a category field yet
-    # Return empty list for iOS app compatibility
-    return []
-
-# Fitness proxy endpoints - return empty data for now (iOS app compatible)
-@app.get("/fitness/food")
-async def get_fitness_food(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness food logs"""
-    # Return empty array for now - can be connected to actual food log system later
-    return []
-
-@app.post("/fitness/food")
-async def create_fitness_food(
-    food_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness food log"""
-    # Return success for now
-    return {
-        "id": "1",
-        "message": "Food log created",
-        **food_data
-    }
-
-@app.delete("/fitness/food/{id}")
-async def delete_fitness_food(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness food log"""
-    return {"message": "Food log deleted"}
-
-@app.get("/fitness/workouts")
-async def get_fitness_workouts(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness workouts"""
-    # Return empty array for now - can be connected to actual workout system later
-    return []
-
-@app.post("/fitness/workouts")
-async def create_fitness_workout(
-    workout_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness workout"""
-    # Return success for now
-    return {
-        "id": "1",
-        "message": "Workout created",
-        **workout_data
-    }
-
-@app.delete("/fitness/workouts/{id}")
-async def delete_fitness_workout(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness workout"""
-    return {"message": "Workout deleted"}
-
-@app.get("/fitness/recovery")
-async def get_fitness_recovery(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness recovery logs"""
-    db = SessionLocal()
-    try:
-        from datetime import datetime, timedelta
-
-        # Default to last 30 days if no dates provided
-        if not start_date:
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        if not end_date:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-
-        # Query the daily_recovery_log table
-        query = text("""
-            SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours,
-                   soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            FROM daily_recovery_log
-            WHERE user_id = :user_id
-              AND log_date >= :start_date
-              AND log_date <= :end_date
-            ORDER BY log_date DESC
-        """)
-
-        results = db.execute(query, {
-            "user_id": current_user.id,
-            "start_date": start_date,
-            "end_date": end_date
-        }).fetchall()
-
-        # Convert to list of dicts
-        recovery_logs = []
-        for row in results:
-            row_dict = row._mapping
-            recovery_logs.append({
-                "id": row_dict['id'],
-                "user_id": row_dict['user_id'],
-                "log_date": row_dict['log_date'].isoformat(),
-                "logged_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
-                "hrv": row_dict['hrv'],
-                "heart_rate": row_dict['heart_rate'],
-                "sleep_hours": float(row_dict['sleep_hours']) if row_dict['sleep_hours'] else None,
-                "soreness_level": row_dict['soreness_level'],
-                "body_weight": float(row_dict['body_weight']) if row_dict['body_weight'] else None,
-                "weight_unit": row_dict['weight_unit'],
-                "notes": row_dict['notes'],
-                "created_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
-                "updated_at": row_dict['updated_at'].isoformat() if row_dict['updated_at'] else None
-            })
-
-        return recovery_logs
-
-    finally:
-        db.close()
-
-@app.post("/fitness/recovery")
-async def create_fitness_recovery(
-    recovery_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness recovery log"""
-    db = SessionLocal()
-    try:
-        from datetime import datetime
-
-        # Get log_date from recovery_data or use today
-        log_date_str = recovery_data.get('log_date', datetime.now().strftime("%Y-%m-%d"))
-
-        # Validate soreness level if provided
-        soreness_level = recovery_data.get('soreness_level')
-        if soreness_level is not None:
-            if soreness_level < 1 or soreness_level > 10:
-                raise HTTPException(status_code=400, detail="Soreness level must be between 1 and 10")
-
-        # Parse log_date
-        try:
-            log_date = datetime.strptime(log_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-
-        # Check if entry exists for this date
-        check_query = text("""
-            SELECT id FROM daily_recovery_log
-            WHERE user_id = :user_id AND log_date = :log_date
-        """)
-        existing = db.execute(check_query, {"user_id": current_user.id, "log_date": log_date}).fetchone()
-
-        if existing:
-            # Update existing entry
-            update_query = text("""
-                UPDATE daily_recovery_log
-                SET hrv = :hrv,
-                    heart_rate = :heart_rate,
-                    sleep_hours = :sleep_hours,
-                    soreness_level = :soreness_level,
-                    body_weight = :body_weight,
-                    weight_unit = :weight_unit,
-                    notes = :notes,
-                    updated_at = NOW()
-                WHERE user_id = :user_id AND log_date = :log_date
-                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            """)
-            result = db.execute(update_query, {
-                "user_id": current_user.id,
-                "log_date": log_date,
-                "hrv": recovery_data.get('hrv'),
-                "heart_rate": recovery_data.get('heart_rate'),
-                "sleep_hours": recovery_data.get('sleep_hours'),
-                "soreness_level": recovery_data.get('soreness_level'),
-                "body_weight": recovery_data.get('body_weight'),
-                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
-                "notes": recovery_data.get('notes', '')
-            }).fetchone()
-        else:
-            # Insert new entry
-            insert_query = text("""
-                INSERT INTO daily_recovery_log
-                (id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at)
-                VALUES (:id, :user_id, :log_date, :hrv, :heart_rate, :sleep_hours, :soreness_level, :body_weight, :weight_unit, :notes, NOW(), NOW())
-                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            """)
-            result = db.execute(insert_query, {
-                "id": str(uuid.uuid4()),
-                "user_id": current_user.id,
-                "log_date": log_date,
-                "hrv": recovery_data.get('hrv'),
-                "heart_rate": recovery_data.get('heart_rate'),
-                "sleep_hours": recovery_data.get('sleep_hours'),
-                "soreness_level": recovery_data.get('soreness_level'),
-                "body_weight": recovery_data.get('body_weight'),
-                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
-                "notes": recovery_data.get('notes', '')
-            }).fetchone()
-
-        db.commit()
-
-        # Convert result to response
-        row = result._mapping
-        return {
-            "id": row['id'],
-            "user_id": row['user_id'],
-            "log_date": row['log_date'].isoformat(),
-            "logged_at": row['created_at'].isoformat() if row['created_at'] else None,
-            "hrv": row['hrv'],
-            "heart_rate": row['heart_rate'],
-            "sleep_hours": float(row['sleep_hours']) if row['sleep_hours'] else None,
-            "soreness_level": row['soreness_level'],
-            "body_weight": float(row['body_weight']) if row['body_weight'] else None,
-            "weight_unit": row['weight_unit'],
-            "notes": row['notes'],
-            "created_at": row['created_at'].isoformat() if row['created_at'] else None,
-            "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to save recovery log: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-@app.delete("/fitness/recovery/{id}")
-async def delete_fitness_recovery(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness recovery log"""
-    db = SessionLocal()
-    try:
-        # Delete the recovery log
-        delete_query = text("""
-            DELETE FROM daily_recovery_log
-            WHERE id = :id AND user_id = :user_id
-        """)
-        db.execute(delete_query, {"id": id, "user_id": current_user.id})
-        db.commit()
-        return {"message": "Recovery log deleted"}
-    finally:
-        db.close()
-
-# /fitness/habits and /fitness/habits/streaks endpoints moved to app.routes.habits
-
-@app.get("/fitness/summary")
-async def get_fitness_summary(date: str = None, current_user: User = Depends(get_current_user)):
-    """Get fitness summary for a specific date"""
-    from datetime import datetime, timedelta
-
-    if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
-
-    # Return a basic summary
-    # In the future, this could aggregate data from food logs, workouts, recovery, and habits
-    return {
-        "date": date,
-        "calories_consumed": 0,
-        "calories_burned": 0,
-        "workouts_completed": 0,
-        "habits_completed": 0,
-        "recovery_score": 0,
-        "notes": "No data available for this date"
-    }
-
-
-
 # HABIT TRACKING ENDPOINTS moved to app.routes.habits
 
-# ==========================================
-# Worker Management Endpoints
-# ==========================================
-
-# Initialize worker coordinator
-try:
-    from app.workers.habit_worker_coordinator import HabitWorkerCoordinator
-    worker_coordinator = HabitWorkerCoordinator()
-    worker_coordinator.start_background_tasks()
-    logger.info("✅ Habit worker coordinator initialized")
-except Exception as e:
-    logger.warning(f"⚠️ Habit worker coordinator not available: {e}")
-    worker_coordinator = None
-
-@app.get("/workers/status")
-async def get_worker_status(current_user: User = Depends(get_current_user)):
-    """Get status of all habit workers"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    return worker_coordinator.get_status()
-
-@app.post("/workers/run/{task_name}")
-async def run_worker_task(
-    task_name: str,
-    request: Dict[str, Any] = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Manually run a specific worker task"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    kwargs = request or {}
-    result = await worker_coordinator.run_manual_task(task_name, **kwargs)
-    return result
-
-@app.post("/workers/generate-instances/{user_id}")
-async def generate_past_instances(
-    user_id: str,
-    days_back: int = 7,
-    current_user: User = Depends(get_current_user)
-):
-    """Generate habit instances for past days (retro logging support)"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    # Only allow users to generate for themselves or admin
-    if current_user.id != user_id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    result = await worker_coordinator.run_manual_task(
-        "generate_past_instances", 
-        user_id=user_id, 
-        days_back=days_back
-    )
-    return result
-
-@app.post("/workers/streak-alerts/{user_id}")
-async def send_streak_alerts(
-    user_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Send streak alerts for a specific user"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    # Only allow users to send for themselves or admin
-    if current_user.id != user_id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    result = await worker_coordinator.run_manual_task("streak_alerts", user_id=user_id)
-    return result
+# Worker management endpoints extracted to app/routes/workers.py
 
 # ==================== SARA AUTONOMOUS SYSTEM ENDPOINTS ====================
-
-@app.get("/autonomous/insights", response_model=List[AutonomousInsightResponse])
-async def get_autonomous_insights(
-    limit: int = 20,
-    sweep_type: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get autonomous insights for the current user"""
-    
-    query = db.query(AutonomousInsight).filter(AutonomousInsight.user_id == current_user.id)
-    
-    if sweep_type:
-        query = query.filter(AutonomousInsight.sweep_type == sweep_type)
-    
-    insights = query.order_by(desc(AutonomousInsight.generated_at)).limit(limit).all()
-    
-    return [AutonomousInsightResponse(
-        id=insight.id,
-        user_id=insight.user_id,
-        insight_type=insight.insight_type,
-        sweep_type=insight.sweep_type,
-        priority_score=insight.priority_score,
-        title=insight.title,
-        message=insight.message,
-        action_suggestion=json.loads(insight.action_suggestion) if insight.action_suggestion else None,
-        related_data=json.loads(insight.related_data) if insight.related_data else None,
-        surfaced_at=insight.surfaced_at,
-        user_action=insight.user_action,
-        feedback_score=insight.feedback_score,
-        generated_at=insight.generated_at,
-        expires_at=insight.expires_at
-    ) for insight in insights]
-
-@app.post("/autonomous/insights/{insight_id}/feedback")
-async def submit_insight_feedback(
-    insight_id: str,
-    feedback: InsightFeedbackRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Submit feedback for an autonomous insight"""
-    
-    insight = db.query(AutonomousInsight).filter(
-        and_(
-            AutonomousInsight.id == insight_id,
-            AutonomousInsight.user_id == current_user.id
-        )
-    ).first()
-    
-    if not insight:
-        raise HTTPException(status_code=404, detail="Insight not found")
-    
-    insight.feedback_score = feedback.feedback_score
-    insight.user_action = feedback.user_action
-    insight.surfaced_at = datetime.now()
-    
-    db.commit()
-    
-    return {"message": "Feedback recorded", "insight_id": insight_id}
-
-@app.post("/autonomous/sweep/{sweep_type}")
-async def trigger_autonomous_sweep(
-    sweep_type: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Manually trigger an autonomous sweep for testing/debugging"""
-
-    if sweep_type not in ['quick_sweep', 'standard_sweep', 'digest_sweep']:
-        raise HTTPException(status_code=400, detail="Invalid sweep type")
-
-    try:
-        from app.services.autonomous_sweep_service import AutonomousSweepService
-
-        sweep_service = AutonomousSweepService(db)
-        raw_insights = await sweep_service.execute_sweep(
-            user_id=current_user.id,
-            sweep_type=sweep_type,
-            triggered_by="manual"
-        )
-
-        # Check for recent similar insights to avoid duplicates
-        recent_cutoff = datetime.now() - timedelta(hours=6)
-        recent_insights = db.query(AutonomousInsight).filter(
-            and_(
-                AutonomousInsight.user_id == current_user.id,
-                AutonomousInsight.generated_at >= recent_cutoff
-            )
-        ).all()
-
-        recent_types = {insight.insight_type for insight in recent_insights}
-        recent_titles = {insight.title for insight in recent_insights}
-
-        # Store insights in database, filtering out duplicates
-        stored_insights = []
-        new_insights = []
-        for insight_data in raw_insights:
-            if sweep_service.scorer.should_surface(insight_data['priority_score'], sweep_type):
-                is_new = (insight_data['type'] not in recent_types and
-                         insight_data['title'] not in recent_titles)
-
-                insight = AutonomousInsight(
-                    user_id=current_user.id,
-                    insight_type=insight_data['type'],
-                    sweep_type=sweep_type,
-                    priority_score=insight_data['priority_score'],
-                    title=insight_data['title'],
-                    message=insight_data['message'],
-                    action_suggestion=json.dumps(insight_data.get('action_suggestion')),
-                    related_data=json.dumps({
-                        **insight_data.get('related_data', {}),
-                        **(insight_data.get('memory_context', {}))
-                    }),
-                    generated_at=datetime.now()
-                )
-                db.add(insight)
-                stored_insights.append(insight)
-
-                if is_new:
-                    new_insights.append(insight)
-
-        db.commit()
-
-        return {
-            "message": f"{sweep_type} completed successfully",
-            "insights_generated": len(raw_insights),
-            "insights_stored": len(stored_insights),
-            "new_insights": len(new_insights),
-            "sweep_type": sweep_type
-        }
-        
-    except Exception as e:
-        logger.error(f"Autonomous sweep error: {e}")
-        raise HTTPException(status_code=500, detail=f"Sweep execution failed: {str(e)}")
-
-@app.get("/autonomous/profile", response_model=Optional[UserProfileResponse])
-async def get_user_profile(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's autonomous system profile"""
-    
-    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    
-    if not profile:
-        return None
-    
-    return UserProfileResponse(
-        id=profile.id,
-        user_id=profile.user_id,
-        current_mode=profile.current_mode,
-        mode_preferences=json.loads(profile.mode_preferences) if profile.mode_preferences else None,
-        autonomy_level=profile.autonomy_level,
-        quiet_hours_start=profile.quiet_hours_start,
-        quiet_hours_end=profile.quiet_hours_end,
-        idle_thresholds=json.loads(profile.idle_thresholds) if profile.idle_thresholds else None,
-        ntfy_enabled=profile.ntfy_enabled,
-        ntfy_topics=json.loads(profile.ntfy_topics) if profile.ntfy_topics else None,
-        sprite_notifications=profile.sprite_notifications,
-        created_at=profile.created_at,
-        updated_at=profile.updated_at
-    )
-
-@app.put("/autonomous/profile")
-async def update_user_profile(
-    profile_data: UserProfileCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update user's autonomous system profile"""
-    
-    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    
-    if not profile:
-        profile = UserProfile(user_id=current_user.id)
-        db.add(profile)
-    
-    # Update fields if provided
-    if profile_data.current_mode is not None:
-        profile.current_mode = profile_data.current_mode
-    
-    if profile_data.mode_preferences is not None:
-        profile.mode_preferences = json.dumps(profile_data.mode_preferences)
-    
-    if profile_data.autonomy_level is not None:
-        profile.autonomy_level = profile_data.autonomy_level
-        
-    if profile_data.quiet_hours_start is not None:
-        profile.quiet_hours_start = profile_data.quiet_hours_start
-        
-    if profile_data.quiet_hours_end is not None:
-        profile.quiet_hours_end = profile_data.quiet_hours_end
-        
-    if profile_data.idle_thresholds is not None:
-        profile.idle_thresholds = json.dumps(profile_data.idle_thresholds)
-        
-    if profile_data.ntfy_enabled is not None:
-        profile.ntfy_enabled = profile_data.ntfy_enabled
-        
-    if profile_data.ntfy_topics is not None:
-        profile.ntfy_topics = json.dumps(profile_data.ntfy_topics)
-        
-    if profile_data.sprite_notifications is not None:
-        profile.sprite_notifications = profile_data.sprite_notifications
-    
-    profile.updated_at = datetime.now()
-    
-    db.commit()
-    
-    return {"message": "Profile updated successfully", "profile_id": profile.id}
-
-@app.get("/autonomous/sweeps", response_model=List[BackgroundSweepResponse])
-async def get_background_sweeps(
-    limit: int = 50,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get background sweep execution history"""
-    
-    sweeps = db.query(BackgroundSweep).filter(
-        BackgroundSweep.user_id == current_user.id
-    ).order_by(desc(BackgroundSweep.executed_at)).limit(limit).all()
-    
-    return [BackgroundSweepResponse(
-        id=sweep.id,
-        user_id=sweep.user_id,
-        sweep_type=sweep.sweep_type,
-        triggered_by=sweep.triggered_by,
-        execution_time_ms=sweep.execution_time_ms,
-        insights_generated=sweep.insights_generated,
-        errors_encountered=json.loads(sweep.errors_encountered) if sweep.errors_encountered else None,
-        episodes_analyzed=sweep.episodes_analyzed,
-        notes_analyzed=sweep.notes_analyzed,
-        patterns_found=json.loads(sweep.patterns_found) if sweep.patterns_found else None,
-        executed_at=sweep.executed_at
-    ) for sweep in sweeps]
-
-
 # GTKY endpoints removed - was broken and unused
 
 # =====================
 # Nightly Reflection Endpoints
 # =====================
-
-class ReflectionStartResponse(BaseModel):
-    status: str
-    reflection_id: Optional[str] = None
-    message: Optional[str] = None
-    reflection_date: Optional[str] = None
-    current_question_index: Optional[int] = None
-    total_questions: Optional[int] = None
-    question: Optional[Dict[str, Any]] = None
-    progress: Optional[str] = None
-    estimated_time: Optional[str] = None
-    responses: Optional[Dict[str, Any]] = None
-    insights_generated: Optional[Dict[str, Any]] = None
-    mood_score: Optional[int] = None
-    can_update: Optional[bool] = None
-
-class ReflectionResponseRequest(BaseModel):
-    question_id: str
-    response: Any
-    question_index: int
-
-class ReflectionResponseReply(BaseModel):
-    status: str
-    question: Optional[Dict[str, Any]] = None
-    follow_up: Optional[str] = None
-    progress: Optional[str] = None
-    current_question_index: Optional[int] = None
-    message: Optional[str] = None
-    insights: Optional[Dict[str, Any]] = None
-    reflection_summary: Optional[str] = None
-    mood_score: Optional[int] = None
-    next_steps: Optional[List[str]] = None
-
-class ReflectionHistoryResponse(BaseModel):
-    history: List[Dict[str, Any]]
-    total_count: int
-    current_streak: int
-    pagination: Dict[str, Any]
-
-class ReflectionInsightsResponse(BaseModel):
-    reflection_id: str
-    reflection_date: str
-    insights: Dict[str, Any]
-    responses: Dict[str, Any]
-    mood_score: Optional[int] = None
-    summary: str
-
-class ReflectionSettingsRequest(BaseModel):
-    enabled: Optional[bool] = None
-    preferred_time: Optional[str] = None
-    timezone: Optional[str] = None
-    quiet_hours: Optional[Dict[str, Any]] = None
-    reminder_channels: Optional[Dict[str, Any]] = None
-
-@app.post("/reflection/start", response_model=ReflectionStartResponse)
-async def start_reflection(
-    reflection_date: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Start a new daily reflection"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        # Parse reflection date if provided
-        parsed_date = None
-        if reflection_date:
-            from datetime import date
-            parsed_date = date.fromisoformat(reflection_date)
-        
-        result = await reflection_service.start_reflection(
-            user_id=str(current_user.id),
-            reflection_date=parsed_date
-        )
-        
-        return ReflectionStartResponse(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to start reflection: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start reflection")
-
-@app.post("/reflection/{reflection_id}/respond", response_model=ReflectionResponseReply)
-async def respond_to_reflection_question(
-    reflection_id: str,
-    request: ReflectionResponseRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Respond to a reflection question"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.respond_to_question(
-            reflection_id=reflection_id,
-            user_id=str(current_user.id),
-            question_id=request.question_id,
-            response=request.response,
-            question_index=request.question_index
-        )
-        
-        return ReflectionResponseReply(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to process reflection response: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process response")
-
-@app.get("/reflection/history", response_model=ReflectionHistoryResponse)
-async def get_reflection_history(
-    limit: int = Query(30, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's reflection history"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.get_reflection_history(
-            user_id=str(current_user.id),
-            limit=limit,
-            offset=offset
-        )
-        
-        return ReflectionHistoryResponse(**result)
-        
-    except Exception as e:
-        logger.error(f"Failed to get reflection history: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve reflection history")
-
-@app.get("/reflection/{reflection_id}/insights", response_model=ReflectionInsightsResponse)
-async def get_reflection_insights(
-    reflection_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get insights for a specific reflection"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.get_reflection_insights(
-            reflection_id=reflection_id,
-            user_id=str(current_user.id)
-        )
-        
-        return ReflectionInsightsResponse(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to get reflection insights: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve insights")
-
-@app.post("/reflection/settings")
-async def update_reflection_settings(
-    request: ReflectionSettingsRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update reflection settings"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.update_reflection_settings(
-            user_id=str(current_user.id),
-            settings_data=request.dict(exclude_none=True)
-        )
-        
-        return result
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to update reflection settings: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update settings")
-
-
-# ==================== DAILY BRIEF ENDPOINTS ====================
-
-@app.get("/api/daily-brief/stats")
-async def get_daily_brief_stats(
-    current_user: User = Depends(get_current_user)
-):
-    """Get statistics about the user's daily brief system"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        stats = daily_brief_service.get_brief_stats(current_user.id)
-        stats["is_bootstrapped"] = daily_brief_service.has_stable_layer(current_user.id)
-        return stats
-    except Exception as e:
-        logger.error(f"Failed to get daily brief stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
-
-
-@app.post("/api/daily-brief/bootstrap")
-async def bootstrap_daily_brief(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Manually trigger bootstrap of the stable layer from conversation history"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        success = await daily_brief_service.bootstrap_stable_layer(current_user.id, db)
-        return {
-            "success": success,
-            "message": "Stable layer bootstrapped successfully" if success else "Bootstrap failed - check logs"
-        }
-    except Exception as e:
-        logger.error(f"Failed to bootstrap daily brief: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/daily-brief/compiled")
-async def get_compiled_brief(
-    current_user: User = Depends(get_current_user)
-):
-    """Get the current compiled daily brief (for debugging/inspection)"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        brief = await daily_brief_service.get_compiled_brief(current_user.id)
-        return {
-            "content": brief,
-            "length": len(brief) if brief else 0
-        }
-    except Exception as e:
-        logger.error(f"Failed to get compiled brief: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve brief")
-
-
-@app.get("/api/daily-brief/layers/{layer_name}")
-async def get_brief_layer(
-    layer_name: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Get a specific layer of the daily brief"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    valid_layers = ["moment", "day", "context", "stable"]
-    if layer_name not in valid_layers:
-        raise HTTPException(status_code=400, detail=f"Invalid layer. Must be one of: {valid_layers}")
-
-    try:
-        content = daily_brief_service._read_layer(current_user.id, layer_name)
-        return {
-            "layer": layer_name,
-            "content": content,
-            "length": len(content)
-        }
-    except Exception as e:
-        logger.error(f"Failed to get layer {layer_name}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve layer")
+# Daily brief endpoints extracted to app/routes/daily_brief.py
 
 
 if __name__ == "__main__":

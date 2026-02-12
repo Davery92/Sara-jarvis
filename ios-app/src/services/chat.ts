@@ -8,6 +8,12 @@ export interface SendMessageParams {
   images?: ImageAttachment[];  // Optional images to attach to the last message
   model?: string;  // Optional model override
   ephemeral?: boolean;  // If true, chat won't be saved to memory
+  inboxItemId?: string;  // Pre-load inbox item content for discussion
+  source?: string;  // 'ios' | 'ios_overlay'
+  currentScreen?: string;  // Current screen for context-aware tool loading
+  onContentCard?: (card: any) => void;
+  onToolStatus?: (status: { tool: string; status: string }) => void;
+  onSuggestedActions?: (actions: any[]) => void;
 }
 
 export interface ChatResponse {
@@ -60,12 +66,33 @@ class ChatService {
 
     try {
       // Build chat options
-      const chatOptions: ChatOptions = {};
+      const chatOptions: ChatOptions = {
+        // Always request notification on complete so background responses notify the user
+        notifyOnComplete: true,
+      };
       if (params.model) {
         chatOptions.model = params.model;
       }
       if (params.ephemeral) {
         chatOptions.ephemeral = params.ephemeral;
+      }
+      if (params.inboxItemId) {
+        chatOptions.inboxItemId = params.inboxItemId;
+      }
+      if (params.source) {
+        chatOptions.source = params.source;
+      }
+      if (params.currentScreen) {
+        chatOptions.currentScreen = params.currentScreen;
+      }
+      if (params.onContentCard) {
+        chatOptions.onContentCard = params.onContentCard;
+      }
+      if (params.onToolStatus) {
+        chatOptions.onToolStatus = params.onToolStatus;
+      }
+      if (params.onSuggestedActions) {
+        chatOptions.onSuggestedActions = params.onSuggestedActions;
       }
 
       await apiClient.streamChat(
@@ -100,6 +127,30 @@ class ChatService {
   async clearConversation(): Promise<void> {
     // Just start a new conversation by not passing conversation_id
     // The backend will create a new one
+  }
+
+  /**
+   * Check for an active session across devices.
+   * Returns the active conversation_id if one exists and is < 1hr old.
+   */
+  async getActiveSession(): Promise<{ active: boolean; session?: { conversation_id?: string; last_device?: string; turn_count?: number; topic_summary?: string } }> {
+    try {
+      const response = await apiClient.get<{ active: boolean; session?: any }>('/api/session/active');
+      return response;
+    } catch {
+      return { active: false };
+    }
+  }
+
+  /**
+   * Acknowledge a notification (track outcome for adaptive check-in frequency).
+   */
+  async ackNotification(notificationId: number, outcome: 'opened_chat' | 'dismissed'): Promise<void> {
+    try {
+      await apiClient.post(`/api/session/notifications/${notificationId}/ack`, { outcome });
+    } catch {
+      // Non-critical
+    }
   }
 }
 

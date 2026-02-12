@@ -43,6 +43,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { id: 'nav-memory', title: 'Go to Memory Garden', icon: '🧠', keywords: ['memory', 'garden', 'graph'], action: () => onNavigate('memory-garden'), category: 'navigation' },
     { id: 'nav-insights', title: 'Go to Insights', icon: '💡', keywords: ['insights', 'sara', 'suggestions'], action: () => onNavigate('insights'), category: 'navigation' },
     { id: 'nav-docs', title: 'Go to Documents', icon: '📄', keywords: ['documents', 'files', 'uploads'], action: () => onNavigate('documents'), category: 'navigation' },
+    { id: 'nav-email', title: 'Go to Email', icon: '📧', keywords: ['email', 'mail', 'inbox', 'messages'], action: () => onNavigate('email'), category: 'navigation' },
     { id: 'nav-settings', title: 'Go to Settings', icon: '⚙️', keywords: ['settings', 'preferences', 'config'], action: () => onNavigate('settings'), category: 'navigation' },
 
     // Creation

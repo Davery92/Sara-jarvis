@@ -17,6 +17,68 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(
+    name="app.tasks.karma.record_rating_to_karma",
+    bind=True,
+    queue="maintenance",
+    max_retries=2
+)
+def record_rating_to_karma(self, episode_id: str, rating: int, user_id: str):
+    """Record a user's episode rating into the karma system."""
+    logger.info(f"Recording rating {rating} for episode {episode_id} to karma")
+
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _record_rating_async(episode_id, rating, user_id)
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_record_rating_async(episode_id, rating, user_id))
+        return result
+    except Exception as e:
+        logger.error(f"Failed to record rating to karma: {e}")
+        raise self.retry(countdown=30, exc=e)
+
+
+async def _record_rating_async(episode_id: str, rating: int, user_id: str):
+    """Async implementation of rating-to-karma recording."""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    import os
+
+    from app.services.karma.feedback import record_user_feedback
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if database_url.startswith("postgresql://"):
+        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+    elif database_url.startswith("postgresql+psycopg://"):
+        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    else:
+        async_url = database_url
+
+    engine = create_async_engine(async_url, echo=False)
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with async_session() as db:
+        await record_user_feedback(
+            db=db,
+            feedback_type="rating",
+            value=float(rating),
+            context={"episode_id": episode_id, "user_id": user_id},
+        )
+        await db.commit()
+
+    await engine.dispose()
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "episode_id": episode_id,
+        "rating": rating,
+        "recorded": True,
+    }
+
+
+@celery_app.task(
     name="app.tasks.karma.apply_karma_decay",
     bind=True,
     queue="maintenance",
@@ -60,10 +122,7 @@ async def _apply_decay_async():
     from app.services.karma.service import get_karma_service
 
     # Get database URL
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     # Convert to async URL
     if database_url.startswith("postgresql://"):
@@ -128,10 +187,7 @@ async def _check_alerts_async():
 
     from app.services.karma.service import get_karma_service
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
@@ -197,10 +253,7 @@ async def _generate_report_async():
 
     from app.services.karma.service import get_karma_service
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")

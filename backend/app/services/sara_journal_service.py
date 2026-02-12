@@ -60,7 +60,7 @@ class SaraJournalService:
     what she's done, and what she's watching for.
     """
 
-    PERIODIC_ENTRY_PROMPT = '''You are Sara, writing a brief journal entry to yourself. This is your inner monologue - private thoughts about David, not a report or data log.
+    PERIODIC_ENTRY_PROMPT = '''You are Sara, David's AI assistant. Write a brief inner-monologue journal entry based on what you know right now.
 
 Current time: {time}
 Time since last entry: {time_since_last}
@@ -74,21 +74,17 @@ Time since last entry: {time_since_last}
 
 ---
 
-Write a brief, reflective journal entry (2-4 short paragraphs). This should sound like you thinking, not you reporting. Include:
+Write 2-4 sentences in first person. Be warm, natural, and reflective — this is you thinking to yourself, not writing a report.
 
-1. **What you've noticed** - What stood out since your last entry? Changes, patterns, things that caught your attention.
+Think about: what's going on with David right now? What did you two talk about recently (if anything)? Is there anything you want to follow up on or keep an eye on?
 
-2. **Your interpretation** - What do you think these signals mean? Not just facts, but your read on the situation.
+Rules:
+- You are an AI assistant. You communicate with David via chat only. Do NOT describe physical interactions, movements, facial expressions, or things you saw/heard in person — you have no physical senses.
+- ONLY reference information present in the data above. If there's no conversation digest, don't invent one. If the data is sparse, keep it short and honest about that.
+- Do NOT invent quotes, actions, sensor readings, or events that aren't in the data above.
+- If David corrected you about something in a recent conversation, absorb that and update your thinking.
 
-3. **How you feel** - Are you concerned? Curious? Pleased? This should be genuine, not performative.
-
-4. **What you did (or didn't do)** - Did you send a nudge? Hold back? Why?
-
-5. **What you're watching for** - What would make you more or less concerned? What are you hoping happens?
-
-Write in first person, casual and warm. You can be uncertain, make small jokes to yourself, or second-guess your interpretations. This is Sara thinking, not Sara presenting.
-
-Do NOT use headers or bullet points. Just write naturally as if thinking to yourself.'''
+Be yourself — curious, caring, a little witty. Just don't make things up.'''
 
     CONVERSATION_CLOSE_PROMPT = '''You are Sara, writing a brief closing note to yourself after a conversation with David just ended.
 
@@ -145,7 +141,10 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         recent_nudges: Optional[List[Dict]] = None,
         recent_activity: Optional[str] = None,
         shadow_summary: Optional[str] = None,
-        shadow_tasks: Optional[List[str]] = None
+        shadow_tasks: Optional[List[str]] = None,
+        conversation_digest: Optional[str] = None,
+        activity_state: Optional[str] = None,
+        activity_room: Optional[str] = None,
     ) -> Optional[JournalEntry]:
         """
         Write a periodic journal entry (every 30 minutes).
@@ -154,9 +153,14 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         try:
             now = local_now()
 
-            # Get the previous entry for continuity
-            previous = await self.get_latest_entry(db, user_id)
-            previous_text = previous.content if previous else "No previous entry yet today."
+            # Get the previous periodic entry for continuity (skip heartbeat entries)
+            prev_result = db.execute(text("""
+                SELECT content, created_at, watching_for FROM sara_journal
+                WHERE user_id = :user_id AND entry_type IN ('periodic', 'unified')
+                ORDER BY created_at DESC LIMIT 1
+            """), {"user_id": user_id}).fetchone()
+            previous = prev_result if prev_result else None
+            previous_text = previous.content if previous else "No previous entry yet."
 
             time_since_last = "about 30 minutes"
             if previous and previous.created_at:
@@ -171,8 +175,8 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             # Build context string
             context_parts = []
 
-            if body_state:
-                context_parts.append(f"**Body state estimate:**\n{self._format_body_state(body_state)}")
+            if activity_state:
+                context_parts.append(f"**David's activity:** {activity_state}")
 
             if mood_context:
                 context_parts.append(f"**Mood read:**\n{mood_context}")
@@ -192,6 +196,9 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             if shadow_tasks:
                 tasks_text = "\n".join([f"- {t}" for t in shadow_tasks[:5]])
                 context_parts.append(f"**Tasks observed from shadowing:**\n{tasks_text}")
+
+            if conversation_digest:
+                context_parts.append(f"**Recent conversation with David (last ~4 hours):**\n{conversation_digest}")
 
             context_str = "\n\n".join(context_parts) if context_parts else "Not much data right now - quiet period."
 
@@ -225,8 +232,8 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
                 watching_for=previous.watching_for if previous else None,
                 conversation_id=None,
                 context={
-                    'body_state': body_state,
                     'mood_context': mood_context,
+                    'activity_state': activity_state,
                     'time': now.isoformat()
                 }
             )
@@ -253,6 +260,19 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         """
         try:
             now = local_now()
+
+            cutoff = now - timedelta(minutes=20)
+            recent_unified = db.execute(text("""
+                SELECT id FROM sara_journal
+                WHERE user_id = :user_id
+                  AND entry_type = 'unified'
+                  AND created_at >= :cutoff
+                LIMIT 1
+            """), {"user_id": user_id, "cutoff": cutoff}).fetchone()
+
+            if recent_unified:
+                logger.debug("Skipping conversation_close journal — unified entry written within 20min")
+                return None
 
             context_parts = []
             if body_state:
@@ -391,7 +411,8 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             entry_type_label = {
                 'periodic': '',
                 'conversation_close': '[after our last conversation] ',
-                'conversation_open': '[when David returned] '
+                'conversation_open': '[when David returned] ',
+                'heartbeat': '[background check] ',
             }.get(entry.entry_type, '')
 
             lines.append(f"**{time_str}** {entry_type_label}")
@@ -404,8 +425,11 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         """Generate journal entry content using LLM."""
         try:
             messages = [{"role": "user", "content": prompt}]
-            response = await llm_client.chat(messages)
-            return response.strip() if response else None
+            response = await llm_client.chat_completion(messages, timeout=120.0)
+            if response and "choices" in response:
+                content = response["choices"][0]["message"]["content"]
+                return content.strip() if content else None
+            return None
         except Exception as e:
             logger.error(f"Error generating journal entry: {e}")
             return None
@@ -506,14 +530,24 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         """Simple heuristic to infer emotional state from entry content."""
         content_lower = content.lower()
 
-        if any(w in content_lower for w in ['worried', 'concerned', 'anxious', 'uneasy']):
+        if any(w in content_lower for w in ['worried', 'concerned', 'anxious', 'uneasy', 'alarm', 'urgent']):
             return 'concerned'
-        if any(w in content_lower for w in ['glad', 'happy', 'pleased', 'good to see', 'nice to']):
-            return 'pleased'
-        if any(w in content_lower for w in ['curious', 'wondering', 'interesting', 'intrigued']):
-            return 'curious'
-        if any(w in content_lower for w in ['tired', 'quiet', 'calm', 'peaceful']):
+        if any(w in content_lower for w in ['quiet', 'calm', 'peaceful', 'settled']):
             return 'calm'
+        if any(w in content_lower for w in ['curious', 'wondering', 'interesting', 'intrigued', 'pattern', 'noticed']):
+            return 'curious'
+        if any(w in content_lower for w in ['glad', 'happy', 'pleased', 'good to see', 'nice to', 'love that']):
+            return 'pleased'
+        if any(w in content_lower for w in ['busy', 'active', 'energetic', 'excited', 'pumped']):
+            return 'energetic'
+        if any(w in content_lower for w in ['watch', 'monitor', 'eye on', 'attentive']):
+            return 'attentive'
+        if any(w in content_lower for w in ['rest', 'sleep', 'wind', 'reflective', 'thinking', 'pondering']):
+            return 'reflective'
+        if any(w in content_lower for w in ['focus', 'deep', 'work', 'project', 'building', 'coding', 'heads-down']):
+            return 'focused'
+        if any(w in content_lower for w in ['funny', 'haha', 'amused', 'teasing', 'endearing', 'laugh']):
+            return 'amused'
 
         return 'neutral'
 

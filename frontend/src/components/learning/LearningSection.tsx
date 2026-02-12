@@ -54,6 +54,7 @@ export default function LearningSection() {
   const [loading, setLoading] = useState(true)
   const [showScratchpad, setShowScratchpad] = useState(true)
   const [showLearningPath, setShowLearningPath] = useState(false)
+  const [autoResearching, setAutoResearching] = useState(false)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
 
   // Load topics on mount
@@ -199,6 +200,132 @@ export default function LearningSection() {
     }
   }
 
+  const handleFileUpload = async (file: File) => {
+    if (!currentTopic) return
+
+    // Validate file type
+    const allowedTypes = ['.pdf', '.txt', '.md', '.markdown']
+    const fileExt = '.' + file.name.split('.').pop()?.toLowerCase()
+    if (!allowedTypes.includes(fileExt)) {
+      console.error('Unsupported file type:', fileExt)
+      return
+    }
+
+    // Create a temporary source entry to show upload progress
+    const tempId = `uploading-${Date.now()}`
+    const tempSource: TopicSource = {
+      id: tempId,
+      topic_id: currentTopic.id,
+      source_type: fileExt === '.pdf' ? 'pdf' : 'document',
+      url: null,
+      title: file.name,
+      quality_score: 0,
+      fetch_status: 'uploading',
+      created_at: new Date().toISOString()
+    }
+    setSources([tempSource, ...sources])
+
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('topic_id', currentTopic.id)
+
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/learn/sources/upload`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        // Replace temp source with real one
+        setSources(prev => prev.map(s =>
+          s.id === tempId
+            ? {
+                id: result.source_id,
+                topic_id: currentTopic.id,
+                source_type: fileExt === '.pdf' ? 'pdf' : 'document',
+                url: null,
+                title: result.title || file.name,
+                quality_score: 0.7,
+                fetch_status: result.status === 'success' ? 'fetched' : 'failed',
+                created_at: new Date().toISOString()
+              }
+            : s
+        ))
+      } else {
+        // Mark as failed
+        setSources(prev => prev.map(s =>
+          s.id === tempId ? { ...s, fetch_status: 'failed' } : s
+        ))
+      }
+    } catch (error) {
+      console.error('Failed to upload file:', error)
+      // Remove temp source on error
+      setSources(prev => prev.filter(s => s.id !== tempId))
+    }
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const files = e.dataTransfer.files
+    if (files.length > 0) {
+      handleFileUpload(files[0])
+    }
+  }
+
+  // Auto-research: discover and add sources automatically
+  const handleAutoResearch = async () => {
+    if (!currentTopic || autoResearching) return
+    setAutoResearching(true)
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/learn/topics/${currentTopic.id}/auto-research`, {
+        method: 'POST',
+        credentials: 'include'
+      })
+      if (response.ok) {
+        const result = await response.json()
+        // Reload sources to show new ones
+        const srcRes = await fetch(`${APP_CONFIG.apiUrl}/api/learn/topics/${currentTopic.id}/sources`, {
+          credentials: 'include'
+        })
+        if (srcRes.ok) {
+          const srcData = await srcRes.json()
+          setSources(srcData)
+        }
+      }
+    } catch (err) {
+      console.error('Auto-research failed:', err)
+    } finally {
+      setAutoResearching(false)
+    }
+  }
+
+  // Delete a topic
+  const handleDeleteTopic = async (topicId: string) => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/learn/topics/${topicId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      })
+      if (response.ok) {
+        setTopics(topics.filter(t => t.id !== topicId))
+        if (currentTopic?.id === topicId) {
+          setCurrentTopic(null)
+        }
+      }
+    } catch (err) {
+      console.error('Delete topic failed:', err)
+    }
+  }
+
   // Handler for selecting topic from learning path
   const handleSelectTopicFromPath = (topicId: string) => {
     const topic = topics.find(t => t.id === topicId)
@@ -244,7 +371,7 @@ export default function LearningSection() {
   // Mobile layout
   if (isMobile) {
     return (
-      <div className="flex flex-col h-[calc(100vh-7rem)] bg-gray-900">
+      <div className="flex flex-col h-full bg-gray-900">
         {/* Mobile Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <div className="flex items-center gap-2">
@@ -292,7 +419,7 @@ export default function LearningSection() {
 
   // Desktop layout - 3 zone
   return (
-    <div className="flex h-[calc(100vh-4rem)] bg-gray-900">
+    <div className="flex h-full bg-gray-900">
       {/* Left Sidebar - Topics */}
       <div className="w-64 border-r border-gray-700 flex flex-col">
         <TopicSidebar
@@ -300,6 +427,7 @@ export default function LearningSection() {
           currentTopic={currentTopic}
           onSelectTopic={setCurrentTopic}
           onCreateTopic={handleCreateTopic}
+          onDeleteTopic={handleDeleteTopic}
           loading={loading}
         />
       </div>
@@ -393,7 +521,11 @@ export default function LearningSection() {
               />
             )}
             {currentView === 'sources' && (
-              <div className="h-full overflow-auto p-4">
+              <div
+                className="h-full overflow-auto p-4"
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
                 <div className="max-w-2xl mx-auto space-y-4">
                   {/* Add Source Form */}
                   <div className="bg-gray-800 rounded-lg p-4">
@@ -427,10 +559,55 @@ export default function LearningSection() {
                     </form>
                   </div>
 
+                  {/* File Upload Zone */}
+                  <div className="bg-gray-800 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-300 mb-3">Upload File</h3>
+                    <label
+                      className={`flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+                        currentTopic
+                          ? 'border-gray-600 hover:border-teal-500 hover:bg-gray-700/50'
+                          : 'border-gray-700 cursor-not-allowed opacity-50'
+                      }`}
+                    >
+                      <div className="flex flex-col items-center justify-center pt-2 pb-2">
+                        <span className="material-icons text-gray-400 text-2xl mb-1">upload_file</span>
+                        <p className="text-sm text-gray-400">
+                          <span className="font-semibold text-teal-400">Click to upload</span> or drag and drop
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">PDF, TXT, MD files</p>
+                      </div>
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept=".pdf,.txt,.md,.markdown"
+                        disabled={!currentTopic}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          if (file) {
+                            handleFileUpload(file)
+                            e.target.value = ''  // Reset input
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  {/* Auto-Research Button */}
+                  <button
+                    onClick={handleAutoResearch}
+                    disabled={!currentTopic || autoResearching}
+                    className="w-full flex items-center justify-center gap-2 bg-teal-600/20 hover:bg-teal-600/30 disabled:bg-gray-800 disabled:text-gray-600 text-teal-400 border border-teal-600/30 rounded-lg px-4 py-3 text-sm font-medium transition-colors"
+                  >
+                    <span className={`material-icons text-sm ${autoResearching ? 'animate-spin' : ''}`}>
+                      {autoResearching ? 'refresh' : 'travel_explore'}
+                    </span>
+                    {autoResearching ? 'Searching for sources...' : 'Find Sources Automatically'}
+                  </button>
+
                   {/* Sources List */}
                   {sources.length === 0 ? (
                     <div className="text-center py-12 text-gray-500">
-                      {currentTopic ? 'No sources yet. Add a URL above to get started.' : 'Select a topic to view sources'}
+                      {currentTopic ? 'No sources yet. Add a URL or upload a file above.' : 'Select a topic to view sources'}
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -456,9 +633,11 @@ export default function LearningSection() {
                                     ? 'bg-green-900/50 text-green-400'
                                     : source.fetch_status === 'failed'
                                     ? 'bg-red-900/50 text-red-400'
+                                    : source.fetch_status === 'uploading'
+                                    ? 'bg-blue-900/50 text-blue-400'
                                     : 'bg-yellow-900/50 text-yellow-400'
                                 }`}>
-                                  {source.fetch_status}
+                                  {source.fetch_status === 'uploading' ? 'uploading...' : source.fetch_status}
                                 </span>
                               </div>
                             </div>
@@ -471,7 +650,7 @@ export default function LearningSection() {
                                   Fetch
                                 </button>
                               )}
-                              {source.fetch_status === 'fetching' && (
+                              {(source.fetch_status === 'fetching' || source.fetch_status === 'uploading') && (
                                 <span className="text-xs text-teal-400 animate-pulse">
                                   Processing...
                                 </span>
@@ -518,6 +697,8 @@ export default function LearningSection() {
         isVisible={showLearningPath}
         onClose={() => setShowLearningPath(false)}
         onSelectTopic={handleSelectTopicFromPath}
+        focusTopicId={currentTopic?.id}
+        focusTopicTitle={currentTopic?.title}
       />
     </div>
   )

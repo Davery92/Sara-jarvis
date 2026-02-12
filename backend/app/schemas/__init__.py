@@ -18,7 +18,7 @@ from .chat import (
     UserSettings, ImageContent, TextContent,
     ChatMessage, ChatRequest, ChatResponse
 )
-from .documents import DocumentResponse, DocumentChunkResponse
+from .documents import DocumentResponse, Model3DResponse, DocumentChunkResponse
 from .memory import (
     ConversationResponse, ConversationTurnResponse,
     EpisodeMessageResponse, ConversationSummaryResponse,
@@ -58,7 +58,7 @@ __all__ = [
     "UserSettings", "ImageContent", "TextContent",
     "ChatMessage", "ChatRequest", "ChatResponse",
     # Documents
-    "DocumentResponse", "DocumentChunkResponse",
+    "DocumentResponse", "Model3DResponse", "DocumentChunkResponse",
     # Memory
     "ConversationResponse", "ConversationTurnResponse",
     "EpisodeMessageResponse", "ConversationSummaryResponse",

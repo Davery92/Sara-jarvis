@@ -1,4 +1,4 @@
-import type { WindowType, WindowData, NoteWindowData, ChatWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData } from '../types'
+import type { WindowType, WindowData, NoteWindowData, ChatWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData, EmailWindowData, AutomationWindowData, PKGWindowData } from '../types'
 import NoteContent from './windows/NoteContent'
 import ChatContent from './windows/ChatContent'
 import FitnessContent from './windows/FitnessContent'
@@ -9,6 +9,9 @@ import FileViewerContent from './windows/FileViewerContent'
 import ModelViewerContent from './windows/ModelViewerContent'
 import ResearchContent from './windows/ResearchContent'
 import ReportContent from './windows/ReportContent'
+import EmailContent from './windows/EmailContent'
+import AutomationContent from './windows/AutomationContent'
+import PKGContent from './windows/PKGContent'
 
 interface WindowContentProps {
   type: WindowType
@@ -38,6 +41,12 @@ export function WindowContent({ type, data, windowId }: WindowContentProps) {
       return <ResearchContent data={data as ResearchWindowData} windowId={windowId} />
     case 'report':
       return <ReportContent data={data as ReportWindowData} windowId={windowId} />
+    case 'email':
+      return <EmailContent data={data as EmailWindowData} windowId={windowId} />
+    case 'automation':
+      return <AutomationContent data={data as AutomationWindowData} />
+    case 'pkg':
+      return <PKGContent data={data as PKGWindowData} windowId={windowId} />
     default:
       return (
         <div className="flex items-center justify-center h-full text-canvas-muted">

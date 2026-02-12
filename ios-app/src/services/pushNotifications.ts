@@ -29,6 +29,9 @@ const NOTIFICATION_CATEGORIES = {
   MORNING_CHECKIN: 'MORNING_CHECKIN',
   HEALTH_ALERT: 'HEALTH_ALERT',
   GENERAL_NUDGE: 'GENERAL_NUDGE',
+  SARA_INSIGHT: 'SARA_INSIGHT',
+  THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
+  LEARNING_REVIEW: 'LEARNING_REVIEW',
 };
 
 // Set up interactive notification categories
@@ -76,6 +79,55 @@ async function setupNotificationCategories() {
       buttonTitle: 'Reply',
       options: { opensAppToForeground: true },
       textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
+    },
+  ]);
+
+  // Sara proactive observations/insights
+  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.SARA_INSIGHT, [
+    {
+      identifier: NOTIFICATION_ACTIONS.REPLY,
+      buttonTitle: 'Reply',
+      options: { opensAppToForeground: true },
+      textInput: { submitButtonTitle: 'Send', placeholder: 'Reply to Sara...' },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+      buttonTitle: 'View',
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.DISMISS,
+      buttonTitle: 'Not Now',
+      options: { opensAppToForeground: false },
+    },
+  ]);
+
+  // Thread follow-ups (Sara following up on a prior topic)
+  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP, [
+    {
+      identifier: NOTIFICATION_ACTIONS.REPLY,
+      buttonTitle: 'Reply',
+      options: { opensAppToForeground: true },
+      textInput: { submitButtonTitle: 'Send', placeholder: 'Reply...' },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.DISMISS,
+      buttonTitle: 'Dismiss',
+      options: { opensAppToForeground: false },
+    },
+  ]);
+
+  // Learning spaced repetition review reminders
+  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.LEARNING_REVIEW, [
+    {
+      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+      buttonTitle: 'Start Review',
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.DISMISS,
+      buttonTitle: 'Later',
+      options: { opensAppToForeground: false },
     },
   ]);
 
@@ -342,7 +394,69 @@ class PushNotificationService {
           this.onAgentClarificationNeeded(data.task_id);
         }
         break;
+      case 'chat_response':
+        // Background chat response is ready - just open the app
+        // ChatScreen's AppState listener will reload the conversation
+        console.log('[PushNotifications] Chat response ready:', data.conversation_id);
+        break;
+      case 'sara_insight':
+      case 'observation':
+        // Sara proactive insight — open chat to discuss
+        console.log('[PushNotifications] Sara insight notification:', data);
+        if (this.onHeartbeatTapped) {
+          this.onHeartbeatTapped(
+            data.title || 'Sara noticed something',
+            data.message || data.body || '',
+            data.priority || 'normal'
+          );
+        }
+        break;
+      case 'thread_followup':
+        // Thread follow-up — Sara following up on a prior conversation topic
+        console.log('[PushNotifications] Thread follow-up notification:', data);
+        if (this.onHeartbeatTapped) {
+          this.onHeartbeatTapped(
+            data.title || 'Following up',
+            data.message || data.body || '',
+            data.priority || 'normal'
+          );
+        }
+        break;
+      case 'learning_review':
+        // Learning spaced repetition review reminder
+        console.log('[PushNotifications] Learning review notification:', data);
+        if (this.onNudgeTapped) {
+          this.onNudgeTapped(
+            'learning_review',
+            data.title || 'Review time',
+            data.message || data.body || 'You have topics due for review',
+            'Open Learning tab to review'
+          );
+        }
+        break;
+      case 'heartbeat':
+      case 'unified_heartbeat':
+      case 'checkin':
+        // Heartbeat/check-in notification from Sara - open chat
+        console.log('[PushNotifications] Heartbeat notification:', data);
+        if (this.onHeartbeatTapped) {
+          this.onHeartbeatTapped(
+            data.title || 'Sara noticed something',
+            data.message || '',
+            data.priority || 'normal'
+          );
+        }
+        break;
       default:
+        // Any other notification type - navigate to chat as default
+        console.log('[PushNotifications] Unknown notification type, navigating to chat:', data.type);
+        if (this.onHeartbeatTapped) {
+          this.onHeartbeatTapped(
+            data.title || 'Sara',
+            data.message || '',
+            data.priority || 'normal'
+          );
+        }
         break;
     }
   }
@@ -351,6 +465,8 @@ class PushNotificationService {
   private onBackgroundTaskComplete: ((taskId: string, noteId?: string) => void) | null = null;
   private onAgentClarificationNeeded: ((taskId: string) => void) | null = null;
   private onHealthAlertTapped: ((severity: string, insightId?: string, title?: string, body?: string) => void) | null = null;
+  // Callback for heartbeat notifications (proactive check-ins from Sara)
+  private onHeartbeatTapped: ((title: string, message: string, priority: string) => void) | null = null;
   // Pending health alert data (stored if callback wasn't ready when notification was tapped)
   private pendingHealthAlertData: { severity: string; insightId?: string; title?: string; body?: string } | null = null;
   // Callback for subconscious nudges (meal reminders, morning check-ins, etc.)
@@ -421,6 +537,16 @@ class PushNotificationService {
    */
   setOnLogMealAction(callback: () => void): void {
     this.onLogMealAction = callback;
+  }
+
+  /**
+   * Set callback for heartbeat notifications (proactive check-ins from Sara)
+   * When tapped, opens the chat with context about what Sara noticed
+   */
+  setOnHeartbeatTapped(
+    callback: (title: string, message: string, priority: string) => void
+  ): void {
+    this.onHeartbeatTapped = callback;
   }
 
   /**

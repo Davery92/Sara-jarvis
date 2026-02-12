@@ -20,7 +20,7 @@ class HabitWorkerCoordinator:
     """Coordinates all habit-related background workers"""
     
     def __init__(self):
-        self.database_url = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub")
+        self.database_url = os.getenv("DATABASE_URL")
         
         # Initialize workers
         self.scheduler_worker = HabitSchedulerWorker(self.database_url)

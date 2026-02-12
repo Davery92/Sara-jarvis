@@ -1,10 +1,15 @@
 """
 Subconscious Service - Sara's Mental Model Manager
 
-Consolidates signals from various sources (chats, meals, health, presence, system)
-to maintain a running "mental model" of the user's current state.
+PARTIALLY DEPRECATED: Signal-gathering logic has been extracted to
+unified_agent.py (SensingPhase class) which runs as part of the consolidated
+4-phase Celery task. The process_user() method is no longer called by the
+subconscious worker.
 
-Generates nudges when thresholds are crossed (missed meals, bedtime, etc.)
+Public API methods are still active (used by routes and other services):
+- get_current_state() — reads subconscious_state table
+- get_pending_nudges() — reads subconscious_nudge table
+- acknowledge_nudge() — updates nudge status
 """
 
 import asyncio
@@ -21,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.services.body_state_service import body_state_service, BodyStateEstimate
 from app.services.sara_journal_service import sara_journal
+from app.services.ha_control_service import ha_control
 from app.core.timezone import USER_TIMEZONE
 
 logger = logging.getLogger(__name__)
@@ -63,6 +69,9 @@ class SubconsciousState:
     message_velocity: Optional[float] = None
     in_flow_state: bool = False  # High focus, suppress non-urgent nudges
 
+    # Recent conversation digest (actual messages for subconscious awareness)
+    recent_conversation_digest: Optional[str] = None
+
     # Focus
     current_focus_areas: Optional[List[str]] = None
     focus_intensity: Optional[float] = None  # 0-1, how deep in focus
@@ -92,6 +101,19 @@ class SubconsciousState:
     # Body state (physiological estimates)
     body_state: Optional[BodyStateEstimate] = None
     body_state_context: Optional[str] = None  # Summary for Sara's prompt
+
+    # Activity state (from ActivityStateMachine)
+    activity_state: Optional[str] = None           # ActivityState enum value
+    activity_confidence: Optional[float] = None
+    activity_reason: Optional[str] = None
+    activity_room: Optional[str] = None
+    interruptibility_score: Optional[float] = None
+    interruptibility_channel: Optional[str] = None  # push, badge, queue
+
+    # Nudge eligibility flags (exposed for heartbeat agent to read)
+    nudge_morning_eligible: bool = False
+    nudge_bedtime_eligible: bool = False
+    nudge_sleep_deficit: float = 0.0
 
     # Shadow session context (recent activity observation)
     recent_shadow_summary: Optional[str] = None
@@ -211,40 +233,262 @@ class SubconsciousService:
             state.body_state = None
             state.body_state_context = None
 
+        # Compute activity state and interruptibility
+        try:
+            from app.services.activity_state_machine import activity_state_machine
+            from app.services.interruptibility import compute_interruptibility
+
+            # Gather recent HA activity for the state machine
+            ha_activity = []
+            try:
+                ha_rows = db.execute(text("""
+                    SELECT entity_id, to_state, changed_at
+                    FROM home_activity_log
+                    WHERE changed_at >= NOW() - INTERVAL '30 minutes'
+                    ORDER BY changed_at DESC
+                    LIMIT 20
+                """)).fetchall()
+                ha_activity = [
+                    {"entity_id": r.entity_id, "to_state": r.to_state, "changed_at": r.changed_at}
+                    for r in ha_rows
+                ]
+            except Exception as e:
+                logger.debug(f"Could not fetch HA activity: {e}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+            # Gather upcoming calendar events
+            calendar_events = []
+            try:
+                cal_rows = db.execute(text("""
+                    SELECT title, summary, start_time as start, end_time as end
+                    FROM calendar_event
+                    WHERE start_time >= :now AND start_time <= :later
+                    ORDER BY start_time ASC
+                    LIMIT 5
+                """), {"now": now, "later": now + timedelta(hours=4)}).fetchall()
+                calendar_events = [
+                    {"title": r.title or r.summary, "start": r.start, "end": r.end}
+                    for r in cal_rows
+                ]
+            except Exception as e:
+                logger.debug(f"Could not fetch calendar: {e}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+            # Compute activity state from full context
+            body_dict = None
+            if state.body_state:
+                body_dict = {
+                    "alertness": state.body_state.alertness,
+                    "stress_load": state.body_state.stress_load,
+                }
+
+            activity_snapshot = activity_state_machine.compute_from_full_context(
+                now=now,
+                calendar_events=calendar_events,
+                last_interaction_at=state.last_activity_at,
+                body_state=body_dict,
+                ha_recent_activity=ha_activity,
+                first_activity_today=state.first_activity_today,
+                has_chatted_today=state.has_chatted_today,
+            )
+
+            # Store in subconscious state
+            state.activity_state = activity_snapshot.state.value
+            state.activity_confidence = activity_snapshot.confidence
+            state.activity_reason = activity_snapshot.reason
+            state.activity_room = None  # Motion sensors can't identify individuals
+
+            # Compute interruptibility
+            hours_since_interaction = None
+            if state.last_activity_at:
+                hours_since_interaction = (now - state.last_activity_at).total_seconds() / 3600
+
+            # Count recent notifications
+            notif_count = 0
+            try:
+                notif_result = db.execute(text("""
+                    SELECT COUNT(*) as cnt FROM notification_log
+                    WHERE user_id = :user_id
+                      AND sent_at >= NOW() - INTERVAL '1 hour'
+                      AND sent = true
+                """), {"user_id": user_id}).fetchone()
+                notif_count = notif_result.cnt if notif_result else 0
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+            # Calendar context for interruptibility
+            calendar_context = {}
+            for evt in calendar_events:
+                start = evt.get("start")
+                end = evt.get("end")
+                if start and end:
+                    if isinstance(start, str):
+                        start = datetime.fromisoformat(start)
+                    if isinstance(end, str):
+                        end = datetime.fromisoformat(end)
+                    if start.tzinfo is None:
+                        start = start.replace(tzinfo=USER_TZ)
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=USER_TZ)
+                    title = (evt.get("title") or "").lower()
+                    if start <= now <= end and any(kw in title for kw in ["meeting", "call", "sync", "standup"]):
+                        calendar_context["in_meeting"] = True
+                    minutes_to = (start - now).total_seconds() / 60
+                    if 0 < minutes_to < 10:
+                        calendar_context["minutes_to_next_event"] = int(minutes_to)
+
+            interruptibility = compute_interruptibility(
+                activity=activity_snapshot,
+                body_state=body_dict,
+                calendar_context=calendar_context if calendar_context else None,
+                hours_since_last_interaction=hours_since_interaction,
+                notification_count_last_hour=notif_count,
+            )
+
+            state.interruptibility_score = interruptibility.score
+            state.interruptibility_channel = interruptibility.recommended_channel
+
+            logger.info(
+                f"Activity: {state.activity_state} (conf={state.activity_confidence:.2f}), "
+                f"Interruptibility: {state.interruptibility_score:.2f} ({state.interruptibility_channel})"
+            )
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Activity state computation failed: {e}\n{traceback.format_exc()}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            state.activity_state = "unknown"
+            state.interruptibility_score = 0.5
+
         # Detect threshold crossings and generate nudges
         nudges = await self._detect_and_generate_nudges(db, user_id, state, now)
 
-        # Update state in database
+        # Update state in database and commit immediately
         await self._update_state(db, user_id, state, now)
+        db.commit()
 
-        # Log snapshot for pattern learning
-        await self._log_snapshot(db, user_id, state, nudges, now)
-
-        # Write Sara's inner monologue journal entry
+        # Log snapshot for pattern learning (non-critical)
         try:
-            body_state_dict = None
-            if state.body_state:
-                body_state_dict = {
-                    'blood_sugar': state.body_state.blood_sugar,
-                    'alertness': state.body_state.alertness,
-                    'stress_proxy': state.body_state.stress_proxy,
-                    'muscle_recovery': state.body_state.muscle_recovery,
-                    'hours_since_meal': state.hours_since_meal,
-                    'hours_awake': state.hours_since_wakeup
-                }
+            await self._log_snapshot(db, user_id, state, nudges, now)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Snapshot logging failed (non-critical): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
+        # Write to unified context snapshot (Redis) for cross-system awareness
+        try:
+            import asyncio
+            from app.services.context_writer import update_fields
+            ctx_kwargs = {
+                "activity_state": state.activity_state or "UNKNOWN",
+                "activity_confidence": state.activity_confidence or 0.5,
+                "room": state.activity_room,
+                "interruptibility": state.interruptibility_score or 0.5,
+                "has_chatted_today": state.has_chatted_today,
+                "is_past_bedtime": state.is_past_bedtime,
+                "mood": state.inferred_mood,
+                "energy_level": state.inferred_energy_level,
+                "in_flow_state": state.in_flow_state,
+            }
+            if state.body_state:
+                ctx_kwargs.update({
+                    "alertness": state.body_state.alertness,
+                    "stress_load": state.body_state.stress_load,
+                    "blood_sugar": state.body_state.blood_sugar,
+                    "circadian_phase": state.body_state.circadian_phase,
+                })
+            await update_fields(user_id, source="subconscious", **ctx_kwargs)
+        except Exception as e:
+            logger.debug(f"Unified context snapshot update failed (non-critical): {e}")
+
+        # Refresh open conversation threads in Redis for fast access
+        try:
+            from app.services.thread_manager import refresh_thread_cache, expire_stale_threads
+
+            class _SyncAsAsyncDB:
+                """Minimal wrapper for sync db in async context."""
+                def __init__(self, sync_db):
+                    self._db = sync_db
+                async def execute(self, stmt, params=None):
+                    return self._db.execute(stmt, params)
+                async def commit(self):
+                    self._db.commit()
+                async def rollback(self):
+                    self._db.rollback()
+
+            db_wrapper = _SyncAsAsyncDB(db)
+            await expire_stale_threads(user_id, db_wrapper)
+            await refresh_thread_cache(user_id, db_wrapper)
+        except Exception as e:
+            logger.debug(f"Thread cache refresh failed (non-critical): {e}")
+
+        # Persist body state history for trend analysis (non-critical)
+        try:
+            db.execute(text("""
+                INSERT INTO body_state_history
+                (user_id, alertness, stress_load, blood_sugar, circadian_phase,
+                 energy_level, mood, in_flow_state, activity_state, recorded_at)
+                VALUES
+                (:uid, :alertness, :stress, :blood, :circadian,
+                 :energy, :mood, :flow, :activity, NOW())
+            """), {
+                "uid": user_id,
+                "alertness": state.body_state.alertness if state.body_state else None,
+                "stress": state.body_state.stress_load if state.body_state else None,
+                "blood": state.body_state.blood_sugar if state.body_state else None,
+                "circadian": state.body_state.circadian_phase if state.body_state else None,
+                "energy": state.inferred_energy_level,
+                "mood": state.inferred_mood,
+                "flow": state.in_flow_state,
+                "activity": state.activity_state,
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"Body state history insert failed (non-critical): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        # Write Sara's inner monologue journal entry (non-critical)
+        try:
             await sara_journal.write_periodic_entry(
                 db=db,
                 user_id=user_id,
-                body_state=body_state_dict,
                 mood_context=state.mood_context,
                 recent_nudges=nudges if nudges else None,
                 recent_activity=f"Last presence: {state.hours_since_presence:.1f}h ago" if state.hours_since_presence else None,
                 shadow_summary=state.recent_shadow_summary,
-                shadow_tasks=state.shadow_tasks
+                shadow_tasks=state.shadow_tasks,
+                conversation_digest=state.recent_conversation_digest,
+                activity_state=state.activity_state,
+                activity_room=state.activity_room,
             )
+            db.commit()
         except Exception as e:
             logger.warning(f"Failed to write journal entry (non-critical): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        # Extract PKG signals from recent conversations (non-critical)
+        await self._extract_pkg_signals(db, user_id, state, now)
 
         # Send push notifications for urgent nudges
         if nudges:
@@ -263,7 +507,10 @@ class SubconsciousService:
 
         Determines: when user woke up (first activity), last activity, past bedtime status
         """
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # today_start in local time, then convert to UTC for DB comparisons
+        # (DB stores timestamps in UTC)
+        today_start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = today_start_local.astimezone(ZoneInfo('UTC'))
 
         # Get last activity from presence_log
         presence_result = db.execute(text("""
@@ -276,18 +523,22 @@ class SubconsciousService:
 
         if presence_result:
             state.last_presence_at = presence_result.created_at
+            # presence_log is tz-aware (+00), but handle naive case safely (treat as UTC)
             if presence_result.created_at.tzinfo is None:
-                state.last_presence_at = state.last_presence_at.replace(tzinfo=self.tz)
+                state.last_presence_at = state.last_presence_at.replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+            else:
+                state.last_presence_at = state.last_presence_at.astimezone(self.tz)
             state.hours_since_presence = (now - state.last_presence_at).total_seconds() / 3600
 
         # Get first activity TODAY - determines "wakeup time"
         # Check both presence_log and episode tables
+        # Normalize: presence_log is tz-aware, episode is naive (UTC) - convert episode to tz-aware
         first_today_result = db.execute(text("""
             SELECT MIN(activity_time) as first_activity FROM (
                 SELECT created_at as activity_time FROM presence_log
                 WHERE user_id = :user_id AND created_at >= :today_start
                 UNION ALL
-                SELECT created_at as activity_time FROM episode
+                SELECT created_at AT TIME ZONE 'UTC' as activity_time FROM episode
                 WHERE user_id = :user_id AND created_at >= :today_start AND role = 'user'
             ) combined
         """), {"user_id": user_id, "today_start": today_start}).fetchone()
@@ -304,20 +555,24 @@ class SubconsciousService:
                        f"{state.hours_since_wakeup:.1f} hours ago")
 
         # Get last activity (most recent interaction)
+        # Normalize: presence_log is tz-aware, episode is naive (UTC) - convert episode to tz-aware
         last_activity_result = db.execute(text("""
             SELECT MAX(activity_time) as last_activity FROM (
                 SELECT created_at as activity_time FROM presence_log
                 WHERE user_id = :user_id
                 UNION ALL
-                SELECT created_at as activity_time FROM episode
+                SELECT created_at AT TIME ZONE 'UTC' as activity_time FROM episode
                 WHERE user_id = :user_id AND role = 'user'
             ) combined
         """), {"user_id": user_id}).fetchone()
 
         if last_activity_result and last_activity_result.last_activity:
             state.last_activity_at = last_activity_result.last_activity
+            # DB returns tz-aware now, convert to user timezone
             if state.last_activity_at.tzinfo is None:
-                state.last_activity_at = state.last_activity_at.replace(tzinfo=self.tz)
+                state.last_activity_at = state.last_activity_at.replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+            else:
+                state.last_activity_at = state.last_activity_at.astimezone(self.tz)
 
         # Check if user has chatted with Sara today
         chat_result = db.execute(text("""
@@ -364,14 +619,17 @@ class SubconsciousService:
             state.last_meal_type = result.meal_type
             state.last_meal_at = result.logged_at
             if result.logged_at:
-                # Make timezone aware if needed
+                # Make timezone aware - food_log stores naive timestamps in EASTERN time (not UTC!)
                 meal_time = result.logged_at
                 if meal_time.tzinfo is None:
                     meal_time = meal_time.replace(tzinfo=self.tz)
+                else:
+                    meal_time = meal_time.astimezone(self.tz)
                 delta = now - meal_time
                 state.hours_since_meal = delta.total_seconds() / 3600
 
         # Calculate typical meal windows from last 14 days
+        # food_log stores naive timestamps in EASTERN time (not UTC!) - extract hour directly
         meal_windows = {}
         for meal_type in ['breakfast', 'lunch', 'dinner']:
             avg_result = db.execute(text("""
@@ -414,7 +672,7 @@ class SubconsciousService:
         if velocity_result and velocity_result.msg_count:
             state.message_velocity = float(velocity_result.msg_count)  # per hour
 
-        # Get recent conversation messages for LLM analysis
+        # Get recent conversation messages for LLM analysis (user messages only)
         messages_result = db.execute(text("""
             SELECT content, created_at
             FROM episode
@@ -444,6 +702,35 @@ class SubconsciousService:
                            f"flow={state.in_flow_state}, focus={state.current_focus_areas}")
                 if state.mood_context:
                     logger.info(f"Context: {state.mood_context}")
+
+        # Build conversation digest — both user AND assistant messages
+        # so the subconscious knows what was actually discussed
+        try:
+            digest_result = db.execute(text("""
+                SELECT role, content, created_at
+                FROM episode
+                WHERE user_id = :user_id
+                  AND created_at >= NOW() - INTERVAL '4 hours'
+                  AND content IS NOT NULL
+                  AND role IN ('user', 'assistant')
+                ORDER BY created_at ASC
+                LIMIT 40
+            """), {"user_id": user_id}).fetchall()
+
+            if digest_result and len(digest_result) >= 1:
+                lines = []
+                for row in digest_result:
+                    speaker = "David" if row.role == "user" else "Sara"
+                    # Trim very long messages but keep enough for context
+                    content = row.content.strip()
+                    if len(content) > 500:
+                        content = content[:500] + "..."
+                    ts = row.created_at.strftime("%I:%M %p") if row.created_at else ""
+                    lines.append(f"[{ts}] {speaker}: {content}")
+                state.recent_conversation_digest = "\n".join(lines)
+                logger.info(f"Built conversation digest: {len(digest_result)} messages")
+        except Exception as e:
+            logger.debug(f"Failed to build conversation digest: {e}")
 
     async def _llm_analyze_conversation(self, messages: List[str]) -> Optional[Dict]:
         """
@@ -711,27 +998,19 @@ Return ONLY the JSON object, no other text."""
         """
         nudges = []
 
-        # Flow state suppression - only allow urgent nudges when in flow
-        suppress_non_urgent = state.in_flow_state and state.focus_intensity and state.focus_intensity > 0.7
-        if suppress_non_urgent:
-            logger.info(f"Flow state detected (intensity={state.focus_intensity:.2f}), suppressing non-urgent nudges")
-
-        # Helper to check if we should suppress this nudge
-        def should_suppress(severity: str) -> bool:
-            if not suppress_non_urgent:
-                return False
-            return severity != SEVERITY_URGENT
-
         # =====================================================
         # MORNING CHECK-IN (15 mins after first activity, if no chat)
         # =====================================================
-        if (state.first_activity_today and
+        morning_eligible = (
+            state.first_activity_today and
             state.hours_since_wakeup and
             0.25 <= state.hours_since_wakeup <= 2.0 and
-            not state.has_chatted_today):
+            not state.has_chatted_today
+        )
+        state.nudge_morning_eligible = bool(morning_eligible)
+        if morning_eligible:
 
-            if not should_suppress(SEVERITY_GENTLE):
-                if not await self._nudge_exists_recently(db, user_id, 'morning_checkin', hours=12):
+            if not await self._nudge_exists_recently(db, user_id, 'morning_checkin', hours=12):
                     hour = now.hour
                     greeting = "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening"
 
@@ -749,161 +1028,81 @@ Return ONLY the JSON object, no other text."""
                     logger.info(f"Generated morning check-in nudge for user {user_id}")
 
         # =====================================================
-        # MEAL NUDGES with COMPOUND CONDITIONS
+        # MEAL NUDGES - DISABLED
         # =====================================================
-        user_is_awake_enough = state.hours_since_wakeup and state.hours_since_wakeup >= 1.0
-
-        if state.is_waking_hours and user_is_awake_enough:
-            # Calculate hours without food
-            hours_awake_without_meal = None
-            if state.last_meal_at and state.first_activity_today:
-                # Ensure both datetimes are timezone-aware for comparison
-                last_meal = state.last_meal_at
-                if last_meal.tzinfo is None:
-                    last_meal = last_meal.replace(tzinfo=self.tz)
-                first_activity = state.first_activity_today
-                if first_activity.tzinfo is None:
-                    first_activity = first_activity.replace(tzinfo=self.tz)
-
-                if last_meal < first_activity:
-                    hours_awake_without_meal = state.hours_since_wakeup
-                else:
-                    hours_awake_without_meal = state.hours_since_meal
-            elif state.hours_since_wakeup:
-                hours_awake_without_meal = state.hours_since_wakeup
-
-            if hours_awake_without_meal:
-                # COMPOUND CONDITION: Low energy + missed meal = more urgent
-                energy = state.inferred_energy_level or 0.5
-                is_low_energy = energy < 0.4
-                mood_suggests_needs_break = state.inferred_mood in ['tired', 'frustrated', 'stressed', 'drained']
-
-                # Determine severity and threshold based on compound signals
-                if hours_awake_without_meal > 4 and is_low_energy:
-                    # Earlier intervention when energy is low
-                    severity = SEVERITY_URGENT if mood_suggests_needs_break else SEVERITY_GENTLE
-                    should_nudge = True
-                elif hours_awake_without_meal > THRESHOLDS['missed_meal_hours']:
-                    severity = SEVERITY_GENTLE
-                    should_nudge = True
-                else:
-                    should_nudge = False
-
-                if should_nudge and not should_suppress(severity):
-                    if not await self._nudge_exists_recently(db, user_id, 'missed_meal', hours=2):
-                        # Build context-aware message using mood and context
-                        if hours_awake_without_meal >= 1:
-                            hours_int = int(hours_awake_without_meal)
-                            hours_str = f"{hours_int} hour" if hours_int == 1 else f"{hours_int} hours"
-                        else:
-                            hours_str = f"{int(hours_awake_without_meal * 60)} minutes"
-
-                        if state.mood_context:
-                            # Use the rich context from LLM analysis
-                            if is_low_energy:
-                                message = f"You've been up {hours_str} without eating and your energy seems low. {state.mood_context[:100]}"
-                            elif state.inferred_mood in ['focused', 'productive', 'determined']:
-                                message = f"You're in a good flow! Just a gentle reminder - it's been {hours_str} since you ate."
-                            elif state.inferred_mood in ['tired', 'stressed', 'frustrated']:
-                                message = f"Seems like a tough stretch. Food might help - it's been {hours_str}."
-                            else:
-                                message = f"It's been {hours_str} since your last meal. Time for a bite?"
-                        elif is_low_energy:
-                            message = f"You've been up {hours_str} without eating. Your energy seems low - food might help."
-                        else:
-                            message = f"It's been {hours_str} since you last ate. Time for a meal?"
-
-                        nudge = await self._create_nudge(
-                            db, user_id,
-                            nudge_type='missed_meal',
-                            severity=severity,
-                            title="Fuel up?" if state.inferred_mood in ['focused', 'productive'] else "Time for a meal?",
-                            message=message,
-                            action_suggestion="Log a meal or snack",
-                            delivery_channel='ios_push',
-                            expires_hours=2
-                        )
-                        nudges.append(nudge)
-
-            # Late meal nudges (lower priority, more likely to suppress)
-            if state.typical_meal_windows and state.hours_since_wakeup >= 0.5:
-                if not should_suppress(SEVERITY_INFO):
-                    current_hour = now.hour + now.minute / 60.0
-                    for meal_type, window in state.typical_meal_windows.items():
-                        if current_hour > window['window_end'] + THRESHOLDS['late_meal_margin_hours']:
-                            today_meal = db.execute(text("""
-                                SELECT id FROM food_log
-                                WHERE user_id = :user_id
-                                  AND meal_type = :meal_type
-                                  AND DATE(logged_at) = CURRENT_DATE
-                            """), {"user_id": user_id, "meal_type": meal_type}).fetchone()
-
-                            if not today_meal:
-                                if not await self._nudge_exists_recently(db, user_id, f'late_{meal_type}', hours=4):
-                                    nudge = await self._create_nudge(
-                                        db, user_id,
-                                        nudge_type=f'late_{meal_type}',
-                                        severity=SEVERITY_INFO,
-                                        title=f"Missed {meal_type}?",
-                                        message=f"You usually have {meal_type} around {window['avg_hour']:.0f}:00. Did you eat?",
-                                        action_suggestion=f"Log {meal_type} if you had it",
-                                        delivery_channel='passive_display',
-                                        expires_hours=4
-                                    )
-                                    nudges.append(nudge)
+        # Generic meal notifications are disabled in favor of proactive pattern-based
+        # notifications. Sara now learns behavioral patterns during her nightly dream
+        # cycle and sends personalized suggestions crafted with LLM awareness.
+        #
+        # The MorningProactiveService runs at 9 AM and checks detected patterns
+        # (e.g., "user runs heat automation when cold") against current conditions,
+        # then sends context-aware iOS push notifications.
+        #
+        # This replaces generic messages like "it's been X hours since you ate" with
+        # personalized suggestions like "It's 5°F out - yesterday you had the heat
+        # running every 2 hours. Want me to set that up again?"
+        # =====================================================
 
         # =====================================================
         # BEDTIME NUDGE (with context awareness)
         # =====================================================
+        state.nudge_bedtime_eligible = bool(state.is_past_bedtime)
         if state.is_past_bedtime:
-            if not should_suppress(SEVERITY_GENTLE):
-                if not await self._nudge_exists_recently(db, user_id, 'bedtime', hours=12):
-                    # Context-aware bedtime message
-                    if state.mood_context and 'coding' in (state.current_focus_areas or []):
-                        message = "It's past 10 PM. I know you're deep in code, but sleep helps with problem-solving. Consider wrapping up."
-                    elif state.inferred_mood == 'stressed':
-                        message = "It's past 10 PM and you seem stressed. Sleep might give you fresh perspective tomorrow."
-                    else:
-                        message = "It's past 10 PM and you're still active. Consider wrapping up for better sleep."
+            if not await self._nudge_exists_recently(db, user_id, 'bedtime', hours=12):
+                # Context-aware bedtime message
+                if state.mood_context and 'coding' in (state.current_focus_areas or []):
+                    message = "It's past 10 PM. I know you're deep in code, but sleep helps with problem-solving. Consider wrapping up."
+                elif state.inferred_mood == 'stressed':
+                    message = "It's past 10 PM and you seem stressed. Sleep might give you fresh perspective tomorrow."
+                else:
+                    message = "It's past 10 PM and you're still active. Consider wrapping up for better sleep."
 
-                    nudge = await self._create_nudge(
-                        db, user_id,
-                        nudge_type='bedtime',
-                        severity=SEVERITY_GENTLE,
-                        title="Time to wind down?",
-                        message=message,
-                        action_suggestion="Start your bedtime routine",
-                        delivery_channel='ios_push',
-                        expires_hours=8
-                    )
-                    nudges.append(nudge)
+                nudge = await self._create_nudge(
+                    db, user_id,
+                    nudge_type='bedtime',
+                    severity=SEVERITY_GENTLE,
+                    title="Time to wind down?",
+                    message=message,
+                    action_suggestion="Start your bedtime routine",
+                    delivery_channel='ios_push',
+                    expires_hours=8
+                )
+                nudges.append(nudge)
 
         # =====================================================
         # SLEEP DEFICIT (compound with mood)
         # =====================================================
+        state.nudge_sleep_deficit = float(state.sleep_deficit_hours) if state.sleep_deficit_hours and state.sleep_deficit_hours > 1.0 else 0.0
         if state.sleep_deficit_hours and state.sleep_deficit_hours > 1.0:
-            if not should_suppress(SEVERITY_INFO):
-                if not await self._nudge_exists_recently(db, user_id, 'sleep_deficit', hours=24):
-                    # More urgent if mood is suffering
-                    if state.inferred_mood in ['tired', 'frustrated', 'stressed'] and state.sleep_deficit_hours > 1.5:
-                        message = f"You got {state.last_sleep_hours:.1f} hours last night and seem {state.inferred_mood} today. Prioritize rest tonight."
-                        severity = SEVERITY_GENTLE
-                    else:
-                        message = f"You got {state.last_sleep_hours:.1f} hours last night. Try to get extra rest tonight."
-                        severity = SEVERITY_INFO
+            if not await self._nudge_exists_recently(db, user_id, 'sleep_deficit', hours=24):
+                # More urgent if mood is suffering
+                if state.inferred_mood in ['tired', 'frustrated', 'stressed'] and state.sleep_deficit_hours > 1.5:
+                    message = f"You got {state.last_sleep_hours:.1f} hours last night and seem {state.inferred_mood} today. Prioritize rest tonight."
+                    severity = SEVERITY_GENTLE
+                else:
+                    message = f"You got {state.last_sleep_hours:.1f} hours last night. Try to get extra rest tonight."
+                    severity = SEVERITY_INFO
 
-                    nudge = await self._create_nudge(
-                        db, user_id,
-                        nudge_type='sleep_deficit',
-                        severity=severity,
-                        title="Sleep debt accumulating",
-                        message=message,
-                        delivery_channel='passive_display',
-                        expires_hours=24
-                    )
-                    nudges.append(nudge)
+                nudge = await self._create_nudge(
+                    db, user_id,
+                    nudge_type='sleep_deficit',
+                    severity=severity,
+                    title="Sleep debt accumulating",
+                    message=message,
+                    delivery_channel='passive_display',
+                    expires_hours=24
+                )
+                nudges.append(nudge)
+
+        # NOTE: Heartbeat agent checks are now handled by the unified heartbeat
+        # (app.services.unified_heartbeat) which runs as a Celery task every 15 min
+        # with full run-to-run memory and topic-based notification dedup.
 
         return nudges
+
+    # NOTE: _run_heartbeat_agent, _evaluate_heartbeat_items, _evaluate_heartbeat_check,
+    # and _execute_ha_action methods have been removed. All heartbeat checks are now
+    # handled by the unified agent (app.services.unified_agent).
 
     async def _nudge_exists_recently(
         self, db: Session, user_id: str, nudge_type: str, hours: int
@@ -1008,6 +1207,17 @@ Return ONLY the JSON object, no other text."""
             "is_waking_hours": state.is_waking_hours,
             "body_state": body_state_json,
             "body_state_context": state.body_state_context,
+            # Activity state & interruptibility
+            "activity_state": state.activity_state,
+            "activity_confidence": state.activity_confidence,
+            "activity_reason": state.activity_reason,
+            "activity_room": state.activity_room,
+            "interruptibility_score": state.interruptibility_score,
+            "interruptibility_channel": state.interruptibility_channel,
+            # Nudge eligibility flags
+            "nudge_morning_eligible": state.nudge_morning_eligible,
+            "nudge_bedtime_eligible": state.nudge_bedtime_eligible,
+            "nudge_sleep_deficit": state.nudge_sleep_deficit,
             # Shadow session context
             "recent_shadow_summary": state.recent_shadow_summary,
             "shadow_tasks": json.dumps(state.shadow_tasks) if state.shadow_tasks else None,
@@ -1051,6 +1261,15 @@ Return ONLY the JSON object, no other text."""
                     is_waking_hours = :is_waking_hours,
                     body_state = :body_state,
                     body_state_context = :body_state_context,
+                    activity_state = :activity_state,
+                    activity_confidence = :activity_confidence,
+                    activity_reason = :activity_reason,
+                    activity_room = :activity_room,
+                    interruptibility_score = :interruptibility_score,
+                    interruptibility_channel = :interruptibility_channel,
+                    nudge_morning_eligible = :nudge_morning_eligible,
+                    nudge_bedtime_eligible = :nudge_bedtime_eligible,
+                    nudge_sleep_deficit = :nudge_sleep_deficit,
                     recent_shadow_summary = :recent_shadow_summary,
                     shadow_tasks = :shadow_tasks,
                     shadow_decisions = :shadow_decisions,
@@ -1072,6 +1291,9 @@ Return ONLY the JSON object, no other text."""
                  llm_failover_status, llm_active_backend, last_presence_at, hours_since_presence,
                  first_activity_today, last_activity_at, has_chatted_today, hours_since_wakeup,
                  is_past_bedtime, is_waking_hours, body_state, body_state_context,
+                 activity_state, activity_confidence, activity_reason, activity_room,
+                 interruptibility_score, interruptibility_channel,
+                 nudge_morning_eligible, nudge_bedtime_eligible, nudge_sleep_deficit,
                  recent_shadow_summary, shadow_tasks, shadow_decisions, shadow_questions,
                  last_shadow_session_at, shadow_focus_areas, updated_at, created_at)
                 VALUES
@@ -1082,6 +1304,9 @@ Return ONLY the JSON object, no other text."""
                  :llm_failover_status, :llm_active_backend, :last_presence_at, :hours_since_presence,
                  :first_activity_today, :last_activity_at, :has_chatted_today, :hours_since_wakeup,
                  :is_past_bedtime, :is_waking_hours, :body_state, :body_state_context,
+                 :activity_state, :activity_confidence, :activity_reason, :activity_room,
+                 :interruptibility_score, :interruptibility_channel,
+                 :nudge_morning_eligible, :nudge_bedtime_eligible, :nudge_sleep_deficit,
                  :recent_shadow_summary, :shadow_tasks, :shadow_decisions, :shadow_questions,
                  :last_shadow_session_at, :shadow_focus_areas, :updated_at, :updated_at)
             """), state_data)
@@ -1107,78 +1332,87 @@ Return ONLY the JSON object, no other text."""
             "created_at": now
         })
 
+    async def _extract_pkg_signals(self, db: Session, user_id: str, state: SubconsciousState, now: datetime):
+        """Extract lightweight PKG signals from recent conversations (last 2 hours)"""
+        try:
+            from app.services.pkg_extractor import pkg_extractor
+
+            # Get recent conversation messages (last 2 hours)
+            two_hours_ago = now - timedelta(hours=2)
+            result = db.execute(text("""
+                SELECT role, content FROM episode
+                WHERE user_id = :user_id
+                AND created_at >= :since
+                AND role IN ('user', 'assistant')
+                ORDER BY created_at ASC
+                LIMIT 30
+            """), {"user_id": user_id, "since": two_hours_ago}).fetchall()
+
+            if not result or len(result) < 2:
+                return
+
+            messages = [{"role": row.role, "content": row.content} for row in result]
+
+            extraction = await pkg_extractor.lightweight_extract(messages, user_id)
+            total = extraction.get("stats", {}).get("total", 0)
+            if total > 0:
+                logger.info(f"PKG: Extracted {total} facts from subconscious cycle")
+
+        except Exception as e:
+            logger.warning(f"PKG signal extraction failed (non-critical): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
     async def _send_push_notifications(self, db: Session, user_id: str, nudges: List[Dict]):
-        """Send iOS push notifications for nudges that require it"""
+        """Send iOS push notifications for nudges that require it.
+
+        Routes through the unified notification pipeline for topic-based dedup.
+        """
+        from app.services.unified_notification import send_notification as unified_send
+
         push_nudges = [n for n in nudges if n.get('delivery_channel') == 'ios_push']
 
         if not push_nudges:
             return
 
-        # Get user's push tokens
-        result = db.execute(text("""
-            SELECT token FROM push_token
-            WHERE user_id = :user_id AND is_active = true
-        """), {"user_id": user_id}).fetchall()
-
-        if not result:
-            logger.info(f"No active push tokens for user {user_id}")
-            return
-
-        tokens = [r.token for r in result]
-
-        # Build messages for Expo with notification categories for interactive actions
-        messages = []
         for nudge in push_nudges:
-            # Determine category based on nudge type
-            if nudge['nudge_type'] in ['missed_meal', 'late_breakfast', 'late_lunch', 'late_dinner']:
-                category = 'MEAL_NUDGE'
-            elif nudge['nudge_type'] == 'morning_checkin':
-                category = 'MORNING_CHECKIN'
-            else:
-                category = 'GENERAL_NUDGE'
+            nudge_type = nudge.get('nudge_type', 'general')
+            topic = f"subconscious:{nudge_type}"
 
-            for token in tokens:
-                messages.append({
-                    "to": token,
-                    "sound": "default",
-                    "title": nudge['title'],
-                    "body": nudge['message'],
-                    "categoryId": category,  # iOS notification category for action buttons
-                    "data": {
-                        "type": "subconscious_nudge",
-                        "nudge_id": nudge['id'],
-                        "nudge_type": nudge['nudge_type'],
-                        "title": nudge['title'],
-                        "message": nudge['message'],
-                        "action_suggestion": nudge.get('action_suggestion')
-                    }
-                })
-
-        # Send to Expo
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    }
+            try:
+                # Route through unified pipeline (uses sync-compatible fallback
+                # since subconscious_service uses sync Session, not AsyncSession)
+                result = await unified_send(
+                    user_id=user_id,
+                    title=nudge['title'],
+                    message=nudge['message'],
+                    priority="normal",
+                    topic=topic,
+                    category="checkin" if nudge_type in ['morning_checkin', 'bedtime'] else "general",
+                    source="subconscious",
+                    cooldown_hours=4.0 if nudge_type == 'morning_checkin' else 8.0,
+                    db=None,  # Use sync fallback since we have a sync Session
                 )
-                if response.status_code == 200:
-                    logger.info(f"Sent {len(push_nudges)} push notifications to {len(tokens)} devices")
 
-                    # Mark nudges as delivered
-                    for nudge in push_nudges:
-                        db.execute(text("""
-                            UPDATE subconscious_nudge
-                            SET delivered_at = NOW(), status = 'delivered'
-                            WHERE id = :nudge_id
-                        """), {"nudge_id": nudge['id']})
+                if result.get("sent"):
+                    # Mark nudge as delivered
+                    db.execute(text("""
+                        UPDATE subconscious_nudge
+                        SET delivered_at = NOW(), status = 'delivered'
+                        WHERE id = :nudge_id
+                    """), {"nudge_id": nudge['id']})
+                    logger.info(f"Sent subconscious nudge via unified pipeline: {nudge['title']}")
                 else:
-                    logger.warning(f"Expo push returned {response.status_code}: {response.text}")
-        except Exception as e:
-            logger.error(f"Failed to send push notifications: {e}")
+                    logger.info(f"Subconscious nudge blocked by dedup: {nudge['title']} reason={result.get('reason')}")
+
+            except Exception as e:
+                logger.error(f"Failed to send nudge via unified pipeline: {e}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
     # Public API methods for external access
 

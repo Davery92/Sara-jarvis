@@ -2205,3 +2205,1729 @@ WHERE reminder.user_id = %(user_id_1)s::UUID AND reminder.due_at <= %(due_at_1)s
 /usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
 /usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
 /usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+/usr/bin/python3: can't open file '/home/david/jarvis/scripts/daily_brief_simple.py': [Errno 2] No such file or directory
+2026-02-05 06:30:03,209 - app.services.notification_service - INFO - 📱 NotificationService initialized (Expo Push)
+2026-02-05 06:30:03,252 - morning_brief_generator - INFO - ============================================================
+2026-02-05 06:30:03,253 - morning_brief_generator - INFO - Starting morning brief generation at 2026-02-05 06:30:03.253147
+2026-02-05 06:30:03,253 - morning_brief_generator - INFO - ============================================================
+2026-02-05 06:30:03,477 - morning_brief_generator - INFO - Found 6 active users
+2026-02-05 06:30:03,478 - morning_brief_generator - INFO - Generating brief for user: c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-05 06:30:03,478 - app.services.morning_brief_service - INFO - Generating morning brief for user c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-05 06:30:03,478 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:30:03,913 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:30:03,922 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:30:03,985 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:30:04,051 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:30:04,072 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:30:04,097 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:30:04,214 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:30:05,264 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:30:05,266 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:30:05,268 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:30:17,657 - app.services.morning_brief_service - INFO - News synthesis complete: 2330 chars, finish_reason: stop
+2026-02-05 06:30:17,721 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:30:17,757 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:30:21,992 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/c2fbff82-ee33-4a97-a5b1-24b317269ad5/2026-02-05/morning_brief.mp3 (~178s)
+2026-02-05 06:30:22,010 - app.services.morning_brief_service - INFO - Brief saved to database for c2fbff82-ee33-4a97-a5b1-24b317269ad5 on 2026-02-05
+2026-02-05 06:30:22,391 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': 'c2fbff82-ee33-4a97-a5b1-24b317269ad5'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:30:22,391 - app.services.morning_brief_service - INFO - Morning brief generated successfully for c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-05 06:30:22,391 - morning_brief_generator - INFO - Successfully generated brief for c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-05 06:30:22,391 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:30:22,392 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:30:22,392 - morning_brief_generator - INFO -   - Audio duration: 177.6s
+2026-02-05 06:30:22,392 - morning_brief_generator - INFO - Generating brief for user: 1
+2026-02-05 06:30:22,392 - app.services.morning_brief_service - INFO - Generating morning brief for user 1
+2026-02-05 06:30:22,392 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:30:22,395 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '1', 'start_of_day': datetime.datetime(2026, 2, 5, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 6, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:22,475 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:30:22,542 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:30:22,546 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:30:22,619 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:30:22,622 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:30:22,644 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:30:22,794 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:30:23,408 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:30:23,410 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:30:23,412 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:30:36,846 - app.services.morning_brief_service - INFO - News synthesis complete: 2561 chars, finish_reason: stop
+2026-02-05 06:30:36,850 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,852 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,854 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '1', 'today': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,856 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,857 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,859 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,860 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,862 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '1', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,864 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '1', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,865 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '1', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-08'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:36,866 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:30:36,901 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:30:40,699 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/1/2026-02-05/morning_brief.mp3 (~173s)
+2026-02-05 06:30:40,703 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '1', 'brief_date': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:40,707 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:30:40,707 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 1
+2026-02-05 06:30:40,708 - morning_brief_generator - INFO - Successfully generated brief for 1
+2026-02-05 06:30:40,708 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:30:40,708 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:30:40,708 - morning_brief_generator - INFO -   - Audio duration: 173.2s
+2026-02-05 06:30:40,708 - morning_brief_generator - INFO - Generating brief for user: 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-05 06:30:40,708 - app.services.morning_brief_service - INFO - Generating morning brief for user 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-05 06:30:40,709 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:30:40,712 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'start_of_day': datetime.datetime(2026, 2, 5, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 6, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:40,780 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:30:40,936 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:30:41,084 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:30:41,141 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:30:41,145 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:30:41,183 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:30:41,326 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:30:41,881 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:30:41,882 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:30:41,883 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:30:56,934 - app.services.morning_brief_service - INFO - News synthesis complete: 2296 chars, finish_reason: stop
+2026-02-05 06:30:56,939 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,940 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,942 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'today': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,943 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,944 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,945 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,946 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,947 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,948 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,949 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-08'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:30:56,949 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:30:56,995 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:00,575 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/44a9b3c0-7864-482b-9d9f-075e8c7c0814/2026-02-05/morning_brief.mp3 (~158s)
+2026-02-05 06:31:00,579 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'brief_date': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:00,585 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:31:00,585 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-05 06:31:00,585 - morning_brief_generator - INFO - Successfully generated brief for 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-05 06:31:00,586 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:31:00,586 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:31:00,586 - morning_brief_generator - INFO -   - Audio duration: 158.0s
+2026-02-05 06:31:00,586 - morning_brief_generator - INFO - Generating brief for user: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-05 06:31:00,586 - app.services.morning_brief_service - INFO - Generating morning brief for user 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-05 06:31:00,587 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:31:00,590 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'start_of_day': datetime.datetime(2026, 2, 5, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 6, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:00,664 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:31:00,666 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:00,736 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:31:00,797 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:31:00,806 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:31:00,835 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:31:01,032 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:31:02,493 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:31:02,496 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:31:02,497 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:31:17,750 - app.services.morning_brief_service - INFO - News synthesis complete: 2137 chars, finish_reason: stop
+2026-02-05 06:31:17,756 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,759 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,761 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'today': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,763 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,765 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,767 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,770 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,771 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,772 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,774 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-08'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:17,774 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:31:17,814 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:21,242 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/64f37c56-85cb-4590-8de9-adfc17d343ed/2026-02-05/morning_brief.mp3 (~152s)
+2026-02-05 06:31:21,246 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'brief_date': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:21,248 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:31:21,249 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-05 06:31:21,249 - morning_brief_generator - INFO - Successfully generated brief for 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-05 06:31:21,249 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:31:21,249 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:31:21,249 - morning_brief_generator - INFO -   - Audio duration: 152.0s
+2026-02-05 06:31:21,249 - morning_brief_generator - INFO - Generating brief for user: 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-05 06:31:21,249 - app.services.morning_brief_service - INFO - Generating morning brief for user 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-05 06:31:21,249 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:31:21,251 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'start_of_day': datetime.datetime(2026, 2, 5, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 6, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:21,293 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:21,366 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:31:21,393 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:31:21,470 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:31:21,473 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:31:21,495 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:31:21,642 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:31:22,213 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:31:22,215 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:31:22,218 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:31:36,653 - app.services.morning_brief_service - INFO - News synthesis complete: 2238 chars, finish_reason: stop
+2026-02-05 06:31:36,658 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,660 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,662 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'today': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,664 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,666 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,668 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,669 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,671 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,673 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,675 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-08'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:36,675 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:31:36,723 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:40,332 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/4f79cea1-48b4-4684-bbd0-d9ad1bb606b4/2026-02-05/morning_brief.mp3 (~150s)
+2026-02-05 06:31:40,335 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'brief_date': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:40,338 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:31:40,338 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-05 06:31:40,338 - morning_brief_generator - INFO - Successfully generated brief for 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-05 06:31:40,338 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:31:40,338 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:31:40,338 - morning_brief_generator - INFO -   - Audio duration: 150.0s
+2026-02-05 06:31:40,338 - morning_brief_generator - INFO - Generating brief for user: f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-05 06:31:40,338 - app.services.morning_brief_service - INFO - Generating morning brief for user f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-05 06:31:40,338 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-05 06:31:40,340 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'start_of_day': datetime.datetime(2026, 2, 5, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 6, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:40,410 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:40,478 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-05 06:31:40,639 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-05 06:31:40,801 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-05 06:31:40,808 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-05 06:31:40,837 - app.services.news_aggregator_service - INFO - Scraped 2 papers from HuggingFace
+2026-02-05 06:31:41,057 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-05 06:31:41,464 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-05 06:31:41,465 - app.services.news_aggregator_service - INFO - Total items before dedup: 59
+2026-02-05 06:31:41,466 - app.services.news_aggregator_service - INFO - Total items after dedup: 59
+2026-02-05 06:31:55,448 - app.services.morning_brief_service - INFO - News synthesis complete: 2672 chars, finish_reason: stop
+2026-02-05 06:31:55,451 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,452 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,453 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'today': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,454 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,455 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,456 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,457 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-04'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,458 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,459 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'two_weeks_ago': '2026-01-22'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,460 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-08'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:55,460 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-05 06:31:55,494 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-05 06:31:59,496 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/f5806b14-d75d-4a0c-8e99-f0c23910af43/2026-02-05/morning_brief.mp3 (~183s)
+2026-02-05 06:31:59,500 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'brief_date': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-05 06:31:59,502 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-05 06:31:59,502 - app.services.morning_brief_service - INFO - Morning brief generated successfully for f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO - Successfully generated brief for f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO -   - News sources: 34
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO -   - Audio duration: 183.2s
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO - ============================================================
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO - Morning brief generation complete
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO -   - Successful: 6
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO -   - Errors: 0
+2026-02-05 06:31:59,502 - morning_brief_generator - INFO - ============================================================
+2026-02-06 06:30:03,490 - app.services.notification_service - INFO - 📱 NotificationService initialized (Expo Push)
+2026-02-06 06:30:03,515 - morning_brief_generator - INFO - ============================================================
+2026-02-06 06:30:03,516 - morning_brief_generator - INFO - Starting morning brief generation at 2026-02-06 06:30:03.516061
+2026-02-06 06:30:03,516 - morning_brief_generator - INFO - ============================================================
+2026-02-06 06:30:03,784 - morning_brief_generator - INFO - Found 6 active users
+2026-02-06 06:30:03,784 - morning_brief_generator - INFO - Generating brief for user: c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-06 06:30:03,785 - app.services.morning_brief_service - INFO - Generating morning brief for user c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-06 06:30:03,785 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:30:04,314 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:30:04,325 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:30:04,499 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:30:04,620 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:30:04,660 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:30:04,674 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:30:04,827 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:30:05,533 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:30:05,534 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:30:05,557 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:30:32,340 - app.services.morning_brief_service - INFO - News synthesis complete: 2220 chars, finish_reason: stop
+2026-02-06 06:30:32,441 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:30:32,483 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:30:36,290 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/c2fbff82-ee33-4a97-a5b1-24b317269ad5/2026-02-06/morning_brief.mp3 (~176s)
+2026-02-06 06:30:36,335 - app.services.morning_brief_service - INFO - Brief saved to database for c2fbff82-ee33-4a97-a5b1-24b317269ad5 on 2026-02-06
+2026-02-06 06:30:36,774 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': 'c2fbff82-ee33-4a97-a5b1-24b317269ad5'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:30:36,774 - app.services.morning_brief_service - INFO - Morning brief generated successfully for c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-06 06:30:36,774 - morning_brief_generator - INFO - Successfully generated brief for c2fbff82-ee33-4a97-a5b1-24b317269ad5
+2026-02-06 06:30:36,774 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:30:36,775 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:30:36,775 - morning_brief_generator - INFO -   - Audio duration: 176.0s
+2026-02-06 06:30:36,775 - morning_brief_generator - INFO - Generating brief for user: 1
+2026-02-06 06:30:36,775 - app.services.morning_brief_service - INFO - Generating morning brief for user 1
+2026-02-06 06:30:36,776 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:30:36,798 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '1', 'start_of_day': datetime.datetime(2026, 2, 6, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 7, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:36,873 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:30:36,951 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:30:37,111 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:30:37,254 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:30:37,289 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:30:37,294 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:30:37,460 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:30:38,020 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:30:38,022 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:30:38,024 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:30:53,229 - app.services.morning_brief_service - INFO - News synthesis complete: 2217 chars, finish_reason: stop
+2026-02-06 06:30:53,235 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,237 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,240 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '1', 'today': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,242 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,244 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,246 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,249 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '1', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,251 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '1', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,253 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '1', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,256 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '1', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-09'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:53,256 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:30:53,299 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:30:56,661 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/1/2026-02-06/morning_brief.mp3 (~156s)
+2026-02-06 06:30:56,666 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '1', 'brief_date': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:56,670 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '1'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:30:56,670 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 1
+2026-02-06 06:30:56,670 - morning_brief_generator - INFO - Successfully generated brief for 1
+2026-02-06 06:30:56,670 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:30:56,670 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:30:56,671 - morning_brief_generator - INFO -   - Audio duration: 156.39999999999998s
+2026-02-06 06:30:56,671 - morning_brief_generator - INFO - Generating brief for user: 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-06 06:30:56,671 - app.services.morning_brief_service - INFO - Generating morning brief for user 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-06 06:30:56,671 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:30:56,674 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'start_of_day': datetime.datetime(2026, 2, 6, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 7, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:30:56,751 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:30:56,923 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:30:56,980 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:30:57,126 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:30:57,142 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:30:57,158 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:30:57,419 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:30:57,815 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:30:57,817 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:30:57,819 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:31:09,727 - app.services.morning_brief_service - INFO - News synthesis complete: 2308 chars, finish_reason: stop
+2026-02-06 06:31:09,732 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,734 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,736 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'today': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,738 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,739 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,741 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,743 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,745 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,747 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,749 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-09'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:09,749 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:31:09,793 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:13,463 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/44a9b3c0-7864-482b-9d9f-075e8c7c0814/2026-02-06/morning_brief.mp3 (~162s)
+2026-02-06 06:31:13,468 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814', 'brief_date': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:13,472 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '44a9b3c0-7864-482b-9d9f-075e8c7c0814'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:31:13,472 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-06 06:31:13,472 - morning_brief_generator - INFO - Successfully generated brief for 44a9b3c0-7864-482b-9d9f-075e8c7c0814
+2026-02-06 06:31:13,472 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:31:13,472 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:31:13,473 - morning_brief_generator - INFO -   - Audio duration: 162.0s
+2026-02-06 06:31:13,473 - morning_brief_generator - INFO - Generating brief for user: 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-06 06:31:13,473 - app.services.morning_brief_service - INFO - Generating morning brief for user 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-06 06:31:13,473 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:31:13,477 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'start_of_day': datetime.datetime(2026, 2, 6, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 7, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:13,609 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:31:13,619 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:13,793 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:31:13,798 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:31:13,836 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:31:13,969 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:31:14,088 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:31:14,494 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:31:14,496 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:31:14,497 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:31:27,474 - app.services.morning_brief_service - INFO - News synthesis complete: 2774 chars, finish_reason: stop
+2026-02-06 06:31:27,479 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,481 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,482 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'today': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,484 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,486 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,488 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,489 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,491 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,493 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,495 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-09'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:27,495 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:31:27,539 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:31,759 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/64f37c56-85cb-4590-8de9-adfc17d343ed/2026-02-06/morning_brief.mp3 (~183s)
+2026-02-06 06:31:31,764 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed', 'brief_date': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:31,770 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '64f37c56-85cb-4590-8de9-adfc17d343ed'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:31:31,770 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-06 06:31:31,771 - morning_brief_generator - INFO - Successfully generated brief for 64f37c56-85cb-4590-8de9-adfc17d343ed
+2026-02-06 06:31:31,771 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:31:31,771 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:31:31,772 - morning_brief_generator - INFO -   - Audio duration: 183.2s
+2026-02-06 06:31:31,772 - morning_brief_generator - INFO - Generating brief for user: 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-06 06:31:31,772 - app.services.morning_brief_service - INFO - Generating morning brief for user 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-06 06:31:31,773 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:31:31,778 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'start_of_day': datetime.datetime(2026, 2, 6, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 7, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:31,833 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:32,008 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:31:32,065 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:31:32,231 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:31:32,260 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:31:32,286 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:31:32,437 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:31:32,897 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:31:32,899 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:31:32,899 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:31:46,120 - app.services.morning_brief_service - INFO - News synthesis complete: 2389 chars, finish_reason: stop
+2026-02-06 06:31:46,125 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,128 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,131 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'today': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,133 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,135 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,137 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,139 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,142 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,144 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,146 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-09'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:46,146 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:31:46,186 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:49,877 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/4f79cea1-48b4-4684-bbd0-d9ad1bb606b4/2026-02-06/morning_brief.mp3 (~166s)
+2026-02-06 06:31:49,881 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4', 'brief_date': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:49,884 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': '4f79cea1-48b4-4684-bbd0-d9ad1bb606b4'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:31:49,884 - app.services.morning_brief_service - INFO - Morning brief generated successfully for 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-06 06:31:49,884 - morning_brief_generator - INFO - Successfully generated brief for 4f79cea1-48b4-4684-bbd0-d9ad1bb606b4
+2026-02-06 06:31:49,885 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:31:49,885 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:31:49,885 - morning_brief_generator - INFO -   - Audio duration: 165.6s
+2026-02-06 06:31:49,885 - morning_brief_generator - INFO - Generating brief for user: f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-06 06:31:49,885 - app.services.morning_brief_service - INFO - Generating morning brief for user f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-06 06:31:49,885 - app.services.news_aggregator_service - INFO - Starting news aggregation...
+2026-02-06 06:31:49,888 - app.services.morning_brief_service - ERROR - Error gathering calendar: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT title, starts_at, ends_at, location
+                FROM event
+                WHERE user_id = %(user_id)s
+                  AND starts_at >= %(start_of_day)s
+                  AND starts_at <= %(end_of_day)s
+                ORDER BY starts_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'start_of_day': datetime.datetime(2026, 2, 6, 5, 0, tzinfo=datetime.timezone.utc), 'end_of_day': datetime.datetime(2026, 2, 7, 4, 59, 59, 999999, tzinfo=datetime.timezone.utc)}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:31:49,963 - app.services.news_aggregator_service - INFO - Fetched 15 items from techcrunch
+2026-02-06 06:31:50,103 - app.services.news_aggregator_service - INFO - Fetched 15 items from ars_technica
+2026-02-06 06:31:50,240 - app.services.news_aggregator_service - INFO - Fetched 10 items from the_verge
+2026-02-06 06:31:50,245 - app.services.news_aggregator_service - INFO - Scraped 2 items from aitidbits
+2026-02-06 06:31:50,248 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:31:50,272 - app.services.news_aggregator_service - INFO - Scraped 1 papers from HuggingFace
+2026-02-06 06:31:50,510 - app.services.news_aggregator_service - INFO - Fetched 15 items from hacker_news
+2026-02-06 06:31:50,992 - app.services.news_aggregator_service - INFO - Scraped 0 items from the-decoder
+2026-02-06 06:31:50,993 - app.services.news_aggregator_service - INFO - Total items before dedup: 58
+2026-02-06 06:31:50,996 - app.services.news_aggregator_service - INFO - Total items after dedup: 58
+2026-02-06 06:32:06,377 - app.services.morning_brief_service - INFO - News synthesis complete: 2141 chars, finish_reason: stop
+2026-02-06 06:32:06,381 - app.services.morning_brief_service - ERROR - Error gathering proactive insights: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, insight_type, title, content, evidence
+                FROM dream_insight
+                WHERE user_id = %(user_id)s
+                    AND surface_strategy = 'proactive'
+                    AND surfaced_count = 0
+                    AND (expiry_at IS NULL OR expiry_at > NOW())
+                    AND confidence >= 0.5
+                ORDER BY confidence DESC, dream_date DESC
+                LIMIT 3
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,383 - app.services.health_insight_service - ERROR - Error getting health summary: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT ON (metric_type)
+                    metric_type, value, recorded_at
+                FROM health_metric
+                WHERE user_id = %(user_id)s
+                  AND recorded_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY metric_type, recorded_at DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,385 - app.services.morning_brief_service - ERROR - Error building recovery section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT sleep_hours, soreness_level, hrv, heart_rate, body_weight, weight_unit, notes
+                FROM daily_recovery_log
+                WHERE user_id = %(user_id)s AND log_date = %(today)s
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'today': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,387 - app.services.morning_brief_service - ERROR - Error building nutrition section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT meal_type, calories, protein, carbs, fats, logged_at
+                FROM food_log
+                WHERE user_id = %(user_id)s AND DATE(logged_at) = %(yesterday)s
+                ORDER BY logged_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,389 - app.services.morning_brief_service - ERROR - Error building workout recap section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT
+                    exercise_id,
+                    weight,
+                    reps,
+                    rpe,
+                    session_time
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND skipped = false
+                ORDER BY created_at
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,391 - app.services.morning_brief_service - ERROR - Error building today's plan section: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id, name FROM fitness_phase
+                WHERE user_id = %(user_id)s AND status = 'active'
+                LIMIT 1
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,393 - app.services.morning_brief_service - ERROR - Error checking for PRs: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT exercise_id, MAX(weight) as max_weight, MAX(reps) as max_reps
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date = %(yesterday)s
+                  AND weight IS NOT NULL
+                  AND skipped = false
+                GROUP BY exercise_id
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'yesterday': '2026-02-05'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,395 - app.services.morning_brief_service - ERROR - Error checking fatigue indicators: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DISTINCT session_date
+                FROM workout_log
+                WHERE user_id = %(user_id)s
+                  AND session_date >= %(two_weeks_ago)s
+                  AND skipped = false
+                ORDER BY session_date DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,397 - app.services.morning_brief_service - ERROR - Error checking nutrition patterns: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT DATE(logged_at) as log_date,
+                       SUM(calories) as total_calories,
+                       SUM(protein) as total_protein
+                FROM food_log
+                WHERE user_id = %(user_id)s
+                  AND logged_at >= %(two_weeks_ago)s
+                GROUP BY DATE(logged_at)
+                ORDER BY log_date DESC
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'two_weeks_ago': '2026-01-23'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,399 - app.services.morning_brief_service - ERROR - Error checking progression: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                    SELECT MAX(weight) as max_weight
+                    FROM workout_log
+                    WHERE user_id = %(user_id)s
+                      AND LOWER(exercise_id) LIKE %(pattern)s
+                      AND session_date >= %(four_weeks_ago)s
+                      AND weight IS NOT NULL
+                      AND skipped = false
+                ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'pattern': '%bench press%', 'four_weeks_ago': '2026-01-09'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:06,399 - app.services.morning_brief_service - INFO - Including fitness brief with readiness score 100/100
+2026-02-06 06:32:06,439 - app.services.weather_service - WARNING - One Call API returned 401, trying free API
+2026-02-06 06:32:09,888 - app.services.morning_brief_service - INFO - TTS audio generated: /home/david/jarvis/data/briefings/f5806b14-d75d-4a0c-8e99-f0c23910af43/2026-02-06/morning_brief.mp3 (~153s)
+2026-02-06 06:32:09,893 - app.services.morning_brief_service - ERROR - Error saving brief to database: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block
+[SQL: 
+                SELECT id FROM morning_brief
+                WHERE user_id = %(user_id)s AND brief_date = %(brief_date)s
+            ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43', 'brief_date': '2026-02-06'}]
+(Background on this error at: https://sqlalche.me/e/20/2j85)
+2026-02-06 06:32:09,897 - app.services.morning_brief_service - ERROR - Error sending iOS push notification: (psycopg.errors.UndefinedTable) relation "user_push_token" does not exist
+LINE 2:                     SELECT push_token FROM user_push_token
+                                                   ^
+[SQL: 
+                    SELECT push_token FROM user_push_token
+                    WHERE user_id = %(user_id)s
+                ]
+[parameters: {'user_id': 'f5806b14-d75d-4a0c-8e99-f0c23910af43'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2026-02-06 06:32:09,897 - app.services.morning_brief_service - INFO - Morning brief generated successfully for f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-06 06:32:09,897 - morning_brief_generator - INFO - Successfully generated brief for f5806b14-d75d-4a0c-8e99-f0c23910af43
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO -   - News sources: 33
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO -   - Calendar events: 0
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO -   - Audio duration: 153.2s
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO - ============================================================
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO - Morning brief generation complete
+2026-02-06 06:32:09,898 - morning_brief_generator - INFO -   - Successful: 6
+2026-02-06 06:32:09,899 - morning_brief_generator - INFO -   - Errors: 0
+2026-02-06 06:32:09,899 - morning_brief_generator - INFO - ============================================================

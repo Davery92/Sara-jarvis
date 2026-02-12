@@ -19,6 +19,7 @@ const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title
   modelviewer: { width: 800, height: 600, title: '3D Model' },
   research: { width: 700, height: 600, title: 'Research' },
   report: { width: 500, height: 450, title: 'Report' },
+  email: { width: 700, height: 600, title: 'Email' },
 }
 
 interface WindowOptions {

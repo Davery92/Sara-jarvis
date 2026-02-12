@@ -82,8 +82,30 @@ export function navigateToChat(params?: {
   healthAlert?: { severity: string; insightId?: string; title?: string; body?: string };
   nudge?: { nudgeType: string; title: string; message: string; actionSuggestion?: string };
   quickReply?: { message: string; nudgeType?: string; title?: string };
+  heartbeat?: { title: string; message: string; priority: string };
+  inboxItem?: { id: string; title: string };
 }) {
-  navigateToTab('Chat', params);
+  console.log('[Navigation] navigateToChat called with params:', params);
+  navigateToTab('Sara', params);
+}
+
+/**
+ * Navigate to Inbox screen
+ */
+export function navigateToInbox() {
+  if (navigationRef.isReady()) {
+    try {
+      // @ts-ignore
+      navigationRef.navigate('Main', {
+        screen: 'Inbox',
+      });
+    } catch (error) {
+      console.error('[Navigation] Error navigating to Inbox:', error);
+    }
+  } else {
+    console.log('[Navigation] Navigator not ready, queueing navigation to Inbox');
+    pendingNavigation = { tabName: 'Inbox' };
+  }
 }
 
 /**

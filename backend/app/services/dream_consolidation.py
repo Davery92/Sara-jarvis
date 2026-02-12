@@ -131,6 +131,31 @@ class DreamConsolidationService:
             summary_ids = await self._store_summaries(db, user_id, day, summaries)
             logger.info(f"💾 Stored {len(summary_ids)} summary traces")
 
+            # Step 7: Generate policy candidates from insights (Phase 3 — Cortana Evolution)
+            policy_candidate_ids = []
+            try:
+                from app.core.config import settings
+                if getattr(settings, 'autonomy_policy_candidates_enabled', False) and insights:
+                    from app.services.autonomy.policy_candidate import policy_candidate_service
+                    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession as AsyncDB
+                    from sqlalchemy.orm import sessionmaker
+                    import os
+
+                    database_url = os.getenv("DATABASE_URL", "")
+                    async_url = database_url.replace("postgresql://", "postgresql+asyncpg://").replace("postgresql+psycopg://", "postgresql+asyncpg://")
+                    engine = create_async_engine(async_url, echo=False)
+                    async_session = sessionmaker(engine, class_=AsyncDB, expire_on_commit=False)
+                    async with async_session() as async_db:
+                        policy_candidate_ids = await policy_candidate_service.generate_from_dream_insights(
+                            db=async_db, user_id=user_id, insights=insights,
+                        )
+                        await async_db.commit()
+                    await engine.dispose()
+                    if policy_candidate_ids:
+                        logger.info(f"Generated {len(policy_candidate_ids)} policy candidates from dream insights")
+            except Exception as e:
+                logger.debug(f"Policy candidate generation from dreams failed (non-fatal): {e}")
+
             runtime_seconds = (datetime.now() - start_time).total_seconds()
             logger.info(f"🌙 Dream consolidation complete in {runtime_seconds:.2f}s")
 
@@ -143,6 +168,7 @@ class DreamConsolidationService:
                 "edges_created": edges_created,
                 "insights_extracted": len(insights),
                 "summary_traces": summary_ids,
+                "policy_candidates": len(policy_candidate_ids),
                 "runtime_seconds": runtime_seconds
             }
 
@@ -300,7 +326,26 @@ Respond with only valid JSON."""
                 max_tokens=500
             )
 
-            result = json.loads(response)
+            if isinstance(response, dict):
+                content = (
+                    response.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+            else:
+                content = str(response)
+
+            # Some models wrap JSON in markdown fences.
+            content = content.strip()
+            if "```" in content:
+                fenced = content.split("```")
+                if len(fenced) >= 2:
+                    content = fenced[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                    content = content.strip()
+
+            result = json.loads(content)
 
             return {
                 "cluster_size": len(cluster),

@@ -1,3 +1,4 @@
+# LEGACY — production uses main_simple.py. Do not add new routes here.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager

@@ -112,6 +112,7 @@ class SourceChunk(Base):
     breadcrumb = Column(String(500), nullable=True)  # Section > Subsection hierarchy
     embedding = Column(Vector(1024), nullable=False)
     concept_tags = Column(JSONB, default=list)
+    analogy_version = Column(JSONB, nullable=True)  # {"text": "...", "domain": "...", "unknown_terms": [...]}
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -127,6 +128,7 @@ class SourceChunk(Base):
             "text": self.text,
             "breadcrumb": self.breadcrumb,
             "concept_tags": self.concept_tags or [],
+            "analogy_version": self.analogy_version,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -184,6 +186,8 @@ class LearningProgress(Base):
     next_review_at = Column(DateTime(timezone=True), server_default=func.now())
     last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
     quality_history = Column(JSONB, default=list)  # [{date, quality_score}]
+    review_mode = Column(String(50), nullable=True)  # Last review mode used
+    review_mode_history = Column(JSONB, default=list)  # [{mode, quality, date}]
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -207,6 +211,8 @@ class LearningProgress(Base):
             "next_review_at": self.next_review_at.isoformat() if self.next_review_at else None,
             "last_reviewed_at": self.last_reviewed_at.isoformat() if self.last_reviewed_at else None,
             "quality_history": self.quality_history or [],
+            "review_mode": self.review_mode,
+            "review_mode_history": self.review_mode_history or [],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -223,6 +229,13 @@ class TopicScratchpad(Base):
     # Content
     content = Column(Text, nullable=False, default="")
     version = Column(Integer, default=1)
+
+    # Session state for continuity
+    session_state = Column(JSONB, default=dict)  # Stores summary, open_questions, concepts_in_progress, stuck_points, mastery_signals
+    last_interaction_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Persisted curriculum (LLM-generated learning path)
+    curriculum = Column(JSONB, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -244,6 +257,8 @@ class TopicScratchpad(Base):
             "user_id": self.user_id,
             "content": self.content,
             "version": self.version,
+            "session_state": self.session_state or {},
+            "last_interaction_at": self.last_interaction_at.isoformat() if self.last_interaction_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

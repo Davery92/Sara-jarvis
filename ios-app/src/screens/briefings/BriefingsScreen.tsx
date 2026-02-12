@@ -85,7 +85,9 @@ export default function BriefingsScreen() {
   const [generating, setGenerating] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [audioProgress, setAudioProgress] = useState<{ positionMs: number; durationMs: number } | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
+  const progressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     loadBriefs();
@@ -93,6 +95,9 @@ export default function BriefingsScreen() {
     return () => {
       if (soundRef.current) {
         soundRef.current.unloadAsync();
+      }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
       }
     };
   }, []);
@@ -257,6 +262,22 @@ export default function BriefingsScreen() {
       setPlaying(true);
       setPaused(false);
 
+      // Start progress polling
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      progressTimerRef.current = setInterval(async () => {
+        if (soundRef.current) {
+          try {
+            const st = await soundRef.current.getStatusAsync();
+            if (st.isLoaded) {
+              setAudioProgress({
+                positionMs: st.positionMillis,
+                durationMs: st.durationMillis || 0,
+              });
+            }
+          } catch {}
+        }
+      }, 1000);
+
       sound.setOnPlaybackStatusUpdate(async (playbackStatus) => {
         if (!playbackStatus.isLoaded) {
           // Handle unloaded state
@@ -306,6 +327,8 @@ export default function BriefingsScreen() {
       console.error('Failed to play audio:', error);
       setPlaying(false);
       setPaused(false);
+      setAudioProgress(null);
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     }
   };
 
@@ -389,15 +412,22 @@ export default function BriefingsScreen() {
               )}
             </View>
             {selectedBrief.has_audio && (
-              <TouchableOpacity
-                onPress={playAudio}
-                style={[styles.playButton, playing && styles.playButtonActive]}
-              >
-                <Text style={styles.playIcon}>{playing ? '⏸' : (paused ? '▶️' : '▶️')}</Text>
-                <Text style={styles.playText}>
-                  {playing ? 'Pause' : (paused ? 'Resume' : 'Play')}
-                </Text>
-              </TouchableOpacity>
+              <View>
+                <TouchableOpacity
+                  onPress={playAudio}
+                  style={[styles.playButton, playing && styles.playButtonActive]}
+                >
+                  <Text style={styles.playIcon}>{playing ? '⏸' : (paused ? '▶️' : '▶️')}</Text>
+                  <Text style={styles.playText}>
+                    {playing ? 'Pause' : (paused ? 'Resume' : 'Play')}
+                  </Text>
+                </TouchableOpacity>
+                {(playing || paused) && audioProgress && audioProgress.durationMs > 0 && (
+                  <Text style={styles.audioProgressText}>
+                    {formatDuration(Math.floor(audioProgress.positionMs / 1000))} / {formatDuration(Math.floor(audioProgress.durationMs / 1000))}
+                  </Text>
+                )}
+              </View>
             )}
           </View>
 
@@ -588,6 +618,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     fontSize: fontSizes.sm,
+  },
+  audioProgressText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    textAlign: 'center',
+    marginTop: 4,
   },
   briefContent: {
     paddingBottom: spacing.lg,

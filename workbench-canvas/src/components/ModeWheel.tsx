@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search } from 'lucide-react'
+import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search, Mail } from 'lucide-react'
 import { useCanvasStore } from '../store/canvasStore'
 import type { WindowType } from '../types'
 
@@ -13,6 +13,7 @@ interface AppConfig {
 
 const apps: AppConfig[] = [
   { id: 'chat', icon: MessageSquare, label: 'Chat', color: 'bg-teal-500' },
+  { id: 'email', icon: Mail, label: 'Email', color: 'bg-cyan-500' },
   { id: 'research', icon: Search, label: 'Research', color: 'bg-purple-500' },
   { id: 'note', icon: FileText, label: 'Notes', color: 'bg-blue-500' },
   { id: 'maps', icon: GitBranch, label: 'Maps', color: 'bg-teal-600', opensPickerFirst: true },

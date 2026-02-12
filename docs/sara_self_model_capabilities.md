@@ -253,6 +253,33 @@
 | `device_take_screenshot` | Take screenshot |
 | `device_open_workspace` | Open workspace on device |
 
+### Soul (`soul`) - Sara's Identity
+| Tool | Description |
+|------|-------------|
+| `view_soul` | View Sara's core identity document (sections: identity, principles, boundaries, growth, evolution_log) |
+| `propose_soul_change` | Propose a change to Sara's operating principles, boundaries, or identity - requires David's approval |
+| `list_soul_proposals` | List pending Soul change proposals awaiting approval |
+
+The Soul is Sara's persistent self-definition. She can propose changes to herself based on observations or feedback, but changes require explicit approval from David. The Soul contains:
+- **Identity**: Who Sara is, her voice and personality
+- **Principles**: Operating principles and behavioral rules
+- **Boundaries**: Things Sara won't do or lines she won't cross
+- **Growth**: Current growth areas and learning focus
+- **Evolution Log**: History of changes to the Soul
+
+### Heartbeat (`heartbeat`) - Sara's Monitoring Checklist
+| Tool | Description |
+|------|-------------|
+| `add_heartbeat_item` | Add an item to Sara's heartbeat checklist (monitors, time-bound reminders, conditional triggers) |
+| `list_heartbeat_items` | View current heartbeat checklist items |
+| `remove_heartbeat_item` | Remove an item from the checklist |
+| `update_heartbeat_item` | Modify an existing heartbeat item |
+
+The Heartbeat is a dynamic watchlist that Sara checks every 30 minutes. Item types:
+- **Monitor**: Persistent checks (e.g., background task completion, meal logging)
+- **Time-bound**: Expires after a date (e.g., "follow up on X by Friday")
+- **Conditional**: Triggers when condition is met (e.g., "alert if HRV < 40")
+
 ## Background Agents
 
 For complex tasks, you can delegate to background agents:
@@ -266,4 +293,4 @@ Use `handoff_to_agents` to spawn background workers on David's GPU cluster. Chec
 
 All tools are defined in `backend/app/tools/` and registered in `backend/app/tools/registry.py`. The registry organizes tools into categories and provides OpenAI-compatible function schemas.
 
-**Total Tools: 100+** across 17 categories
+**Total Tools: 107+** across 19 categories

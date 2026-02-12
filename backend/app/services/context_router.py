@@ -18,7 +18,14 @@ class ContextDecision(NamedTuple):
     inject_cognitive: bool
     inject_insight: bool
     inject_daily_brief: bool
-    inject_body_state: bool
+    inject_body_state: bool  # DEPRECATED: always False, body state removed from chat
+    inject_soul: bool  # Always True - Sara's core identity
+    inject_pkg: bool  # Personal Knowledge Graph about David
+    inject_patterns: bool  # Discovered behavioral patterns
+    inject_activity_context: bool  # Activity state & interruptibility for tone adaptation
+    inject_learning_recall: bool  # Test recall on topics David is studying
+    inject_changes_brief: bool  # Changes since last chat (re-entry, first msg of day, "catch me up")
+    inject_lessons: bool  # Lessons learned from past mistakes (self-correction)
     reason: str
 
 
@@ -56,11 +63,45 @@ class ContextRouter:
         'meetings', 'brief', 'agenda', 'plans for', 'appointments'
     ]
 
-    # Keywords that force body state injection even in work mode
-    BODY_STATE_KEYWORDS = [
-        'tired', 'energy', 'sleep', 'how am i', 'feeling', 'health',
-        'stressed', 'exhausted', 'rested', 'wellness', 'fatigue'
+    # Keywords that trigger PKG injection
+    PKG_KEYWORDS = [
+        'i like', 'i prefer', 'i usually', 'my favorite', 'my goal',
+        'do you know about me', 'do you remember', 'what do you know',
+        'i always', 'i never', 'i love', 'i hate', 'my routine',
+        'my schedule', 'my habit', 'about me', 'you know me'
     ]
+
+    # Intents that benefit from PKG context
+    PKG_INTENTS = ['CONVERSATIONAL', 'MEMORY', 'GENERAL', 'FITNESS']
+
+    # Keywords that trigger pattern injection
+    PATTERN_KEYWORDS = [
+        'usually', 'pattern', 'routine', 'habit', 'every',
+        'trend', 'notice', 'always seem', 'tend to'
+    ]
+
+    # Intents that benefit from pattern injection
+    PATTERN_INTENTS = ['CONVERSATIONAL', 'FITNESS', 'GENERAL']
+
+    # Keywords that suggest learning-adjacent questions (recall testing opportunities)
+    LEARNING_RECALL_KEYWORDS = [
+        'learn', 'study', 'review', 'practice', 'explain',
+        'how does', 'what is', 'tell me about', 'how do',
+        'what are', 'why does', 'why is', 'can you explain',
+    ]
+
+    # Intents eligible for learning recall injection
+    LEARNING_RECALL_INTENTS = ['CONVERSATIONAL', 'KNOWLEDGE', 'GENERAL']
+
+    # Keywords that trigger changes brief (what happened while away)
+    CHANGES_BRIEF_KEYWORDS = [
+        'catch me up', 'what happened', 'what did i miss', 'any updates',
+        'anything new', 'what\'s new', 'fill me in', 'bring me up to speed',
+        'while i was away', 'since last time',
+    ]
+
+    # Intents eligible for lesson injection (conversational quality improvement)
+    LESSON_INTENTS = ['CONVERSATIONAL', 'GENERAL', 'KNOWLEDGE', 'MEMORY', 'NOTES']
 
     def decide(
         self,
@@ -97,12 +138,31 @@ class ContextRouter:
         # Determine if insight context should be injected
         inject_insight = self._should_inject_insight(intent, has_question)
 
-        # Determine if daily brief and body state should be injected
+        # Determine if daily brief should be injected (body state removed from chat)
         inject_daily_brief = self._should_inject_daily_brief(message_lower, in_work_mode)
-        inject_body_state = self._should_inject_body_state(message_lower, in_work_mode)
+        inject_body_state = False  # Body state permanently disabled
+
+        # Soul is always injected - it's Sara's core identity
+        inject_soul = True
+
+        # Determine if PKG and patterns should be injected
+        inject_pkg = self._should_inject_pkg(intent, message_lower, turn_count, in_work_mode)
+        inject_patterns = self._should_inject_patterns(intent, message_lower, turn_count, in_work_mode)
+
+        # Activity context is always injected (lightweight, drives tone)
+        inject_activity_context = True
+
+        # Determine if learning recall testing should be injected
+        inject_learning_recall = self._should_inject_learning_recall(intent, message_lower, in_work_mode)
+
+        # Determine if changes brief should be injected (first msg after gap, "catch me up", etc.)
+        inject_changes_brief = self._should_inject_changes_brief(message_lower, turn_count)
+
+        # Determine if lessons from past mistakes should be injected
+        inject_lessons = self._should_inject_lessons(intent, in_work_mode)
 
         # Build reason string for logging
-        reasons = []
+        reasons = ["soul"]  # Always included
         if inject_memory:
             reasons.append("memory")
         if inject_cognitive:
@@ -111,10 +171,20 @@ class ContextRouter:
             reasons.append("insight")
         if inject_daily_brief:
             reasons.append("daily_brief")
-        if inject_body_state:
-            reasons.append("body_state")
+        if inject_pkg:
+            reasons.append("pkg")
+        if inject_patterns:
+            reasons.append("patterns")
+        if inject_activity_context:
+            reasons.append("activity")
+        if inject_learning_recall:
+            reasons.append("learning_recall")
+        if inject_changes_brief:
+            reasons.append("changes_brief")
+        if inject_lessons:
+            reasons.append("lessons")
 
-        reason = f"Injecting: {', '.join(reasons) if reasons else 'none'}"
+        reason = f"Injecting: {', '.join(reasons)}"
         if in_work_mode:
             reason = f"[WORK MODE] {reason}"
 
@@ -124,6 +194,13 @@ class ContextRouter:
             inject_insight=inject_insight,
             inject_daily_brief=inject_daily_brief,
             inject_body_state=inject_body_state,
+            inject_soul=inject_soul,
+            inject_pkg=inject_pkg,
+            inject_patterns=inject_patterns,
+            inject_activity_context=inject_activity_context,
+            inject_learning_recall=inject_learning_recall,
+            inject_changes_brief=inject_changes_brief,
+            inject_lessons=inject_lessons,
             reason=reason
         )
 
@@ -213,17 +290,100 @@ class ContextRouter:
         # In work mode, check for schedule-related keywords
         return any(kw in message_lower for kw in self.DAILY_BRIEF_KEYWORDS)
 
-    def _should_inject_body_state(self, message_lower: str, in_work_mode: bool) -> bool:
+    def _should_inject_pkg(self, intent: str, message_lower: str,
+                           turn_count: int, in_work_mode: bool) -> bool:
         """
-        Body state is injected when:
-        1. Not in work mode (always inject in normal mode)
-        2. In work mode but user asks about wellness/energy/feelings
+        PKG context is injected when:
+        1. Not in work mode and intent benefits from personal knowledge
+        2. PKG keywords detected
+        3. First turn of conversation (rapport building)
+        4. Personal question detected
         """
-        if not in_work_mode:
+        if in_work_mode:
+            # In work mode, only inject if explicitly asking about personal knowledge
+            return any(kw in message_lower for kw in self.PKG_KEYWORDS)
+
+        # PKG keywords always trigger
+        if any(kw in message_lower for kw in self.PKG_KEYWORDS):
             return True
 
-        # In work mode, check for wellness-related keywords
-        return any(kw in message_lower for kw in self.BODY_STATE_KEYWORDS)
+        # First turn of conversation
+        if turn_count <= 1:
+            return True
+
+        # Conversational/memory/general/fitness intents benefit from PKG
+        if intent in self.PKG_INTENTS:
+            return True
+
+        # Personal questions
+        if '?' in message_lower and any(w in message_lower for w in ['i ', 'my ', 'me ']):
+            return True
+
+        return False
+
+    def _should_inject_learning_recall(self, intent: str, message_lower: str,
+                                      in_work_mode: bool) -> bool:
+        """
+        Learning recall testing should be injected when:
+        1. Not in work mode
+        2. Intent is conversational/knowledge/general
+        3. Message contains learning-adjacent question keywords
+        4. Message is long enough to be a real question (not a quick command)
+        """
+        if in_work_mode:
+            return False
+        if intent not in self.LEARNING_RECALL_INTENTS:
+            return False
+        if len(message_lower) < 20:
+            return False
+        return any(kw in message_lower for kw in self.LEARNING_RECALL_KEYWORDS)
+
+    def _should_inject_patterns(self, intent: str, message_lower: str,
+                                turn_count: int, in_work_mode: bool) -> bool:
+        """
+        Pattern context is injected when:
+        1. Pattern-related keywords detected
+        2. First turn of day (morning greeting)
+        3. Conversational/fitness/general intents (not work mode)
+        """
+        if in_work_mode:
+            return any(kw in message_lower for kw in self.PATTERN_KEYWORDS)
+
+        # Pattern keywords always trigger
+        if any(kw in message_lower for kw in self.PATTERN_KEYWORDS):
+            return True
+
+        # First turn (likely greeting / start of session)
+        if turn_count <= 1 and intent in self.PATTERN_INTENTS:
+            return True
+
+        return False
+
+    def _should_inject_changes_brief(self, message_lower: str, turn_count: int) -> bool:
+        """
+        Changes brief is injected when:
+        1. First message of a conversation (turn_count <= 1) — re-entry context
+        2. User explicitly asks "catch me up" / "what did I miss"
+        """
+        # First message — likely re-entry
+        if turn_count <= 1:
+            return True
+
+        # Explicit request for updates
+        if any(kw in message_lower for kw in self.CHANGES_BRIEF_KEYWORDS):
+            return True
+
+        return False
+
+    def _should_inject_lessons(self, intent: str, in_work_mode: bool) -> bool:
+        """
+        Lesson injection is needed when:
+        1. Not in work mode
+        2. Intent is conversational/general/knowledge (where mistakes matter most)
+        """
+        if in_work_mode:
+            return False
+        return intent in self.LESSON_INTENTS
 
 
 # Singleton instance

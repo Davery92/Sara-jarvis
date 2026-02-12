@@ -8,10 +8,14 @@ import BriefingsScreen from '../screens/briefings/BriefingsScreen';
 import HealthDataScreen from '../screens/health/HealthDataScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import ProjectsScreen from '../screens/projects/ProjectsScreen';
+import InboxScreen from '../screens/inbox/InboxScreen';
+import SaraActivityScreen from '../screens/sara/SaraActivityScreen';
+import NotesListScreen from '../screens/notes/NotesListScreen';
 import { colors, fontSizes } from '../styles/theme';
 
 export type AppStackParamList = {
   MainTabs: undefined;
+  Notes: undefined;
   Recipes: undefined;
   Documents: undefined;
   Calendar: undefined;
@@ -19,6 +23,8 @@ export type AppStackParamList = {
   Health: undefined;
   Settings: undefined;
   Projects: undefined;
+  Inbox: undefined;
+  SaraActivity: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -41,6 +47,11 @@ export default function AppNavigator() {
         name="MainTabs"
         component={MainNavigator}
         options={{ headerShown: false }}
+      />
+      <Stack.Screen
+        name="Notes"
+        component={NotesListScreen}
+        options={{ title: 'Notes' }}
       />
       <Stack.Screen
         name="Recipes"
@@ -76,6 +87,16 @@ export default function AppNavigator() {
         name="Projects"
         component={ProjectsScreen}
         options={{ title: 'Projects' }}
+      />
+      <Stack.Screen
+        name="Inbox"
+        component={InboxScreen}
+        options={{ title: 'Inbox' }}
+      />
+      <Stack.Screen
+        name="SaraActivity"
+        component={SaraActivityScreen}
+        options={{ title: "Sara's Mind" }}
       />
     </Stack.Navigator>
   );

@@ -178,7 +178,7 @@ export default function Notes() {
   }, [])
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] bg-gray-900 text-white">
+    <div className="flex h-full bg-gray-900 text-white">
       {/* Sidebar */}
       <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
         {/* Header */}

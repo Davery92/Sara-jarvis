@@ -424,7 +424,7 @@ class AnticipationService:
                     """),
                     {
                         "id": str(uuid.uuid4()),
-                        "user_id": "64f37c56-85cb-4590-8de9-adfc17c343ed",
+                        "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
                         "title": prep.title,
                         "description": prep.body,
                         "reminder_time": prep.scheduled_for,
@@ -439,7 +439,7 @@ class AnticipationService:
             try:
                 wm_service = get_working_memory_service()
                 await wm_service.add_context_segment(
-                    user_id="64f37c56-85cb-4590-8de9-adfc17c343ed",
+                    user_id="64f37c56-85cb-4590-8de9-adfc17d343ed",
                     content=f"[Daily Brief]\n{prep.body}",
                     source="anticipation",
                     relevance=prep.priority,
@@ -456,7 +456,7 @@ class AnticipationService:
                     VALUES (:user_id, 'anticipation_alert', :content, :context)
                 """),
                 {
-                    "user_id": "64f37c56-85cb-4590-8de9-adfc17c343ed",
+                    "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
                     "content": f"{prep.title}: {prep.body}",
                     "context": prep.metadata or {},
                 }

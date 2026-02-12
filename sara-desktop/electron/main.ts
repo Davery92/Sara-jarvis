@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, Notification } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, Notification, dialog } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { spawn, ChildProcess } from 'child_process'
 import WebSocket from 'ws'
+import { autoUpdater } from 'electron-updater'
 
 let sidecarProcess: ChildProcess | null = null
 let sidecarBridge: WebSocket | null = null
@@ -775,6 +776,10 @@ ipcMain.handle('get-auth-token', () => {
 ipcMain.handle('set-auth-token', (_, token: string | null) => {
   if (token) {
     store.set('authToken', token)
+    // Push new token to sidecar so it can reconnect with fresh credentials
+    if (sidecarBridge && sidecarBridge.readyState === WebSocket.OPEN) {
+      sidecarBridge.send(JSON.stringify({ type: 'auth_token', token }))
+    }
   } else {
     store.delete('authToken')
   }
@@ -832,6 +837,50 @@ ipcMain.on('update-timer', (_, timerData: { id: string; remainingSeconds: number
 app.whenReady().then(() => {
   // Initialize settings store (must be after app is ready)
   store.init()
+
+  // --- Auto-updater ---
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.logger = {
+    info: (msg: any) => console.log('[AutoUpdate]', msg),
+    warn: (msg: any) => console.warn('[AutoUpdate]', msg),
+    error: (msg: any) => console.error('[AutoUpdate]', msg),
+    debug: (msg: any) => console.log('[AutoUpdate:debug]', msg),
+  }
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('[AutoUpdate] Update available:', info.version)
+    new Notification({
+      title: 'Sara Update Available',
+      body: `Version ${info.version} is downloading...`,
+    }).show()
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[AutoUpdate] Update downloaded:', info.version)
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Ready',
+      message: `Sara ${info.version} has been downloaded.`,
+      detail: 'It will be installed when you restart the app. Restart now?',
+      buttons: ['Restart', 'Later'],
+      defaultId: 0,
+    }).then(({ response }) => {
+      if (response === 0) {
+        autoUpdater.quitAndInstall()
+      }
+    })
+  })
+
+  autoUpdater.on('error', (err) => {
+    console.error('[AutoUpdate] Error:', err.message)
+  })
+
+  // Check for updates on launch, then every 30 minutes
+  autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Initial check failed:', err.message))
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Periodic check failed:', err.message))
+  }, 30 * 60 * 1000)
 
   // Start sidecar for activity monitoring and screenshots
   startSidecar(store)

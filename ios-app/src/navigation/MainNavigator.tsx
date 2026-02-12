@@ -1,9 +1,7 @@
 import React from 'react';
 import { Text } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import HomeScreen from '../screens/home/HomeScreen';
-import ChatScreen from '../screens/chat/ChatScreen';
-import NotesListScreen from '../screens/notes/NotesListScreen';
+import SaraScreen from '../screens/sara/SaraScreen';
 import FitnessScreen from '../screens/fitness/FitnessScreen';
 import LearningScreen from '../screens/learning/LearningScreen';
 import MoreScreen from '../screens/more/MoreScreen';
@@ -29,35 +27,25 @@ export default function MainNavigator() {
       }}
     >
       <Tab.Screen
-        name="Home"
-        component={HomeScreen}
+        name="Sara"
+        component={SaraScreen}
         options={{
-          title: 'Home',
-          tabBarLabel: 'Home',
+          title: 'Sara',
+          headerShown: false,
+          tabBarLabel: 'Sara',
           tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="🏠" color={color} size={size} />
+            <TabBarIcon name="✨" color={color} size={size} />
           ),
         }}
       />
       <Tab.Screen
-        name="Chat"
-        component={ChatScreen}
+        name="Fitness"
+        component={FitnessScreen}
         options={{
-          title: 'Chat with Sara',
-          tabBarLabel: 'Chat',
+          title: 'Fitness',
+          tabBarLabel: 'Fitness',
           tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="💬" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Notes"
-        component={NotesListScreen}
-        options={{
-          title: 'Notes',
-          tabBarLabel: 'Notes',
-          tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="📝" color={color} size={size} />
+            <TabBarIcon name="💪" color={color} size={size} />
           ),
         }}
       />
@@ -71,17 +59,6 @@ export default function MainNavigator() {
             <TabBarIcon name="📚" color={color} size={size} />
           ),
           headerShown: false,
-        }}
-      />
-      <Tab.Screen
-        name="Fitness"
-        component={FitnessScreen}
-        options={{
-          title: 'Fitness',
-          tabBarLabel: 'Fitness',
-          tabBarIcon: ({ color, size}) => (
-            <TabBarIcon name="💪" color={color} size={size} />
-          ),
         }}
       />
       <Tab.Screen

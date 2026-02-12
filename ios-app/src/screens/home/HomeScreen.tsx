@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   ScrollView,
@@ -13,6 +13,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MainTabScreenProps } from '../../types/navigation';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import apiClient from '../../services/api';
+import { useToast } from '../../context/ToastContext';
 
 // Import widgets
 import HeaderWidget from '../../components/home/HeaderWidget';
@@ -33,6 +35,129 @@ import RecoveryLogModal from '../../components/fitness/RecoveryLogModal';
 // Import contexts and services
 import { useTimer } from '../../context/TimerContext';
 
+// --- Sara Status Card ---
+const EMOTION_EMOJI: Record<string, string> = {
+  curious: '\uD83E\uDD14', calm: '\uD83D\uDE0C', alert: '\u26A1', concerned: '\uD83D\uDE1F',
+  happy: '\uD83D\uDE0A', focused: '\uD83C\uDFAF', neutral: '\uD83D\uDE10', reflective: '\uD83E\uDE9E', attentive: '\uD83D\uDC40',
+};
+
+function SaraStatusCard() {
+  const [status, setStatus] = useState<any>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const data = await apiClient.get('/api/sara/status');
+      setStatus(data);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 60000);
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
+
+  if (!status) return null;
+
+  const emoji = EMOTION_EMOJI[status.emotional_state] || '\uD83E\uDD16';
+
+  return (
+    <TouchableOpacity
+      onPress={() => setExpanded(!expanded)}
+      style={saraStyles.card}
+      activeOpacity={0.7}
+    >
+      <View style={saraStyles.topRow}>
+        <Text style={saraStyles.emoji}>{emoji}</Text>
+        <View style={saraStyles.textCol}>
+          <Text style={saraStyles.stateLabel}>Sara is {status.emotional_state}</Text>
+          {status.watching_for && (
+            <Text style={saraStyles.watching} numberOfLines={1}>Watching for: {status.watching_for}</Text>
+          )}
+        </View>
+        {status.david_energy != null && (
+          <View style={saraStyles.energyBadge}>
+            <Text style={saraStyles.energyText}>{Math.round(status.david_energy * 100)}%</Text>
+          </View>
+        )}
+      </View>
+      {expanded && (
+        <View style={saraStyles.expandedSection}>
+          {status.latest_thought && (
+            <Text style={saraStyles.thought}>{status.latest_thought}</Text>
+          )}
+          {status.last_action && (
+            <Text style={saraStyles.detail}>Last: {status.last_action.slice(0, 100)}</Text>
+          )}
+          {status.pending_observations > 0 && (
+            <Text style={saraStyles.detail}>{status.pending_observations} pending observations</Text>
+          )}
+          {status.pkg_facts_count > 0 && (
+            <Text style={saraStyles.detail}>{status.pkg_facts_count} facts about you</Text>
+          )}
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+const saraStyles = StyleSheet.create({
+  card: {
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  topRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  emoji: { fontSize: 28 },
+  textCol: { flex: 1 },
+  stateLabel: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  watching: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
+  },
+  energyBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  energyText: {
+    color: colors.success,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  expandedSection: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    gap: 4,
+  },
+  thought: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontStyle: 'italic',
+  },
+  detail: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+  },
+});
+
 type Props = MainTabScreenProps<'Home'>;
 
 export default function HomeScreen({ navigation }: Props) {
@@ -45,12 +170,14 @@ export default function HomeScreen({ navigation }: Props) {
   const [noteText, setNoteText] = useState('');
   const [timerTitle, setTimerTitle] = useState('');
   const [timerMinutes, setTimerMinutes] = useState('25');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const { startTimer } = useTimer();
+  const { showToast } = useToast();
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    // Give widgets time to refresh
+    setRefreshKey(k => k + 1);
     await new Promise((resolve) => setTimeout(resolve, 1000));
     setRefreshing(false);
   };
@@ -75,15 +202,19 @@ export default function HomeScreen({ navigation }: Props) {
     setShowTimerModal(true);
   };
 
-  const handleSaveNote = () => {
+  const handleSaveNote = async () => {
     if (!noteText.trim()) {
       Alert.alert('Error', 'Please enter a note');
       return;
     }
-    // TODO: Implement quick note saving to backend
-    Alert.alert('Success', 'Note saved');
-    setNoteText('');
-    setShowQuickNoteModal(false);
+    try {
+      await apiClient.post('/notes', { title: 'Quick Note', content: noteText.trim() });
+      setNoteText('');
+      setShowQuickNoteModal(false);
+      showToast('success', 'Note saved');
+    } catch {
+      showToast('error', 'Failed to save note');
+    }
   };
 
   const handleCreateTimer = async () => {
@@ -118,6 +249,7 @@ export default function HomeScreen({ navigation }: Props) {
         }
       >
         <HeaderWidget />
+        <SaraStatusCard key={`sara-${refreshKey}`} />
         <QuickActionsGrid
           onLogFood={handleLogFood}
           onLogWorkout={handleLogWorkout}

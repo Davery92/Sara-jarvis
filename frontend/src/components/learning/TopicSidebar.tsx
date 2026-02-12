@@ -6,6 +6,7 @@ interface TopicSidebarProps {
   currentTopic: LearningTopic | null
   onSelectTopic: (topic: LearningTopic | null) => void
   onCreateTopic: (title: string, description?: string, parentId?: string, autoResearch?: boolean) => void
+  onDeleteTopic?: (topicId: string) => void
   loading: boolean
 }
 
@@ -14,6 +15,7 @@ export default function TopicSidebar({
   currentTopic,
   onSelectTopic,
   onCreateTopic,
+  onDeleteTopic,
   loading
 }: TopicSidebarProps) {
   const [showNewTopicForm, setShowNewTopicForm] = useState(false)
@@ -176,7 +178,7 @@ export default function TopicSidebar({
                     : 'border-transparent'
                 }`}
               >
-                <div className="flex items-start gap-3">
+                <div className="flex items-start gap-3 group">
                   <div className={`w-2 h-2 rounded-full mt-2 ${getStatusColor(topic.status)}`} />
                   <div className="flex-1 min-w-0">
                     <p className={`font-medium truncate ${
@@ -198,6 +200,20 @@ export default function TopicSidebar({
                       </span>
                     </div>
                   </div>
+                  {onDeleteTopic && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (confirm(`Delete "${topic.title}"?`)) {
+                          onDeleteTopic(topic.id)
+                        }
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all mt-1 flex-shrink-0"
+                      title="Delete topic"
+                    >
+                      <span className="material-icons text-sm">delete</span>
+                    </button>
+                  )}
                 </div>
               </button>
             ))}

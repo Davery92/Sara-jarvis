@@ -4,6 +4,7 @@ import { apiClient } from './api';
 
 class VoiceService {
   private recording: Audio.Recording | null = null;
+  private currentSound: Audio.Sound | null = null;
   private isListening: boolean = false;
   private vadCheckInterval: NodeJS.Timeout | null = null;
   private silenceStartTime: number | null = null;
@@ -244,16 +245,16 @@ class VoiceService {
 
       // Upload to backend for transcription
       const token = await apiClient.getToken();
-      const response = await fetch(
-        `${apiClient.baseURL}/api/voice-agent/transcribe`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': token ? `Bearer ${token}` : '',
-          },
-          body: formData,
-        }
-      );
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`${apiClient.baseURL}/api/voice-agent/transcribe`, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
 
       if (!response.ok) {
         throw new Error(`Transcription failed: ${response.status}`);
@@ -352,17 +353,18 @@ class VoiceService {
     try {
       console.log('[Voice] Fetching TTS audio from backend...');
       const token = await apiClient.getToken();
-      const response = await fetch(
-        `${apiClient.baseURL}/api/voice-agent/speak`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': token ? `Bearer ${token}` : '',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ text }),
-        }
-      );
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`${apiClient.baseURL}/api/voice-agent/speak`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ text }),
+      });
 
       if (!response.ok) {
         throw new Error(`TTS failed: ${response.status}`);
@@ -389,6 +391,7 @@ class VoiceService {
               { uri: base64Audio },
               { shouldPlay: true }
             );
+            this.currentSound = sound;
 
             console.log('[Voice] Audio sound created, starting playback...');
 
@@ -397,15 +400,18 @@ class VoiceService {
               if (status.isLoaded && status.didJustFinish) {
                 console.log('[Voice] Playback finished');
                 await sound.unloadAsync();
+                this.currentSound = null;
                 resolve(true);
               }
               if (status.isLoaded === false && 'error' in status) {
                 console.error('[Voice] Audio playback error:', status.error);
+                this.currentSound = null;
                 reject(new Error(status.error));
               }
             });
           } catch (error) {
             console.error('[Voice] Chunk playback error:', error);
+            this.currentSound = null;
             reject(error);
           }
         };
@@ -475,6 +481,15 @@ class VoiceService {
    */
   async stopSpeaking(): Promise<void> {
     try {
+      if (this.currentSound) {
+        try {
+          await this.currentSound.stopAsync();
+        } catch {}
+        try {
+          await this.currentSound.unloadAsync();
+        } catch {}
+        this.currentSound = null;
+      }
       await Speech.stop();
       console.log('[Voice] Speech stopped');
     } catch (error) {

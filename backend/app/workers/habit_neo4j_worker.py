@@ -409,7 +409,7 @@ async def main():
     """Test runner for development"""
     logging.basicConfig(level=logging.INFO)
     
-    database_url = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub")
+    database_url = os.getenv("DATABASE_URL")
     worker = HabitNeo4jWorker(database_url)
     
     print("🧪 Testing Habit Neo4j Worker...")

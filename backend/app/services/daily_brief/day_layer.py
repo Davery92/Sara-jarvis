@@ -29,7 +29,7 @@ class DayLayer:
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR
-        self.fast_model = os.environ.get("FAST_MODEL", "gpt-oss:20b")
+        self.fast_model = "qwen3-coder-next"
         self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
 
     def _ensure_user_dir(self, user_id: str) -> Path:

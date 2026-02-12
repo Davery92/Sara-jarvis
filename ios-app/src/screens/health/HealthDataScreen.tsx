@@ -25,6 +25,7 @@ export default function HealthDataScreen({ navigation }: Props) {
   const [todayData, setTodayData] = useState<HealthData>({});
   const [weeklyStats, setWeeklyStats] = useState<any[]>([]);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [sleepHours, setSleepHours] = useState<number | null>(null);
 
   useEffect(() => {
     initializeHealthKit();
@@ -65,13 +66,15 @@ export default function HealthDataScreen({ navigation }: Props) {
 
   const loadHealthData = async () => {
     try {
-      const [today, stats] = await Promise.all([
+      const [today, stats, sleep] = await Promise.all([
         healthKitService.getTodayHealthData(),
         healthKitService.getDailyStats(7),
+        healthKitService.getLastNightSleepHours(),
       ]);
 
       setTodayData(today);
       setWeeklyStats(stats);
+      setSleepHours(sleep > 0 ? sleep : null);
     } catch (error) {
       console.error('Error loading health data:', error);
     }
@@ -249,6 +252,21 @@ export default function HealthDataScreen({ navigation }: Props) {
                 <Text style={styles.metricValue}>{Math.round(todayData.restingHeartRate)} bpm</Text>
               </View>
             )}
+          </View>
+        </View>
+      )}
+
+      {/* Last Night's Sleep */}
+      {sleepHours != null && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Last Night's Sleep</Text>
+          <View style={styles.metricsContainer}>
+            <View style={styles.metricRow}>
+              <Text style={styles.metricLabel}>🌙 Total Sleep</Text>
+              <Text style={styles.metricValue}>
+                {Math.floor(sleepHours)}h {Math.round((sleepHours % 1) * 60)}m
+              </Text>
+            </View>
           </View>
         </View>
       )}

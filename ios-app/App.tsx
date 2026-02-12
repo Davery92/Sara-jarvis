@@ -5,8 +5,11 @@ import { AuthProvider } from './src/context/AuthContext';
 import { TimerProvider } from './src/context/TimerContext';
 import { BackgroundTasksProvider } from './src/context/BackgroundTasksContext';
 import { WorkoutModeProvider } from './src/context/WorkoutModeContext';
+import { ToastProvider } from './src/context/ToastContext';
 import RootNavigator from './src/navigation/RootNavigator';
 import AuthenticatedOverlays from './src/components/AuthenticatedOverlays';
+import ErrorBoundary from './src/components/ErrorBoundary';
+import { SaraOverlayProvider } from './src/context/SaraOverlayContext';
 
 /**
  * Main App Component
@@ -17,17 +20,23 @@ import AuthenticatedOverlays from './src/components/AuthenticatedOverlays';
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AuthProvider>
-        <TimerProvider>
-          <BackgroundTasksProvider>
-            <WorkoutModeProvider>
-              <RootNavigator />
-              <AuthenticatedOverlays />
-              <StatusBar style="dark" />
-            </WorkoutModeProvider>
-          </BackgroundTasksProvider>
-        </TimerProvider>
-      </AuthProvider>
+      <ErrorBoundary>
+        <ToastProvider>
+          <AuthProvider>
+            <TimerProvider>
+              <BackgroundTasksProvider>
+                <WorkoutModeProvider>
+                  <SaraOverlayProvider>
+                    <RootNavigator />
+                    <AuthenticatedOverlays />
+                    <StatusBar style="dark" />
+                  </SaraOverlayProvider>
+                </WorkoutModeProvider>
+              </BackgroundTasksProvider>
+            </TimerProvider>
+          </AuthProvider>
+        </ToastProvider>
+      </ErrorBoundary>
     </SafeAreaProvider>
   );
 }

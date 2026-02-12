@@ -341,13 +341,16 @@ class SidecarService:
         logger.info(f"Received Electron message: {msg_type}")
 
         if msg_type == "auth_token_update":
-            # Update auth token
+            # Update auth token and force reconnect
             token = data.get("token")
             if token:
                 config.auth_token = token
                 config.save_settings()
                 if self._backend_client:
                     self._backend_client.config.auth_token = token
+                    # Force disconnect so the reconnect loop picks up the new token
+                    await self._backend_client.disconnect()
+                    logger.info("Auth token updated, forcing backend reconnect")
 
         elif msg_type == "screenshot_request":
             # Take screenshot on demand

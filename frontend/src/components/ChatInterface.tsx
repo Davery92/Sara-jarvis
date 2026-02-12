@@ -224,18 +224,38 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       try {
         setIsLoadingHistory(true)
 
-        // Get active conversation from backend
-        const activeResponse = await fetch(`${APP_CONFIG.apiUrl}/api/conversations/active`, {
-          credentials: 'include'
-        })
+        let savedConversationId: string | null = null
 
-        if (!activeResponse.ok) {
-          console.log('No active conversation found')
-          return
+        // First, check for a cross-device active session (e.g. started on iOS)
+        try {
+          const sessionResponse = await fetch(`${APP_CONFIG.apiUrl}/api/session/active`, {
+            credentials: 'include'
+          })
+          if (sessionResponse.ok) {
+            const sessionData = await sessionResponse.json()
+            if (sessionData.active && sessionData.session?.conversation_id) {
+              savedConversationId = sessionData.session.conversation_id
+              console.log('Resuming cross-device session:', savedConversationId, 'from', sessionData.session.last_device)
+            }
+          }
+        } catch {
+          // Non-critical — fall through to conversations/active
         }
 
-        const activeData = await activeResponse.json()
-        const savedConversationId = activeData.conversation_id
+        // Fall back to the per-device active conversation
+        if (!savedConversationId) {
+          const activeResponse = await fetch(`${APP_CONFIG.apiUrl}/api/conversations/active`, {
+            credentials: 'include'
+          })
+
+          if (!activeResponse.ok) {
+            console.log('No active conversation found')
+            return
+          }
+
+          const activeData = await activeResponse.json()
+          savedConversationId = activeData.conversation_id
+        }
 
         if (!savedConversationId) {
           console.log('No active conversation ID')
@@ -864,7 +884,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-12rem)] bg-card border border-card rounded-xl overflow-hidden ${isResizing ? 'select-none' : ''}`}
+      className={`relative flex h-full bg-card border border-card rounded-xl overflow-hidden ${isResizing ? 'select-none' : ''}`}
     >
       {/* Main Chat Area - shrinks when canvas is open */}
       <div

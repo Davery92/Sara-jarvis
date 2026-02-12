@@ -311,17 +311,25 @@ class IOSCalendarSyncService {
       const calendarMap = new Map(calendars.map(c => [c.id, c]));
 
       // Transform events for backend
-      const eventsToSync = events.map(event => ({
-        ios_event_id: event.id,
-        ios_calendar_id: event.calendarId,
-        ios_calendar_name: calendarMap.get(event.calendarId)?.title || 'Unknown',
-        title: event.title,
-        description: event.notes || null,
-        start_time: event.startDate,
-        end_time: event.endDate,
-        location: event.location || null,
-        all_day: event.allDay,
-      }));
+      // expo-calendar returns dates as ISO strings in the event's timezone
+      // We need to ensure they're sent as proper UTC ISO strings
+      const eventsToSync = events.map(event => {
+        // Parse the date strings and convert to UTC ISO format
+        const startDate = new Date(event.startDate);
+        const endDate = new Date(event.endDate);
+
+        return {
+          ios_event_id: event.id,
+          ios_calendar_id: event.calendarId,
+          ios_calendar_name: calendarMap.get(event.calendarId)?.title || 'Unknown',
+          title: event.title,
+          description: event.notes || null,
+          start_time: startDate.toISOString(),  // Converts to UTC with 'Z' suffix
+          end_time: endDate.toISOString(),      // Converts to UTC with 'Z' suffix
+          location: event.location || null,
+          all_day: event.allDay,
+        };
+      });
 
       // Send to backend
       const response = await apiClient.post<{ synced: number; errors: number }>(

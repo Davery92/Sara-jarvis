@@ -213,7 +213,9 @@ class OrchestratorService:
         self,
         db: Optional[Session] = None,
         user_id: Optional[str] = None,
-        workspace_folder_id: Optional[str] = None
+        workspace_folder_id: Optional[str] = None,
+        orchestrator_model: Optional[str] = None,
+        worker_model: Optional[str] = None
     ):
         """
         Initialize orchestrator service.
@@ -222,14 +224,16 @@ class OrchestratorService:
             db: Optional database session for real tool access
             user_id: Optional user ID for scoping data access
             workspace_folder_id: Optional workspace folder ID for note creation
+            orchestrator_model: Optional custom model for orchestrator (defaults to ORCHESTRATOR_MODEL)
+            worker_model: Optional custom model for workers (defaults to WORKER_MODEL)
 
         If db/user_id are provided, workers will use real tools (web search,
         URL reading, Sara data access). Otherwise, mock tools are used.
         """
         self.orchestrator_url = ORCHESTRATOR_OLLAMA_URL
         self.worker_url = WORKER_OLLAMA_URL
-        self.orchestrator_model = ORCHESTRATOR_MODEL
-        self.worker_model = WORKER_MODEL
+        self.orchestrator_model = orchestrator_model or ORCHESTRATOR_MODEL
+        self.worker_model = worker_model or WORKER_MODEL
         self.pending_workers: Dict[str, asyncio.Task] = {}
         self.worker_results: Dict[str, Dict] = {}
         self.worker_counter = 0

@@ -8,6 +8,7 @@ import aiohttp
 import logging
 import os
 import json
+import re
 from datetime import datetime, date, timedelta, timezone as dt_timezone
 from app.core.timezone import now as local_now, today as local_today, USER_TIMEZONE
 from pathlib import Path
@@ -20,9 +21,50 @@ from sqlalchemy import text
 from .news_aggregator_service import news_aggregator_service, NewsItem
 from .weather_service import weather_service, WeatherData
 from .notification_service import notification_service, NotificationPriority
-from .health_insight_service import health_insight_service
 
 logger = logging.getLogger(__name__)
+
+# --- LLM Brief Prompts ---
+
+BRIEF_SYSTEM_PROMPT = """You are Sara, David's personal AI assistant. Write his morning brief.
+
+Rules:
+- First person ("you have", "your"), 300-500 words
+- Use light markdown: **bold** for emphasis, bullets where natural, but keep it speakable
+- Prioritize by relevance: busy day → lead with calendar; rest day → lighter brief
+- Pick the 2-3 most interesting news items, skip the rest
+- Do NOT include any health, fitness, body, or biometric data (no HRV, heart rate, sleep stats, recovery scores, workout plans, nutrition advice)
+- Do NOT include action items, to-do lists, micro-tasks, suggestions, or productivity advice — this is an informational brief, not a task list
+- If dream insights exist, integrate them conversationally — don't label them "Dream Insights"
+- No "Good morning David!" clichés — start with something specific and useful
+- End with a brief, natural sendoff (1 sentence max)
+
+Tone directive: {tone_directive}"""
+
+BRIEF_USER_PROMPT = """Generate David's morning brief for today.
+
+== WHO DAVID IS ==
+{stable_layer}
+
+== ACTIVE CONTEXT ==
+{context_layer}
+
+== YESTERDAY ==
+{yesterday_summary}
+
+== WEATHER ==
+{weather}
+
+== CALENDAR ==
+{calendar}
+
+== DREAM INSIGHTS ==
+{dream_insights}
+
+== TECH NEWS ==
+{news}
+
+Write the brief now."""
 
 
 @dataclass
@@ -475,14 +517,7 @@ Synthesized summary:"""
                     "",
                 ])
 
-            # 2. Yesterday's Nutrition
-            if fitness_brief.nutrition_text:
-                sections.extend([
-                    fitness_brief.nutrition_text,
-                    "",
-                    "---",
-                    "",
-                ])
+            # 2. Yesterday's Nutrition — skipped (Sara has its own nutrition section)
 
             # 3. Yesterday's Workout
             if fitness_brief.workout_recap_text:
@@ -567,10 +602,7 @@ Synthesized summary:"""
                 parts.append(fitness_brief.recovery_tts)
                 parts.append("")
 
-            # 2. Yesterday's Nutrition
-            if fitness_brief.nutrition_tts:
-                parts.append(fitness_brief.nutrition_tts)
-                parts.append("")
+            # 2. Yesterday's Nutrition — skipped (Sara has its own nutrition section)
 
             # 3. Yesterday's Workout
             if fitness_brief.workout_recap_tts:
@@ -606,6 +638,109 @@ Synthesized summary:"""
         parts.append("That's your morning brief. Have a great day!")
 
         return " ".join(parts)
+
+    def _derive_tone_directive(self, body_estimate) -> str:
+        """Convert body state estimate into a tone instruction for the LLM."""
+        directives = []
+
+        if body_estimate.alertness < 0.35:
+            directives.append("gentle, warm, and brief — he's still waking up")
+        elif body_estimate.alertness > 0.7:
+            directives.append("energetic and upbeat")
+
+        if body_estimate.stress_load > 0.6:
+            directives.append("keep things light, don't pile on")
+
+        if body_estimate.overall_physical_readiness < 0.5:
+            directives.append("encouraging about rest and recovery")
+
+        if body_estimate.pattern_anomalies:
+            directives.append(f"note unusual patterns: {', '.join(body_estimate.pattern_anomalies[:2])}")
+
+        if not directives:
+            return "Warm and natural morning energy."
+
+        return ". ".join(directives) + "."
+
+    def _strip_markdown_for_tts(self, text: str) -> str:
+        """Remove markdown formatting for clean TTS output."""
+        s = text
+        s = re.sub(r'^#{1,6}\s+', '', s, flags=re.MULTILINE)  # headers
+        s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)                 # bold
+        s = re.sub(r'\*(.+?)\*', r'\1', s)                     # italic
+        s = re.sub(r'`(.+?)`', r'\1', s)                       # inline code
+        s = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', s)              # links
+        s = re.sub(r'^-\s+', '', s, flags=re.MULTILINE)        # bullets
+        s = re.sub(r'^---+$', '', s, flags=re.MULTILINE)       # rules
+        s = re.sub(r'\n{3,}', '\n\n', s)                       # collapse newlines
+        s = re.sub(r'\.\.+', '.', s)                           # double periods
+        return s.strip()
+
+    def _fallback_brief(self, weekday: str, date_str: str, weather_summary: str,
+                        calendar_summary: str, news_summary: str) -> str:
+        """Minimal template brief when LLM is unavailable."""
+        return (
+            f"Here's your brief for {weekday}, {date_str}.\n\n"
+            f"{weather_summary}\n\n"
+            f"{calendar_summary}\n\n"
+            f"**Tech News**\n{news_summary}\n\n"
+            f"Have a great day."
+        )
+
+    async def _generate_llm_brief(
+        self, weekday: str, date_str: str, news_summary: str,
+        weather_summary: str, calendar_summary: str, calendar_events: List[Dict],
+        insights_summary: str,
+        stable_layer: str, context_layer: str, yesterday_summary: str,
+        tone_directive: str,
+    ) -> str:
+        """Generate a cohesive morning brief via a single LLM call."""
+        try:
+            system_msg = BRIEF_SYSTEM_PROMPT.format(tone_directive=tone_directive)
+
+            user_msg = BRIEF_USER_PROMPT.format(
+                stable_layer=stable_layer or "Not available yet.",
+                context_layer=context_layer or "No active context.",
+                yesterday_summary=yesterday_summary or "No summary from yesterday.",
+                weather=weather_summary,
+                calendar=calendar_summary,
+                dream_insights=insights_summary or "None.",
+                news=news_summary,
+            )
+
+            llm_timeout = aiohttp.ClientTimeout(total=180)
+            async with aiohttp.ClientSession(timeout=llm_timeout) as session:
+                async with session.post(
+                    f"{self.llm_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.llm_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.llm_model,
+                        "messages": [
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_msg},
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 2000,
+                        "stream": False
+                    }
+                ) as response:
+                    if response.status != 200:
+                        error = await response.text()
+                        logger.error(f"LLM brief generation failed ({response.status}): {error}")
+                        return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
+
+                    data = await response.json()
+                    content = data["choices"][0]["message"]["content"]
+                    word_count = len(content.split())
+                    logger.info(f"LLM brief generated: {len(content)} chars, {word_count} words")
+                    return content
+
+        except Exception as e:
+            logger.error(f"Error generating LLM brief: {e}")
+            return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
 
     async def generate_tts_audio(self, text: str, output_path: Path) -> Optional[float]:
         """Generate TTS audio using Kokoro."""
@@ -652,7 +787,7 @@ Synthesized summary:"""
             import httpx
             from sqlalchemy import text
             from sqlalchemy.orm import Session
-            from app.core.database import SessionLocal
+            from app.db.base import SessionLocal
 
             # Get database session if not provided
             close_db = False
@@ -731,39 +866,33 @@ Synthesized summary:"""
         if insights_data:
             logger.info(f"Including {len(insights_data)} proactive insights in morning brief")
 
-        # Gather health digest from the new health monitoring system
-        health_digest, health_data = await self.gather_health_digest(user_id, db)
-        if health_data:
-            logger.info(f"Including health digest with {len(health_data.get('metrics', {}))} metrics in morning brief")
+        # Phase 2: Read daily brief context layers
+        stable_content = ""
+        context_content = ""
+        yesterday_summary = ""
+        try:
+            from app.services.daily_brief import stable_layer as sl, context_layer as cl, archiver
+            stable_content = sl.read(user_id)
+            context_content = cl.read(user_id)
+            archives = archiver.get_recent_archives(user_id, days=1)
+            yesterday_summary = archives[0]["content"] if archives else ""
+            logger.info(f"Context layers: stable={len(stable_content)} chars, context={len(context_content)} chars, yesterday={len(yesterday_summary)} chars")
+        except Exception as e:
+            logger.warning(f"Failed to read context layers: {e}")
 
-        # Build comprehensive fitness and recovery brief
-        fitness_brief = await self.build_fitness_recovery_brief(user_id, db)
-        if fitness_brief.has_data:
-            logger.info(f"Including fitness brief with readiness score {fitness_brief.readiness_score}/100")
+        tone_directive = "Warm and natural morning energy."
 
-        # Get weather TTS format if available
-        weather_tts = ""
-        if weather_data:
-            from .weather_service import WeatherData, WeatherCondition, DailyForecast
-            # Reconstruct for TTS formatting
-            try:
-                weather_obj = await weather_service.get_weather()
-                if weather_obj:
-                    weather_tts = weather_service.format_for_tts(weather_obj)
-            except:
-                weather_tts = weather_summary
-
-        # Compose full brief with insights, health digest, and fitness sections
-        full_text = self._compose_full_brief(
-            weekday, news_summary, weather_summary, calendar_summary,
-            insights_summary, health_digest, fitness_brief
+        # Phase 3: Single LLM call for cohesive brief
+        date_str = today.strftime("%B %d, %Y")
+        full_text = await self._generate_llm_brief(
+            weekday, date_str, news_summary, weather_summary,
+            calendar_summary, calendar_events, insights_summary,
+            stable_content, context_content,
+            yesterday_summary, tone_directive,
         )
 
-        # Compose TTS text with fitness sections
-        tts_text = self._compose_tts_text(
-            weekday, news_summary, weather_tts or weather_summary,
-            calendar_events, fitness_brief
-        )
+        # Phase 5: Strip markdown for TTS
+        tts_text = self._strip_markdown_for_tts(full_text)
 
         # Generate TTS audio
         audio_dir = BRIEFINGS_BASE_PATH / user_id / brief_date
@@ -898,9 +1027,9 @@ Synthesized summary:"""
             today_str = today.strftime("%Y-%m-%d")
             yesterday_str = yesterday.strftime("%Y-%m-%d")
 
-            # Build all sections
+            # Build all sections (nutrition skipped — Sara has its own nutrition section)
             recovery_result = await self._build_recovery_status_section(user_id, db, today_str)
-            nutrition_result = await self._build_nutrition_recap_section(user_id, db, yesterday_str)
+            nutrition_result = {"text": "", "tts": ""}
             workout_result = await self._build_workout_recap_section(user_id, db, yesterday_str)
             today_plan_result = await self._build_today_plan_section(user_id, db, today_str)
             insights_result = await self._build_smart_insights_section(user_id, db, yesterday_str)
@@ -1782,10 +1911,7 @@ Synthesized summary:"""
             if fatigue_insight:
                 insights.append(("fatigue", fatigue_insight))
 
-            # Check nutrition patterns
-            nutrition_insight = await self._check_nutrition_patterns(user_id, db)
-            if nutrition_insight:
-                insights.append(("nutrition", nutrition_insight))
+            # Nutrition patterns skipped — Sara has its own nutrition section
 
             # Check progression
             progression_insight = await self._check_progression(user_id, db)

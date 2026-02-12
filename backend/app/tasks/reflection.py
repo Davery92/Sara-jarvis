@@ -54,10 +54,7 @@ async def _run_reflection_async():
 
     from app.services.reflection.agent import get_reflection_agent
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
@@ -69,13 +66,31 @@ async def _run_reflection_async():
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with async_session() as db:
-        reflection_agent = await get_reflection_agent(db)
-        result = await reflection_agent.run_reflection_cycle()
+    try:
+        async with async_session() as db:
+            reflection_agent = await get_reflection_agent(db)
+            result = await reflection_agent.run_reflection_cycle()
+            result_dict = result.to_dict()
 
-        return result.to_dict()
+            # Generate policy candidates from reflection (Phase 3 — Cortana Evolution)
+            try:
+                from app.core.config import settings
+                if getattr(settings, 'autonomy_policy_candidates_enabled', False):
+                    from app.services.autonomy.policy_candidate import policy_candidate_service
+                    candidate_ids = await policy_candidate_service.generate_from_reflection(
+                        db=db, user_id="64f37c56-85cb-4590-8de9-adfc17d343ed",
+                        reflection_data=result_dict,
+                    )
+                    await db.commit()
+                    if candidate_ids:
+                        logger.info(f"Generated {len(candidate_ids)} policy candidates from reflection")
+                        result_dict["policy_candidates"] = len(candidate_ids)
+            except Exception as e:
+                logger.debug(f"Policy candidate generation from reflection failed (non-fatal): {e}")
 
-    await engine.dispose()
+            return result_dict
+    finally:
+        await engine.dispose()
 
 
 @celery_app.task(
@@ -113,10 +128,7 @@ async def _assess_proposal_async(proposal_id: int):
 
     from app.services.karma import get_karma_service, KarmaEvent
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
@@ -128,83 +140,84 @@ async def _assess_proposal_async(proposal_id: int):
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with async_session() as db:
-        # Get proposal details
-        result = await db.execute(
-            text("""
-                SELECT status, target_agent, karma_state_at_implementation
-                FROM prompt_proposals
-                WHERE proposal_id = :proposal_id
-            """),
-            {"proposal_id": proposal_id}
-        )
-        row = result.fetchone()
+    try:
+        async with async_session() as db:
+            # Get proposal details
+            result = await db.execute(
+                text("""
+                    SELECT status, target_agent, karma_state_at_implementation
+                    FROM prompt_proposals
+                    WHERE proposal_id = :proposal_id
+                """),
+                {"proposal_id": proposal_id}
+            )
+            row = result.fetchone()
 
-        if not row or row[0] != "implemented":
-            return {"status": "skipped", "reason": "Proposal not implemented"}
+            if not row or row[0] != "implemented":
+                return {"status": "skipped", "reason": "Proposal not implemented"}
 
-        target_agent = row[1]
-        karma_at_impl = row[2] or {}
+            target_agent = row[1]
+            karma_at_impl = row[2] or {}
 
-        # Get current karma
-        karma_service = await get_karma_service(db)
-        current_karma = await karma_service.get_agent_karma(target_agent)
+            # Get current karma
+            karma_service = await get_karma_service(db)
+            current_karma = await karma_service.get_agent_karma(target_agent)
 
-        if not current_karma:
-            return {"status": "error", "reason": "Agent not found"}
+            if not current_karma:
+                return {"status": "error", "reason": "Agent not found"}
 
-        # Calculate delta
-        old_score = karma_at_impl.get("composite_score", 50)
-        new_score = current_karma.composite_score
-        delta = new_score - old_score
+            # Calculate delta
+            old_score = karma_at_impl.get("composite_score", 50)
+            new_score = current_karma.composite_score
+            delta = new_score - old_score
 
-        # Determine assessment
-        if delta > 2:
-            assessment = "improvement"
-            reflection_delta = 2.0
-        elif delta < -2:
-            assessment = "regression"
-            reflection_delta = -3.0
-            logger.warning(f"Proposal {proposal_id} may have caused regression")
-        else:
-            assessment = "neutral"
-            reflection_delta = 0
+            # Determine assessment
+            if delta > 2:
+                assessment = "improvement"
+                reflection_delta = 2.0
+            elif delta < -2:
+                assessment = "regression"
+                reflection_delta = -3.0
+                logger.warning(f"Proposal {proposal_id} may have caused regression")
+            else:
+                assessment = "neutral"
+                reflection_delta = 0
 
-        # Update proposal
-        await db.execute(
-            text("""
-                UPDATE prompt_proposals
-                SET outcome_assessment = :assessment,
-                    outcome_karma_delta = :delta
-                WHERE proposal_id = :proposal_id
-            """),
-            {
-                "proposal_id": proposal_id,
+            # Update proposal
+            await db.execute(
+                text("""
+                    UPDATE prompt_proposals
+                    SET outcome_assessment = :assessment,
+                        outcome_karma_delta = :delta
+                    WHERE proposal_id = :proposal_id
+                """),
+                {
+                    "proposal_id": proposal_id,
+                    "assessment": assessment,
+                    "delta": delta,
+                }
+            )
+
+            # Adjust reflection karma
+            if reflection_delta != 0:
+                await karma_service.record_event(KarmaEvent(
+                    agent_id="reflection",
+                    dimension_name="insight_quality",
+                    delta=reflection_delta,
+                    reason=f"Proposal {proposal_id} assessment: {assessment} (delta={delta:.1f})",
+                    evidence_type="proposal_outcome",
+                    evidence_ids=[str(proposal_id)],
+                ))
+
+            await db.commit()
+
+            return {
+                "status": "assessed",
                 "assessment": assessment,
-                "delta": delta,
+                "karma_delta": delta,
             }
-        )
-
-        # Adjust reflection karma
-        if reflection_delta != 0:
-            await karma_service.record_event(KarmaEvent(
-                agent_id="reflection",
-                dimension_name="insight_quality",
-                delta=reflection_delta,
-                reason=f"Proposal {proposal_id} assessment: {assessment} (delta={delta:.1f})",
-                evidence_type="proposal_outcome",
-                evidence_ids=[str(proposal_id)],
-            ))
-
-        await db.commit()
-
-        return {
-            "status": "assessed",
-            "assessment": assessment,
-            "karma_delta": delta,
-        }
-
-    await engine.dispose()
+    finally:
+        await engine.dispose()
 
 
 @celery_app.task(
@@ -239,10 +252,7 @@ async def _cleanup_scratchpad_async():
 
     from app.services.reflection.scratchpad import get_reflection_scratchpad
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
@@ -254,16 +264,17 @@ async def _cleanup_scratchpad_async():
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with async_session() as db:
-        scratchpad = await get_reflection_scratchpad(db)
-        count = await scratchpad.cleanup_expired()
+    try:
+        async with async_session() as db:
+            scratchpad = await get_reflection_scratchpad(db)
+            count = await scratchpad.cleanup_expired()
 
-        return {
-            "timestamp": datetime.utcnow().isoformat(),
-            "expired_removed": count,
-        }
-
-    await engine.dispose()
+            return {
+                "timestamp": datetime.utcnow().isoformat(),
+                "expired_removed": count,
+            }
+    finally:
+        await engine.dispose()
 
 
 @celery_app.task(
@@ -299,10 +310,7 @@ async def _generate_report_async():
 
     from app.services.reflection.scratchpad import get_reflection_scratchpad
 
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-    )
+    database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
         async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
@@ -314,28 +322,29 @@ async def _generate_report_async():
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with async_session() as db:
-        scratchpad = await get_reflection_scratchpad(db)
-        summary = await scratchpad.get_scratchpad_summary()
+    try:
+        async with async_session() as db:
+            scratchpad = await get_reflection_scratchpad(db)
+            summary = await scratchpad.get_scratchpad_summary()
 
-        # Get proposal stats
-        proposal_result = await db.execute(
-            text("""
-                SELECT status, COUNT(*)
-                FROM prompt_proposals
-                WHERE created_at > NOW() - INTERVAL '7 days'
-                GROUP BY status
-            """)
-        )
-        proposal_stats = dict(proposal_result.fetchall())
+            # Get proposal stats
+            proposal_result = await db.execute(
+                text("""
+                    SELECT status, COUNT(*)
+                    FROM prompt_proposals
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    GROUP BY status
+                """)
+            )
+            proposal_stats = dict(proposal_result.fetchall())
 
-        report = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "scratchpad_summary": summary,
-            "proposal_stats": proposal_stats,
-        }
+            report = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "scratchpad_summary": summary,
+                "proposal_stats": proposal_stats,
+            }
 
-        logger.info(f"Reflection report: {summary}")
-        return report
-
-    await engine.dispose()
+            logger.info(f"Reflection report: {summary}")
+            return report
+    finally:
+        await engine.dispose()
