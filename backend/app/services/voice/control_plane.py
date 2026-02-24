@@ -128,7 +128,7 @@ def _default_voice_config() -> Dict[str, Any]:
         },
         "routing": {
             "asr_provider": "faster-whisper",
-            "diarization_provider": "pyannote",
+            "diarization_provider": "nemo",
             "tts_provider": "kokoro",
             "orchestrator_provider": "sara-backend",
         },

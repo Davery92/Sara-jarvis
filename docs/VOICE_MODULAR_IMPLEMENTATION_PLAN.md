@@ -50,8 +50,8 @@ Trace contract:
 - [x] Add voice event stream publisher + query endpoint
 - [x] Add no-hardware demo simulation endpoint for remote testing
 - [x] Add Sensory UI control-plane tabs and controls
-- [ ] Add SSE/WebSocket stream endpoint for live voice events (instead of polling)
-- [ ] Add auth policy hardening for service-to-service endpoints
+- [x] Add SSE/WebSocket stream endpoint for live voice events (instead of polling)
+- [x] Add auth policy hardening for service-to-service endpoints
 - [ ] Add OpenAPI examples for each contract event
 
 ### Phase 1: Jetson Wake Sensor
@@ -65,7 +65,7 @@ Trace contract:
 ### Phase 2: GPU Speech Stack
 
 - [x] Add `speech-asr` scaffold (`gpu-cluster/asr_service.py`, `Dockerfile.asr`)
-- [ ] Stand up `speaker-diarization` with `pyannote` service endpoint
+- [x] Stand up `speaker-diarization` with `pyannote` service endpoint
 - [ ] Add speaker linking against versioned registry profiles
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`
 - [ ] Add replay tests using recorded WAV fixtures
@@ -104,7 +104,7 @@ Trace contract:
 
 ## Immediate Next Actions
 
-1. Add live event streaming endpoint (`/api/voice-control/events/stream`) and wire UI live feed.
-2. Define service auth mechanism for heartbeat/job status endpoints.
-3. Start Jetson `wake-sensor` extraction using existing wake-word and VAD logic.
-4. Stand up `speech-asr` prototype endpoint using `faster-whisper` with contract-compatible output.
+1. Integrate `openWakeWord` model lifecycle hooks into `wake-sensor` training jobs.
+2. Add adaptive ambient profiler loop and dynamic VAD/wake-threshold policy updates.
+3. Add canonical `trace_id` propagation from wake sensor through GPU services into Sara handoff.
+4. Replace legacy sensory SSH enrollment actions with job-driven training execution + status updates.

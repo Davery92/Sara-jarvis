@@ -3,7 +3,7 @@ Audio Pipeline Worker
 
 Processes audio files through the complete pipeline:
 1. Riva ASR - Transcription
-2. NeMo - Speaker diarization
+2. Diarization service - Speaker diarization (NeMo/pyannote compatible)
 3. Speaker identification
 4. Send results to Sara backend
 """
@@ -56,12 +56,13 @@ class ProcessingResult:
 
 
 class AudioPipelineWorker:
-    """Processes audio through Riva + NeMo pipeline."""
+    """Processes audio through modular ASR + diarization pipeline."""
 
     def __init__(self):
         self.riva_server = os.getenv("RIVA_SERVER", "riva-server:50051")
         self.asr_url = os.getenv("ASR_SERVICE_URL", os.getenv("WHISPER_URL", "")).rstrip("/")
         self.nemo_url = os.getenv("NEMO_DIARIZATION_URL", "http://nemo-diarization:8002")
+        self.diarization_url = os.getenv("DIARIZATION_SERVICE_URL", self.nemo_url).rstrip("/")
         self.enrollment_url = os.getenv("SPEAKER_ENROLLMENT_URL", "http://speaker-enrollment:8003")
         self.sara_backend = os.getenv("SARA_BACKEND_URL", "http://10.185.1.180:8000")
         self.redis_url = os.getenv("REDIS_URL", "redis://audio-redis:6379/0")
@@ -86,7 +87,7 @@ class AudioPipelineWorker:
         logger.info(f"Riva: {self.riva_server}")
         if self.asr_url:
             logger.info(f"ASR service: {self.asr_url}")
-        logger.info(f"NeMo: {self.nemo_url}")
+        logger.info(f"Diarization service: {self.diarization_url}")
         logger.info(f"Sara Backend: {self.sara_backend}")
 
         # Process queue
@@ -284,10 +285,10 @@ class AudioPipelineWorker:
             return []
 
     async def diarize(self, audio_path: str) -> Dict:
-        """Diarize audio using NeMo service."""
+        """Diarize audio using configured diarization service."""
         try:
             response = await self.http_client.post(
-                f"{self.nemo_url}/diarize",
+                f"{self.diarization_url}/diarize",
                 json={
                     "audio_path": audio_path,
                     "max_speakers": 5,

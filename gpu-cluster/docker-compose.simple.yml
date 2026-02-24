@@ -1,7 +1,6 @@
 version: "3.8"
 
-# Simplified GPU Cluster - NeMo Diarization Only
-# Uses existing faster-whisper for transcription
+# Simplified GPU Cluster - Modular ASR + Diarization
 
 services:
   # ============================================
@@ -71,6 +70,41 @@ services:
     restart: unless-stopped
 
   # ============================================
+  # pyannote Speaker Diarization (optional profile)
+  # ============================================
+  pyannote-diarization:
+    profiles: ["pyannote"]
+    build:
+      context: .
+      dockerfile: Dockerfile.pyannote
+      args:
+        INSTALL_PYANNOTE: ${INSTALL_PYANNOTE:-false}
+    container_name: pyannote-diarization
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${PYANNOTE_GPU_ID:-2}
+      - PYANNOTE_MODEL=${PYANNOTE_MODEL:-pyannote/speaker-diarization-community-1}
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-}
+    ports:
+      - "8004:8004"
+    volumes:
+      - /data/audio:/data/audio
+      - /data/pyannote-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
   # Speaker Enrollment Service
   # ============================================
   speaker-enrollment:
@@ -100,6 +134,7 @@ services:
     environment:
       - ASR_SERVICE_URL=http://asr-service:8585
       - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+      - DIARIZATION_SERVICE_URL=${DIARIZATION_SERVICE_URL:-http://nemo-diarization:8002}
       - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
       - REDIS_URL=redis://host.docker.internal:6379/0
       - SARA_BACKEND_URL=http://10.185.1.180:8000

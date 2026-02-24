@@ -1,48 +1,25 @@
-# GPU Cluster - NVIDIA Audio Stack
+# GPU Cluster - Audio Services
 
 This directory contains the deployment configuration for Sara's NVIDIA audio processing stack.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     GPU Cluster (10.185.1.8)                    │
-│                        6x GTX 1070                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-│  │   Riva ASR      │  │ NeMo Diarization│  │    VLLM/Vision  │ │
-│  │   (GPU 0-1)     │  │    (GPU 2)      │  │   (GPU 3-4)     │ │
-│  │   Port: 50051   │  │   Port: 8002    │  │   Port: 11434   │ │
-│  └────────┬────────┘  └────────┬────────┘  └─────────────────┘ │
-│           │                    │                                │
-│           └──────────┬─────────┘                                │
-│                      │                                          │
-│           ┌──────────┴──────────┐                               │
-│           │   Audio Worker      │                               │
-│           │   (Orchestrates)    │                               │
-│           └──────────┬──────────┘                               │
-│                      │                                          │
-└──────────────────────┼──────────────────────────────────────────┘
-                       │
-                       ▼
-              Sara Backend (10.185.1.180:8000)
-                /api/cognitive/audio/processed
+Jetson/Desktop audio -> ASR service (8585) -> Diarization service (8002/8004)
+                                         -> Audio worker -> Sara backend
 ```
 
 ## Services
 
-### 1. Riva ASR (Speech Recognition)
-- **Image**: `nvcr.io/nvidia/riva/riva-speech:2.14.0`
-- **GPUs**: 0, 1
-- **Port**: 50051 (gRPC)
+### 1. ASR Service (faster-whisper scaffold)
+- **Image**: Custom (`Dockerfile.asr`)
+- **Port**: 8585 (REST)
 - **Features**:
-  - Real-time streaming transcription
-  - Word-level timestamps
-  - Automatic punctuation
-  - Multi-language support
+  - REST transcription endpoint (`/transcribe`)
+  - Word timestamps when available
+  - Model/device from env (`ASR_MODEL_NAME`, `ASR_DEVICE`, `ASR_COMPUTE_TYPE`)
 
-### 2. NeMo Diarization (Speaker Identification)
+### 2. NeMo Diarization (default diarization backend)
 - **Image**: Custom (Dockerfile.nemo)
 - **GPU**: 2
 - **Port**: 8002 (REST)
@@ -52,7 +29,15 @@ This directory contains the deployment configuration for Sara's NVIDIA audio pro
   - Speaker enrollment
   - TitaNet embeddings
 
-### 3. Speaker Enrollment Service
+### 3. pyannote Diarization (optional profile)
+- **Image**: Custom (`Dockerfile.pyannote`)
+- **Port**: 8004 (REST)
+- **Features**:
+  - `POST /diarize` with NeMo-compatible response schema
+  - `GET /health` reports backend state (`pyannote` or `mock`)
+  - Optional install via `INSTALL_PYANNOTE=true`
+
+### 4. Speaker Enrollment Service
 - **Image**: Custom (Dockerfile.enrollment)
 - **Port**: 8003 (REST)
 - **Features**:
@@ -60,48 +45,40 @@ This directory contains the deployment configuration for Sara's NVIDIA audio pro
   - Manage speaker profiles
   - Add/remove voice samples
 
-### 4. Audio Worker
+### 5. Audio Worker
 - **Image**: Custom (Dockerfile.worker)
 - **Features**:
   - Processes audio queue from Redis
-  - Orchestrates Riva → NeMo pipeline
+  - Orchestrates ASR -> diarization pipeline
   - Sends results to Sara backend
-
-### 5. ASR Service (faster-whisper scaffold)
-- **Image**: Custom (`Dockerfile.asr`)
-- **Port**: 8585 (REST)
-- **Features**:
-  - REST transcription endpoint (`/transcribe`)
-  - Word timestamps when available
-  - Model/device from env (`ASR_MODEL_NAME`, `ASR_DEVICE`, `ASR_COMPUTE_TYPE`)
 
 The worker now supports fallback order:
 1. Riva gRPC
 2. ASR REST service (`ASR_SERVICE_URL`)
 
+For diarization routing:
+1. `DIARIZATION_SERVICE_URL` (default `http://nemo-diarization:8002`)
+2. `NEMO_DIARIZATION_URL` (legacy fallback)
+
 ## Deployment
 
 ### Prerequisites
 - NVIDIA Docker runtime installed
-- NGC API key for Riva models
-- At least 24GB total GPU memory
+- GPU with enough memory for selected models
 
 ### Quick Start
 
 ```bash
-# 1. Set NGC credentials (for Riva model download)
-export NGC_API_KEY=your_key_here
+# 1. Start default stack (ASR + NeMo diarization)
+docker compose -f docker-compose.simple.yml up -d
 
-# 2. Initialize Riva models (first time only)
-docker compose --profile init up riva-init
-
-# 3. Start all services
-docker compose up -d
-
-# 4. Verify health
-curl http://10.185.1.8:8001/v1/health/ready  # Riva
-curl http://10.185.1.8:8002/health           # NeMo
+# 2. Verify health
+curl http://10.185.1.8:8585/health           # ASR
+curl http://10.185.1.8:8002/health           # NeMo diarization
 curl http://10.185.1.8:8003/health           # Enrollment
+
+# 3. Optional: start pyannote diarization profile
+INSTALL_PYANNOTE=true docker compose -f docker-compose.simple.yml --profile pyannote up -d pyannote-diarization
 ```
 
 ### Enroll David
@@ -125,8 +102,12 @@ python scripts/enroll_david.py --status
 # Sara Backend
 SARA_BACKEND_URL=http://10.185.1.180:8000
 
-# Riva
-RIVA_API_KEY=your_ngc_key  # Optional, for premium models
+# Diarization routing
+DIARIZATION_SERVICE_URL=http://nemo-diarization:8002
+# DIARIZATION_SERVICE_URL=http://pyannote-diarization:8004
+
+# pyannote optional model auth
+HUGGINGFACE_TOKEN=hf_xxx
 
 # Redis (for audio queue)
 REDIS_URL=redis://audio-redis:6379/0
@@ -134,11 +115,11 @@ REDIS_URL=redis://audio-redis:6379/0
 
 ### GPU Allocation
 
-Edit `docker-compose.yml` to change GPU assignments:
+Edit `docker-compose.simple.yml` to change GPU assignments:
 
 ```yaml
 environment:
-  - NVIDIA_VISIBLE_DEVICES=0,1  # Riva uses GPUs 0 and 1
+  - NVIDIA_VISIBLE_DEVICES=2
 ```
 
 ## API Reference
@@ -200,7 +181,7 @@ All services expose health endpoints:
 
 ```bash
 # Check all services
-for port in 8001 8002 8003; do
+for port in 8585 8002 8003; do
   echo "Port $port: $(curl -s http://10.185.1.8:$port/health | jq -r .status)"
 done
 ```
@@ -209,12 +190,13 @@ done
 
 ```bash
 # View all logs
-docker compose logs -f
+docker compose -f docker-compose.simple.yml logs -f
 
 # View specific service
-docker compose logs -f riva-server
-docker compose logs -f nemo-diarization
-docker compose logs -f audio-worker
+docker compose -f docker-compose.simple.yml logs -f asr-service
+docker compose -f docker-compose.simple.yml logs -f nemo-diarization
+docker compose -f docker-compose.simple.yml logs -f pyannote-diarization
+docker compose -f docker-compose.simple.yml logs -f audio-worker
 ```
 
 ### GPU Usage
@@ -226,9 +208,9 @@ watch -n 1 nvidia-smi
 
 ## Troubleshooting
 
-### Riva not starting
-1. Check NGC credentials: `docker login nvcr.io`
-2. Verify model download: `docker compose --profile init up riva-init`
+### ASR service not starting
+1. Check container logs: `docker compose -f docker-compose.simple.yml logs asr-service`
+2. Verify GPU/runtime and model env values
 3. Check GPU memory: `nvidia-smi`
 
 ### Diarization failing
@@ -246,7 +228,7 @@ watch -n 1 nvidia-smi
 The audio pipeline integrates with Sara's cognitive architecture:
 
 1. **Desktop Sidecar** captures audio from microphone
-2. **Audio Worker** processes through Riva → NeMo
+2. **Audio Worker** processes through ASR -> diarization backend
 3. **Results** sent to `/api/cognitive/audio/processed`
 4. **Raw Buffer** stores transcripts with speaker info
 5. **Consolidation** processes for working memory
