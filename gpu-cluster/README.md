@@ -145,6 +145,10 @@ SPEAKER_TRAIN_COMMAND=
 SPEAKER_TRAIN_TIMEOUT_SECONDS=1800
 SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK=true
 
+# optional event publishing from audio-worker to voice-control
+VOICE_CONTROL_URL=http://10.185.1.180:8000
+VOICE_CONTROL_INTERNAL_TOKEN=change-me-voice-internal-token
+
 # Redis (for audio queue)
 REDIS_URL=redis://audio-redis:6379/0
 ```

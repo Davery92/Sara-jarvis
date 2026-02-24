@@ -66,6 +66,8 @@ class AudioPipelineWorker:
         self.diarization_url = os.getenv("DIARIZATION_SERVICE_URL", self.nemo_url).rstrip("/")
         self.enrollment_url = os.getenv("SPEAKER_ENROLLMENT_URL", "http://speaker-enrollment:8003")
         self.sara_backend = os.getenv("SARA_BACKEND_URL", "http://10.185.1.180:8000")
+        self.voice_control_url = os.getenv("VOICE_CONTROL_URL", "").rstrip("/")
+        self.voice_control_internal_token = os.getenv("VOICE_CONTROL_INTERNAL_TOKEN", "").strip()
         self.redis_url = os.getenv("REDIS_URL", "redis://audio-redis:6379/0")
 
         self.redis_client = redis.from_url(self.redis_url)
@@ -90,6 +92,8 @@ class AudioPipelineWorker:
             logger.info(f"ASR service: {self.asr_url}")
         logger.info(f"Diarization service: {self.diarization_url}")
         logger.info(f"Sara Backend: {self.sara_backend}")
+        if self.voice_control_url and self.voice_control_internal_token:
+            logger.info(f"Voice control events: {self.voice_control_url}")
 
         # Process queue
         await self.process_queue()
@@ -150,10 +154,29 @@ class AudioPipelineWorker:
             # Step 1: Transcribe with Riva
             transcript_segments = await self.transcribe(audio_path)
             logger.info(f"Transcription complete: {len(transcript_segments)} segments")
+            asr_text = " ".join(segment.get("text", "") for segment in transcript_segments).strip()
+            await self.publish_voice_event(
+                event_type="asr.final",
+                source="speech-asr",
+                trace_id=trace_id,
+                payload={
+                    "text": asr_text,
+                    "segment_count": len(transcript_segments),
+                },
+            )
 
             # Step 2: Diarize with NeMo
             diarization = await self.diarize(audio_path)
             logger.info(f"Diarization complete: {diarization.get('num_speakers', 0)} speakers")
+            await self.publish_voice_event(
+                event_type="diarization.final",
+                source="speaker-diarization",
+                trace_id=trace_id,
+                payload={
+                    "num_speakers": diarization.get("num_speakers", 0),
+                    "speaker_labels": diarization.get("speaker_labels", []),
+                },
+            )
 
             # Step 3: Combine transcript with diarization
             combined_segments = self.combine_results(
@@ -177,6 +200,15 @@ class AudioPipelineWorker:
             )
 
             # Step 4: Send to Sara backend
+            await self.publish_voice_event(
+                event_type="sara.request.started",
+                source="voice-orchestrator",
+                trace_id=trace_id,
+                payload={
+                    "job_id": job_id,
+                    "speaker": speakers[0] if speakers else "unknown",
+                },
+            )
             await self.send_to_sara(result, job)
 
             self.redis_client.hset(
@@ -192,6 +224,12 @@ class AudioPipelineWorker:
 
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}")
+            await self.publish_voice_event(
+                event_type="pipeline.error",
+                source="voice-orchestrator",
+                trace_id=trace_id,
+                payload={"job_id": job_id, "message": str(e)},
+            )
             # Store error in Redis
             self.redis_client.hset(f"audio:job:{job_id}", "error", str(e))
             self.redis_client.hset(f"audio:job:{job_id}", "status", "failed")
@@ -372,6 +410,37 @@ class AudioPipelineWorker:
             })
 
         return combined
+
+    async def publish_voice_event(
+        self,
+        *,
+        event_type: str,
+        source: str,
+        trace_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """
+        Publish event into voice control-plane stream when configured.
+        """
+        if not self.voice_control_url or not self.voice_control_internal_token:
+            return
+        try:
+            response = await self.http_client.post(
+                f"{self.voice_control_url}/api/voice-control/events/publish-internal",
+                json={
+                    "event_type": event_type,
+                    "source": source,
+                    "trace_id": trace_id,
+                    "payload": payload,
+                },
+                headers={
+                    "X-Internal-Service": source,
+                    "X-Internal-Token": self.voice_control_internal_token,
+                },
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.debug("voice event publish failed (%s): %s", event_type, exc)
 
     async def send_to_sara(self, result: ProcessingResult, job: Dict):
         """Send processing result to Sara backend."""

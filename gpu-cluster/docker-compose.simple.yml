@@ -162,6 +162,8 @@ services:
       - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
       - DIARIZATION_SERVICE_URL=${DIARIZATION_SERVICE_URL:-http://nemo-diarization:8002}
       - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
       - REDIS_URL=redis://host.docker.internal:6379/0
       - SARA_BACKEND_URL=http://10.185.1.180:8000
     extra_hosts:
