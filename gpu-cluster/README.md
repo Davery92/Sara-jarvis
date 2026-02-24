@@ -266,7 +266,7 @@ The audio pipeline integrates with Sara's cognitive architecture:
 
 1. **Desktop Sidecar** captures audio from microphone
 2. **Audio Worker** processes through ASR -> diarization backend
-3. **Results** sent to `/api/cognitive/audio/processed`
+3. **Results** sent to `/api/cognitive/audio/processed` with `trace_id` metadata
 4. **Raw Buffer** stores transcripts with speaker info
 5. **Consolidation** processes for working memory
 6. **Sara** uses speaker context for personalized responses

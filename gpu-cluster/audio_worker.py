@@ -13,9 +13,10 @@ import json
 import logging
 import asyncio
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import redis
 import httpx
@@ -126,12 +127,23 @@ class AudioPipelineWorker:
         """Process a single audio job."""
         audio_path = job.get("audio_path")
         job_id = job.get("job_id", "unknown")
+        trace_id = str(job.get("trace_id") or job_id)
+        job["trace_id"] = trace_id
 
         if not audio_path or not Path(audio_path).exists():
             logger.error(f"Audio file not found: {audio_path}")
             return
 
-        logger.info(f"Processing job {job_id}: {audio_path}")
+        self.redis_client.hset(
+            f"audio:job:{job_id}",
+            mapping={
+                "status": "running",
+                "trace_id": trace_id,
+                "started_at": time.time(),
+            },
+        )
+
+        logger.info("Processing job %s trace=%s: %s", job_id, trace_id, audio_path)
         start_time = time.time()
 
         try:
@@ -167,13 +179,23 @@ class AudioPipelineWorker:
             # Step 4: Send to Sara backend
             await self.send_to_sara(result, job)
 
-            logger.info(f"Job {job_id} complete in {processing_time:.2f}s")
+            self.redis_client.hset(
+                f"audio:job:{job_id}",
+                mapping={
+                    "status": "completed",
+                    "trace_id": trace_id,
+                    "processing_time": processing_time,
+                    "completed_at": time.time(),
+                },
+            )
+            logger.info("Job %s trace=%s complete in %.2fs", job_id, trace_id, processing_time)
 
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}")
             # Store error in Redis
             self.redis_client.hset(f"audio:job:{job_id}", "error", str(e))
             self.redis_client.hset(f"audio:job:{job_id}", "status", "failed")
+            self.redis_client.hset(f"audio:job:{job_id}", "trace_id", trace_id)
 
     async def transcribe(self, audio_path: str) -> List[Dict]:
         """Transcribe audio using Riva, then ASR REST fallback."""
@@ -367,6 +389,7 @@ class AudioPipelineWorker:
                 "speaker": primary_speaker,
                 "duration_seconds": result.duration,
                 "source": job.get("source", "gpu_cluster"),
+                "trace_id": job.get("trace_id"),
                 "diarization": {
                     "segments": result.segments,
                     "speakers": result.speakers,
@@ -374,6 +397,7 @@ class AudioPipelineWorker:
                 },
                 "metadata": {
                     "job_id": job.get("job_id"),
+                    "trace_id": job.get("trace_id"),
                     "processing_time": result.processing_time,
                     "audio_path": result.audio_path
                 }
@@ -398,14 +422,15 @@ class AudioPipelineWorker:
         self,
         audio_path: str,
         source: str = "upload",
-        priority: int = 5
+        priority: int = 5,
+        trace_id: Optional[str] = None,
     ) -> str:
         """Queue an audio file for processing."""
-        import uuid
-
         job_id = str(uuid.uuid4())
+        resolved_trace_id = trace_id or job_id
         job = {
             "job_id": job_id,
+            "trace_id": resolved_trace_id,
             "audio_path": audio_path,
             "source": source,
             "priority": priority,
@@ -418,6 +443,7 @@ class AudioPipelineWorker:
         # Store job metadata
         self.redis_client.hset(f"audio:job:{job_id}", mapping={
             "status": "queued",
+            "trace_id": resolved_trace_id,
             "audio_path": audio_path,
             "source": source
         })

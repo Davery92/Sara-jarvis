@@ -70,6 +70,7 @@ Trace contract:
 - [x] Stand up `speaker-diarization` with `pyannote` service endpoint
 - [x] Add speaker training worker scaffold (`gpu-cluster/speaker_training_worker.py`)
 - [x] Add dataset-based speaker enrollment training path + optional command hook
+- [x] Propagate `trace_id` through audio-worker job metadata into Sara audio handoff
 - [ ] Add speaker linking against versioned registry profiles
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`
 - [ ] Add replay tests using recorded WAV fixtures
