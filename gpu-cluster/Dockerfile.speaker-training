@@ -1,0 +1,10 @@
+# Speaker model training worker scaffold
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir httpx==0.27.2
+
+COPY speaker_training_worker.py /app/
+
+CMD ["python", "speaker_training_worker.py"]

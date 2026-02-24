@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Simplified GPU Cluster - Modular ASR + Diarization
 
 services:
@@ -121,6 +119,25 @@ services:
       - /data/enrollment-samples:/data/samples
     depends_on:
       - nemo-diarization
+    restart: unless-stopped
+
+  # ============================================
+  # Speaker Training Worker (optional profile)
+  # ============================================
+  speaker-training-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.speaker-training
+    container_name: speaker-training-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - VOICE_INTERNAL_SERVICE=speaker-registry
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}
+      - TRAINING_POLL_INTERVAL_SECONDS=${TRAINING_POLL_INTERVAL_SECONDS:-6}
+      - TRAINING_HEARTBEAT_INTERVAL_SECONDS=${TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - SPEAKER_TRAINING_AUTO_ACTIVATE=${SPEAKER_TRAINING_AUTO_ACTIVATE:-false}
+      - SPEAKER_MODEL_VERSION_PREFIX=${SPEAKER_MODEL_VERSION_PREFIX:-speaker_profiles_v}
     restart: unless-stopped
 
   # ============================================

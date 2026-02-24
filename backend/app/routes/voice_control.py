@@ -25,6 +25,7 @@ from app.services.voice.control_plane import (
     VOICE_EVENT_TYPES,
     VOICE_EVENT_PUBSUB_CHANNEL,
     VOICE_REDIS_URL,
+    claim_next_job,
     create_training_job,
     get_job,
     get_model_registry,
@@ -34,6 +35,7 @@ from app.services.voice.control_plane import (
     list_jobs,
     patch_voice_config,
     publish_voice_event,
+    register_model_version,
     set_active_model_version,
     update_job_status,
     update_service_heartbeat,
@@ -124,6 +126,17 @@ class SpeakerTrainInput(BaseModel):
 
 class ActivateModelInput(BaseModel):
     version: str
+
+
+class RegisterModelVersionInput(BaseModel):
+    version: str
+    status: str = "candidate"
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ClaimJobInput(BaseModel):
+    job_types: List[str] = Field(default_factory=list)
 
 
 class JobStatusInput(BaseModel):
@@ -227,6 +240,51 @@ async def activate_voice_model(
     return {"status": "ok", "registry": registry}
 
 
+@router.post("/models/{model_family}/activate-internal")
+async def activate_voice_model_internal(
+    model_family: str,
+    payload: ActivateModelInput,
+    x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """Set active model version from an internal pipeline service."""
+    service_name = _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
+    try:
+        registry = set_active_model_version(model_family, payload.version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "registry": registry, "activated_by": service_name}
+
+
+@router.post("/models/{model_family}/versions")
+async def register_voice_model(
+    model_family: str,
+    payload: RegisterModelVersionInput,
+    x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """Register a trained model version from an internal pipeline service."""
+    service_name = _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
+    try:
+        registry = register_model_version(
+            model_family,
+            payload.version,
+            status=payload.status,
+            metrics=payload.metrics,
+            metadata=payload.metadata,
+            created_by=service_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "registry": registry, "registered_by": service_name}
+
+
 @router.post("/models/wake-word/train")
 async def queue_wake_word_training(
     payload: WakeWordTrainInput,
@@ -271,6 +329,21 @@ async def get_voice_job(job_id: str, current_user=Depends(get_current_user)):
     return job
 
 
+@router.post("/jobs/claim")
+async def claim_voice_job(
+    payload: ClaimJobInput,
+    x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """Claim the next queued job for an internal worker service."""
+    service_name = _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
+    job = claim_next_job(service_name, job_types=payload.job_types or None)
+    return {"status": "ok", "job": job}
+
+
 @router.post("/jobs/{job_id}/status")
 async def set_voice_job_status(
     job_id: str,
@@ -294,6 +367,7 @@ async def set_voice_job_status(
         notes=payload.notes,
         error=payload.error,
         result=payload.result,
+        worker_service=x_internal_service,
     )
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

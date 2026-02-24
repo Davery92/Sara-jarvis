@@ -27,6 +27,8 @@ class WakeSensorService:
         logger.info("wake-sensor starting (simulate=%s)", self.config.simulate)
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._ambient_loop()))
+        if self.config.training_enabled:
+            self._tasks.append(asyncio.create_task(self._training_loop()))
 
         if self.config.simulate:
             self._tasks.append(asyncio.create_task(self._simulation_loop()))
@@ -52,6 +54,7 @@ class WakeSensorService:
                         "simulate": self.config.simulate,
                         "wake_threshold": self.config.wake_threshold,
                         "vad_threshold": self.config.vad_threshold,
+                        "training_enabled": self.config.training_enabled,
                     },
                 )
             except Exception as exc:
@@ -85,6 +88,81 @@ class WakeSensorService:
             except Exception as exc:
                 logger.warning("simulation turn failed: %s", exc)
             await asyncio.sleep(self.config.simulation_interval_seconds)
+
+    async def _training_loop(self) -> None:
+        while self._running:
+            try:
+                job = await self.client.claim_job(job_types=["train_wake_word"])
+                if not job:
+                    await asyncio.sleep(self.config.training_poll_interval_seconds)
+                    continue
+                await self._run_wake_word_training(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("training loop failure: %s", exc)
+                await asyncio.sleep(self.config.training_poll_interval_seconds)
+
+    async def _run_wake_word_training(self, job: dict) -> None:
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            return
+
+        payload = job.get("payload") or {}
+        target_phrase = str(payload.get("target_phrase") or self.config.keyword).strip().lower()
+        target_token = "_".join(target_phrase.split()) or "hey_sara"
+
+        try:
+            await self.client.update_job_status(
+                job_id,
+                status="running",
+                notes=f"wake-word training started for '{target_phrase}'",
+            )
+
+            # Placeholder duration while the real openWakeWord training pipeline is integrated.
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            version = f"{target_token}_v{int(time.time())}"
+            metrics = {
+                "simulated": True,
+                "target_phrase": target_phrase,
+                "false_accept_rate": round(random.uniform(0.004, 0.018), 4),
+                "miss_rate": round(random.uniform(0.015, 0.045), 4),
+                "eval_samples": random.randint(180, 420),
+            }
+
+            await self.client.register_model_version(
+                model_family="wake_word",
+                version=version,
+                status="candidate",
+                metrics=metrics,
+                metadata={"job_id": job_id, "source": "wake-sensor"},
+            )
+
+            notes = f"wake-word model {version} trained (candidate)"
+            if self.config.auto_activate_trained_model:
+                await self.client.activate_model_version(model_family="wake_word", version=version)
+                notes = f"wake-word model {version} trained and activated"
+
+            await self.client.update_job_status(
+                job_id,
+                status="completed",
+                notes=notes,
+                result={
+                    "model_family": "wake_word",
+                    "version": version,
+                    "metrics": metrics,
+                    "auto_activated": self.config.auto_activate_trained_model,
+                },
+            )
+            logger.info("wake-word training job completed: %s -> %s", job_id, version)
+        except Exception as exc:
+            logger.error("wake-word training job failed: %s", exc)
+            await self.client.update_job_status(
+                job_id,
+                status="failed",
+                error=str(exc),
+                notes="wake-word training failed",
+            )
 
     async def _emit_simulated_turn(self, context: TurnContext) -> None:
         await self.client.publish_event(
@@ -134,4 +212,3 @@ class WakeSensorService:
         logger.info("live audio mode selected; capture pipeline not yet wired")
         while self._running:
             await asyncio.sleep(5)
-

@@ -52,6 +52,14 @@ Jetson/Desktop audio -> ASR service (8585) -> Diarization service (8002/8004)
   - Orchestrates ASR -> diarization pipeline
   - Sends results to Sara backend
 
+### 6. Speaker Training Worker (optional profile)
+- **Image**: Custom (`Dockerfile.speaker-training`)
+- **Profile**: `training`
+- **Features**:
+  - Claims `train_speakers` jobs from voice control plane
+  - Registers speaker model versions
+  - Optionally auto-activates trained speaker profiles
+
 The worker now supports fallback order:
 1. Riva gRPC
 2. ASR REST service (`ASR_SERVICE_URL`)
@@ -79,6 +87,9 @@ curl http://10.185.1.8:8003/health           # Enrollment
 
 # 3. Optional: start pyannote diarization profile
 INSTALL_PYANNOTE=true docker compose -f docker-compose.simple.yml --profile pyannote up -d pyannote-diarization
+
+# 4. Optional: start training worker profile for speaker model jobs
+docker compose -f docker-compose.simple.yml --profile training up -d speaker-training-worker
 ```
 
 ### Enroll David
@@ -108,6 +119,9 @@ DIARIZATION_SERVICE_URL=http://nemo-diarization:8002
 
 # pyannote optional model auth
 HUGGINGFACE_TOKEN=hf_xxx
+
+# voice-control internal service auth (for training workers)
+VOICE_CONTROL_INTERNAL_TOKEN=change-me-voice-internal-token
 
 # Redis (for audio queue)
 REDIS_URL=redis://audio-redis:6379/0
@@ -196,6 +210,7 @@ docker compose -f docker-compose.simple.yml logs -f
 docker compose -f docker-compose.simple.yml logs -f asr-service
 docker compose -f docker-compose.simple.yml logs -f nemo-diarization
 docker compose -f docker-compose.simple.yml logs -f pyannote-diarization
+docker compose -f docker-compose.simple.yml logs -f speaker-training-worker
 docker compose -f docker-compose.simple.yml logs -f audio-worker
 ```
 

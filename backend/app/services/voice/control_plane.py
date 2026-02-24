@@ -20,6 +20,7 @@ VOICE_CONFIG_KEY = "voice:control:config"
 VOICE_MODEL_REGISTRY_KEY = "voice:control:model_registry"
 VOICE_JOBS_HASH_KEY = "voice:control:jobs"
 VOICE_JOBS_LIST_KEY = "voice:control:jobs:recent"
+VOICE_JOB_CLAIMS_HASH_KEY = "voice:control:jobs:claims"
 VOICE_EVENT_STREAM_KEY = "voice:events"
 VOICE_EVENT_PUBSUB_CHANNEL = "voice:events:pubsub"
 VOICE_HEARTBEAT_KEY_PREFIX = "voice:heartbeat:"
@@ -27,6 +28,7 @@ VOICE_HEARTBEAT_KEY_PREFIX = "voice:heartbeat:"
 VOICE_EVENT_MAXLEN = int(os.getenv("VOICE_EVENT_STREAM_MAXLEN", "50000"))
 VOICE_JOB_MAXLEN = int(os.getenv("VOICE_JOB_RECENT_MAXLEN", "300"))
 VOICE_HEARTBEAT_TTL_SECONDS = int(os.getenv("VOICE_HEARTBEAT_TTL_SECONDS", "90"))
+VOICE_TERMINAL_JOB_STATES = {"completed", "failed", "canceled", "cancelled"}
 
 # Canonical event contract names for the voice pipeline.
 VOICE_EVENT_TYPES: List[str] = [
@@ -219,6 +221,57 @@ def set_active_model_version(model_family: str, version: str) -> Dict[str, Any]:
     return _save_model_registry(registry)
 
 
+def register_model_version(
+    model_family: str,
+    version: str,
+    *,
+    status: str = "candidate",
+    metrics: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    created_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    registry = get_model_registry()
+    family = registry.get(model_family)
+    if not isinstance(family, dict):
+        raise ValueError(f"Unknown model family: {model_family}")
+
+    versions = family.setdefault("versions", [])
+    now = _now_iso()
+    target = None
+
+    for item in versions:
+        if item.get("version") == version:
+            target = item
+            break
+
+    if target is None:
+        target = {
+            "version": version,
+            "status": status,
+            "created_at": now,
+            "metrics": metrics or {},
+            "metadata": metadata or {},
+            "created_by": created_by,
+        }
+        versions.append(target)
+    else:
+        target["status"] = status
+        target["metrics"] = metrics or target.get("metrics", {})
+        target["metadata"] = metadata or target.get("metadata", {})
+        if created_by:
+            target["created_by"] = created_by
+        target.setdefault("created_at", now)
+
+    if status == "active":
+        for item in versions:
+            item["status"] = "inactive"
+        target["status"] = "active"
+        family["active_version"] = version
+
+    family["updated_at"] = now
+    return _save_model_registry(registry)
+
+
 def create_training_job(job_type: str, payload: Dict[str, Any], requested_by: str) -> Dict[str, Any]:
     job_id = str(uuid4())
     now = _now_iso()
@@ -275,6 +328,60 @@ def list_jobs(limit: int = 25) -> List[Dict[str, Any]]:
     return jobs
 
 
+def claim_next_job(worker_service: str, *, job_types: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """
+    Claim the oldest queued job, optionally filtered by job type(s).
+
+    Uses a Redis hash lock per job_id to avoid duplicate claims across workers.
+    """
+    allowed_types = {
+        item.strip()
+        for item in (job_types or [])
+        if isinstance(item, str) and item.strip()
+    }
+
+    r = _redis()
+    job_ids = r.lrange(VOICE_JOBS_LIST_KEY, 0, VOICE_JOB_MAXLEN - 1)
+    for job_id in reversed(job_ids):
+        if r.hsetnx(VOICE_JOB_CLAIMS_HASH_KEY, job_id, worker_service) != 1:
+            continue
+
+        keep_claim = False
+        try:
+            job = get_job(job_id)
+            if not job:
+                continue
+            if job.get("status") != "queued":
+                continue
+            if allowed_types and job.get("job_type") not in allowed_types:
+                continue
+
+            now = _now_iso()
+            job["status"] = "running"
+            job["claimed_by"] = worker_service
+            job["started_at"] = job.get("started_at") or now
+            job["updated_at"] = now
+            r.hset(VOICE_JOBS_HASH_KEY, job_id, json.dumps(job))
+            keep_claim = True
+
+            publish_voice_event(
+                event_type="job.updated",
+                source="voice-control",
+                payload={
+                    "job_id": job_id,
+                    "status": "running",
+                    "claimed_by": worker_service,
+                    "job_type": job.get("job_type"),
+                },
+            )
+            return job
+        finally:
+            if not keep_claim:
+                r.hdel(VOICE_JOB_CLAIMS_HASH_KEY, job_id)
+
+    return None
+
+
 def update_job_status(
     job_id: str,
     status: str,
@@ -282,13 +389,17 @@ def update_job_status(
     notes: Optional[str] = None,
     error: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
+    worker_service: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     job = get_job(job_id)
     if not job:
         return None
 
+    r = _redis()
     job["status"] = status
     job["updated_at"] = _now_iso()
+    if worker_service:
+        job["claimed_by"] = job.get("claimed_by") or worker_service
     if notes is not None:
         job["notes"] = notes
     if error is not None:
@@ -296,7 +407,10 @@ def update_job_status(
     if result is not None:
         job["result"] = result
 
-    _redis().hset(VOICE_JOBS_HASH_KEY, job_id, json.dumps(job))
+    r.hset(VOICE_JOBS_HASH_KEY, job_id, json.dumps(job))
+    if status in VOICE_TERMINAL_JOB_STATES:
+        r.hdel(VOICE_JOB_CLAIMS_HASH_KEY, job_id)
+
     publish_voice_event(
         event_type="job.updated",
         source="voice-control",
@@ -305,6 +419,7 @@ def update_job_status(
             "status": status,
             "notes": notes,
             "error": error,
+            "claimed_by": job.get("claimed_by"),
         },
     )
     return job

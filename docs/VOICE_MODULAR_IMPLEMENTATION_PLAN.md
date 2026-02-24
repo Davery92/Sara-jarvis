@@ -57,6 +57,7 @@ Trace contract:
 ### Phase 1: Jetson Wake Sensor
 
 - [x] Create dedicated `wake-sensor` service scaffold (`jetson/wake-sensor`)
+- [x] Add wake-word training job worker hooks (claim -> run -> register model version)
 - [ ] Integrate `openWakeWord` model management hooks
 - [ ] Add adaptive ambient profiler and VAD threshold policy
 - [ ] Emit canonical events (`wake.detected`, `utterance.*`)
@@ -66,6 +67,7 @@ Trace contract:
 
 - [x] Add `speech-asr` scaffold (`gpu-cluster/asr_service.py`, `Dockerfile.asr`)
 - [x] Stand up `speaker-diarization` with `pyannote` service endpoint
+- [x] Add speaker training worker scaffold (`gpu-cluster/speaker_training_worker.py`)
 - [ ] Add speaker linking against versioned registry profiles
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`
 - [ ] Add replay tests using recorded WAV fixtures
@@ -104,7 +106,7 @@ Trace contract:
 
 ## Immediate Next Actions
 
-1. Integrate `openWakeWord` model lifecycle hooks into `wake-sensor` training jobs.
+1. Replace simulated wake-word/speaker training with real training pipelines (`openWakeWord`, speaker embeddings).
 2. Add adaptive ambient profiler loop and dynamic VAD/wake-threshold policy updates.
 3. Add canonical `trace_id` propagation from wake sensor through GPU services into Sara handoff.
-4. Replace legacy sensory SSH enrollment actions with job-driven training execution + status updates.
+4. Replace remaining legacy sensory SSH actions with control-plane-backed job execution.
