@@ -50,6 +50,7 @@ Jetson/Desktop audio -> ASR service (8585) -> Diarization service (8002/8004)
 - **Features**:
   - Processes audio queue from Redis
   - Orchestrates ASR -> diarization pipeline
+  - Optional segment-level speaker linking against enrolled profiles
   - Sends results to Sara backend
 
 ### 6. Speaker Training Worker (optional profile)
@@ -144,6 +145,11 @@ SPEAKER_TRAIN_DATASET_ROOT=/data/enrollment-samples
 SPEAKER_TRAIN_COMMAND=
 SPEAKER_TRAIN_TIMEOUT_SECONDS=1800
 SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK=true
+
+# optional speaker linking in audio-worker
+SPEAKER_LINKING_ENABLED=true
+SPEAKER_VERIFY_THRESHOLD=0.55
+SPEAKER_MIN_SEGMENT_SECONDS=0.8
 
 # optional event publishing from audio-worker to voice-control
 VOICE_CONTROL_URL=http://10.185.1.180:8000

@@ -14,6 +14,7 @@ import logging
 import asyncio
 import time
 import uuid
+import tempfile
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass
@@ -65,6 +66,9 @@ class AudioPipelineWorker:
         self.nemo_url = os.getenv("NEMO_DIARIZATION_URL", "http://nemo-diarization:8002")
         self.diarization_url = os.getenv("DIARIZATION_SERVICE_URL", self.nemo_url).rstrip("/")
         self.enrollment_url = os.getenv("SPEAKER_ENROLLMENT_URL", "http://speaker-enrollment:8003")
+        self.speaker_linking_enabled = os.getenv("SPEAKER_LINKING_ENABLED", "true").strip().lower() == "true"
+        self.speaker_verify_threshold = float(os.getenv("SPEAKER_VERIFY_THRESHOLD", "0.55"))
+        self.speaker_min_segment_seconds = float(os.getenv("SPEAKER_MIN_SEGMENT_SECONDS", "0.8"))
         self.sara_backend = os.getenv("SARA_BACKEND_URL", "http://10.185.1.180:8000")
         self.voice_control_url = os.getenv("VOICE_CONTROL_URL", "").rstrip("/")
         self.voice_control_internal_token = os.getenv("VOICE_CONTROL_INTERNAL_TOKEN", "").strip()
@@ -91,6 +95,7 @@ class AudioPipelineWorker:
         if self.asr_url:
             logger.info(f"ASR service: {self.asr_url}")
         logger.info(f"Diarization service: {self.diarization_url}")
+        logger.info("Speaker linking: %s", "enabled" if self.speaker_linking_enabled else "disabled")
         logger.info(f"Sara Backend: {self.sara_backend}")
         if self.voice_control_url and self.voice_control_internal_token:
             logger.info(f"Voice control events: {self.voice_control_url}")
@@ -183,6 +188,7 @@ class AudioPipelineWorker:
                 transcript_segments,
                 diarization.get("segments", [])
             )
+            combined_segments = await self.link_speakers(audio_path, combined_segments)
 
             # Build result
             full_transcript = " ".join(s["text"] for s in combined_segments if s.get("text"))
@@ -441,6 +447,104 @@ class AudioPipelineWorker:
             response.raise_for_status()
         except Exception as exc:
             logger.debug("voice event publish failed (%s): %s", event_type, exc)
+
+    async def list_known_speakers(self) -> List[str]:
+        """Fetch enrolled speaker IDs from speaker enrollment service."""
+        try:
+            response = await self.http_client.get(f"{self.enrollment_url}/speakers")
+            response.raise_for_status()
+            payload = response.json()
+            speakers = payload.get("speakers", [])
+            return [
+                str(item.get("speaker_id", "")).strip().lower()
+                for item in speakers
+                if isinstance(item, dict) and str(item.get("speaker_id", "")).strip()
+            ]
+        except Exception as exc:
+            logger.debug("Failed to list enrolled speakers: %s", exc)
+            return []
+
+    async def verify_segment_speaker(self, segment_audio_path: str, speaker_id: str) -> float:
+        """Return similarity score for one speaker on one audio segment."""
+        try:
+            response = await self.http_client.post(
+                f"{self.nemo_url}/verify",
+                json={
+                    "audio_path": segment_audio_path,
+                    "speaker_id": speaker_id,
+                    "threshold": self.speaker_verify_threshold,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return float(payload.get("confidence", 0.0))
+        except Exception as exc:
+            logger.debug("speaker verify failed (%s): %s", speaker_id, exc)
+            return 0.0
+
+    async def link_speakers(self, audio_path: str, segments: List[Dict]) -> List[Dict]:
+        """
+        Attempt to map diarized segments to enrolled speaker IDs.
+
+        Works for both NeMo and pyannote diarization output by verifying
+        per-segment clips against enrolled profiles.
+        """
+        if not self.speaker_linking_enabled or not segments:
+            return segments
+
+        known_speakers = await self.list_known_speakers()
+        if not known_speakers:
+            return segments
+
+        try:
+            import soundfile as sf
+
+            audio_data, sample_rate = sf.read(audio_path)
+            linked_segments: List[Dict] = []
+            for segment in segments:
+                start_time = float(segment.get("start_time", 0.0))
+                end_time = float(segment.get("end_time", start_time))
+                duration = max(0.0, end_time - start_time)
+                if duration < self.speaker_min_segment_seconds:
+                    linked_segments.append(segment)
+                    continue
+
+                start_index = max(0, int(start_time * sample_rate))
+                end_index = min(len(audio_data), int(end_time * sample_rate))
+                if end_index <= start_index:
+                    linked_segments.append(segment)
+                    continue
+
+                clip = audio_data[start_index:end_index]
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                    temp_path = tmp_file.name
+                try:
+                    sf.write(temp_path, clip, sample_rate)
+                    best_speaker = None
+                    best_score = 0.0
+                    for known_speaker in known_speakers:
+                        score = await self.verify_segment_speaker(temp_path, known_speaker)
+                        if score > best_score:
+                            best_score = score
+                            best_speaker = known_speaker
+
+                    if best_speaker and best_score >= self.speaker_verify_threshold:
+                        linked = dict(segment)
+                        linked["speaker_id"] = best_speaker
+                        linked["confidence"] = max(float(segment.get("confidence", 0.0)), best_score)
+                        linked_segments.append(linked)
+                    else:
+                        linked_segments.append(segment)
+                finally:
+                    try:
+                        os.unlink(temp_path)
+                    except FileNotFoundError:
+                        pass
+
+            return linked_segments
+        except Exception as exc:
+            logger.debug("Speaker linking skipped due to error: %s", exc)
+            return segments
 
     async def send_to_sara(self, result: ProcessingResult, job: Dict):
         """Send processing result to Sara backend."""

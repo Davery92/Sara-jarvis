@@ -72,7 +72,7 @@ Trace contract:
 - [x] Add dataset-based speaker enrollment training path + optional command hook
 - [x] Propagate `trace_id` through audio-worker job metadata into Sara audio handoff
 - [x] Add optional audio-worker voice-control event publishing (`asr.final`, `diarization.final`, `sara.request.started`)
-- [ ] Add speaker linking against versioned registry profiles
+- [x] Add optional speaker linking against enrolled profiles in audio-worker
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`
 - [ ] Add replay tests using recorded WAV fixtures
 
