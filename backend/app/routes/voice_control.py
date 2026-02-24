@@ -11,6 +11,8 @@ API layer for the modular voice-system rollout:
 from __future__ import annotations
 
 import asyncio
+import hmac
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -38,6 +40,60 @@ from app.services.voice.control_plane import (
 )
 
 router = APIRouter(prefix="/api/voice-control", tags=["voice-control"])
+
+VOICE_CONTROL_INTERNAL_TOKEN = os.getenv("VOICE_CONTROL_INTERNAL_TOKEN", "")
+VOICE_CONTROL_INTERNAL_AUTH_REQUIRED = (
+    os.getenv("VOICE_CONTROL_INTERNAL_AUTH_REQUIRED", "true").strip().lower() == "true"
+)
+VOICE_CONTROL_ALLOWED_SERVICES = {
+    item.strip()
+    for item in os.getenv(
+        "VOICE_CONTROL_ALLOWED_SERVICES",
+        "wake-sensor,speech-asr,speaker-diarization,speaker-registry,voice-orchestrator,tts-router,playback-agent",
+    ).split(",")
+    if item.strip()
+}
+
+
+def _authorize_internal_request(
+    *,
+    service_name: Optional[str],
+    token: Optional[str],
+    expected_service: Optional[str] = None,
+) -> str:
+    """
+    Validate internal service access for control-plane mutation endpoints.
+    """
+    if not service_name:
+        raise HTTPException(status_code=401, detail="Missing X-Internal-Service header")
+
+    if expected_service and service_name != expected_service:
+        raise HTTPException(
+            status_code=403,
+            detail=f"X-Internal-Service '{service_name}' cannot operate on '{expected_service}'",
+        )
+
+    if VOICE_CONTROL_ALLOWED_SERVICES and service_name not in VOICE_CONTROL_ALLOWED_SERVICES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Service '{service_name}' is not in VOICE_CONTROL_ALLOWED_SERVICES",
+        )
+
+    if not VOICE_CONTROL_INTERNAL_AUTH_REQUIRED:
+        return service_name
+
+    configured = VOICE_CONTROL_INTERNAL_TOKEN.strip()
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="VOICE_CONTROL_INTERNAL_TOKEN is required but not configured",
+        )
+
+    provided = (token or "").strip()
+    if not provided or not hmac.compare_digest(provided, configured):
+        raise HTTPException(status_code=401, detail="Invalid internal token")
+
+    return service_name
 
 
 class ServiceHeartbeatInput(BaseModel):
@@ -111,6 +167,7 @@ async def report_service_heartbeat(
     service_id: str,
     heartbeat: ServiceHeartbeatInput,
     x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
 ):
     """
     Report service heartbeat for voice pipeline components.
@@ -118,10 +175,11 @@ async def report_service_heartbeat(
     This endpoint is intentionally service-to-service and does not require
     user auth. Prefer calling from internal network/services only.
     """
-    if x_internal_service is None:
-        # Keep this permissive during migration, but signal missing header.
-        # A tighter auth policy can be enforced once all services are migrated.
-        pass
+    _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+        expected_service=service_id,
+    )
 
     return {
         "status": "ok",
@@ -218,14 +276,17 @@ async def set_voice_job_status(
     job_id: str,
     payload: JobStatusInput,
     x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
 ):
     """
     Update a job status.
 
     Designed for worker services reporting progress/completion.
     """
-    if x_internal_service is None:
-        pass
+    _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
 
     job = update_job_status(
         job_id,
@@ -249,6 +310,40 @@ async def publish_event(
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported event_type '{payload.event_type}'",
+        )
+
+    event = publish_voice_event(
+        event_type=payload.event_type,
+        source=payload.source,
+        payload=payload.payload,
+        trace_id=payload.trace_id,
+    )
+    return {"status": "published", "event": event}
+
+
+@router.post("/events/publish-internal")
+async def publish_event_internal(
+    payload: PublishVoiceEventInput,
+    x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """
+    Publish one structured event from internal pipeline services.
+    """
+    service_name = _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
+    if payload.event_type not in VOICE_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported event_type '{payload.event_type}'",
+        )
+
+    if payload.source != service_name:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Payload source '{payload.source}' must match service '{service_name}'",
         )
 
     event = publish_voice_event(

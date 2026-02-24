@@ -56,7 +56,7 @@ Trace contract:
 
 ### Phase 1: Jetson Wake Sensor
 
-- [ ] Extract wake detection into dedicated `wake-sensor` service
+- [x] Create dedicated `wake-sensor` service scaffold (`jetson/wake-sensor`)
 - [ ] Integrate `openWakeWord` model management hooks
 - [ ] Add adaptive ambient profiler and VAD threshold policy
 - [ ] Emit canonical events (`wake.detected`, `utterance.*`)
