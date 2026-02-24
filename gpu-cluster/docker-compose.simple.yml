@@ -138,6 +138,15 @@ services:
       - TRAINING_HEARTBEAT_INTERVAL_SECONDS=${TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
       - SPEAKER_TRAINING_AUTO_ACTIVATE=${SPEAKER_TRAINING_AUTO_ACTIVATE:-false}
       - SPEAKER_MODEL_VERSION_PREFIX=${SPEAKER_MODEL_VERSION_PREFIX:-speaker_profiles_v}
+      - SPEAKER_ENROLLMENT_URL=${SPEAKER_ENROLLMENT_URL:-http://speaker-enrollment:8003}
+      - SPEAKER_TRAIN_DATASET_ROOT=${SPEAKER_TRAIN_DATASET_ROOT:-/data/enrollment-samples}
+      - SPEAKER_TRAIN_COMMAND=${SPEAKER_TRAIN_COMMAND:-}
+      - SPEAKER_TRAIN_TIMEOUT_SECONDS=${SPEAKER_TRAIN_TIMEOUT_SECONDS:-1800}
+      - SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK=${SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK:-true}
+    volumes:
+      - /data/enrollment-samples:/data/enrollment-samples
+    depends_on:
+      - speaker-enrollment
     restart: unless-stopped
 
   # ============================================

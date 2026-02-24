@@ -29,9 +29,21 @@ Current status:
 
 3. Training worker:
 - Polls control-plane queue for `train_wake_word` jobs
-- Simulates training output while hardware/training pipeline is unavailable
+- Runs configured wake training command when `WAKE_SENSOR_WAKE_TRAIN_COMMAND` is set
+- Falls back to simulation when enabled (`WAKE_SENSOR_WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK=true`)
 - Registers model versions in voice-control model registry
 - Optional auto-activation via `WAKE_SENSOR_AUTO_ACTIVATE_TRAINED_MODEL=true`
+- Supports `dataset_id` from queued jobs (`/models/wake-word/train`)
+
+Command hook env passed to your trainer:
+- `VOICE_JOB_ID`
+- `VOICE_TARGET_PHRASE`
+- `VOICE_DATASET_ID`
+- `VOICE_JOB_NOTES`
+
+Optional command stdout contract:
+- emit a JSON line, example
+  - `{"version":"hey_sara_v20260224","metrics":{"far":0.01},"auto_activate":false}`
 
 ## Quick Start
 

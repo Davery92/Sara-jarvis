@@ -57,6 +57,7 @@ Jetson/Desktop audio -> ASR service (8585) -> Diarization service (8002/8004)
 - **Profile**: `training`
 - **Features**:
   - Claims `train_speakers` jobs from voice control plane
+  - Runs configurable trainer command (`SPEAKER_TRAIN_COMMAND`) or uses enrollment service with sample folders
   - Registers speaker model versions
   - Optionally auto-activates trained speaker profiles
 
@@ -92,6 +93,20 @@ INSTALL_PYANNOTE=true docker compose -f docker-compose.simple.yml --profile pyan
 docker compose -f docker-compose.simple.yml --profile training up -d speaker-training-worker
 ```
 
+Speaker training dataset layout for enrollment mode:
+
+```text
+/data/enrollment-samples/
+  <dataset_id>/
+    david/
+      sample_0.wav
+      sample_1.wav
+    guest_1/
+      sample_0.wav
+```
+
+If `dataset_id` is omitted in a job, the worker uses `/data/enrollment-samples/<speaker_id>/...`.
+
 ### Enroll David
 
 ```bash
@@ -122,6 +137,13 @@ HUGGINGFACE_TOKEN=hf_xxx
 
 # voice-control internal service auth (for training workers)
 VOICE_CONTROL_INTERNAL_TOKEN=change-me-voice-internal-token
+
+# speaker training worker data/command options
+SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
+SPEAKER_TRAIN_DATASET_ROOT=/data/enrollment-samples
+SPEAKER_TRAIN_COMMAND=
+SPEAKER_TRAIN_TIMEOUT_SECONDS=1800
+SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK=true
 
 # Redis (for audio queue)
 REDIS_URL=redis://audio-redis:6379/0

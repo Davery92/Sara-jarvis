@@ -125,7 +125,9 @@ const SensoryControlPlane: React.FC = () => {
   const [streamConnected, setStreamConnected] = useState<boolean>(false)
 
   const [wakePhrase, setWakePhrase] = useState<string>('hey sara')
+  const [wakeDatasetId, setWakeDatasetId] = useState<string>('')
   const [speakerIds, setSpeakerIds] = useState<string>('david')
+  const [speakerDatasetId, setSpeakerDatasetId] = useState<string>('')
   const [wakeThreshold, setWakeThreshold] = useState<number>(0.58)
   const [vadThreshold, setVadThreshold] = useState<number>(0.5)
   const [ambientInterval, setAmbientInterval] = useState<number>(120)
@@ -218,6 +220,7 @@ const SensoryControlPlane: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({
           target_phrase: wakePhrase.trim() || 'hey sara',
+          dataset_id: wakeDatasetId.trim() || undefined,
           notes: 'Queued from Sensory Wake Word Lab',
         }),
       })
@@ -229,7 +232,7 @@ const SensoryControlPlane: React.FC = () => {
     } finally {
       setBusy(false)
     }
-  }, [load, request, wakePhrase])
+  }, [load, request, wakeDatasetId, wakePhrase])
 
   const queueSpeakerTraining = useCallback(async () => {
     setBusy(true)
@@ -244,6 +247,7 @@ const SensoryControlPlane: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({
           speaker_ids: ids,
+          dataset_id: speakerDatasetId.trim() || undefined,
           notes: 'Queued from Sensory Speaker Lab',
         }),
       })
@@ -255,7 +259,7 @@ const SensoryControlPlane: React.FC = () => {
     } finally {
       setBusy(false)
     }
-  }, [load, request, speakerIds])
+  }, [load, request, speakerDatasetId, speakerIds])
 
   const saveThresholds = useCallback(async () => {
     setBusy(true)
@@ -433,6 +437,12 @@ const SensoryControlPlane: React.FC = () => {
               className="rounded bg-gray-900 px-2 py-1 text-sm text-white"
               placeholder="Wake phrase"
             />
+            <input
+              value={wakeDatasetId}
+              onChange={(e) => setWakeDatasetId(e.target.value)}
+              className="rounded bg-gray-900 px-2 py-1 text-sm text-white"
+              placeholder="Dataset ID (optional)"
+            />
             <div className="text-xs text-gray-400">
               Active model: {models?.wake_word?.active_version || 'unknown'}
             </div>
@@ -456,6 +466,12 @@ const SensoryControlPlane: React.FC = () => {
             onChange={(e) => setSpeakerIds(e.target.value)}
             className="mb-2 w-full rounded bg-gray-900 px-2 py-1 text-sm text-white"
             placeholder="david, sara, guest_1"
+          />
+          <input
+            value={speakerDatasetId}
+            onChange={(e) => setSpeakerDatasetId(e.target.value)}
+            className="mb-2 w-full rounded bg-gray-900 px-2 py-1 text-sm text-white"
+            placeholder="Dataset ID (optional)"
           />
           <button
             onClick={queueSpeakerTraining}

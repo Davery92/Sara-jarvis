@@ -58,6 +58,7 @@ Trace contract:
 
 - [x] Create dedicated `wake-sensor` service scaffold (`jetson/wake-sensor`)
 - [x] Add wake-word training job worker hooks (claim -> run -> register model version)
+- [x] Add wake-word trainer command hook (`WAKE_SENSOR_WAKE_TRAIN_COMMAND`) with simulation fallback
 - [ ] Integrate `openWakeWord` model management hooks
 - [x] Add adaptive ambient profiler and VAD threshold policy (simulation scaffold)
 - [ ] Emit canonical events (`wake.detected`, `utterance.*`)
@@ -68,6 +69,7 @@ Trace contract:
 - [x] Add `speech-asr` scaffold (`gpu-cluster/asr_service.py`, `Dockerfile.asr`)
 - [x] Stand up `speaker-diarization` with `pyannote` service endpoint
 - [x] Add speaker training worker scaffold (`gpu-cluster/speaker_training_worker.py`)
+- [x] Add dataset-based speaker enrollment training path + optional command hook
 - [ ] Add speaker linking against versioned registry profiles
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`
 - [ ] Add replay tests using recorded WAV fixtures

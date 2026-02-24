@@ -32,6 +32,9 @@ class WakeSensorConfig:
     training_enabled: bool
     training_poll_interval_seconds: int
     auto_activate_trained_model: bool
+    wake_train_command: str
+    wake_train_timeout_seconds: int
+    wake_train_allow_simulation_fallback: bool
 
     @classmethod
     def from_env(cls) -> "WakeSensorConfig":
@@ -54,5 +57,11 @@ class WakeSensorConfig:
             auto_activate_trained_model=_as_bool(
                 os.getenv("WAKE_SENSOR_AUTO_ACTIVATE_TRAINED_MODEL", "false"),
                 False,
+            ),
+            wake_train_command=os.getenv("WAKE_SENSOR_WAKE_TRAIN_COMMAND", "").strip(),
+            wake_train_timeout_seconds=int(os.getenv("WAKE_SENSOR_WAKE_TRAIN_TIMEOUT_SECONDS", "1800")),
+            wake_train_allow_simulation_fallback=_as_bool(
+                os.getenv("WAKE_SENSOR_WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK", "true"),
+                True,
             ),
         )
