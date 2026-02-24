@@ -64,7 +64,7 @@ Trace contract:
 
 ### Phase 2: GPU Speech Stack
 
-- [ ] Stand up `speech-asr` with `faster-whisper` service endpoint
+- [x] Add `speech-asr` scaffold (`gpu-cluster/asr_service.py`, `Dockerfile.asr`)
 - [ ] Stand up `speaker-diarization` with `pyannote` service endpoint
 - [ ] Add speaker linking against versioned registry profiles
 - [ ] Ensure all outputs publish canonical events with shared `trace_id`

@@ -5,6 +5,39 @@ version: "3.8"
 
 services:
   # ============================================
+  # faster-whisper ASR
+  # ============================================
+  asr-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.asr
+    container_name: asr-service
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - ASR_MODEL_NAME=${ASR_MODEL_NAME:-distil-large-v3}
+      - ASR_DEVICE=${ASR_DEVICE:-cuda}
+      - ASR_COMPUTE_TYPE=${ASR_COMPUTE_TYPE:-float16}
+    ports:
+      - "8585:8585"
+    volumes:
+      - /data/audio:/data/audio
+      - /data/whisper-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8585/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
   # NeMo Speaker Diarization
   # ============================================
   nemo-diarization:
@@ -65,7 +98,7 @@ services:
       dockerfile: Dockerfile.worker
     container_name: audio-worker
     environment:
-      - WHISPER_URL=http://host.docker.internal:8585
+      - ASR_SERVICE_URL=http://asr-service:8585
       - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
       - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
       - REDIS_URL=redis://host.docker.internal:6379/0
@@ -75,6 +108,7 @@ services:
     volumes:
       - /data/audio:/data/audio
     depends_on:
+      - asr-service
       - nemo-diarization
     restart: unless-stopped
 

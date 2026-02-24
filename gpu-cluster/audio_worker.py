@@ -60,6 +60,7 @@ class AudioPipelineWorker:
 
     def __init__(self):
         self.riva_server = os.getenv("RIVA_SERVER", "riva-server:50051")
+        self.asr_url = os.getenv("ASR_SERVICE_URL", os.getenv("WHISPER_URL", "")).rstrip("/")
         self.nemo_url = os.getenv("NEMO_DIARIZATION_URL", "http://nemo-diarization:8002")
         self.enrollment_url = os.getenv("SPEAKER_ENROLLMENT_URL", "http://speaker-enrollment:8003")
         self.sara_backend = os.getenv("SARA_BACKEND_URL", "http://10.185.1.180:8000")
@@ -83,6 +84,8 @@ class AudioPipelineWorker:
         self.http_client = httpx.AsyncClient(timeout=120.0)
         logger.info("Audio Pipeline Worker started")
         logger.info(f"Riva: {self.riva_server}")
+        if self.asr_url:
+            logger.info(f"ASR service: {self.asr_url}")
         logger.info(f"NeMo: {self.nemo_url}")
         logger.info(f"Sara Backend: {self.sara_backend}")
 
@@ -172,10 +175,22 @@ class AudioPipelineWorker:
             self.redis_client.hset(f"audio:job:{job_id}", "status", "failed")
 
     async def transcribe(self, audio_path: str) -> List[Dict]:
+        """Transcribe audio using Riva, then ASR REST fallback."""
+        if RIVA_AVAILABLE and self.riva_client:
+            riva_segments = await self._transcribe_riva(audio_path)
+            if riva_segments:
+                return riva_segments
+            logger.warning("Riva transcription empty/failed, trying ASR service fallback")
+
+        if self.asr_url:
+            return await self._transcribe_asr_service(audio_path)
+
+        logger.warning("No ASR backend available, returning empty transcript")
+        return []
+
+    async def _transcribe_riva(self, audio_path: str) -> List[Dict]:
         """Transcribe audio using Riva ASR."""
         if not RIVA_AVAILABLE or not self.riva_client:
-            # Fallback: Return empty if Riva not available
-            logger.warning("Riva not available, skipping transcription")
             return []
 
         try:
@@ -216,6 +231,56 @@ class AudioPipelineWorker:
 
         except Exception as e:
             logger.error(f"Riva transcription failed: {e}")
+            return []
+
+    async def _transcribe_asr_service(self, audio_path: str) -> List[Dict]:
+        """Transcribe audio via ASR REST service (faster-whisper)."""
+        try:
+            response = await self.http_client.post(
+                f"{self.asr_url}/transcribe",
+                json={
+                    "audio_path": audio_path,
+                    "language": "en",
+                    "beam_size": 1,
+                    "vad_filter": True,
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            word_segments: List[Dict] = []
+            for seg in data.get("segments", []):
+                words = seg.get("words") or []
+                if words:
+                    for word in words:
+                        word_segments.append({
+                            "text": word.get("word", "").strip(),
+                            "start_time": float(word.get("start_time", 0.0)),
+                            "end_time": float(word.get("end_time", 0.0)),
+                            "confidence": float(word.get("confidence", 0.0)),
+                        })
+                else:
+                    # Fallback to segment-level timing when word timings are absent.
+                    text = (seg.get("text") or "").strip()
+                    if text:
+                        word_segments.append({
+                            "text": text,
+                            "start_time": float(seg.get("start_time", 0.0)),
+                            "end_time": float(seg.get("end_time", 0.0)),
+                            "confidence": 0.0,
+                        })
+
+            if not word_segments and data.get("text"):
+                word_segments.append({
+                    "text": data.get("text", "").strip(),
+                    "start_time": 0.0,
+                    "end_time": float(data.get("duration", 0.0)),
+                    "confidence": 0.0,
+                })
+
+            return word_segments
+        except Exception as e:
+            logger.error(f"ASR service transcription failed: {e}")
             return []
 
     async def diarize(self, audio_path: str) -> Dict:

@@ -67,6 +67,18 @@ This directory contains the deployment configuration for Sara's NVIDIA audio pro
   - Orchestrates Riva → NeMo pipeline
   - Sends results to Sara backend
 
+### 5. ASR Service (faster-whisper scaffold)
+- **Image**: Custom (`Dockerfile.asr`)
+- **Port**: 8585 (REST)
+- **Features**:
+  - REST transcription endpoint (`/transcribe`)
+  - Word timestamps when available
+  - Model/device from env (`ASR_MODEL_NAME`, `ASR_DEVICE`, `ASR_COMPUTE_TYPE`)
+
+The worker now supports fallback order:
+1. Riva gRPC
+2. ASR REST service (`ASR_SERVICE_URL`)
+
 ## Deployment
 
 ### Prerequisites
