@@ -229,9 +229,9 @@ class MorningProactiveService:
             )
 
             response = await self.client.post(
-                f"{settings.openai_base_url}/chat/completions",
+                f"{settings.bg_llm_primary_url}/chat/completions",
                 json={
-                    "model": settings.openai_model,
+                    "model": settings.bg_llm_primary_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
                     "max_tokens": 200
@@ -279,24 +279,25 @@ class MorningProactiveService:
         Returns True if sent successfully.
         """
         try:
-            # Import here to avoid circular imports
-            from app.main_simple import send_push_to_user
+            from app.services.unified_notification import send_notification as unified_send_notification
 
-            await send_push_to_user(
+            topic = f"pattern_suggestion:{pattern['id']}:{datetime.utcnow().strftime('%Y%m%d')}"
+            result = await unified_send_notification(
                 user_id=user_id,
                 title=message["title"],
-                body=message["body"],
-                notification_data={
-                    "type": "pattern_suggestion",
-                    "pattern_id": pattern["id"],
-                    "action_type": pattern["action_type"],
-                    "action_payload": pattern.get("action_payload", {})
-                },
+                message=message["body"],
+                priority="normal",
+                topic=topic,
+                category="general",
+                source="morning_proactive",
                 db=db
             )
 
-            logger.info(f"Sent proactive notification: {message['title']}")
-            return True
+            if result.get("sent"):
+                logger.info(f"Sent proactive notification: {message['title']}")
+                return True
+            logger.info(f"Proactive notification not sent: reason={result.get('reason')} topic={topic}")
+            return False
 
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
@@ -372,15 +373,7 @@ class MorningProactiveService:
                 action_payload = json.loads(action_payload)
 
             if action_type == "automation":
-                # Trigger the automation
-                automation_name = action_payload.get("automation_name")
-                # TODO: Hook into automation execution system
-                logger.info(f"Would execute automation: {automation_name}")
-                return {
-                    "success": True,
-                    "action": "automation_triggered",
-                    "automation_name": automation_name
-                }
+                return await self._trigger_automation_task(db, pattern_id, action_payload)
 
             elif action_type == "suggestion":
                 # Just acknowledge the suggestion
@@ -398,6 +391,117 @@ class MorningProactiveService:
         except Exception as e:
             logger.error(f"Failed to execute pattern action: {e}")
             return {"success": False, "error": str(e)}
+
+    async def _trigger_automation_task(
+        self,
+        db: Session,
+        pattern_id: str,
+        action_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Trigger an existing automation task by ID or name.
+        """
+        from app.services.automation.constants import AutomationStatus
+        from app.tasks.automation import automation_execute
+
+        automation_id = (
+            action_payload.get("automation_id")
+            or action_payload.get("task_id")
+            or action_payload.get("id")
+        )
+        automation_name = (
+            action_payload.get("automation_name")
+            or action_payload.get("name")
+        )
+
+        if not automation_id and not automation_name:
+            return {
+                "success": False,
+                "error": "Automation action_payload must include automation_id/task_id or automation_name."
+            }
+
+        owner = db.execute(
+            text("SELECT user_id FROM behavioral_pattern WHERE id = :pattern_id"),
+            {"pattern_id": pattern_id}
+        ).fetchone()
+        if not owner:
+            return {"success": False, "error": "Pattern owner not found"}
+
+        user_id = str(owner.user_id)
+        task = None
+
+        if automation_id:
+            task = db.execute(
+                text("""
+                    SELECT id, name, status
+                    FROM automation_task
+                    WHERE id = :task_id AND user_id = :user_id
+                    LIMIT 1
+                """),
+                {"task_id": automation_id, "user_id": user_id}
+            ).fetchone()
+
+        if not task and automation_name:
+            task = db.execute(
+                text("""
+                    SELECT id, name, status
+                    FROM automation_task
+                    WHERE user_id = :user_id
+                      AND LOWER(name) = LOWER(:name)
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "name": automation_name}
+            ).fetchone()
+
+        if not task:
+            return {
+                "success": False,
+                "error": f"Automation not found (id={automation_id}, name={automation_name})"
+            }
+
+        if task.status != AutomationStatus.ACTIVE:
+            return {
+                "success": False,
+                "error": f"Automation '{task.name}' is not active (status={task.status}).",
+                "automation_id": str(task.id),
+                "automation_name": task.name,
+                "status": task.status,
+            }
+
+        db.execute(
+            text("""
+                UPDATE automation_task
+                SET next_wake_at = NOW()
+                WHERE id = :task_id
+            """),
+            {"task_id": str(task.id)}
+        )
+        db.commit()
+
+        try:
+            dispatch = automation_execute.delay(str(task.id))
+            dispatch_id = getattr(dispatch, "id", None)
+        except Exception as e:
+            logger.error(f"Failed to dispatch automation {task.id}: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to dispatch automation execution: {e}",
+                "automation_id": str(task.id),
+                "automation_name": task.name,
+            }
+
+        logger.info(
+            f"Triggered automation from pattern {pattern_id}: "
+            f"{task.name} ({str(task.id)[:8]}) dispatch_id={dispatch_id}"
+        )
+        return {
+            "success": True,
+            "action": "automation_triggered",
+            "automation_id": str(task.id),
+            "automation_name": task.name,
+            "dispatch_id": dispatch_id,
+        }
 
 
 # Singleton instance

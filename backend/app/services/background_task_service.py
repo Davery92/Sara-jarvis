@@ -12,7 +12,7 @@ This service:
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -159,8 +159,19 @@ class BackgroundTaskService:
             logger.error(f"Task {task_id} not found")
             return {"error": "Task not found"}
 
+        # Clarification handling uses retry semantics: rerun from scratch with extra user context.
+        clarification = (task.clarification_response or "").strip()
+        orchestrator_query = task.original_query
+        if clarification:
+            orchestrator_query = (
+                f"{task.original_query}\n\n"
+                f"[Additional context from user: {clarification}]"
+            )
+        task.clarification_response = None
+
         # Update status to running
         task.status = "running"
+        task.clarification_question = None
         task.started_at = datetime.utcnow()
         task.task_metadata = {
             **(task.task_metadata or {}),
@@ -213,7 +224,7 @@ class BackgroundTaskService:
         try:
             # Run orchestration with real tools
             result = await orchestrator.run_task(
-                task.original_query,
+                orchestrator_query,
                 collect_events
             )
 
@@ -439,8 +450,26 @@ class BackgroundTaskService:
             logger.exception(f"Error sending task complete notification: {e}")
 
     async def get_active_tasks(self, db: Session, user_id: str) -> List["BackgroundTask"]:
-        """Get all active (pending/running) tasks for a user."""
+        """Get all active (pending/running) tasks for a user.
+
+        Auto-fails tasks stuck in 'needs_clarification' or 'running' for > 4 hours.
+        """
         from ..main_simple import BackgroundTask
+
+        # Auto-expire stuck tasks before returning results
+        cutoff = datetime.utcnow() - timedelta(hours=4)
+        stuck = db.query(BackgroundTask).filter(
+            BackgroundTask.user_id == user_id,
+            BackgroundTask.status.in_(["needs_clarification", "running"]),
+            BackgroundTask.updated_at < cutoff,
+        ).all()
+        for t in stuck:
+            logger.info(f"Auto-expiring stuck task {t.id} (status={t.status})")
+            orig_status = t.status
+            t.status = "failed"
+            t.error_message = f"Auto-expired: stuck in {orig_status} for >4 hours"
+        if stuck:
+            db.commit()
 
         return db.query(BackgroundTask).filter(
             BackgroundTask.user_id == user_id,
@@ -595,6 +624,7 @@ class BackgroundTaskService:
             return False
 
         task.clarification_response = response
+        task.clarification_question = None
         task.status = "running"
         task.task_metadata = {
             **(task.task_metadata or {}),
@@ -604,9 +634,15 @@ class BackgroundTaskService:
 
         logger.info(f"Clarification provided for task {task_id}, resuming...")
 
-        # Resume task (would need to implement continuation logic)
-        # For now, we'll need to restart with context
-        # This is a TODO for later - orchestrator needs to support continuation
+        async def run_task_background():
+            from ..main_simple import SessionLocal
+            async_db = SessionLocal()
+            try:
+                await self.run_task(async_db, task_id)
+            finally:
+                async_db.close()
+
+        asyncio.create_task(run_task_background())
 
         return True
 

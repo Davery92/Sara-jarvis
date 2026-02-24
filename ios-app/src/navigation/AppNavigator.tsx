@@ -10,7 +10,12 @@ import SettingsScreen from '../screens/settings/SettingsScreen';
 import ProjectsScreen from '../screens/projects/ProjectsScreen';
 import InboxScreen from '../screens/inbox/InboxScreen';
 import SaraActivityScreen from '../screens/sara/SaraActivityScreen';
+import KnowledgeScreen from '../screens/knowledge/KnowledgeScreen';
+import IntelligenceScreen from '../screens/intelligence/IntelligenceScreen';
 import NotesListScreen from '../screens/notes/NotesListScreen';
+import AgentTasksScreen from '../screens/agents/AgentTasksScreen';
+import TemerantScreen from '../screens/temerant/TemerantScreen';
+import TemerantRpgScreen from '../screens/temerant/TemerantRpgScreen';
 import { colors, fontSizes } from '../styles/theme';
 
 export type AppStackParamList = {
@@ -25,6 +30,11 @@ export type AppStackParamList = {
   Projects: undefined;
   Inbox: undefined;
   SaraActivity: undefined;
+  Knowledge: undefined;
+  Intelligence: undefined;
+  AgentTasks: undefined;
+  Temerant: undefined;
+  TemerantRpg: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -97,6 +107,31 @@ export default function AppNavigator() {
         name="SaraActivity"
         component={SaraActivityScreen}
         options={{ title: "Sara's Mind" }}
+      />
+      <Stack.Screen
+        name="Knowledge"
+        component={KnowledgeScreen}
+        options={{ title: 'Knowledge' }}
+      />
+      <Stack.Screen
+        name="Intelligence"
+        component={IntelligenceScreen}
+        options={{ title: 'Intelligence Feed' }}
+      />
+      <Stack.Screen
+        name="AgentTasks"
+        component={AgentTasksScreen}
+        options={{ title: 'Agent Tasks' }}
+      />
+      <Stack.Screen
+        name="Temerant"
+        component={TemerantScreen}
+        options={{ title: 'Temerant' }}
+      />
+      <Stack.Screen
+        name="TemerantRpg"
+        component={TemerantRpgScreen}
+        options={{ title: 'Temerant RPG' }}
       />
     </Stack.Navigator>
   );

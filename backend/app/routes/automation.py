@@ -8,7 +8,7 @@ Provides endpoints for:
 - Pause/Resume/Cancel controls
 - WebSocket stream for real-time updates
 """
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel, Field
@@ -17,9 +17,11 @@ from datetime import datetime, timezone
 import json
 import logging
 import asyncio
+from urllib.parse import unquote
 
 from app.db.session import get_db
 from app.core.deps import get_current_user
+from app.core.auth import verify_token
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -546,6 +548,35 @@ async def get_automation_stats(
 active_connections: Dict[str, List[WebSocket]] = {}
 
 
+def _extract_cookie_token(cookie_header: str) -> Optional[str]:
+    """Extract access_token cookie from raw Cookie header."""
+    if not cookie_header:
+        return None
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith("access_token="):
+            token = part.split("=", 1)[1].strip()
+            return unquote(token) if token else None
+    return None
+
+
+def _extract_websocket_token(websocket: WebSocket) -> Optional[str]:
+    """
+    Extract bearer token from query params, Authorization header, or cookie.
+    Priority: query -> header -> cookie.
+    """
+    token = websocket.query_params.get("token") or websocket.query_params.get("access_token")
+    if token:
+        return token
+
+    auth_header = websocket.headers.get("authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+
+    cookie_header = websocket.headers.get("cookie", "")
+    return _extract_cookie_token(cookie_header)
+
+
 @router.websocket("/stream")
 async def automation_stream(websocket: WebSocket, db: Session = Depends(get_db)):
     """
@@ -556,10 +587,32 @@ async def automation_stream(websocket: WebSocket, db: Session = Depends(get_db))
     - Status changes
     - Error notifications
     """
-    await websocket.accept()
+    token = _extract_websocket_token(websocket)
+    if not token:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Missing auth token",
+        )
+        return
 
-    # TODO: Add proper auth for WebSocket
-    user_id = "default"
+    payload = verify_token(token)
+    user_id = payload.get("sub") if payload else None
+    if not user_id:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Invalid auth token",
+        )
+        return
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Unknown user",
+        )
+        return
+
+    await websocket.accept()
 
     if user_id not in active_connections:
         active_connections[user_id] = []
@@ -580,11 +633,14 @@ async def automation_stream(websocket: WebSocket, db: Session = Depends(get_db))
                 await websocket.send_json({"type": "keepalive"})
 
     except WebSocketDisconnect:
-        active_connections[user_id].remove(websocket)
+        pass
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+    finally:
         if websocket in active_connections.get(user_id, []):
             active_connections[user_id].remove(websocket)
+        if user_id in active_connections and not active_connections[user_id]:
+            active_connections.pop(user_id, None)
 
 
 async def broadcast_automation_event(user_id: str, event: Dict[str, Any]):

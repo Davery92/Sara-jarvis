@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 
 import aiofiles
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, Response, File
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -37,7 +37,7 @@ MODEL_MIME_TYPES = {
 
 @router.post("/documents", response_model=DocumentResponse)
 async def upload_document(
-    file: UploadFile,
+    file: UploadFile = File(...),
     chat_context: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -261,7 +261,8 @@ async def download_document(
         content=file_content,
         media_type=document.mime_type,
         headers={
-            "Content-Disposition": f"attachment; filename=\"{document.original_filename}\""
+            "Content-Disposition": f"inline; filename=\"{document.original_filename}\"",
+            "Access-Control-Expose-Headers": "Content-Disposition"
         }
     )
 

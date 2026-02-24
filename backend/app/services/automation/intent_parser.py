@@ -189,7 +189,7 @@ Return ONLY valid JSON, no other text."""
 
     try:
         openai_base = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-        openai_model = model or os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+        openai_model = model or os.getenv("OPENAI_MODEL", "gpt-oss:20b")
         openai_key = os.getenv("OPENAI_API_KEY", "")
 
         headers = {}

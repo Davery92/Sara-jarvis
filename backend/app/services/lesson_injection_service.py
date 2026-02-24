@@ -7,6 +7,7 @@ for injection into the system prompt.
 
 import logging
 import json
+import asyncio
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -78,7 +79,10 @@ class LessonInjectionService:
         """
         try:
             # Generate embedding for the query
-            query_embedding = await embedding_service.generate_embedding(query)
+            query_embedding = await asyncio.wait_for(
+                embedding_service.generate_embedding(query),
+                timeout=2.5
+            )
             if not query_embedding:
                 logger.warning("Failed to generate query embedding for lesson retrieval")
                 return []
@@ -172,7 +176,14 @@ class LessonInjectionService:
             lessons.sort(key=lambda x: x.composite_score, reverse=True)
             return lessons[:limit]
 
+        except asyncio.TimeoutError:
+            logger.warning("Lesson retrieval embedding timed out (skipping)")
+            return []
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.error(f"Error retrieving lessons: {e}")
             return []
 

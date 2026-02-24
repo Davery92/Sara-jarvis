@@ -15,6 +15,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import get_db
+from app.core.config import settings as app_settings
 import httpx
 import io
 
@@ -1455,7 +1456,7 @@ async def fitness_chat(
         # Get LLM configuration
         OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:20b")
 
         # ===== GATHER FITNESS CONTEXT =====
 
@@ -4923,6 +4924,40 @@ async def complete_active_workout(
     """
     try:
         result = await workout_session_service.complete_workout(user_id, db)
+
+        if app_settings.temerant_enabled and app_settings.temerant_auto_ingestion_enabled:
+            try:
+                from app.services.temerant import CharacterService, IngestionService
+
+                character = CharacterService.get_character(db, user_id)
+                if character:
+                    summary = result.get("summary") or {}
+                    sets_completed = int(summary.get("total_sets") or 0)
+                    quantity = max(1.0, round(sets_completed / 3.0, 2)) if sets_completed else 1.0
+                    IngestionService.log_external_action(
+                        db=db,
+                        user_id=user_id,
+                        character=character,
+                        source_type="fitness",
+                        source_ref_id=result.get("session_id"),
+                        mapping_ref="workout_complete",
+                        default_action_type="workout",
+                        action_label=summary.get("workout_name") or "Workout",
+                        notes=None,
+                        quantity=quantity,
+                        occurred_at=datetime.utcnow(),
+                        metadata={
+                            "source": "workout_session_complete",
+                            "duration_minutes": summary.get("duration_minutes"),
+                            "total_sets": sets_completed,
+                            "total_volume": summary.get("total_volume"),
+                        },
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Temerant auto-ingestion failed for completed workout")
+
         return result
     except HTTPException:
         raise
@@ -4969,4 +5004,3 @@ async def get_workout_context(
     except Exception as e:
         logger.error(f"Failed to get workout context: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

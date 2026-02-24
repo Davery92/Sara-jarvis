@@ -202,9 +202,9 @@ class LessonExtractor:
 
             # Use local LLM for lesson extraction (cheaper, faster)
             response = await self.client.post(
-                f"{settings.openai_base_url}/chat/completions",
+                f"{settings.bg_llm_primary_url}/chat/completions",
                 json={
-                    "model": settings.openai_model,
+                    "model": settings.bg_llm_primary_model,
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],

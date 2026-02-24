@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   FlatList,
+  ScrollView,
   StyleSheet,
   TouchableOpacity,
   Text,
@@ -12,8 +13,48 @@ import apiClient from '../../services/api';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import SimpleMarkdown from '../../components/chat/SimpleMarkdown';
 
-type TabType = 'activity' | 'attention' | 'missions';
+type TabType = 'mind' | 'activity' | 'attention' | 'missions';
 type FilterType = 'all' | 'heartbeat' | 'notification' | 'journal';
+
+interface WorkingMemoryData {
+  activity_state?: string;
+  room?: string;
+  interruptibility?: number;
+  mood?: string;
+  sara_focus?: string;
+  sara_emotional_tone?: string;
+  sara_curiosities?: string;
+  sara_deliberation_count_today?: number;
+  observation_count?: number;
+  salience_high_water?: number;
+  last_heartbeat_watching_for?: string;
+  quiet_mode?: boolean;
+  hours_since_last_chat?: number;
+  next_event_title?: string;
+  next_event_minutes_away?: number;
+  notifications_sent_today?: number;
+  error?: string;
+}
+
+interface DeliberationEntry {
+  source: string;
+  thought: string | null;
+  handoff_note: string | null;
+  watching_for: string | null;
+  actions_taken: any;
+  duration_seconds: number | null;
+  run_at: string | null;
+  created_at: string | null;
+}
+
+interface ObservationEntry {
+  id: string;
+  timestamp: string;
+  source: string;
+  description: string;
+  salience: number;
+  category: string;
+}
 
 const ACTIVITY_ICONS: Record<string, string> = {
   heartbeat: '\uD83E\uDDE0',
@@ -34,18 +75,19 @@ const TYPE_COLORS: Record<string, string> = {
 
 function stripMarkdown(text: string): string {
   return text
-    .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold**
-    .replace(/\*(.+?)\*/g, '$1')       // *italic*
-    .replace(/__(.+?)__/g, '$1')       // __bold__
-    .replace(/_(.+?)_/g, '$1')         // _italic_
-    .replace(/`(.+?)`/g, '$1')         // `code`
-    .replace(/^#{1,3}\s+/gm, '')       // headers
-    .replace(/^[-*]\s+/gm, '• ')       // list items
-    .replace(/^\d+\.\s+/gm, '')        // numbered lists
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^#{1,3}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '\u2022 ')
+    .replace(/^\d+\.\s+/gm, '')
     .trim();
 }
 
-function timeAgo(dateStr: string): string {
+function timeAgo(dateStr: string | null): string {
+  if (!dateStr) return '';
   const now = new Date();
   const date = new Date(dateStr);
   const diffMs = now.getTime() - date.getTime();
@@ -62,8 +104,41 @@ function formatTime(dateStr: string): string {
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
+function formatActions(actions: any): string[] {
+  if (!actions) return [];
+  if (typeof actions === 'string') {
+    try {
+      const parsed = JSON.parse(actions);
+      if (Array.isArray(parsed)) return parsed.map(String);
+      return [actions];
+    } catch {
+      return actions.split(',').map((s: string) => s.trim()).filter(Boolean);
+    }
+  }
+  if (Array.isArray(actions)) return actions.map(String);
+  return [];
+}
+
+function emotionColor(tone: string | undefined): string {
+  if (!tone) return colors.textMuted;
+  const lower = tone.toLowerCase();
+  if (lower.includes('calm') || lower.includes('content')) return colors.success;
+  if (lower.includes('curious') || lower.includes('engaged')) return colors.info;
+  if (lower.includes('concern') || lower.includes('worry')) return colors.warning;
+  if (lower.includes('warm') || lower.includes('caring')) return '#ec4899';
+  if (lower.includes('focused')) return colors.secondary;
+  return colors.accent;
+}
+
+function salienceColor(salience: number): string {
+  if (salience >= 0.8) return '#ef4444';
+  if (salience >= 0.5) return '#eab308';
+  if (salience >= 0.3) return colors.info;
+  return colors.textMuted;
+}
+
 export default function SaraActivityScreen() {
-  const [tab, setTab] = useState<TabType>('activity');
+  const [tab, setTab] = useState<TabType>('mind');
   const [activities, setActivities] = useState<any[]>([]);
   const [attentionItems, setAttentionItems] = useState<any[]>([]);
   const [missions, setMissions] = useState<any[]>([]);
@@ -71,6 +146,29 @@ export default function SaraActivityScreen() {
   const [filter, setFilter] = useState<FilterType>('all');
   const [refreshing, setRefreshing] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Mind tab data
+  const [workingMemory, setWorkingMemory] = useState<WorkingMemoryData | null>(null);
+  const [deliberations, setDeliberations] = useState<DeliberationEntry[]>([]);
+  const [observations, setObservations] = useState<ObservationEntry[]>([]);
+  const [accumulatedSalience, setAccumulatedSalience] = useState(0);
+  const [expandedThoughtIdx, setExpandedThoughtIdx] = useState<number | null>(null);
+
+  const loadMindData = useCallback(async () => {
+    try {
+      const [memData, delibData, obsData] = await Promise.all([
+        apiClient.get('/autonomy/working-memory').catch(() => null),
+        apiClient.get('/autonomy/deliberation-history?hours=24&limit=10').catch(() => ({ entries: [] })),
+        apiClient.get('/autonomy/observations?limit=10').catch(() => ({ observations: [], accumulated_salience: 0 })),
+      ]);
+      if (memData && !(memData as any).error) setWorkingMemory(memData as WorkingMemoryData);
+      setDeliberations((delibData as any)?.entries || []);
+      setObservations((obsData as any)?.observations || []);
+      setAccumulatedSalience((obsData as any)?.accumulated_salience || 0);
+    } catch {
+      // best-effort
+    }
+  }, []);
 
   const loadActivities = useCallback(async () => {
     try {
@@ -104,18 +202,23 @@ export default function SaraActivityScreen() {
   }, []);
 
   useEffect(() => {
-    loadActivities();
+    loadMindData();
     loadAttentionCount();
-  }, [loadActivities, loadAttentionCount]);
+    // Auto-refresh mind data every 30s
+    const interval = setInterval(loadMindData, 30000);
+    return () => clearInterval(interval);
+  }, [loadMindData, loadAttentionCount]);
 
   useEffect(() => {
+    if (tab === 'activity') loadActivities();
     if (tab === 'attention') loadAttention();
     if (tab === 'missions') loadMissions();
-  }, [tab, loadAttention, loadMissions]);
+  }, [tab, loadActivities, loadAttention, loadMissions]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    if (tab === 'activity') await loadActivities();
+    if (tab === 'mind') await loadMindData();
+    else if (tab === 'activity') await loadActivities();
     else if (tab === 'attention') { await loadAttention(); await loadAttentionCount(); }
     else if (tab === 'missions') await loadMissions();
     setRefreshing(false);
@@ -195,6 +298,7 @@ export default function SaraActivityScreen() {
   };
 
   const tabs: { key: TabType; label: string; badge?: number }[] = [
+    { key: 'mind', label: 'Mind' },
     { key: 'activity', label: 'Activity' },
     { key: 'attention', label: 'Attention', badge: attentionCount },
     { key: 'missions', label: 'Missions' },
@@ -257,6 +361,190 @@ export default function SaraActivityScreen() {
     );
   };
 
+  // ── Mind Tab Content ──────────────────────────────────────
+
+  const renderMindTab = () => {
+    const eColor = emotionColor(workingMemory?.sara_emotional_tone);
+    const recentActions = deliberations
+      .filter(d => formatActions(d.actions_taken).length > 0)
+      .slice(0, 3)
+      .flatMap(d => formatActions(d.actions_taken).map(a => ({ action: a, time: d.created_at })))
+      .slice(0, 5);
+
+    return (
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
+        }
+      >
+        {/* Focus + Emotional State */}
+        <View style={styles.activityItem}>
+          <View style={styles.itemHeader}>
+            <Text style={{ fontSize: 16 }}>{'\uD83C\uDFAF'}</Text>
+            <Text style={styles.sectionLabel}>Current Focus</Text>
+          </View>
+          <Text style={styles.itemSummary}>
+            {workingMemory?.sara_focus || 'No specific focus right now'}
+          </Text>
+        </View>
+
+        <View style={styles.activityItem}>
+          <View style={styles.itemHeader}>
+            <View style={[styles.emotionDot, { backgroundColor: eColor }]} />
+            <Text style={styles.sectionLabel}>Emotional Tone</Text>
+          </View>
+          <Text style={[styles.itemSummary, { color: eColor }]}>
+            {workingMemory?.sara_emotional_tone || 'Unknown'}
+          </Text>
+        </View>
+
+        {/* Watching For */}
+        {workingMemory?.last_heartbeat_watching_for ? (
+          <View style={styles.activityItem}>
+            <View style={styles.itemHeader}>
+              <Text style={{ fontSize: 16 }}>{'\uD83D\uDC41'}</Text>
+              <Text style={styles.sectionLabel}>Watching For</Text>
+            </View>
+            <Text style={styles.detailText}>
+              {workingMemory.last_heartbeat_watching_for}
+            </Text>
+          </View>
+        ) : null}
+
+        {/* Stats Row */}
+        <View style={styles.statsRow}>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{workingMemory?.sara_deliberation_count_today ?? 0}</Text>
+            <Text style={styles.statLabel}>Deliberations</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{workingMemory?.notifications_sent_today ?? 0}</Text>
+            <Text style={styles.statLabel}>Notifications</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{workingMemory?.observation_count ?? 0}</Text>
+            <Text style={styles.statLabel}>Observations</Text>
+          </View>
+        </View>
+
+        {/* Recent Thoughts */}
+        {deliberations.length > 0 && (
+          <>
+            <View style={[styles.itemHeader, { marginTop: spacing.md, marginBottom: spacing.sm }]}>
+              <Text style={{ fontSize: 16 }}>{'\uD83E\uDDE0'}</Text>
+              <Text style={styles.sectionLabel}>Recent Thoughts</Text>
+            </View>
+            {deliberations.slice(0, 5).map((d, i) => {
+              const isThoughtExpanded = expandedThoughtIdx === i;
+              const actions = formatActions(d.actions_taken);
+              const sourceColor = d.source === 'deliberation' ? colors.secondary
+                : d.source === 'consolidation' ? colors.info
+                : colors.textMuted;
+
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={styles.activityItem}
+                  onPress={() => setExpandedThoughtIdx(isThoughtExpanded ? null : i)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.itemHeader}>
+                    <View style={[styles.typeBadge, { backgroundColor: sourceColor + '20' }]}>
+                      <Text style={[styles.typeBadgeText, { color: sourceColor }]}>{d.source}</Text>
+                    </View>
+                    {actions.length > 0 && (
+                      <Text style={{ color: colors.success, fontSize: fontSizes.xs }}>
+                        {'\u26A1'} {actions.length} action{actions.length > 1 ? 's' : ''}
+                      </Text>
+                    )}
+                    <Text style={styles.itemTime}>{timeAgo(d.created_at)}</Text>
+                  </View>
+                  <Text style={styles.itemSummary} numberOfLines={isThoughtExpanded ? undefined : 3}>
+                    {d.thought || 'No thought recorded'}
+                  </Text>
+                  {isThoughtExpanded && (
+                    <View style={styles.expandedDetail}>
+                      {d.handoff_note ? (
+                        <View style={{ marginBottom: spacing.sm }}>
+                          <Text style={styles.miniLabel}>Handoff Note</Text>
+                          <Text style={styles.detailText}>{d.handoff_note}</Text>
+                        </View>
+                      ) : null}
+                      {d.watching_for ? (
+                        <View style={{ marginBottom: spacing.sm }}>
+                          <Text style={styles.miniLabel}>Now Watching For</Text>
+                          <Text style={styles.detailText}>{d.watching_for}</Text>
+                        </View>
+                      ) : null}
+                      {actions.length > 0 ? (
+                        <View>
+                          <Text style={styles.miniLabel}>Actions Taken</Text>
+                          {actions.map((a, j) => (
+                            <Text key={j} style={[styles.detailText, { color: colors.success }]}>
+                              {'\u2713'} {a}
+                            </Text>
+                          ))}
+                        </View>
+                      ) : null}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </>
+        )}
+
+        {/* Observations */}
+        {observations.length > 0 && (
+          <>
+            <View style={[styles.itemHeader, { marginTop: spacing.md, marginBottom: spacing.sm }]}>
+              <Text style={{ fontSize: 16 }}>{'\uD83D\uDC41'}</Text>
+              <Text style={styles.sectionLabel}>
+                Observations (salience: {accumulatedSalience.toFixed(1)}/2.0)
+              </Text>
+            </View>
+            {observations.slice(0, 5).map((obs) => (
+              <View key={obs.id} style={styles.activityItem}>
+                <View style={styles.itemHeader}>
+                  <View style={[styles.salienceDot, { backgroundColor: salienceColor(obs.salience) }]} />
+                  <Text style={[styles.typeBadgeText, { color: salienceColor(obs.salience) }]}>
+                    {obs.salience.toFixed(2)}
+                  </Text>
+                  <Text style={styles.itemTime}>{obs.source}</Text>
+                  <Text style={styles.itemTime}>{timeAgo(obs.timestamp)}</Text>
+                </View>
+                <Text style={styles.detailText} numberOfLines={2}>{obs.description}</Text>
+              </View>
+            ))}
+          </>
+        )}
+
+        {/* Recent Actions */}
+        {recentActions.length > 0 && (
+          <>
+            <View style={[styles.itemHeader, { marginTop: spacing.md, marginBottom: spacing.sm }]}>
+              <Text style={{ fontSize: 16 }}>{'\u26A1'}</Text>
+              <Text style={styles.sectionLabel}>Recent Actions</Text>
+            </View>
+            {recentActions.map((a, i) => (
+              <View key={i} style={styles.activityItem}>
+                <View style={styles.itemRow}>
+                  <Text style={{ color: colors.success, fontSize: fontSizes.sm }}>{'\u2713'}</Text>
+                  <Text style={[styles.detailText, { flex: 1 }]}>{a.action}</Text>
+                  <Text style={styles.itemTime}>{timeAgo(a.time)}</Text>
+                </View>
+              </View>
+            ))}
+          </>
+        )}
+
+        <View style={{ height: spacing.xxl }} />
+      </ScrollView>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
       {/* Tab Bar */}
@@ -273,6 +561,8 @@ export default function SaraActivityScreen() {
           </TouchableOpacity>
         ))}
       </View>
+
+      {tab === 'mind' && renderMindTab()}
 
       {tab === 'activity' && (
         <>
@@ -385,10 +675,12 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
+    marginBottom: spacing.sm,
   },
   itemRow: {
     flexDirection: 'row',
     gap: spacing.sm,
+    alignItems: 'flex-start',
   },
   itemIcon: {
     fontSize: 20,
@@ -455,5 +747,54 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: fontSizes.md,
     textAlign: 'center',
+  },
+  // Mind tab specific styles
+  sectionLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  emotionDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  salienceDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  miniLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    marginBottom: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  statValue: {
+    color: colors.text,
+    fontSize: fontSizes.xl,
+    fontWeight: '700',
+  },
+  statLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
   },
 });

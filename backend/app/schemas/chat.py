@@ -37,6 +37,7 @@ class ChatRequest(BaseModel):
     inbox_item_id: Optional[str] = None  # Pre-load inbox item content for discussion
     notify_on_complete: Optional[bool] = False  # Send push notification when response is ready
     current_screen: Optional[str] = None  # iOS current screen name for context-aware tool loading
+    workspace_context: Optional[dict] = None  # Canvas workspace context (open windows, active scene)
 
 
 class ChatResponse(BaseModel):

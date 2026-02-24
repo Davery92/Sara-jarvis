@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.user import User
 from app.models.habit import Habit, HabitItem, HabitInstance, HabitLog, HabitStreak, HabitLink
@@ -268,6 +269,33 @@ def log_habit_completion(
                 streak.last_completed = last_completed
                 streak.updated_at = datetime.now()
                 db.commit()
+
+    if app_settings.temerant_enabled and app_settings.temerant_auto_ingestion_enabled:
+        try:
+            from app.services.temerant import CharacterService, IngestionService
+            from app.services.temerant.rules_engine import TemerantRulesEngine
+
+            character = CharacterService.get_character(db, current_user.id)
+            if character:
+                inferred_action = TemerantRulesEngine.infer_action_type(habit.title, fallback="study")
+                IngestionService.log_external_action(
+                    db=db,
+                    user_id=current_user.id,
+                    character=character,
+                    source_type="habit",
+                    source_ref_id=log.id,
+                    mapping_ref=habit.id,
+                    default_action_type=inferred_action,
+                    action_label=habit.title,
+                    notes=None,
+                    quantity=log_data.amount,
+                    occurred_at=log.ts,
+                    metadata={"habit_id": habit.id, "habit_type": habit.type},
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Temerant auto-ingestion failed for habit log")
 
     return {"message": "Habit logged successfully", "log_id": log.id}
 
@@ -672,6 +700,33 @@ def log_habit_retro(
         HabitInstanceGenerator.update_instance_progress(
             db, instance_data["instance_id"], log_dicts, habit, checklist_items
         )
+
+    if app_settings.temerant_enabled and app_settings.temerant_auto_ingestion_enabled:
+        try:
+            from app.services.temerant import CharacterService, IngestionService
+            from app.services.temerant.rules_engine import TemerantRulesEngine
+
+            character = CharacterService.get_character(db, current_user.id)
+            if character:
+                inferred_action = TemerantRulesEngine.infer_action_type(habit.title, fallback="study")
+                IngestionService.log_external_action(
+                    db=db,
+                    user_id=current_user.id,
+                    character=character,
+                    source_type="habit",
+                    source_ref_id=log.id,
+                    mapping_ref=habit.id,
+                    default_action_type=inferred_action,
+                    action_label=habit.title,
+                    notes="retro_log",
+                    quantity=log_data.get("amount"),
+                    occurred_at=log.ts,
+                    metadata={"habit_id": habit.id, "habit_type": habit.type, "retro": True},
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Temerant auto-ingestion failed for retro habit log")
 
     return {"message": f"Retro log created for {target_date}", "log_id": log.id}
 

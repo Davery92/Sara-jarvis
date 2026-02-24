@@ -1,0 +1,106 @@
+"""
+Working Memory — Sara's persistent, incrementally-updated awareness.
+
+Extends the UnifiedContextSnapshot with read/update/rebuild operations.
+Working memory is always fresh because event subscribers update it continuously,
+rather than rebuilding from scratch every 15 minutes.
+
+Usage:
+    from app.services.working_memory import read_memory, update_memory, rebuild_memory
+
+    memory = await read_memory(user_id)
+    await update_memory(user_id, source="chat_stream", hours_since_last_chat=0.0)
+    await rebuild_memory(user_id, db)  # cold-start only
+"""
+
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy.orm import Session
+
+from app.services.unified_context import (
+    UnifiedContextSnapshot,
+    read_snapshot,
+)
+from app.services.context_writer import update_fields, rebuild_snapshot
+
+logger = logging.getLogger(__name__)
+
+
+async def read_memory(user_id: str) -> UnifiedContextSnapshot:
+    """
+    Read the full working memory from Redis.
+    This is the single source of truth for Sara's current awareness.
+    Returns an empty snapshot if Redis is cold.
+    """
+    return await read_snapshot(user_id)
+
+
+async def update_memory(user_id: str, source: str = "unknown", **fields) -> None:
+    """
+    Incrementally update working memory fields.
+    Delegates to context_writer.update_fields which handles:
+    - Atomic Redis hash updates
+    - Version bumping
+    - Notable field change tracking
+    """
+    if not fields:
+        return
+    await update_fields(user_id, source=source, **fields)
+
+
+async def rebuild_memory(user_id: str, db: Session) -> UnifiedContextSnapshot:
+    """
+    Full cold-start rebuild from DB.
+    Used on Redis restart, first boot, or if snapshot is missing/stale.
+    """
+    return await rebuild_snapshot(user_id, db)
+
+
+async def update_sara_state(
+    user_id: str,
+    focus: Optional[str] = None,
+    emotional_tone: Optional[str] = None,
+    curiosities: Optional[list] = None,
+    deliberation_happened: bool = False,
+) -> None:
+    """
+    Update Sara's internal state fields in working memory.
+    Called after deliberation to persist Sara's evolving awareness.
+    """
+    fields = {}
+    if focus is not None:
+        fields["sara_focus"] = focus
+    if emotional_tone is not None:
+        fields["sara_emotional_tone"] = emotional_tone
+    if curiosities is not None:
+        fields["sara_curiosities"] = curiosities[:5]  # cap at 5
+    if deliberation_happened:
+        fields["sara_last_deliberation_at"] = datetime.now(timezone.utc).isoformat()
+    if fields:
+        await update_fields(user_id, source="deliberation", **fields)
+
+
+async def increment_deliberation_count(user_id: str) -> None:
+    """Bump the daily deliberation counter. Reset handled by DerivedSignalRefresher at midnight."""
+    try:
+        from app.services.unified_context import _get_redis, SNAPSHOT_KEY
+        r = await _get_redis()
+        key = SNAPSHOT_KEY.format(user_id=user_id)
+        await r.hincrby(key, "sara_deliberation_count_today", 1)
+    except Exception as e:
+        logger.warning(f"Failed to increment deliberation count: {e}")
+
+
+async def sync_observation_stats(user_id: str, count: int, high_water: float) -> None:
+    """
+    Update observation stats in working memory.
+    Called by observation_log after logging/consuming observations.
+    """
+    await update_fields(
+        user_id,
+        source="observation_log",
+        observation_count=count,
+        salience_high_water=high_water,
+    )

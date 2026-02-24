@@ -244,8 +244,7 @@ class AutonomousSweepService:
     
     async def _analyze_conversation_patterns_with_memory(
         self, 
-        user_id: str, 
-        mode: str
+        user_id: str
     ) -> List[Dict[str, Any]]:
         """Use memory service to analyze conversation patterns and themes"""
         insights = []
@@ -266,8 +265,7 @@ class AutonomousSweepService:
                     user_id=user_id,
                     query=theme,
                     limit=10,
-                    scopes=["episodes"],
-                    age_months=1  # Last month only
+                    scopes=["episodes"]
                 )
                 
                 if len(memories) >= 3:  # Found a pattern
@@ -275,7 +273,7 @@ class AutonomousSweepService:
             
             # Generate insights based on patterns
             for theme, memories in pattern_findings.items():
-                if theme == "question about learning" and mode in ['librarian', 'analyst']:
+                if theme == "question about learning":
                     priority = self.scorer.calculate_priority(0.7, 0.6, 0.5, 0.8)
                     if self.scorer.should_surface(priority, 'standard_sweep'):
                         insights.append({
@@ -289,7 +287,7 @@ class AutonomousSweepService:
                             }
                         })
                         
-                elif theme == "goal progress discussion" and mode == 'coach':
+                elif theme == "goal progress discussion":
                     priority = self.scorer.calculate_priority(0.8, 0.7, 0.4, 0.9)
                     if self.scorer.should_surface(priority, 'standard_sweep'):
                         insights.append({
@@ -303,7 +301,7 @@ class AutonomousSweepService:
                             }
                         })
                         
-                elif theme == "reflection on past experience" and mode == 'companion':
+                elif theme == "reflection on past experience":
                     priority = self.scorer.calculate_priority(0.6, 0.8, 0.6, 0.7)
                     if self.scorer.should_surface(priority, 'standard_sweep'):
                         insights.append({
@@ -340,7 +338,7 @@ class AutonomousSweepService:
             insights.extend(await self._check_calendar_prep(user_id))
 
         except Exception as e:
-            print(f"Error in quick sweep: {e}")
+            logger.warning("Error in quick sweep: %s", e)
 
         return insights
 
@@ -371,7 +369,7 @@ class AutonomousSweepService:
             insights.extend(await self._analyze_conversation_patterns_with_memory(user_id))
 
         except Exception as e:
-            print(f"Error in standard sweep: {e}")
+            logger.warning("Error in standard sweep: %s", e)
 
         return insights
 
@@ -395,7 +393,7 @@ class AutonomousSweepService:
             insights.extend(await self._analyze_conversation_patterns_with_memory(user_id))
 
         except Exception as e:
-            print(f"Error in digest sweep: {e}")
+            logger.warning("Error in digest sweep: %s", e)
 
         return insights
     
@@ -500,7 +498,7 @@ class AutonomousSweepService:
                     insights.append({
                         'type': 'reflection_streak',
                         'title': f'🔥 {consecutive_days}-day reflection streak!',
-                        'message': self._get_streak_message(consecutive_days, mode),
+                        'message': self._get_streak_message(consecutive_days),
                         'priority_score': priority,
                         'related_data': {'streak_days': consecutive_days}
                     })
@@ -555,61 +553,61 @@ class AutonomousSweepService:
                         })
         
         # Check communication style preferences
-        if profile.communication_style and mode == 'companion':
-            if profile.communication_style == 'direct' and mode not in ['analyst', 'coach']:
-                priority = self.scorer.calculate_priority(0.5, 0.6, 0.7, 0.4)
-                if self.scorer.should_surface(priority, 'standard_sweep'):
-                    insights.append({
-                        'type': 'style_adjustment',
-                        'title': '💬 Adjusting my communication style',
-                        'message': 'I notice you prefer direct communication. I\'ll keep things concise and actionable.',
-                        'priority_score': priority,
-                        'related_data': {'style': profile.communication_style}
-                    })
+        if profile.communication_style == 'direct':
+            priority = self.scorer.calculate_priority(0.5, 0.6, 0.7, 0.4)
+            if self.scorer.should_surface(priority, 'standard_sweep'):
+                insights.append({
+                    'type': 'style_adjustment',
+                    'title': '💬 Adjusting my communication style',
+                    'message': 'I notice you prefer direct communication. I\'ll keep things concise and actionable.',
+                    'priority_score': priority,
+                    'related_data': {'style': profile.communication_style}
+                })
         
         return insights
     
     async def _check_habit_salvage(self, user_id: str) -> List[Dict[str, Any]]:
         """Check for habits that can still be salvaged today"""
-        # Import Habit and HabitInstance here to avoid circular import
-        from ..main_simple import Habit, HabitInstance
+        from ..models.habit import Habit, HabitInstance
 
         insights = []
 
-        # Get today's date
-        today = datetime.now().date()
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
+        completed_today = self.db.query(HabitInstance.habit_id).filter(
+            HabitInstance.user_id == user_id,
+            HabitInstance.date >= today_start,
+            HabitInstance.date < tomorrow_start,
+            HabitInstance.status == "complete"
+        ).distinct().all()
+        completed_habit_ids = {row[0] for row in completed_today}
 
         # Query habits that haven't been completed today but still can be
         habits = self.db.query(Habit).filter(
             Habit.user_id == user_id,
-            Habit.paused == 0
+            or_(Habit.paused == 0, Habit.paused.is_(None))
         ).all()
 
         for habit in habits:
-            # Check if habit was completed today
-            today_instance = self.db.query(HabitInstance).filter(
-                HabitInstance.habit_id == habit.id,
-                HabitInstance.target_date == today,
-                HabitInstance.completed == 1
-            ).first()
-            
-            if not today_instance:
-                # Calculate priority score
-                relevance = 0.8  # High relevance for habit tracking
-                impact = 0.7     # Good impact on user goals
-                novelty = 0.3    # Not very novel, but useful
-                timing = 0.9     # Very timely (can still do today)
-                
-                priority = self.scorer.calculate_priority(relevance, impact, novelty, timing)
-                
-                if self.scorer.should_surface(priority, 'quick_sweep'):
-                    insights.append({
-                        'type': 'habit_salvage',
-                        'title': f'Time to {habit.title}?',
-                        'message': self._get_habit_salvage_message(habit.title),
-                        'priority_score': priority,
-                        'related_data': {'habit_id': habit.id}
-                    })
+            if habit.id in completed_habit_ids:
+                continue
+
+            # Calculate priority score
+            relevance = 0.8  # High relevance for habit tracking
+            impact = 0.7     # Good impact on user goals
+            novelty = 0.3    # Not very novel, but useful
+            timing = 0.9     # Very timely (can still do today)
+
+            priority = self.scorer.calculate_priority(relevance, impact, novelty, timing)
+
+            if self.scorer.should_surface(priority, 'quick_sweep'):
+                insights.append({
+                    'type': 'habit_salvage',
+                    'title': f'Time to {habit.title}?',
+                    'message': self._get_habit_salvage_message(habit.title),
+                    'priority_score': priority,
+                    'related_data': {'habit_id': habit.id}
+                })
         
         return insights[:2]  # Limit to 2 habit salvage suggestions
     
@@ -671,6 +669,8 @@ class AutonomousSweepService:
     
     async def _generate_habit_insights(self, user_id: str) -> List[Dict[str, Any]]:
         """Generate coaching insights about habit performance"""
+        from ..models.habit import HabitInstance
+
         insights = []
         
         if False:  # Always generate habit insights
@@ -681,8 +681,8 @@ class AutonomousSweepService:
         recent_instances = self.db.query(HabitInstance).filter(
             and_(
                 HabitInstance.user_id == user_id,
-                HabitInstance.target_date >= week_ago.date(),
-                HabitInstance.completed == 1
+                HabitInstance.date >= week_ago,
+                HabitInstance.status == "complete"
             )
         ).all()
         
@@ -691,7 +691,7 @@ class AutonomousSweepService:
             total_expected = self.db.query(HabitInstance).filter(
                 and_(
                     HabitInstance.user_id == user_id,
-                    HabitInstance.target_date >= week_ago.date()
+                    HabitInstance.date >= week_ago
                 )
             ).count()
             
@@ -799,6 +799,8 @@ class AutonomousSweepService:
     
     async def _generate_periodic_summaries(self, user_id: str) -> List[Dict[str, Any]]:
         """Generate daily/weekly summaries (Digest sweep)"""
+        from ..models.conversation import Conversation
+
         insights = []
         
         # Generate a summary based on recent activity
@@ -819,7 +821,7 @@ class AutonomousSweepService:
                 insights.append({
                     'type': 'weekly_summary',
                     'title': 'Your week in review',
-                    'message': self._get_weekly_summary_message(notes_count, conversations_count, mode),
+                    'message': self._get_weekly_summary_message(notes_count, conversations_count),
                     'priority_score': priority,
                     'related_data': {
                         'notes_count': notes_count,
@@ -849,22 +851,12 @@ class AutonomousSweepService:
     
     async def _generate_big_suggestion(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Generate one major suggestion based on comprehensive analysis"""
-        
-        suggestions_by_mode = {
-            'coach': 'Consider adding a morning routine habit to build momentum for your day.',
-            'analyst': 'Your data shows peak productivity between 2-4 PM. Schedule important work then.',
-            'companion': 'You\'ve been very thoughtful lately. Maybe time for some celebration?',
-            'guardian': 'Your security posture is strong. Consider sharing your setup with others.',
-            'concierge': 'I notice gaps in your calendar. Want to block focus time?',
-            'librarian': 'Your notes are rich but scattered. A weekly review might help connect ideas.'
-        }
-        
         priority = self.scorer.calculate_priority(0.7, 0.8, 0.6, 0.5)
         if self.scorer.should_surface(priority, 'digest_sweep'):
             return {
                 'type': 'big_suggestion',
-                'title': f'One big suggestion from your {mode}',
-                'message': suggestions_by_mode.get(mode, 'Keep up the great work!'),
+                'title': 'One big suggestion',
+                'message': 'Consider one focused habit this week that supports your top priority.',
                 'priority_score': priority,
                 'related_data': {}
             }
@@ -874,81 +866,27 @@ class AutonomousSweepService:
     def _get_habit_salvage_message(self, habit_title: str) -> str:
         """Get message for habit salvage"""
         return f"Still time to complete {habit_title} today!"
-        """Get mode-specific message for habit salvage"""
-        messages = {
-            'coach': f"You've got this! Still time to check off {habit_title} today 💪",
-            'companion': f"Gentle reminder about {habit_title} - no pressure, just checking in 🌟",
-            'guardian': f"Maintaining {habit_title} is part of your wellness protocol. Status check?",
-            'concierge': f"Your {habit_title} is still possible today. Shall I block some time?",
-            'analyst': f"Data shows you usually complete {habit_title} around this time. Ready?",
-            'librarian': f"Your {habit_title} routine is documented and ready. Proceeding?"
-        }
-        
     
     def _get_pattern_message(self, topic: str) -> str:
-        """Get mode-specific message for content patterns"""
-        messages = {
-            'coach': f"I notice you're focused on {topic} lately. How's progress?",
-            'analyst': f"Pattern detected: {topic} appears frequently in your notes. Worth exploring?",
-            'companion': f"You've been thinking about {topic} a lot. Want to dive deeper?",
-            'guardian': f"Monitoring your focus on {topic}. Any security implications to consider?",
-            'concierge': f"Your recurring interest in {topic} - shall I schedule time to explore it?",
-            'librarian': f"I've catalogued multiple references to {topic}. Time to organize these insights?"
-        }
-        return messages.get(mode, f"I notice you're focused on {topic} lately.")
+        """Get message for content patterns."""
+        return f"I notice you're focused on {topic} lately."
     
     def _get_weekly_summary_message(self, notes_count: int, conversations_count: int) -> str:
-        """Get mode-specific weekly summary message"""
-        if mode == 'coach':
-            return f"This week you created {notes_count} notes and had {conversations_count} conversations. That's momentum! 🚀"
-        elif mode == 'analyst':
-            return f"Weekly metrics: {notes_count} notes created, {conversations_count} conversations logged. Productivity trending upward."
-        elif mode == 'companion':
-            return f"What a week! You've been so thoughtful with {notes_count} notes and our {conversations_count} chats. 💫"
-        elif mode == 'guardian':
-            return f"Week secured: {notes_count} knowledge assets created, {conversations_count} communications logged."
-        elif True:  # Always check calendar prep
-            return f"Weekly summary: {notes_count} notes organized, {conversations_count} discussions facilitated."
-        else:  # librarian
-            return f"Weekly archive: {notes_count} documents catalogued, {conversations_count} conversations indexed."
+        """Get weekly summary message."""
+        return f"Weekly summary: {notes_count} notes organized, {conversations_count} discussions facilitated."
     
     def _get_gtky_message(self) -> str:
-        """Get mode-specific message for GTKY interview prompt"""
-        messages = {
-            'coach': "I'd love to learn about your goals and habits so I can better support your growth! 💪",
-            'analyst': "Let me gather some data about your preferences and patterns to optimize our interactions.",
-            'companion': "I'd like to get to know you better so we can have more meaningful conversations! ✨",
-            'guardian': "Please share some info about yourself so I can better protect and assist you.",
-            'concierge': "Tell me about your preferences so I can provide more personalized assistance.",
-            'librarian': "Share your interests and goals so I can curate information more effectively for you."
-        }
-        return messages.get(mode, "I'd love to learn more about you to provide better assistance!")
+        """Get message for GTKY interview prompt."""
+        return "I'd love to learn more about you to provide better assistance!"
     
-    def _get_reflection_message(self, mode: str, current_hour: int) -> str:
-        """Get mode-specific message for reflection prompt"""
+    def _get_reflection_message(self, current_hour: int) -> str:
+        """Get message for reflection prompt."""
         time_context = "Perfect time for reflection" if current_hour >= 19 else "Good time to reflect"
-        
-        messages = {
-            'coach': f"{time_context} on today's wins and tomorrow's game plan! 🎯",
-            'analyst': f"{time_context} - let's review today's data points and insights.",
-            'companion': f"{time_context} on your day. I'm here to listen and understand. 🌙",
-            'guardian': f"{time_context} - daily check-in for wellness and security awareness.",
-            'concierge': f"{time_context} on today's activities and tomorrow's priorities.",
-            'librarian': f"{time_context} - time to catalog today's learnings and insights."
-        }
-        return messages.get(mode, f"{time_context} on your day - just 3 minutes of thoughtful questions.")
+        return f"{time_context} on your day - just 3 minutes of thoughtful questions."
     
     def _get_streak_message(self, streak_days: int) -> str:
-        """Get mode-specific message for reflection streak"""
-        messages = {
-            'coach': f"You're building an amazing reflection habit! This consistency is key to growth. 🚀",
-            'analyst': f"Excellent data collection streak! Your self-awareness metrics are trending upward.",
-            'companion': f"I love seeing your commitment to self-reflection. You're really getting to know yourself! 💫",
-            'guardian': f"Consistent reflection strengthens mental resilience. Well done maintaining this practice.",
-            'concierge': f"Your reflection routine is well-established. This creates great structure for daily planning.",
-            'librarian': f"Wonderful documentation of your daily insights! This creates a rich personal archive."
-        }
-        return messages.get(mode, "Your commitment to daily reflection shows real wisdom and growth!")
+        """Get message for reflection streak."""
+        return f"Great consistency: {streak_days} days of reflection in a row."
     
     def _log_sweep_execution(
         self,

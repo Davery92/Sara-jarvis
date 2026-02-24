@@ -8,7 +8,9 @@ Returns a unified timeline of Sara's autonomous activity:
 """
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -20,6 +22,18 @@ from app.core.deps import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sara-activity"])
+
+
+def _normalize_journal_text(content: str) -> str:
+    text = (content or "").lower()
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _normalize_journal_text(a), _normalize_journal_text(b)).ratio()
 
 
 @router.get("/api/sara/activity")
@@ -106,20 +120,31 @@ async def get_activity(
                 LIMIT :lim
             """), {"uid": user_id, "since": since, "lim": limit}).fetchall()
 
+            last_kept_content = None
+            last_kept_ts = None
             for entry in entries:
+                content = entry.content or ""
+                entry_ts = entry.created_at
+                if last_kept_content and last_kept_ts and entry_ts:
+                    within_window = (last_kept_ts - entry_ts) <= timedelta(hours=12)
+                    if within_window and _similarity(content, last_kept_content) >= 0.9:
+                        continue
+
                 activities.append({
                     "id": str(entry.id),
                     "timestamp": entry.created_at.isoformat() if entry.created_at else None,
                     "type": "journal",
-                    "summary": (entry.content or "")[:200],
+                    "summary": content[:200],
                     "details": {
                         "emotional_state": entry.emotional_state,
                         "entry_type": entry.entry_type,
                         "observations": entry.observations,
                         "watching_for": entry.watching_for,
-                        "full_content": entry.content,
+                        "full_content": content,
                     }
                 })
+                last_kept_content = content
+                last_kept_ts = entry_ts
 
         # Sort by timestamp descending
         activities.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

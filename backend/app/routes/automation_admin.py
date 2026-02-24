@@ -3,15 +3,17 @@ Automation admin routes for managing registered endpoints and system-wide settin
 
 These endpoints should be restricted to admin users in production.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
+from functools import lru_cache
 import logging
 
 from app.db.session import get_db
+from app.core.config import settings
 from app.core.deps import get_current_user
 from app.models.user import User
 
@@ -64,11 +66,60 @@ class RegisteredEndpointResponse(BaseModel):
         from_attributes = True
 
 
-# TODO: Add proper admin check
-def require_admin(current_user: User = Depends(get_current_user)):
-    """Check if user is admin. For now, allow all authenticated users."""
-    # In production, add proper admin role checking
-    return current_user
+@lru_cache(maxsize=1)
+def _automation_admin_allowlist() -> set[str]:
+    """Parse automation admin allowlist once per process."""
+    raw = (settings.automation_admin_emails or "").strip()
+    if not raw:
+        return set()
+    return {email.strip().lower() for email in raw.split(",") if email.strip()}
+
+
+def _user_has_admin_role(db: Session, user_id: str) -> bool:
+    """
+    True when user has an explicit admin-like role in app_user_role.
+    Falls back safely if role table is not migrated yet.
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT role
+                FROM app_user_role
+                WHERE user_id = :user_id
+                LIMIT 1
+            """),
+            {"user_id": user_id},
+        ).fetchone()
+    except Exception:
+        return False
+
+    if not row:
+        return False
+    return str(row[0] or "").lower() in {"admin", "owner"}
+
+
+def require_admin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Restrict automation-admin endpoints to explicit role-based admin users,
+    with allowlist fallback for legacy deployments.
+    """
+    if _user_has_admin_role(db, current_user.id):
+        return current_user
+
+    allowlist = _automation_admin_allowlist()
+    if allowlist and (current_user.email or "").lower() in allowlist:
+        return current_user
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "Admin privileges required. Assign role=admin/owner in app_user_role "
+            "or configure AUTOMATION_ADMIN_EMAILS for legacy allowlist access."
+        ),
+    )
 
 
 @router.get("/endpoints", response_model=List[RegisteredEndpointResponse])

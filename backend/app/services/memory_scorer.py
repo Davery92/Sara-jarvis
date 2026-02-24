@@ -5,8 +5,8 @@ Scores episodes on the write path for better recall using LLM with heuristic fal
 Computes importance, affect, novelty, and taskness scores.
 
 Uses same LLM failover pattern as subconscious service:
-- Primary: gpt-oss:120b on primary endpoint
-- Fallback: gpt-oss:20b on local endpoint
+- Primary: background primary model on primary endpoint
+- Fallback: background fallback model on local endpoint
 """
 import httpx
 import json
@@ -23,15 +23,7 @@ class MemoryScorer:
         self.enabled = True
 
         # LLM config with failover (same pattern as subconscious service)
-        try:
-            from app.core.config import settings
-            self.llm_primary_url = getattr(settings, 'llm_primary_url', 'http://100.104.68.115:11434').replace('/v1', '')
-        except Exception:
-            self.llm_primary_url = 'http://100.104.68.115:11434'
-
-        self.llm_fallback_url = "http://10.185.1.8:11434"
-        self.primary_model = "gpt-oss:120b"
-        self.fallback_model = "gpt-oss:20b"
+        self._refresh_llm_config()
         self._active_llm_url = None
         self._active_model = None
 
@@ -53,8 +45,31 @@ class MemoryScorer:
             "worried", "anxious", "upset", "disappointed", "annoyed"
         ]
 
+    def _refresh_llm_config(self):
+        """Reload background LLM settings so model switches apply live."""
+        try:
+            from app.core.config import settings
+            self.llm_primary_url = getattr(
+                settings,
+                "bg_llm_primary_url",
+                "http://100.104.68.115:11434/v1",
+            ).replace('/v1', '')
+            self.llm_fallback_url = getattr(
+                settings,
+                "bg_llm_fallback_url",
+                "http://10.185.1.8:11434/v1",
+            ).replace('/v1', '')
+            self.primary_model = getattr(settings, "bg_llm_primary_model", "gpt-oss:20b")
+            self.fallback_model = getattr(settings, "bg_llm_fallback_model", "gpt-oss:20b")
+        except Exception:
+            self.llm_primary_url = 'http://100.104.68.115:11434'
+            self.llm_fallback_url = "http://10.185.1.8:11434"
+            self.primary_model = "gpt-oss:20b"
+            self.fallback_model = "gpt-oss:20b"
+
     async def _get_active_llm(self) -> tuple[Optional[str], Optional[str]]:
         """Get active LLM endpoint with failover"""
+        self._refresh_llm_config()
         endpoints = [
             (self.llm_primary_url, self.primary_model),
             (self.llm_fallback_url, self.fallback_model)

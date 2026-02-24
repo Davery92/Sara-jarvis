@@ -132,6 +132,16 @@ interface ChatInterfaceProps {
   message: string
   setMessage: React.Dispatch<React.SetStateAction<string>>
   abortControllerRef: React.MutableRefObject<AbortController | null>
+  quickActionContext?: {
+    inboxUnreadCount: number
+    attentionUnreadCount: number
+    missionAwaitingCount: number
+    runningMissionCount: number
+    standingOrdersCount: number
+    nextCalendarEventTitle?: string | null
+    nextCalendarEventStart?: string | null
+  }
+  onQuickAction?: (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => void
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({
@@ -142,7 +152,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onClearChat,
   message,
   setMessage,
-  abortControllerRef
+  abortControllerRef,
+  quickActionContext,
+  onQuickAction,
 }) => {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null)
   const [isMobile, setIsMobile] = useState(false)
@@ -162,7 +174,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [isResizing, setIsResizing] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [showImageMenu, setShowImageMenu] = useState(false)
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b')
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:20b')
   const [isEphemeral, setIsEphemeral] = useState(false)
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null)
@@ -174,6 +186,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const imageMenuRef = useRef<HTMLDivElement>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
   const hasLoadedHistory = useRef(false)
+  const hasUserMessages = messages.some((msg) => msg.role === 'user')
 
   // Artifacts hook for creating/managing artifacts
   const { createArtifact, artifacts } = useArtifacts({ conversationId: currentConversationId || undefined })
@@ -305,7 +318,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       try {
         const models = await apiClient.getChatModels()
         setAvailableModels(models)
-        if (models.default && selectedModel === 'gpt-oss:120b') {
+        if (models.default && selectedModel === 'gpt-oss:20b') {
           setSelectedModel(models.default)
         }
       } catch (error) {
@@ -507,6 +520,27 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   // Remove attached image
   const removeAttachedImage = (index: number) => {
     setAttachedImages(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const formatQuickActionTime = (value?: string | null): string => {
+    if (!value) return 'time unknown'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return 'time unknown'
+    const now = Date.now()
+    const diff = date.getTime() - now
+    const mins = Math.round(Math.abs(diff) / 60000)
+    if (mins < 60) return diff >= 0 ? `in ${mins}m` : `${mins}m ago`
+    const hours = Math.round(mins / 60)
+    if (hours < 24) return diff >= 0 ? `in ${hours}h` : `${hours}h ago`
+    const days = Math.round(hours / 24)
+    return diff >= 0 ? `in ${days}d` : `${days}d ago`
+  }
+
+  const handleQuickAction = (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => {
+    if (actionId === 'standing_orders') {
+      setMessage('Review my active standing orders and tell me what is scheduled next.')
+    }
+    onQuickAction?.(actionId)
   }
 
   // Close image menu when clicking outside
@@ -920,7 +954,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   ).map(([provider, models]) => (
                     <div key={provider}>
                       <div className="px-3 py-1 text-xs text-gray-400 uppercase tracking-wider">
-                        {provider === 'anthropic' ? 'Claude' : provider === 'google' ? 'Gemini' : 'Local'}
+                        {provider === 'anthropic'
+                          ? 'Claude'
+                          : provider === 'google'
+                          ? 'Gemini'
+                          : provider === 'codex'
+                          ? 'ChatGPT Codex'
+                          : provider === 'openai'
+                          ? 'OpenAI'
+                          : 'Local'}
                       </div>
                       {models.map((model) => (
                         <button
@@ -969,6 +1011,55 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {!hasUserMessages && (
+            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4">
+              <div className="mb-3">
+                <h3 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">Quick Actions</h3>
+                <p className="text-xs text-gray-500 mt-1">Context-aware shortcuts based on your current queue.</p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <button
+                  onClick={() => handleQuickAction('inbox_attention')}
+                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                >
+                  <p className="text-sm text-white">Review Attention Inbox</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {quickActionContext?.attentionUnreadCount || 0} unread attention item(s)
+                  </p>
+                </button>
+                <button
+                  onClick={() => handleQuickAction('missions')}
+                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                >
+                  <p className="text-sm text-white">Open Missions</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {quickActionContext?.missionAwaitingCount || 0} awaiting decisions, {quickActionContext?.runningMissionCount || 0} running
+                  </p>
+                </button>
+                <button
+                  onClick={() => handleQuickAction('calendar')}
+                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                >
+                  <p className="text-sm text-white">Check Calendar</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {quickActionContext?.nextCalendarEventTitle
+                      ? `Next: ${quickActionContext.nextCalendarEventTitle} (${formatQuickActionTime(quickActionContext?.nextCalendarEventStart)})`
+                      : 'No upcoming events loaded'}
+                  </p>
+                </button>
+                <button
+                  onClick={() => handleQuickAction('standing_orders')}
+                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                >
+                  <p className="text-sm text-white">Summarize Standing Orders</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {quickActionContext?.standingOrdersCount || 0} active standing order(s)
+                  </p>
+                </button>
+              </div>
+            </div>
+          )}
+
           {messages.map((msg, index) => (
             <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
@@ -1046,6 +1137,42 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                   <span className="inline-block px-1.5 py-0.5 text-xs bg-teal-600/20 border border-teal-500/30 rounded text-teal-400 hover:bg-teal-600/30 cursor-pointer transition-colors">
                                     {children}
                                   </span>
+                                )
+                              }
+                              // Internal API links (e.g. /email/.../download) — fetch with auth cookie
+                              if (href && (href.startsWith('/email/') || href.startsWith('/api/'))) {
+                                const handleApiDownload = async (e: React.MouseEvent) => {
+                                  e.preventDefault()
+                                  try {
+                                    const apiBase = APP_CONFIG.apiUrl
+                                    const res = await fetch(`${apiBase}${href}`, { credentials: 'include' })
+                                    if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+                                    const blob = await res.blob()
+                                    const url = URL.createObjectURL(blob)
+                                    const a = document.createElement('a')
+                                    a.href = url
+                                    // Extract filename from Content-Disposition or href
+                                    const disposition = res.headers.get('Content-Disposition')
+                                    const filenameMatch = disposition?.match(/filename="?([^"]+)"?/)
+                                    a.download = filenameMatch?.[1] || href.split('/').pop() || 'download'
+                                    document.body.appendChild(a)
+                                    a.click()
+                                    document.body.removeChild(a)
+                                    URL.revokeObjectURL(url)
+                                  } catch (err) {
+                                    console.error('Download failed:', err)
+                                  }
+                                }
+                                return (
+                                  <a
+                                    href={href}
+                                    onClick={handleApiDownload}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-600/20 border border-blue-500/30 rounded text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors no-underline"
+                                    title="Click to download"
+                                  >
+                                    <span className="material-icons text-xs" style={{fontSize: '14px'}}>attach_file</span>
+                                    {children}
+                                  </a>
                                 )
                               }
                               return (

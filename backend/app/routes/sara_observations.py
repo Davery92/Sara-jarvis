@@ -51,7 +51,7 @@ async def get_observations(
             SELECT id, content, emotional_state, entry_type, label, created_at
             FROM sara_journal
             WHERE user_id = :uid
-            AND entry_type IN ('heartbeat', 'periodic', 'unified')
+            AND entry_type IN ('heartbeat', 'periodic', 'unified', 'deliberation', 'consolidation')
             AND created_at >= :since
             ORDER BY created_at DESC
             LIMIT :lim

@@ -461,10 +461,10 @@ class OutboxProcessor:
     async def _llm_extract_entities(self, content: str, user_id: str) -> Dict[str, Any]:
         """Use LLM to extract personal entities from content"""
         import httpx
-        import os
+        from app.core.config import settings
 
-        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+        llm_base_url = settings.bg_llm_primary_url
+        llm_model = settings.bg_llm_primary_model
 
         prompt = f"""Extract personal entities from this text. Include:
 - People (with relationship to user if mentioned: "brother", "coworker", "friend")
@@ -481,9 +481,9 @@ Return ONLY valid JSON in this exact format, no other text:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
-                    f"{OPENAI_BASE_URL}/chat/completions",
+                    f"{llm_base_url}/chat/completions",
                     json={
-                        "model": OPENAI_MODEL,
+                        "model": llm_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.3,
                         "max_tokens": 500

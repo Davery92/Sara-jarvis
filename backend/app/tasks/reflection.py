@@ -153,8 +153,14 @@ async def _assess_proposal_async(proposal_id: int):
             )
             row = result.fetchone()
 
-            if not row or row[0] != "implemented":
-                return {"status": "skipped", "reason": "Proposal not implemented"}
+            if not row:
+                return {"status": "skipped", "reason": "Proposal not found"}
+            if row[0] != "implemented":
+                return {
+                    "status": "skipped",
+                    "reason": "Proposal not implemented",
+                    "proposal_status": row[0],
+                }
 
             target_agent = row[1]
             karma_at_impl = row[2] or {}

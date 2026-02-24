@@ -148,13 +148,17 @@ class DeviceOrchestrator:
                     capabilities=m.capabilities if isinstance(m.capabilities, list) else [],
                 ))
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(f"Failed to get machine profiles: {e}")
 
         # Mobile devices from push tokens
         try:
             push_results = db.execute(text("""
                 SELECT id, token, platform, device_name, is_active, created_at
-                FROM push_tokens
+                FROM push_token
                 WHERE user_id = :user_id AND is_active = true
             """), {"user_id": user_id}).fetchall()
 
@@ -171,6 +175,10 @@ class DeviceOrchestrator:
                     has_push=True,
                 ))
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(f"Failed to get push token profiles: {e}")
 
         return profiles
@@ -343,6 +351,10 @@ class DeviceOrchestrator:
             return "\n".join(lines)
 
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(f"Device context generation failed: {e}")
             return None
 

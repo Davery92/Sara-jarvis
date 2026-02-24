@@ -13,9 +13,11 @@ services:
     build:
       context: ./frontend
       args:
+        VITE_API_URL: ${VITE_API_URL-}
         VITE_ASSISTANT_NAME: Sara
         VITE_DOMAIN: sara.avery.cloud
         VITE_API_DOMAIN: sara-api.avery.cloud
+        VITE_WORKBENCH_URL: ${VITE_WORKBENCH_URL-}
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -24,7 +26,21 @@ services:
       - VITE_ASSISTANT_NAME=Sara
       - VITE_DOMAIN=${VITE_DOMAIN-sara.avery.cloud}
       - VITE_API_DOMAIN=${VITE_API_DOMAIN-sara-api.avery.cloud}
+      - VITE_WORKBENCH_URL=${VITE_WORKBENCH_URL-}
       - VITE_ALLOWED_HOSTS=sara.avery.cloud,localhost,10.185.1.180
+    depends_on:
+      - backend
+
+  canvas:
+    build:
+      context: ./workbench-canvas
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3002:3002"
+    restart: unless-stopped
+    volumes:
+      - ./workbench-canvas:/app
+      - /app/node_modules
     depends_on:
       - backend
 
@@ -49,8 +65,8 @@ services:
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
-      - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","https://sara-api.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001"]
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN-.avery.cloud}
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://canvas.avery.cloud","http://canvas.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","https://sara-api.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
@@ -77,6 +93,7 @@ services:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
     volumes:
       - backend_data:/app/data
+      - ./data:/home/david/jarvis/data
     depends_on:
       db:
         condition: service_started

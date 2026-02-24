@@ -22,10 +22,29 @@ const getApiUrl = () => {
   return 'http://localhost:8000'
 }
 
+const getWorkbenchUrl = () => {
+  if (import.meta.env.VITE_WORKBENCH_URL) {
+    return import.meta.env.VITE_WORKBENCH_URL
+  }
+
+  // Production: use canvas.avery.cloud
+  if (typeof window !== 'undefined' && window.location.hostname.includes('avery.cloud')) {
+    return 'https://canvas.avery.cloud'
+  }
+
+  // LAN development
+  if (typeof window !== 'undefined') {
+    return `http://${window.location.hostname}:3002`
+  }
+
+  return 'http://localhost:3002'
+}
+
 export const APP_CONFIG = {
   assistantName: import.meta.env.VITE_ASSISTANT_NAME || 'Sara',
   domain: import.meta.env.VITE_DOMAIN || 'sara.avery.cloud',
   apiUrl: getApiUrl(),
+  workbenchUrl: getWorkbenchUrl(),
   theme: {
     primary: '#6366f1',
     secondary: '#8b5cf6',

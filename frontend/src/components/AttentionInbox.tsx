@@ -24,7 +24,7 @@ export default function AttentionInbox() {
 
   const loadItems = useCallback(async () => {
     try {
-      const res = await fetch(`${APP_CONFIG.API_BASE_URL}/autonomy/attention?limit=50`, {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention?limit=50`, {
         credentials: 'include',
       })
       if (res.ok) {
@@ -44,22 +44,43 @@ export default function AttentionInbox() {
     return () => clearInterval(interval)
   }, [loadItems])
 
+  const sendNotificationFeedback = async (notificationId: number | undefined, action: string) => {
+    if (!notificationId) return
+    try {
+      await fetch(`${APP_CONFIG.apiUrl}/api/notifications/${notificationId}/feedback`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+    } catch (err) {
+      // Feedback is best-effort, don't block the UI
+    }
+  }
+
   const markRead = async (id: string) => {
-    await fetch(`${APP_CONFIG.API_BASE_URL}/autonomy/attention/${id}/read`, {
+    await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/${id}/read`, {
       method: 'POST', credentials: 'include',
     })
     loadItems()
   }
 
+  const markEngaged = async (id: string) => {
+    // Mark as read + record engagement via attention queue
+    await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/${id}/read`, {
+      method: 'POST', credentials: 'include',
+    })
+  }
+
   const archiveItem = async (id: string) => {
-    await fetch(`${APP_CONFIG.API_BASE_URL}/autonomy/attention/${id}/archive`, {
+    await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/${id}/archive`, {
       method: 'POST', credentials: 'include',
     })
     loadItems()
   }
 
   const archiveAll = async () => {
-    await fetch(`${APP_CONFIG.API_BASE_URL}/autonomy/attention/archive-all`, {
+    await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/archive-all`, {
       method: 'POST', credentials: 'include',
     })
     loadItems()
@@ -109,7 +130,13 @@ export default function AttentionInbox() {
                   ? 'border-teal-500/30 bg-teal-500/5'
                   : 'border-white/10 bg-white/5'
               }`}
-              onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+              onClick={() => {
+                const isExpanding = expandedId !== item.id
+                setExpandedId(isExpanding ? item.id : null)
+                if (isExpanding && (item.status === 'new' || item.status === 'sent')) {
+                  markEngaged(item.id)
+                }
+              }}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1 min-w-0">

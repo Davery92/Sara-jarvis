@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, Notification, dialog } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import net from 'net'
 import { spawn, ChildProcess } from 'child_process'
 import WebSocket from 'ws'
 import { autoUpdater } from 'electron-updater'
@@ -10,8 +11,44 @@ let sidecarBridge: WebSocket | null = null
 let bridgeReconnectTimeout: NodeJS.Timeout | null = null
 let currentVoiceState: string = 'disconnected'
 
-function startSidecar(store: SimpleStore) {
+function isLocalPortOpen(port: number, host = '127.0.0.1', timeoutMs = 400): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket()
+    let settled = false
+
+    const finish = (open: boolean) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(open)
+    }
+
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+    socket.connect(port, host)
+  })
+}
+
+async function startSidecar(store: SimpleStore) {
   if (sidecarProcess) return
+
+  const bridgeAlreadyRunning = await isLocalPortOpen(9876)
+  if (bridgeAlreadyRunning) {
+    console.log('[Main] Existing sidecar bridge detected; requesting shutdown before restart')
+    await requestExistingSidecarShutdown()
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    if (await isLocalPortOpen(9876)) {
+      console.log('[Main] Existing sidecar did not stop gracefully; forcing shutdown by port owner')
+      await forceKillBridgePortProcess(9876)
+      await new Promise((resolve) => setTimeout(resolve, 900))
+    }
+    if (await isLocalPortOpen(9876)) {
+      console.warn('[Main] Sidecar bridge port 9876 is still occupied; reusing existing sidecar instance')
+      return
+    }
+  }
 
   let sidecarDir: string
   let sidecarPath: string
@@ -37,12 +74,19 @@ function startSidecar(store: SimpleStore) {
 
   // Look for venv Python first, fall back to system Python
   let pythonCmd: string
-  const venvPython = isWindows
-    ? path.join(sidecarDir, 'venv', 'Scripts', 'python.exe')
-    : path.join(sidecarDir, 'venv', 'bin', 'python')
+  const venvCandidates = isWindows
+    ? [
+        path.join(sidecarDir, 'venv', 'Scripts', 'python.exe'),
+        path.join(sidecarDir, '.venv', 'Scripts', 'python.exe'),
+      ]
+    : [
+        path.join(sidecarDir, 'venv', 'bin', 'python'),
+        path.join(sidecarDir, '.venv', 'bin', 'python'),
+      ]
+  const discoveredVenv = venvCandidates.find((candidate) => fs.existsSync(candidate))
 
-  if (fs.existsSync(venvPython)) {
-    pythonCmd = venvPython
+  if (discoveredVenv) {
+    pythonCmd = discoveredVenv
     console.log('[Main] Using venv Python:', pythonCmd)
   } else {
     pythonCmd = isWindows ? 'python' : 'python3'
@@ -53,7 +97,12 @@ function startSidecar(store: SimpleStore) {
   }
 
   sidecarProcess = spawn(pythonCmd, [sidecarPath], {
-    env: { ...process.env, SARA_AUTH_TOKEN: authToken, SARA_BACKEND_URL: apiUrl },
+    env: {
+      ...process.env,
+      SARA_AUTH_TOKEN: authToken,
+      SARA_BACKEND_URL: apiUrl,
+      SARA_VOICE_PLAYBACK_BACKEND: 'winsound',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
     cwd: sidecarDir,  // Set working directory to sidecar folder
   })
@@ -63,6 +112,94 @@ function startSidecar(store: SimpleStore) {
   sidecarProcess.on('close', (code) => {
     console.log(`[Main] Sidecar exited with code ${code}`)
     sidecarProcess = null
+  })
+}
+
+async function requestExistingSidecarShutdown(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const ws = new WebSocket('ws://127.0.0.1:9876')
+    let settled = false
+
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try {
+        ws.close()
+      } catch {
+        // no-op
+      }
+      resolve()
+    }
+
+    const timeout = setTimeout(() => {
+      console.log('[Main] Existing sidecar shutdown request timed out')
+      finish()
+    }, 1500)
+
+    ws.on('open', () => {
+      try {
+        ws.send(JSON.stringify({ type: 'shutdown_sidecar' }))
+        console.log('[Main] Sent shutdown request to existing sidecar')
+      } catch {
+        // no-op
+      }
+      setTimeout(() => {
+        clearTimeout(timeout)
+        finish()
+      }, 350)
+    })
+
+    ws.on('error', () => {
+      clearTimeout(timeout)
+      finish()
+    })
+
+    ws.on('close', () => {
+      clearTimeout(timeout)
+      finish()
+    })
+  })
+}
+
+async function forceKillBridgePortProcess(port: number): Promise<void> {
+  if (process.platform !== 'win32') return
+
+  const script = `
+$connections = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue
+if (-not $connections) { exit 0 }
+$owningPids = $connections | Select-Object -ExpandProperty OwningProcess -Unique
+foreach ($owningPid in $owningPids) {
+  try {
+    Stop-Process -Id $owningPid -Force -ErrorAction Stop
+    Write-Output "Killed PID $owningPid on port ${port}"
+  } catch {
+    Write-Output "Failed to kill PID $owningPid on port ${port}: $($_.Exception.Message)"
+  }
+}
+`
+
+  await new Promise<void>((resolve) => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    ps.stdout?.on('data', (data) => {
+      const output = data.toString().trim()
+      if (output) {
+        console.log('[Main] Port kill stdout:', output)
+      }
+    })
+
+    ps.stderr?.on('data', (data) => {
+      const output = data.toString().trim()
+      if (output) {
+        console.warn('[Main] Port kill stderr:', output)
+      }
+    })
+
+    ps.on('close', () => resolve())
+    ps.on('error', () => resolve())
   })
 }
 
@@ -164,11 +301,6 @@ function handleBridgeMessage(message: { type: string; [key: string]: any }) {
           body: message.message || ''
         }).show()
       }
-      break
-
-    case 'speak':
-      // Forward to renderer for TTS (browser speech synthesis)
-      mainWindow?.webContents.send('speak', message.text)
       break
 
     case 'activity_update':
@@ -276,6 +408,8 @@ let settingsWindow: BrowserWindow | null = null  // Settings window
 let timerWindows: Map<string, BrowserWindow> = new Map()  // Floating timer windows
 let tray: Tray | null = null
 let isQuitting = false
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 // Activity monitoring
 let activityTimeout: NodeJS.Timeout | null = null
@@ -833,91 +967,110 @@ ipcMain.on('update-timer', (_, timerData: { id: string; remainingSeconds: number
   }
 })
 
-// App lifecycle
-app.whenReady().then(() => {
-  // Initialize settings store (must be after app is ready)
-  store.init()
-
-  // --- Auto-updater ---
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.logger = {
-    info: (msg: any) => console.log('[AutoUpdate]', msg),
-    warn: (msg: any) => console.warn('[AutoUpdate]', msg),
-    error: (msg: any) => console.error('[AutoUpdate]', msg),
-    debug: (msg: any) => console.log('[AutoUpdate:debug]', msg),
-  }
-
-  autoUpdater.on('update-available', (info) => {
-    console.log('[AutoUpdate] Update available:', info.version)
-    new Notification({
-      title: 'Sara Update Available',
-      body: `Version ${info.version} is downloading...`,
-    }).show()
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (!mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
+      }
+      mainWindow.focus()
+      fadeIn()
+    }
   })
 
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('[AutoUpdate] Update downloaded:', info.version)
-    dialog.showMessageBox({
-      type: 'info',
-      title: 'Update Ready',
-      message: `Sara ${info.version} has been downloaded.`,
-      detail: 'It will be installed when you restart the app. Restart now?',
-      buttons: ['Restart', 'Later'],
-      defaultId: 0,
-    }).then(({ response }) => {
-      if (response === 0) {
-        autoUpdater.quitAndInstall()
+  // App lifecycle
+  app.whenReady().then(() => {
+    // Initialize settings store (must be after app is ready)
+    store.init()
+
+    // --- Auto-updater ---
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.logger = {
+      info: (msg: any) => console.log('[AutoUpdate]', msg),
+      warn: (msg: any) => console.warn('[AutoUpdate]', msg),
+      error: (msg: any) => console.error('[AutoUpdate]', msg),
+      debug: (msg: any) => console.log('[AutoUpdate:debug]', msg),
+    }
+
+    autoUpdater.on('update-available', (info) => {
+      console.log('[AutoUpdate] Update available:', info.version)
+      new Notification({
+        title: 'Sara Update Available',
+        body: `Version ${info.version} is downloading...`,
+      }).show()
+    })
+
+    autoUpdater.on('update-downloaded', (info) => {
+      console.log('[AutoUpdate] Update downloaded:', info.version)
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Update Ready',
+        message: `Sara ${info.version} has been downloaded.`,
+        detail: 'It will be installed when you restart the app. Restart now?',
+        buttons: ['Restart', 'Later'],
+        defaultId: 0,
+      }).then(({ response }) => {
+        if (response === 0) {
+          autoUpdater.quitAndInstall()
+        }
+      })
+    })
+
+    autoUpdater.on('error', (err) => {
+      console.error('[AutoUpdate] Error:', err.message)
+    })
+
+    // Check for updates on launch, then every 30 minutes
+    autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Initial check failed:', err.message))
+    setInterval(() => {
+      autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Periodic check failed:', err.message))
+    }, 30 * 60 * 1000)
+
+    // Start sidecar for activity monitoring and screenshots
+    startSidecar(store).catch((err) => {
+      console.error('[Main] Failed to start sidecar:', err)
+    })
+
+    // Connect to sidecar bridge after a short delay (let sidecar start its WebSocket server)
+    setTimeout(() => connectToBridge(store), 2000)
+
+    createWindow()
+    createTray()
+    resetActivityTimer()
+
+    // Auto-start on login (can be toggled in settings)
+    const autoStart = store.get('autoStart', true) as boolean
+    app.setLoginItemSettings({
+      openAtLogin: autoStart,
+      openAsHidden: true,
+    })
+
+    // If mode was saved as silent, show chat window
+    if (store.get('mode') === 'silent') {
+      showChatWindow()
+    }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
       }
     })
   })
 
-  autoUpdater.on('error', (err) => {
-    console.error('[AutoUpdate] Error:', err.message)
-  })
-
-  // Check for updates on launch, then every 30 minutes
-  autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Initial check failed:', err.message))
-  setInterval(() => {
-    autoUpdater.checkForUpdates().catch(err => console.log('[AutoUpdate] Periodic check failed:', err.message))
-  }, 30 * 60 * 1000)
-
-  // Start sidecar for activity monitoring and screenshots
-  startSidecar(store)
-
-  // Connect to sidecar bridge after a short delay (let sidecar start its WebSocket server)
-  setTimeout(() => connectToBridge(store), 2000)
-
-  createWindow()
-  createTray()
-  resetActivityTimer()
-
-  // Auto-start on login (can be toggled in settings)
-  const autoStart = store.get('autoStart', true) as boolean
-  app.setLoginItemSettings({
-    openAtLogin: autoStart,
-    openAsHidden: true,
-  })
-
-  // If mode was saved as silent, show chat window
-  if (store.get('mode') === 'silent') {
-    showChatWindow()
-  }
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit()
     }
   })
-})
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
-
-app.on('before-quit', () => {
-  isQuitting = true
-  stopSidecar()
-})
+  app.on('before-quit', () => {
+    isQuitting = true
+    stopSidecar()
+  })
+}

@@ -467,6 +467,12 @@ class ToolIntentClassifier:
             'show the map', 'hide the map', 'create a map', 'add node',
             'connect nodes', 'visualization', 'visualize'
         ],
+        'TEMERANT': [
+            'temerant', 'university rank', "e'lir", "re'lar", "el'the",
+            'oracle event', 'talent pipes', 'eolian', 'fishery', 'archives',
+            'admissions', 'term review', 'tuition talents', 'alar', 'naming affinity',
+            'log workout to temerant', 'log study to temerant', 'temerant character'
+        ],
         'EMAIL': [
             'email', 'emails', 'mail', 'email inbox', 'message', 'unread',
             'sender', 'from', 'attachment', 'attachments', 'riskninja',
@@ -543,6 +549,7 @@ class ToolIntentClassifier:
         'AGENTS': ['agents', 'web'],
         'DEVICES': ['devices'],  # Cross-device commands
         'WORKSPACE': ['workspace', 'maps'],  # Canvas and map control
+        'TEMERANT': ['temerant'],
         'EMAIL': ['email'],  # Email search and reading
         'AUTOMATION': ['standing_orders', 'home'],  # Routed to standing orders
         'SOUL': ['soul', 'self_knowledge'],  # Sara's identity and self-modification

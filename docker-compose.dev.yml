@@ -39,8 +39,6 @@ services:
     ports:
       - "3002:3002"
     restart: unless-stopped
-    environment:
-      - VITE_API_URL=http://10.185.1.180:8000
     volumes:
       # Mount source code for live editing
       - ./workbench-canvas:/app
@@ -67,7 +65,7 @@ services:
       # AI Provider - defaults to local gpt-oss, can be overridden via settings
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b}
+      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b-32k}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
@@ -80,7 +78,7 @@ services:
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://canvas.avery.cloud","http://canvas.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
@@ -190,7 +188,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b}
+      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b-32k}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://100.104.68.115:11434/v1}
       - FAST_MODEL=${FAST_MODEL-gpt-oss:20b}

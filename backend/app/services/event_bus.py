@@ -92,6 +92,18 @@ class EventType(str, Enum):
     PRESENCE_ROOM_CHANGED = "presence.room_changed"
     INTERRUPTIBILITY_CHANGED = "interruptibility.changed"
 
+    # Chat events
+    CHAT_MESSAGE_RECEIVED = "chat.message_received"
+
+    # Agent task events
+    AGENT_TASK_PROGRESS = "agent_task.progress"
+
+    # Vision / Sensory events (Jetson)
+    FACE_DETECTED = "vision.face_detected"
+    DESK_PRESENCE_CHANGED = "vision.desk_presence_changed"
+    VOICE_CONVERSATION_STARTED = "voice.conversation_started"
+    VOICE_CONVERSATION_ENDED = "voice.conversation_ended"
+
     # System events
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"

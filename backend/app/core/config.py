@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     backend_url: str = "https://sara.avery.cloud/api"
 
     # LLM Configuration
-    ai_provider: str = "local"  # Options: local, gemini, openai, claude, custom
+    ai_provider: str = "local"  # Options: local, gemini, openai, claude, codex, custom
     openai_base_url: str = "http://100.104.68.115:11434/v1"
-    openai_model: str = "gpt-oss:120b"
+    openai_model: str = "gpt-oss:20b"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
@@ -32,9 +32,15 @@ class Settings(BaseSettings):
 
     # Background LLM Configuration (separate from chat - always uses local models)
     bg_llm_primary_url: str = "http://100.104.68.115:11434/v1"
-    bg_llm_primary_model: str = "gpt-oss:120b"
-    bg_llm_fallback_url: str = "http://100.104.68.115:11434/v1"
+    bg_llm_primary_model: str = "gpt-oss:120b-32k"
+    bg_llm_fallback_url: str = "http://10.185.1.8:11434/v1"
     bg_llm_fallback_model: str = "gpt-oss:20b"
+    bg_llm_request_timeout: float = 180.0
+    bg_llm_connect_timeout: float = 6.0
+    bg_llm_num_ctx: int = 32768
+    learning_guide_num_ctx: int = 32768
+    learning_lesson_num_ctx: int = 49152
+    learning_lesson_request_timeout: float = 300.0
 
     # Search / Reranker / Caching
     search_provider: str = "tavily"  # Options: searxng, tavily
@@ -57,6 +63,8 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24 * 7  # 1 week
+    # Comma-separated admin email allowlist for automation admin APIs
+    automation_admin_emails: str = ""
     cookie_domain: str = ".sara.avery.cloud"
     cookie_secure: bool = True
     cookie_samesite: str = "lax"
@@ -120,11 +128,29 @@ class Settings(BaseSettings):
     autonomy_structured_plan: bool = False        # Phase 1: 6-phase cycle with structured plan
     autonomy_policy_engine: bool = False          # Phase 1: policy gating on tool execution
     autonomy_attention_enabled: bool = False       # Phase 2: attention queue for deferred items
-    autonomy_missions_enabled: bool = False        # Phase 2: mission engine
+    autonomy_missions_enabled: bool = True         # Phase 2: mission engine
     autonomy_policy_candidates_enabled: bool = False  # Phase 3: dream→policy candidates
+    temerant_enabled: bool = True  # Temerant RPG surface rollout flag
+    temerant_oracle_enabled: bool = True  # Enables oracle roll/event mechanics
+    temerant_narrative_enabled: bool = True  # Enables narrative/journal generation features
+    temerant_auto_ingestion_enabled: bool = False  # Enables passive ingestion from habits/learning/fitness
+    temerant_rpg_enabled: bool = True  # Enables separate scene-based Temerant RPG
+    temerant_rpg_narrative_enabled: bool = True  # Enables narrative generation for separate RPG
+    temerant_rpg_model: str = "gpt-oss:120b-32k"  # Dedicated GM model for scene-based RPG
+    temerant_rpg_num_ctx: int = 32768  # Dedicated context window for scene-based RPG narration
+
+    # Autonomy rollout thresholds (used by /autonomy/rollout/summary evaluation)
+    autonomy_rollout_min_runs_for_eval: int = 10
+    autonomy_rollout_max_fallback_rate: float = 0.25
+    autonomy_rollout_max_action_failure_rate: float = 0.10
+    autonomy_rollout_max_dedup_block_rate: float = 0.45
+    autonomy_rollout_max_attention_backlog_ratio: float = 0.70
+    autonomy_rollout_max_mission_failure_rate: float = 0.20
+    autonomy_rollout_max_mission_nonterminal_ratio: float = 0.70
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()

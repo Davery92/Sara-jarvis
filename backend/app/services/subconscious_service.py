@@ -138,15 +138,19 @@ class SubconsciousService:
         self.tz = USER_TZ
 
         # LLM config for inference with failover
-        from app.core.config import settings
-        self.llm_primary_url = settings.llm_primary_url.replace('/v1', '')
-        self.llm_fallback_url = "http://10.185.1.8:11434"  # Local fallback
-        self.primary_model = "gpt-oss:120b"   # Full model on primary
-        self.fallback_model = "gpt-oss:20b"   # Smaller model on fallback
+        self._refresh_llm_config()
 
         # Track which backend is currently active
         self._active_llm_url = None
         self._active_model = None
+
+    def _refresh_llm_config(self):
+        """Reload background LLM settings so model switches apply live."""
+        from app.core.config import settings
+        self.llm_primary_url = settings.bg_llm_primary_url.replace('/v1', '')
+        self.llm_fallback_url = settings.bg_llm_fallback_url.replace('/v1', '')
+        self.primary_model = settings.bg_llm_primary_model
+        self.fallback_model = settings.bg_llm_fallback_model
 
     def _is_waking_hours(self, now: datetime) -> bool:
         """Check if current time is during waking hours"""
@@ -157,6 +161,7 @@ class SubconsciousService:
         Get the active LLM endpoint and model, with automatic failover.
         Returns (url, model) tuple.
         """
+        self._refresh_llm_config()
         # Check primary endpoint
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -259,16 +264,20 @@ class SubconsciousService:
                 except Exception:
                     pass
 
-            # Gather upcoming calendar events
+            # Gather upcoming calendar events for this user only.
+            now_local_naive = now.replace(tzinfo=None) if now.tzinfo else now
+            later_local_naive = now_local_naive + timedelta(hours=4)
             calendar_events = []
             try:
                 cal_rows = db.execute(text("""
                     SELECT title, summary, start_time as start, end_time as end
                     FROM calendar_event
-                    WHERE start_time >= :now AND start_time <= :later
+                    WHERE user_id = :user_id
+                    AND start_time >= :now
+                    AND start_time <= :later
                     ORDER BY start_time ASC
                     LIMIT 5
-                """), {"now": now, "later": now + timedelta(hours=4)}).fetchall()
+                """), {"user_id": user_id, "now": now_local_naive, "later": later_local_naive}).fetchall()
                 calendar_events = [
                     {"title": r.title or r.summary, "start": r.start, "end": r.end}
                     for r in cal_rows

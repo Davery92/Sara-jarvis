@@ -21,22 +21,20 @@ class HandoffToAgentsTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return """Hand off a research or analysis task to background worker agents.
-    Use this when the user wants you to research something in the background,
-    look into a topic thoroughly, compare options, or when they explicitly say
-    'have your agents look into this', 'research this in the background',
-    'look into this for me', or similar phrases.
+        return """Hand off a WEB RESEARCH task to background worker agents.
+    Use ONLY for tasks that require searching the internet and reading web pages.
 
     The agents will:
     - Search the web for real-time information
     - Read and analyze web pages
-    - Access the user's notes and memories (read-only)
     - Compile a comprehensive report
     - Save results to the Agent Workspace folder
-    - Notify the user when complete
 
-    Best for: Research tasks, comparing products/options, learning about topics,
-    gathering information that requires multiple sources."""
+    Best for: Web research, comparing products, learning about topics online.
+
+    DO NOT use this for tasks involving David's emails, calendar, notes, memory,
+    home control, or any of Sara's internal data. Use dispatch_agent_task instead
+    for those tasks — it has direct access to Sara's tools."""
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -49,8 +47,8 @@ class HandoffToAgentsTool(BaseTool):
                 },
                 "task_type": {
                     "type": "string",
-                    "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
-                    "enum": ["research", "analysis"],
+                    "description": "Type of task: 'research' for web research",
+                    "enum": ["research"],
                     "default": "research"
                 }
             },

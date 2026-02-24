@@ -18,6 +18,14 @@ import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
+_RELEASE_IF_OWNER = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
 
 class HealthStatus(str, Enum):
     """System health status levels."""
@@ -89,6 +97,10 @@ class WorkerCoordinator:
         "weekly-digest": 10,
     }
 
+    # Keep lock TTL short enough to self-heal after worker restarts/crashes.
+    # The unified agent typically finishes within a couple of minutes.
+    EXCLUSIVE_LOCK_TTL_SECONDS = 900
+
     def __init__(self, redis_url: str = "redis://redis:6379/0"):
         self.redis_url = redis_url
         self._redis: Optional[redis.Redis] = None
@@ -110,7 +122,12 @@ class WorkerCoordinator:
         lock_key = f"worker_lock:{group}"
 
         # Try to acquire lock with NX (only if not exists)
-        acquired = await r.set(lock_key, worker_name, nx=True, ex=3600)
+        acquired = await r.set(
+            lock_key,
+            worker_name,
+            nx=True,
+            ex=self.EXCLUSIVE_LOCK_TTL_SECONDS,
+        )
 
         if acquired:
             logger.debug(f"Worker {worker_name} acquired lock for {group}")
@@ -120,12 +137,78 @@ class WorkerCoordinator:
         logger.debug(f"Worker {worker_name} blocked by {current_holder} for {group}")
         return False
 
-    async def release_exclusive(self, group: str) -> None:
-        """Release exclusive lock for a group."""
+    async def release_exclusive(self, group: str, worker_name: Optional[str] = None) -> None:
+        """Release exclusive lock for a group.
+
+        If worker_name is provided, only release when that worker currently
+        holds the lock.
+        """
         r = await self._get_redis()
         lock_key = f"worker_lock:{group}"
+
+        if worker_name:
+            deleted = 0
+            eval_error = None
+            try:
+                deleted = await r.eval(_RELEASE_IF_OWNER, 1, lock_key, worker_name)
+            except Exception as e:
+                # Compatibility fallback for Redis implementations without EVAL (e.g., some fakeredis builds).
+                eval_error = e
+                current_holder = await r.get(lock_key)
+                if isinstance(current_holder, bytes):
+                    current_holder = current_holder.decode()
+                if str(current_holder) == worker_name:
+                    deleted = await r.delete(lock_key)
+
+            if eval_error is not None:
+                logger.warning(
+                    f"Lock release CAS fallback used for {group}; Redis EVAL unavailable: {eval_error}"
+                )
+
+            if deleted:
+                logger.debug(f"Released lock for {group} (owner={worker_name})")
+            else:
+                current_holder = await r.get(lock_key)
+                if isinstance(current_holder, bytes):
+                    current_holder = current_holder.decode()
+                logger.debug(
+                    f"Skip releasing lock for {group}; holder={current_holder}, requested={worker_name}"
+                )
+            return
+
+        logger.warning(f"Releasing lock for {group} without owner verification")
         await r.delete(lock_key)
         logger.debug(f"Released lock for {group}")
+
+    async def refresh_exclusive(self, worker_name: str, group: str) -> bool:
+        """
+        Refresh lock TTL for a group if held by worker_name.
+
+        Returns True if refreshed, False if lock is missing or owned by another worker.
+        """
+        r = await self._get_redis()
+        lock_key = f"worker_lock:{group}"
+        current_holder = await r.get(lock_key)
+        if current_holder is None:
+            return False
+        if isinstance(current_holder, bytes):
+            current_holder = current_holder.decode()
+        if str(current_holder) != worker_name:
+            return False
+
+        await r.expire(lock_key, self.EXCLUSIVE_LOCK_TTL_SECONDS)
+        return True
+
+    async def get_lock_holder(self, group: str) -> Optional[str]:
+        """Get the current holder of an exclusive lock group."""
+        r = await self._get_redis()
+        lock_key = f"worker_lock:{group}"
+        holder = await r.get(lock_key)
+        if holder is None:
+            return None
+        if isinstance(holder, bytes):
+            return holder.decode()
+        return str(holder)
 
     async def check_resource_budget(self, resource: str, amount: int) -> bool:
         """Check if resource budget allows this operation."""

@@ -29,7 +29,7 @@ from .automation import AutomationTask, AutomationExecutionLog, AutomationStateS
 from .soul import SaraSoul, SoulChangeProposal
 from .heartbeat import HeartbeatItem, HeartbeatLog  # DEPRECATED: read-only, see HEARTBEAT.md
 from .shared_content import SharedContent
-from .learning import LearningTopic, TopicSource, SourceChunk, LearningSession, LearningProgress, TopicScratchpad, ResearchReport, ResearchJob, TopicConnection, LearningArtifact
+from .learning import LearningTopic, TopicSource, SourceChunk, LearningSession, LearningProgress, TopicScratchpad, ResearchReport, ResearchJob, LearningGuideJob, TopicConnection, LearningArtifact, LearningBlueprint
 from .tangent_queue import TangentQueue
 from .known_domain import KnownDomain
 from .anchor_point import AnchorPoint
@@ -37,3 +37,29 @@ from .action_trace import ActionTrace
 from .attention_item import AttentionItem
 from .mission import Mission, MissionStep
 from .policy_candidate import PolicyCandidate
+from .user_role import UserRole
+from .candidate_skill import CandidateSkill
+from .notification_preference import NotificationPreference
+from .intelligence_item import IntelligenceItem
+from .temerant import (
+    TemerantCharacter,
+    TemerantAttributeState,
+    TemerantLedgerEntry,
+    TemerantDailyState,
+    TemerantStoryThread,
+    TemerantOracleEvent,
+    TemerantTerm,
+    TemerantMasterwork,
+    TemerantMappingRule,
+    TemerantJournalEntry,
+    TemerantIngestionCursor,
+)
+from .temerant_rpg import (
+    TemerantRpgCharacter,
+    TemerantRpgWorldState,
+    TemerantRpgScene,
+    TemerantRpgSceneTurn,
+    TemerantRpgRelationship,
+    TemerantRpgJournalEntry,
+    TemerantRpgTerm,
+)

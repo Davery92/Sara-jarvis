@@ -113,6 +113,7 @@ from app.tools.canvas import (
 from app.tools.patterns import PATTERN_TOOLS
 from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
+from app.tools.temerant import TEMERANT_TOOLS
 from app.tools.maps import MAP_TOOLS
 from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
 from app.tools.email import EMAIL_TOOLS
@@ -122,6 +123,7 @@ from app.tools.behavior_router import BEHAVIOR_ROUTER_TOOLS
 from app.tools.personal_knowledge import PKG_TOOLS
 from app.tools.standing_orders import STANDING_ORDER_TOOLS
 from app.tools.content_inbox import CONTENT_INBOX_TOOLS
+from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -273,7 +275,14 @@ class ToolRegistry:
             'tools': [
                 'workspace_list_windows', 'workspace_open_window', 'workspace_open_note',
                 'workspace_close_window', 'workspace_save_state', 'workspace_arrange',
-                'workspace_focus_window'
+                'workspace_focus_window', 'workspace_find_and_open', 'workspace_open_from_last_results'
+            ]
+        },
+        'temerant': {
+            'description': 'Manage the Temerant habit RPG state - check character status, log actions, and roll oracle events.',
+            'tools': [
+                'temerant_status', 'temerant_log_action', 'temerant_roll_oracle',
+                'temerant_list_events', 'temerant_resolve_event'
             ]
         },
         'maps': {
@@ -291,7 +300,7 @@ class ToolRegistry:
         },
         'email': {
             'description': 'Search, read, and get summaries of emails from synced mailboxes',
-            'tools': ['email_search', 'email_read', 'email_recent']
+            'tools': ['email_search', 'email_read', 'email_recent', 'email_attachment_read']
         },
         'soul': {
             'description': "View and propose changes to Sara's core identity, operating principles, boundaries, and growth areas. The Soul is Sara's persistent self-definition.",
@@ -325,6 +334,14 @@ class ToolRegistry:
         'inbox': {
             'description': "Search and read items from David's content inbox — saved URLs, Reddit posts, PDFs, articles, and text snippets.",
             'tools': ['inbox_search', 'inbox_read']
+        },
+        'vm_agents': {
+            'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
+            'tools': [
+                'dispatch_agent_task', 'dispatch_and_monitor',
+                'get_agent_status', 'resume_agent_session',
+                'submit_candidate_skill'
+            ]
         }
     }
 
@@ -494,6 +511,9 @@ class ToolRegistry:
             # Workspace Control Tools (for workbench-canvas)
             *WORKSPACE_TOOLS,
 
+            # Temerant RPG Tools
+            *TEMERANT_TOOLS,
+
             # Map Control Tools (mindmaps/flowcharts on canvas)
             *MAP_TOOLS,
 
@@ -520,6 +540,9 @@ class ToolRegistry:
 
             # Content Inbox Tools (search/read saved content)
             *CONTENT_INBOX_TOOLS,
+
+            # VM Agent Dispatch Tools (sandbox VM agent orchestration)
+            *AGENT_DISPATCH_TOOLS,
         ]
 
         for tool in tools:

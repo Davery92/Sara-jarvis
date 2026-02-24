@@ -84,6 +84,8 @@ CONTEXT_LAYER_UPDATE = """You are updating Sara's "what's active" document. This
 currently working on, thinking about, and might need help with. It's refreshed daily
 so it should reflect TODAY, not last week.
 
+TODAY'S DATE: {today_date}
+
 TODAY'S SUMMARY:
 {day_content}
 
@@ -94,6 +96,16 @@ RECENT DREAM INSIGHTS:
 {dream_insights}
 
 Using today's conversation summaries and the previous context layer, update each section.
+
+CRITICAL — temporal hygiene:
+- Today is {today_date}. Any item tied to a specific past date (e.g. "pending tonight Feb 19"
+  when today is Feb 20) is STALE — drop it or mark it as completed/past.
+- Location references from previous days should be removed unless David explicitly said he'll
+  be there again today. "In Sparta today" from yesterday ≠ in Sparta today.
+- Food/meal references older than 1 day are stale. A meal cooked 3+ days ago is not "pending
+  evaluation tonight."
+- If the previous context says "tomorrow" or "tonight" but was written yesterday, those
+  temporal anchors have passed — rewrite or remove them.
 
 ## Format
 

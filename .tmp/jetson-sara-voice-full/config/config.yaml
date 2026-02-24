@@ -1,0 +1,140 @@
+# Sara Voice + Vision Agent Configuration
+# All IPs, thresholds, model paths, and timeouts in one place.
+
+service:
+  name: "sara-voice"
+  log_level: "INFO"       # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/sara-voice.log"
+
+audio:
+  input_device: "AIRHUG"         # Substring match for sounddevice
+  fallback_device: "OBSBOT"      # Camera mic fallback
+  sample_rate: 48000             # Native mic rate
+  target_rate: 16000             # Downsampled for models
+  channels: 1                    # Mono after downmix
+  block_size: 1024               # Frames per callback
+  ring_buffer_seconds: 30        # Rolling audio buffer
+
+noise_gate:
+  enabled: false
+  floor_db: -50                  # Noise floor estimate (dBFS)
+  attack_ms: 5                   # Gate open speed
+  release_ms: 100                # Gate close speed
+  adaptive: true                 # Track ambient level
+  ambient_window_seconds: 10     # Window for ambient estimation
+
+wake_word:
+  model_path: "models/hey_sara.onnx"
+  threshold: 0.5                 # Base detection threshold
+  ambient_threshold_boost: 0.15  # Added when music/TV detected
+  refractory_seconds: 2.0        # Minimum gap between triggers
+  chunk_size: 1280               # 80ms at 16kHz
+
+vad:
+  model_path: "models/silero_vad.onnx"
+  threshold: 0.5                 # Speech probability threshold
+  min_speech_ms: 250             # Ignore shorter than this
+  max_silence_ms: 300            # End-of-speech silence
+  max_speech_seconds: 30         # Hard cutoff for single utterance
+  pre_speech_pad_ms: 300         # Include audio before speech onset
+
+stt:
+  remote_url: "http://10.185.1.8:8585/v1/audio/transcriptions"
+  remote_timeout_seconds: 20
+  remote_retries: 1
+  local_model_path: "models/ggml-base.en.bin"
+  local_threads: 4
+  language: "en"
+  use_local_fallback: true       # Fall back to local on remote failure
+
+speaker_verification:
+  enabled: true
+  url: "http://10.185.1.8:8002"
+  endpoint: "/verify-upload"
+  speaker_id: "david"
+  threshold: 0.60
+  timeout_seconds: 6
+
+conversation:
+  wake_confirmation_ms: 300      # Ding/flash duration
+  listen_timeout_seconds: 30     # Max listening time
+  processing_timeout_seconds: 30 # Max wait for backend response
+  cooldown_seconds: 5            # Pause between turns
+  max_turns: 20                  # Max turns before forced idle
+  goodbye_phrases:
+    - "goodbye"
+    - "bye sara"
+    - "that's all"
+    - "stop"
+    - "never mind"
+    - "thanks sara"
+  barge_in:
+    enabled: true
+    energy_threshold: 0.05       # RMS threshold to detect speech during playback
+    min_duration_ms: 200         # Must sustain for this long
+
+echo:
+  tail_suppression_ms: 500       # Suppress after Sara stops speaking
+  reference_delay_ms: 50         # Expected latency from TTS to speaker
+
+backend:
+  base_url: "http://10.185.1.180:8000"
+  voice_chat_endpoint: "/api/pi-dashboard/voice/chat"
+  use_device_token_auth: true
+  device_bootstrap_endpoint: "/api/devices/bootstrap"
+  device_name: "jetson-voice"
+  device_type: "jetson_voice"
+  raw_buffer_endpoint: "/api/cognitive/raw-buffer/audio"
+  sensory_base: "/api/sensory"
+  auth:
+    username: ""                 # Set via environment: SARA_USERNAME
+    password: ""                 # Set via environment: SARA_PASSWORD
+
+tts:
+  url: "http://10.185.1.9:8880"
+  voice: "af_heart"
+  speed: 1.0
+  sentence_pause_ms: 150         # Pause between sentences
+  format: "pcm"                  # Raw PCM for low latency
+
+desktop_bridge:
+  host: "0.0.0.0"
+  port: 8765
+  reconnect_interval_seconds: 5
+  audio_format:
+    sample_rate: 24000
+    channels: 1
+    dtype: "int16"
+
+vision:
+  enabled: true
+  camera_device: 0               # /dev/video0
+  camera_name: "OBSBOT"          # Substring match for V4L2
+  resolution: [1280, 720]        # 720p
+  fps: 15
+  face_detection:
+    interval_seconds: 5          # Run detection every N seconds
+    model: "buffalo_sc"          # InsightFace model
+    tensorrt: true               # Use TensorRT engine
+    confidence_threshold: 0.5
+    david_embedding_path: "models/david_face.npy"
+    similarity_threshold: 0.4    # Cosine similarity for David match
+  presence:
+    absent_timeout_seconds: 60   # No face → absent
+    present_cooldown_seconds: 10 # Debounce present→absent
+
+gpu:
+  pre_allocate: true
+  cuda_device: 0
+  memory_pool_mb: 512            # Pre-allocated CUDA memory pool
+  priority:
+    # P0: always available (CPU — wake word, VAD)
+    # P1: face detection (GPU, every 5s)
+    # P2: local STT fallback (GPU, on demand)
+    face_detection: 1
+    local_stt: 2
+
+health:
+  report_interval_seconds: 60
+  watchdog_interval_seconds: 30  # sd_notify interval
+  endpoint: "/api/sensory/jetson/health"

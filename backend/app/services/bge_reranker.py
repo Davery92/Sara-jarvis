@@ -5,6 +5,11 @@ Reranks retrieval results using BGE reranker model
 from typing import List, Tuple, Optional
 import logging
 import asyncio
+import os
+
+import httpx
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +17,20 @@ logger = logging.getLogger(__name__)
 class BGEReranker:
     """Reranks results using BGE reranker model"""
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-base", use_local: bool = True):
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-reranker-base",
+        use_local: bool = True,
+        remote_base_url: Optional[str] = None,
+        remote_model: Optional[str] = None,
+    ):
         self.model_name = model_name
         self.use_local = use_local
         self.model = None
         self.tokenizer = None
         self._initialized = False
+        self.remote_base_url = (remote_base_url or "").rstrip("/")
+        self.remote_model = remote_model or settings.reranker_model
 
     async def initialize(self):
         """Initialize the reranker model"""
@@ -42,8 +55,14 @@ class BGEReranker:
                     logger.error(f"Failed to load reranker model: {e}")
                     self._initialized = False
             else:
-                logger.warning("Remote reranking not implemented yet, using fallback")
-                self._initialized = False
+                if not self.remote_base_url:
+                    logger.warning("Remote reranking configured without base URL, using fallback")
+                    self._initialized = False
+                else:
+                    logger.info(
+                        f"✅ BGE reranker remote mode enabled: {self.remote_base_url} ({self.remote_model})"
+                    )
+                    self._initialized = True
 
         except Exception as e:
             logger.error(f"Error initializing reranker: {e}")
@@ -64,14 +83,17 @@ class BGEReranker:
             return [0.5] * len(pairs)
 
         try:
-            # Run prediction in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            scores = await loop.run_in_executor(
-                None,
-                self._predict_sync,
-                pairs
-            )
-            return scores
+            if self.use_local:
+                # Run prediction in thread pool to avoid blocking
+                loop = asyncio.get_event_loop()
+                scores = await loop.run_in_executor(
+                    None,
+                    self._predict_sync,
+                    pairs
+                )
+                return scores
+
+            return await self._predict_remote(pairs)
 
         except Exception as e:
             logger.error(f"Error during reranking: {e}")
@@ -89,6 +111,61 @@ class BGEReranker:
         normalized = [(float(score) + 10) / 20 for score in scores]
 
         return normalized
+
+    @staticmethod
+    def _normalize_remote_score(score: float) -> float:
+        """
+        Normalize remote reranker score to [0, 1].
+        Handles both normalized scores and raw cross-encoder style scores.
+        """
+        if 0.0 <= score <= 1.0:
+            return score
+        if -10.0 <= score <= 10.0:
+            return (score + 10.0) / 20.0
+        return max(0.0, min(1.0, score))
+
+    async def _predict_remote(self, pairs: List[Tuple[str, str]]) -> List[float]:
+        """Remote prediction via OpenAI-compatible /v1/rerank endpoint."""
+        if not self.remote_base_url:
+            return [0.5] * len(pairs)
+
+        if not pairs:
+            return []
+
+        scores = [0.5] * len(pairs)
+
+        # Group by query to avoid one request per pair.
+        grouped: dict[str, list[tuple[int, str]]] = {}
+        for idx, (query, doc) in enumerate(pairs):
+            grouped.setdefault(query, []).append((idx, doc))
+
+        timeout = httpx.Timeout(15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for query, indexed_docs in grouped.items():
+                documents = [doc for _, doc in indexed_docs]
+                payload = {
+                    "model": self.remote_model,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": len(documents),
+                }
+                try:
+                    resp = await client.post(f"{self.remote_base_url}/v1/rerank", json=payload)
+                    resp.raise_for_status()
+                    data = resp.json() or {}
+                    for item in data.get("results", []):
+                        doc_index = item.get("index")
+                        relevance = item.get("relevance_score")
+                        if doc_index is None or relevance is None:
+                            continue
+                        if 0 <= int(doc_index) < len(indexed_docs):
+                            original_idx = indexed_docs[int(doc_index)][0]
+                            scores[original_idx] = self._normalize_remote_score(float(relevance))
+                except Exception as e:
+                    logger.warning(f"Remote rerank request failed for query group: {e}")
+                    # Keep neutral fallback for this group.
+
+        return scores
 
     async def rerank(
         self,
@@ -131,7 +208,10 @@ class BGEReranker:
 _global_reranker: Optional[BGEReranker] = None
 
 
-async def get_reranker(model_name: str = "BAAI/bge-reranker-base") -> BGEReranker:
+async def get_reranker(
+    model_name: str = "BAAI/bge-reranker-base",
+    use_local: Optional[bool] = None,
+) -> BGEReranker:
     """
     Get or create global reranker instance
 
@@ -144,7 +224,16 @@ async def get_reranker(model_name: str = "BAAI/bge-reranker-base") -> BGEReranke
     global _global_reranker
 
     if _global_reranker is None:
-        _global_reranker = BGEReranker(model_name=model_name)
+        if use_local is None:
+            use_local = os.getenv("BGE_RERANKER_REMOTE", "false").lower() != "true"
+
+        reranker_base = (settings.reranker_base_url or settings.embedding_base_url or "").rstrip("/")
+        _global_reranker = BGEReranker(
+            model_name=model_name,
+            use_local=use_local,
+            remote_base_url=reranker_base,
+            remote_model=settings.reranker_model,
+        )
         await _global_reranker.initialize()
 
     return _global_reranker

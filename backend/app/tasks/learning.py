@@ -11,6 +11,8 @@ import logging
 import asyncio
 from datetime import datetime
 
+from celery.exceptions import Retry
+
 from app.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,101 @@ def deep_research_worker(self, job_id: str = None):
     except Exception as e:
         logger.error(f"Deep research worker failed: {e}")
         raise self.retry(countdown=120, exc=e)
+
+
+@celery_app.task(
+    name="app.tasks.learning.generate_blueprint_guides_worker",
+    bind=True,
+    queue="cognitive",
+    max_retries=1
+)
+def generate_blueprint_guides_worker(self, job_id: str):
+    """
+    Generate Pareto + deep study guides for blueprint modules.
+
+    Expects an existing learning_guide_job row and updates it through the service.
+    """
+    logger.info(f"Starting blueprint guide generation worker (job_id={job_id})")
+
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _run_generate_blueprint_guides_async(job_id)
+        )
+        logger.info(f"Blueprint guide generation complete: {result}")
+        return result
+    except RuntimeError:
+        result = asyncio.run(_run_generate_blueprint_guides_async(job_id))
+        logger.info(f"Blueprint guide generation complete: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Blueprint guide generation worker failed: {e}")
+        raise self.retry(countdown=120, exc=e)
+
+
+async def _run_generate_blueprint_guides_async(job_id: str):
+    """Async wrapper that executes learning guide generation using a sync DB session."""
+    from app.db.session import SessionLocal
+    from app.services.learning_guide_service import learning_guide_service
+
+    db = SessionLocal()
+    try:
+        return await learning_guide_service.run_job(job_id=job_id, db=db)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.learning.generate_blueprint_lessons_worker",
+    bind=True,
+    queue="cognitive",
+    max_retries=120
+)
+def generate_blueprint_lessons_worker(self, job_id: str):
+    """
+    Generate structured teaching lessons for blueprint modules.
+
+    Expects an existing learning_guide_job row with job_type='lesson'
+    and updates it through the lesson service.
+    """
+    logger.info(f"Starting blueprint lesson generation worker (job_id={job_id})")
+
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _run_generate_blueprint_lessons_async(job_id)
+        )
+        if isinstance(result, dict) and result.get("status") == "postponed":
+            logger.info(
+                f"Lesson worker postponed (job_id={job_id}, reason={result.get('reason')}); retrying in 60s"
+            )
+            raise self.retry(countdown=60)
+        logger.info(f"Blueprint lesson generation complete: {result}")
+        return result
+    except RuntimeError:
+        result = asyncio.run(_run_generate_blueprint_lessons_async(job_id))
+        if isinstance(result, dict) and result.get("status") == "postponed":
+            logger.info(
+                f"Lesson worker postponed (job_id={job_id}, reason={result.get('reason')}); retrying in 60s"
+            )
+            raise self.retry(countdown=60)
+        logger.info(f"Blueprint lesson generation complete: {result}")
+        return result
+    except Retry:
+        raise
+    except Exception as e:
+        logger.error(f"Blueprint lesson generation worker failed: {e}")
+        raise self.retry(countdown=120, exc=e)
+
+
+async def _run_generate_blueprint_lessons_async(job_id: str):
+    """Async wrapper that executes lesson generation using a sync DB session."""
+    from app.db.session import SessionLocal
+    from app.services.learning_lesson_service import learning_lesson_service
+
+    db = SessionLocal()
+    try:
+        return await learning_lesson_service.run_job(job_id=job_id, db=db)
+    finally:
+        db.close()
 
 
 async def _run_deep_research_async(job_id: str = None):
@@ -737,5 +834,289 @@ async def _transform_topic_chunks_async(user_id: str, topic_id: str):
             db=sync_db
         )
         return result
+    finally:
+        sync_db.close()
+
+
+# ─── Blueprint Resource Discovery ────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.learning.discover_blueprint_resources",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def discover_blueprint_resources(self, blueprint_id: str, user_id: str):
+    """
+    Search for free versions of blueprint resources that don't have URLs.
+
+    Dispatched after blueprint materialization. For resources of type
+    textbook/book/paper/website without URLs, searches the web for free
+    versions. If found, updates the TopicSource with the URL and sets
+    fetch_status='pending' so the existing fetch_pending_sources poller
+    picks it up.
+    """
+    logger.info(f"Starting blueprint resource discovery for blueprint {blueprint_id}")
+
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _discover_blueprint_resources_async(blueprint_id, user_id)
+        )
+        logger.info(f"Blueprint resource discovery complete: {result}")
+        return result
+    except RuntimeError:
+        result = asyncio.run(
+            _discover_blueprint_resources_async(blueprint_id, user_id)
+        )
+        logger.info(f"Blueprint resource discovery complete: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Blueprint resource discovery failed: {e}")
+        raise self.retry(countdown=120, exc=e)
+
+
+async def _discover_blueprint_resources_async(blueprint_id: str, user_id: str):
+    """Search web for free versions of blueprint resources without URLs."""
+    from app.db.session import SessionLocal
+    from app.models.learning import LearningBlueprint, TopicSource, LearningTopic
+
+    sync_db = SessionLocal()
+    try:
+        blueprint = sync_db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id,
+        ).first()
+
+        if not blueprint or not blueprint.parsed_json:
+            return {"skipped": True, "reason": "blueprint not found"}
+
+        # Build map of module_code → topic_id
+        topics = sync_db.query(LearningTopic).filter(
+            LearningTopic.blueprint_id == blueprint_id,
+            LearningTopic.user_id == user_id,
+        ).all()
+        code_to_topic: dict = {}
+        for topic in topics:
+            meta = topic.meta or {}
+            code = meta.get("blueprint_module_code")
+            if code:
+                code_to_topic[str(code)] = topic.id
+
+        # Collect resources without URLs that are searchable types
+        searchable_types = {"textbook", "book", "paper", "website", "course"}
+        resources_to_search = []
+
+        for phase in blueprint.parsed_json.get("phases") or []:
+            for module in phase.get("modules") or []:
+                code = str(module.get("code") or "")
+                topic_id = code_to_topic.get(code)
+                if not topic_id:
+                    continue
+
+                for resource in module.get("resources") or []:
+                    # Skip if already has a URL
+                    if resource.get("url"):
+                        continue
+                    res_type = (resource.get("type") or "").lower()
+                    if res_type not in searchable_types:
+                        continue
+
+                    res_title = (resource.get("title") or "").strip()
+                    if not res_title:
+                        continue
+
+                    # Check if a source already exists for this resource in the topic
+                    existing = sync_db.query(TopicSource).filter(
+                        TopicSource.topic_id == topic_id,
+                        TopicSource.user_id == user_id,
+                        TopicSource.url.isnot(None),
+                    ).all()
+                    # Fuzzy check if any existing source matches
+                    already_found = False
+                    for src in existing:
+                        if src.title and res_title.lower() in (src.title or "").lower():
+                            already_found = True
+                            break
+                    if already_found:
+                        continue
+
+                    resources_to_search.append({
+                        "title": res_title,
+                        "type": res_type,
+                        "module_code": code,
+                        "topic_id": topic_id,
+                        "notes": resource.get("notes"),
+                    })
+
+        if not resources_to_search:
+            return {"skipped": True, "reason": "no searchable resources without URLs"}
+
+        from app.services.search_service import search_service
+        import uuid as uuid_mod
+
+        found = 0
+        searched = 0
+
+        for resource in resources_to_search[:15]:  # Limit to 15 searches per run
+            searched += 1
+            query = f"{resource['title']} free {resource['type']} pdf"
+            try:
+                results = await search_service.web_search(query=query, max_results=3)
+                for r in results.get("results", []):
+                    url = r.get("url", "")
+                    if not url:
+                        continue
+
+                    # Prefer PDF links or well-known free sources
+                    is_good = (
+                        url.lower().endswith(".pdf")
+                        or "arxiv.org" in url
+                        or "github.com" in url
+                        or "openreview.net" in url
+                        or "mit.edu" in url
+                        or "stanford.edu" in url
+                        or "wikipedia.org" in url
+                    )
+                    if not is_good:
+                        continue
+
+                    # Create TopicSource with this URL
+                    source_type = "pdf" if url.lower().endswith(".pdf") else "web"
+                    source = TopicSource(
+                        id=str(uuid_mod.uuid4()),
+                        topic_id=resource["topic_id"],
+                        user_id=user_id,
+                        source_type=source_type,
+                        url=url,
+                        title=resource["title"],
+                        fetch_status="pending",
+                        meta={
+                            "blueprint_id": blueprint_id,
+                            "blueprint_resource_type": resource["type"],
+                            "auto_discovered": True,
+                            "discovery_query": query,
+                        },
+                    )
+                    sync_db.add(source)
+                    found += 1
+                    logger.info(
+                        f"Discovered free resource: '{resource['title']}' → {url}"
+                    )
+                    break  # One URL per resource
+
+            except Exception as e:
+                logger.warning(f"Search failed for '{resource['title']}': {e}")
+                continue
+
+        sync_db.commit()
+
+        return {
+            "blueprint_id": blueprint_id,
+            "searched": searched,
+            "found": found,
+            "total_searchable": len(resources_to_search),
+        }
+    finally:
+        sync_db.close()
+
+
+# ─── Background Source Processing ────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.learning.process_uploaded_source",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def process_uploaded_source(self, source_id: str, user_id: str):
+    """Process an uploaded source in the background (chunking + embedding).
+
+    Called after the upload endpoint saves the raw source record and returns
+    immediately.  Sends a push notification when done.
+    """
+    logger.info(f"Background processing source {source_id}")
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _process_uploaded_source_async(source_id, user_id)
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_process_uploaded_source_async(source_id, user_id))
+        return result
+    except Exception as e:
+        logger.error(f"Background source processing failed for {source_id}: {e}")
+        return {"error": str(e)}
+
+
+async def _process_uploaded_source_async(source_id: str, user_id: str):
+    from app.db.session import SessionLocal
+    from app.models.learning import TopicSource
+    from app.services.learning_source_service import learning_source_service
+
+    sync_db = SessionLocal()
+    try:
+        source = sync_db.query(TopicSource).filter(TopicSource.id == source_id).first()
+        if not source:
+            return {"error": "Source not found"}
+
+        content = source.content_text or ""
+        if not content.strip():
+            source.fetch_status = "failed"
+            sync_db.commit()
+            return {"error": "No content to process"}
+
+        # Get raw PDF bytes if stored in meta
+        import base64
+        pdf_bytes = None
+        if source.meta and source.meta.get("pdf_b64"):
+            pdf_bytes = base64.b64decode(source.meta["pdf_b64"])
+            # Clean up the b64 blob from meta now that we've read it
+            meta_copy = dict(source.meta)
+            del meta_copy["pdf_b64"]
+            source.meta = meta_copy
+            sync_db.commit()
+
+        result = await learning_source_service.process_uploaded_content(
+            source, content, sync_db, pdf_bytes=pdf_bytes
+        )
+
+        chunk_count = result.get("chunk_count", 0)
+        chapter_count = result.get("chapter_count", 0)
+
+        # Blueprint matching
+        match_info = ""
+        try:
+            matches = learning_source_service.match_source_to_blueprint(source, sync_db)
+            if matches:
+                match_info = f" (matched to {len(matches)} blueprint resource(s))"
+        except Exception:
+            pass
+
+        # Send push notification
+        body = f"{source.title}: {chunk_count} chunks"
+        if chapter_count:
+            body += f", {chapter_count} chapters"
+        body += match_info
+
+        try:
+            from app.routes.push_tokens import send_push_to_user
+            await send_push_to_user(
+                user_id=user_id,
+                title="Source processed",
+                body=body,
+                notification_data={"type": "learning", "source_id": source_id},
+                db=sync_db,
+            )
+        except Exception as push_err:
+            logger.warning(f"Push notification failed for source {source_id}: {push_err}")
+
+        return {
+            "source_id": source_id,
+            "status": result.get("status", "unknown"),
+            "chunk_count": chunk_count,
+            "chapter_count": chapter_count,
+        }
     finally:
         sync_db.close()

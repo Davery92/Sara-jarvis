@@ -201,7 +201,10 @@
       "Bash(WINEPREFIX=/tmp/wine-test DISPLAY= WINEDEBUG=-all wineboot:*)",
       "Bash(WINEPREFIX=/home/david/.wine-build DISPLAY= WINEDEBUG=-all wineboot:*)",
       "Bash(WINEPREFIX=/home/david/.wine-build DISPLAY= WINEDEBUG=-all wine:*)",
-      "Bash(WINEPREFIX=/home/david/.wine-build npx electron-builder:*)"
+      "Bash(WINEPREFIX=/home/david/.wine-build npx electron-builder:*)",
+      "WebFetch(domain:openclaw.ai)",
+      "Bash(celery --version:*)",
+      "Bash(docker builder prune:*)"
     ],
     "deny": [],
     "ask": [],

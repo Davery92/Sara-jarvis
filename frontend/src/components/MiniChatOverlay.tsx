@@ -13,23 +13,40 @@ interface BackgroundTask {
   created_at: string
   started_at: string | null
   completed_at: string | null
+  updated_at: string | null
 }
 
 interface MiniChatOverlayProps {
   onClose?: () => void
 }
 
-// Validate that a task has the minimum required fields
+// Max age (4 hours) before a needs_clarification task is considered expired
+const TASK_EXPIRY_MS = 4 * 60 * 60 * 1000
+
+// Validate that a task has the minimum required fields and is not expired
 const isValidTask = (task: any): task is BackgroundTask => {
-  return (
-    task &&
-    typeof task.id === 'string' &&
-    task.id.length > 0 &&
-    task.status === 'needs_clarification' &&
-    typeof task.original_query === 'string' &&
-    typeof task.clarification_question === 'string' &&
-    task.clarification_question.length > 0
-  )
+  if (
+    !task ||
+    typeof task.id !== 'string' ||
+    task.id.length === 0 ||
+    task.status !== 'needs_clarification' ||
+    typeof task.original_query !== 'string' ||
+    typeof task.clarification_question !== 'string' ||
+    task.clarification_question.length === 0
+  ) {
+    return false
+  }
+
+  // Ignore tasks that have been stuck for > 4 hours
+  const updatedAt = task.updated_at || task.created_at
+  if (updatedAt) {
+    const age = Date.now() - new Date(updatedAt).getTime()
+    if (age > TASK_EXPIRY_MS) {
+      return false
+    }
+  }
+
+  return true
 }
 
 export const MiniChatOverlay: React.FC<MiniChatOverlayProps> = ({ onClose }) => {

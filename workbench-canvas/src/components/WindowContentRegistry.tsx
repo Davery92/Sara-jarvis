@@ -1,6 +1,7 @@
-import type { WindowType, WindowData, NoteWindowData, ChatWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData, EmailWindowData, AutomationWindowData, PKGWindowData } from '../types'
+import type { WindowType, WindowData, NoteWindowData, ChatWindowData, LearningWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData, EmailWindowData, DocumentsWindowData, AutomationWindowData, PKGWindowData, IntelligenceWindowData, TemerantWindowData } from '../types'
 import NoteContent from './windows/NoteContent'
 import ChatContent from './windows/ChatContent'
+import LearningContent from './windows/LearningContent'
 import FitnessContent from './windows/FitnessContent'
 import ProjectsContent from './windows/ProjectsContent'
 import TimersContent from './windows/TimersContent'
@@ -10,8 +11,11 @@ import ModelViewerContent from './windows/ModelViewerContent'
 import ResearchContent from './windows/ResearchContent'
 import ReportContent from './windows/ReportContent'
 import EmailContent from './windows/EmailContent'
+import DocumentsContent from './windows/DocumentsContent'
 import AutomationContent from './windows/AutomationContent'
 import PKGContent from './windows/PKGContent'
+import IntelligenceContent from './windows/IntelligenceContent'
+import TemerantContent from './windows/TemerantContent'
 
 interface WindowContentProps {
   type: WindowType
@@ -25,6 +29,8 @@ export function WindowContent({ type, data, windowId }: WindowContentProps) {
       return <NoteContent data={data as NoteWindowData} windowId={windowId} />
     case 'chat':
       return <ChatContent data={data as ChatWindowData} windowId={windowId} />
+    case 'learning':
+      return <LearningContent data={data as LearningWindowData} windowId={windowId} />
     case 'fitness':
       return <FitnessContent data={data as FitnessWindowData} windowId={windowId} />
     case 'projects':
@@ -43,10 +49,16 @@ export function WindowContent({ type, data, windowId }: WindowContentProps) {
       return <ReportContent data={data as ReportWindowData} windowId={windowId} />
     case 'email':
       return <EmailContent data={data as EmailWindowData} windowId={windowId} />
+    case 'documents':
+      return <DocumentsContent data={data as DocumentsWindowData} windowId={windowId} />
     case 'automation':
       return <AutomationContent data={data as AutomationWindowData} />
     case 'pkg':
       return <PKGContent data={data as PKGWindowData} windowId={windowId} />
+    case 'intelligence':
+      return <IntelligenceContent data={data as IntelligenceWindowData} windowId={windowId} />
+    case 'temerant':
+      return <TemerantContent data={data as TemerantWindowData} windowId={windowId} />
     default:
       return (
         <div className="flex items-center justify-center h-full text-canvas-muted">

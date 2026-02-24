@@ -5,6 +5,7 @@ Builds Sara's dynamic personality layer by combining:
 - Activity state → base tone
 - Interruptibility → verbosity calibration
 - Conversation depth → detail level
+- Behavioral calibration → engagement-informed directives
 - Proactive memory nudges → personal callbacks that make Sara feel like she *knows* David
 
 This engine is the "soul in motion" — the soul file defines *who* Sara is,
@@ -14,11 +15,19 @@ Note: Body state (blood sugar, stress, alertness, circadian) has been
 intentionally removed from chat injection per user request.
 """
 
+import json
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ── Calibration Cache ──
+# Lazily loaded, refreshed every hour (3600s)
+_calibration_cache: Dict[str, Any] = {}
+_calibration_cache_time: float = 0.0
+_CALIBRATION_CACHE_TTL = 3600  # 1 hour
 
 
 @dataclass
@@ -28,6 +37,7 @@ class PersonalityContext:
     verbosity: str = "balanced"  # ultra_brief, brief, balanced, detailed
     emotional_modulation: str = ""
     memory_nudges: List[str] = field(default_factory=list)
+    calibration_directives: List[str] = field(default_factory=list)
 
     def render(self) -> str:
         """Render the full personality context block for system prompt injection."""
@@ -46,6 +56,11 @@ class PersonalityContext:
             "detailed": "David is engaged in deep conversation. Be thorough and expansive.",
         }
         lines.append(f"Verbosity: {verbosity_map.get(self.verbosity, verbosity_map['balanced'])}")
+
+        if self.calibration_directives:
+            lines.append("Behavioral calibration (learned from David's engagement patterns):")
+            for directive in self.calibration_directives[:5]:
+                lines.append(f"  - {directive}")
 
         if self.memory_nudges:
             lines.append("Personal callbacks (weave naturally if relevant, don't force):")
@@ -84,6 +99,108 @@ ACTIVITY_VERBOSITY: Dict[str, str] = {
 }
 
 
+async def _load_calibration_data(user_id: str) -> Optional[Dict]:
+    """
+    Load behavioral calibration from working memory (Redis).
+    Cached for 1 hour to avoid repeated Redis reads on every chat turn.
+    Returns parsed calibration dict or None.
+    """
+    global _calibration_cache, _calibration_cache_time
+
+    now = time.time()
+    cache_key = f"calibration:{user_id}"
+
+    # Return cached if fresh
+    if cache_key in _calibration_cache and (now - _calibration_cache_time) < _CALIBRATION_CACHE_TTL:
+        return _calibration_cache[cache_key]
+
+    try:
+        from app.services.working_memory import read_memory
+        memory = await read_memory(user_id)
+        raw = memory.behavioral_calibration
+        if raw:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            _calibration_cache[cache_key] = data
+            _calibration_cache_time = now
+            return data
+    except Exception as e:
+        logger.debug(f"[PersonalityEngine] Failed to load calibration data: {e}")
+
+    _calibration_cache[cache_key] = None
+    _calibration_cache_time = now
+    return None
+
+
+def _build_calibration_directives(calibration: Optional[Dict]) -> List[str]:
+    """
+    Generate personality directives from behavioral calibration data.
+    Returns a list of gentle, actionable guidance strings.
+    """
+    if not calibration:
+        return []
+
+    directives = []
+    category_scores = calibration.get("category_scores", {})
+    best_hours = calibration.get("best_hours", [])
+    worst_hours = calibration.get("worst_hours", [])
+    insights = calibration.get("insights", [])
+
+    # Category-specific directives
+    for cat, scores in category_scores.items():
+        rate = scores.get("rate", 0.5)
+        trend = scores.get("trend", "stable")
+
+        if cat in ("check_in", "checkin", "check-in"):
+            if rate < 0.25:
+                directives.append(
+                    "Avoid generic check-ins. Only reach out with specific, useful observations."
+                )
+            elif rate < 0.4:
+                directives.append(
+                    "Keep check-ins rare and specific. David prefers actionable messages over general 'how are you' prompts."
+                )
+        elif cat in ("calendar", "schedule"):
+            if rate >= 0.6:
+                directives.append(
+                    "Calendar reminders are welcome -- be proactive about upcoming events."
+                )
+        elif cat in ("security", "home"):
+            if rate >= 0.6:
+                directives.append(
+                    f"'{cat}' alerts get good engagement -- David values these."
+                )
+        else:
+            # Generic category handling
+            if rate < 0.2 and scores.get("sent", 0) >= 3:
+                directives.append(
+                    f"David rarely engages with '{cat}' notifications -- be very selective."
+                )
+            elif rate >= 0.7 and scores.get("sent", 0) >= 2:
+                directives.append(
+                    f"'{cat}' notifications are well-received -- continue when relevant."
+                )
+
+        if trend == "declining" and scores.get("sent", 0) >= 3:
+            directives.append(
+                f"'{cat}' engagement is declining -- try varying the approach or timing."
+            )
+
+    # Time-of-day directives
+    if best_hours:
+        hr_strs = [f"{h}:00" for h in best_hours[:3]]
+        directives.append(
+            f"David is most receptive around {', '.join(hr_strs)}. Time proactive messages accordingly."
+        )
+
+    if worst_hours:
+        hr_strs = [f"{h}:00" for h in worst_hours[:3]]
+        directives.append(
+            f"Avoid proactive messages around {', '.join(hr_strs)} -- low engagement historically."
+        )
+
+    return directives[:5]  # Cap at 5 directives to avoid prompt bloat
+
+
 def build_personality_context(
     activity_state: str = "active",
     activity_confidence: float = 0.5,
@@ -94,6 +211,8 @@ def build_personality_context(
     conversation_depth: int = 0,  # Number of back-and-forth exchanges in current session
     # Memory nudges (pre-computed)
     memory_nudges: Optional[List[str]] = None,
+    # Behavioral calibration (pre-loaded)
+    calibration_data: Optional[Dict] = None,
     # Body state params kept for backward compat but ignored
     stress_load: float = 0.3,
     alertness: float = 0.5,
@@ -103,8 +222,8 @@ def build_personality_context(
     """
     Build the full adaptive personality context.
 
-    Merges activity state and conversation signals into a personality directive.
-    Body state is intentionally not used.
+    Merges activity state, conversation signals, and behavioral calibration
+    into a personality directive. Body state is intentionally not used.
     """
     ctx = PersonalityContext()
 
@@ -120,7 +239,10 @@ def build_personality_context(
         base_verbosity, interruptibility, turn_count, conversation_depth
     )
 
-    # 4. MEMORY NUDGES
+    # 4. BEHAVIORAL CALIBRATION DIRECTIVES
+    ctx.calibration_directives = _build_calibration_directives(calibration_data)
+
+    # 5. MEMORY NUDGES
     if memory_nudges:
         ctx.memory_nudges = memory_nudges[:3]
 
@@ -223,11 +345,11 @@ async def extract_memory_nudges(
         for topic in topics[:3]:  # Max 3 topic searches
             result = db.execute(text("""
                 SELECT content, created_at, importance
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND role = 'assistant'
                 AND content ILIKE :pattern
-                AND importance >= 3
+                AND importance >= 0.3
                 ORDER BY importance DESC, created_at DESC
                 LIMIT 2
             """), {
@@ -250,6 +372,11 @@ async def extract_memory_nudges(
         return nudges[:max_nudges]
 
     except Exception as e:
+        # Clear failed transaction state so later context queries can continue.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.warning(f"Memory nudge extraction failed (non-critical): {e}")
         return []
 

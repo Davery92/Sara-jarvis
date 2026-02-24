@@ -16,7 +16,7 @@ def get_db():
 
 async def create_tables():
     """Create database tables and extensions"""
-    from app.models import user, note, folder, reminder, calendar, episode, memory, doc
+    from app.models import user, note, folder, reminder, calendar, episode, memory, doc, user_role, temerant, temerant_rpg
     
     # Import all models to ensure they're registered
     
@@ -40,6 +40,9 @@ async def create_tables():
         episode.Base.metadata.create_all(bind=engine)
         memory.Base.metadata.create_all(bind=engine)
         doc.Base.metadata.create_all(bind=engine)
+        user_role.Base.metadata.create_all(bind=engine)
+        temerant.Base.metadata.create_all(bind=engine)
+        temerant_rpg.Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Error creating tables: {e}")

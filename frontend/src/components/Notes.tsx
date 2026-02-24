@@ -361,7 +361,7 @@ export default function Notes({
   }
 
   return (
-    <div className="flex h-screen w-full bg-[#18181b] text-[#f8fafc]">
+    <div className="flex h-full w-full bg-[#18181b] text-[#f8fafc]">
       {/* Left Sidebar - Folder Tree & Notes List */}
       <aside className="flex w-64 flex-col border-r border-[#3f3f46] p-4">
         <div className="mb-6 flex items-center gap-2">

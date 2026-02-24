@@ -58,6 +58,22 @@ export default function NoteContent({ data }: NoteContentProps) {
     }
   }, [data.noteId, data.title, data.content])
 
+  useEffect(() => {
+    const openBestMatch = async () => {
+      if (!data.initialQuery || selectedNote) return
+      try {
+        const matches = await notesApi.search(data.initialQuery)
+        if (matches?.length) {
+          setSelectedNote(matches[0])
+          setIsEditing(false)
+        }
+      } catch (error) {
+        console.error('Failed to auto-search notes:', error)
+      }
+    }
+    openBestMatch()
+  }, [data.initialQuery, selectedNote])
+
   // Mutations
   const createNoteMutation = useMutation({
     mutationFn: ({ title, content, folderId }: { title: string; content: string; folderId: string | null }) =>

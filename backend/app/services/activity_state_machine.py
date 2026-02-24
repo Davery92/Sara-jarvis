@@ -163,6 +163,10 @@ class ActivityStateMachine:
             self._handle_sleep(signal)
         elif signal.signal_type == "workout":
             self._handle_workout(signal)
+        elif signal.signal_type == "face":
+            self._handle_face(signal)
+        elif signal.signal_type == "desk_presence":
+            self._handle_desk_presence(signal)
 
         return self.current
 
@@ -438,6 +442,33 @@ class ActivityStateMachine:
             self._transition(ActivityState.EXERCISING, 0.9, f"workout started: {signal.metadata.get('type', 'exercise')}")
         elif signal.value == "end":
             self._transition(ActivityState.ACTIVE, 0.7, "workout finished")
+
+    def _handle_face(self, signal: ActivitySignal):
+        """Handle face detection events from Jetson vision system."""
+        is_david = signal.metadata.get("is_david", False)
+        if is_david:
+            current = self._current.state
+            # David at desk → reinforce ACTIVE or FOCUSED_WORK
+            if current == ActivityState.AWAY:
+                self._transition(ActivityState.ACTIVE, 0.7, "David seen at desk")
+            elif current in (ActivityState.ACTIVE, ActivityState.FOCUSED_WORK):
+                self._current.confidence = min(self._current.confidence + 0.05, 1.0)
+            elif current == ActivityState.UNKNOWN:
+                self._transition(ActivityState.ACTIVE, 0.6, "David seen at desk")
+
+    def _handle_desk_presence(self, signal: ActivitySignal):
+        """Handle desk presence state changes from Jetson vision system."""
+        state = signal.value  # "present", "absent", "unknown"
+        if state == "absent":
+            current = self._current.state
+            if current in (ActivityState.FOCUSED_WORK, ActivityState.ACTIVE):
+                # Don't immediately transition to AWAY — just lower confidence
+                self._current.confidence = max(self._current.confidence - 0.2, 0.2)
+                self._current.reason = "left desk"
+        elif state == "present":
+            current = self._current.state
+            if current == ActivityState.AWAY:
+                self._transition(ActivityState.ACTIVE, 0.7, "returned to desk")
 
     # --- Internal helpers ---
 

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, RedirectResponse
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -16,6 +16,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List, Union
 # CryptContext imported via app.core.auth.pwd_context
 from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
 from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc, format_memory_timestamp, relative_time
 from jose import jwt, JWTError
 import uuid
@@ -23,13 +24,16 @@ import httpx
 import json
 import logging
 import os
+import base64
+import hashlib
+import secrets
 import aiofiles
 import asyncio
 import json
 from fastapi import UploadFile
 from app.tools.registry import tool_registry
 from fastapi import APIRouter
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl, urlencode
 import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
@@ -133,6 +137,8 @@ if _cors_env:
 CORS_ORIGINS = _parsed_env_origins or [
     "https://sara.avery.cloud",
     "http://sara.avery.cloud",
+    "https://canvas.avery.cloud",
+    "http://canvas.avery.cloud",
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:3002",
@@ -157,49 +163,403 @@ NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
 NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
 NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
 NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, claude, custom
+AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, claude, codex, custom
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:20b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Separate key for Anthropic Claude API
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")  # Google Gemini API key
 
+# ChatGPT/Codex OAuth configuration
+CODEX_OAUTH_CLIENT_ID = os.getenv("CODEX_OAUTH_CLIENT_ID", "").strip() or "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_OAUTH_AUTHORIZE_URL = os.getenv("CODEX_OAUTH_AUTHORIZE_URL", "").strip() or "https://auth.openai.com/oauth/authorize"
+CODEX_OAUTH_TOKEN_URL = os.getenv("CODEX_OAUTH_TOKEN_URL", "").strip() or "https://auth.openai.com/oauth/token"
+CODEX_OAUTH_SCOPE = os.getenv("CODEX_OAUTH_SCOPE", "").strip() or "openid profile email offline_access"
+CODEX_OAUTH_ORIGINATOR = os.getenv("CODEX_OAUTH_ORIGINATOR", "").strip() or "codex_vscode"
+CODEX_OAUTH_REDIRECT_URI = os.getenv("CODEX_OAUTH_REDIRECT_URI", "").strip()
+CODEX_DEFAULT_BASE_URL = os.getenv("CODEX_BASE_URL", "https://chatgpt.com/backend-api")
+CODEX_DEFAULT_MODEL = os.getenv("CODEX_DEFAULT_MODEL", "gpt-5.3-codex")
+CODEX_JWT_CLAIM_PATH = "https://api.openai.com/auth"
+CODEX_OAUTH_ACCESS_TOKEN = os.getenv("CODEX_OAUTH_ACCESS_TOKEN", "")
+CODEX_OAUTH_REFRESH_TOKEN = os.getenv("CODEX_OAUTH_REFRESH_TOKEN", "")
+CODEX_OAUTH_EXPIRES_AT = os.getenv("CODEX_OAUTH_EXPIRES_AT", "")
+CODEX_OAUTH_ACCOUNT_ID = os.getenv("CODEX_OAUTH_ACCOUNT_ID", "")
+CODEX_OAUTH_EMAIL = os.getenv("CODEX_OAUTH_EMAIL", "")
+
 # Available models for chat model selector
 AVAILABLE_MODELS = [
+    {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "provider": "codex"},
+    {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark", "provider": "codex"},
     {"id": "claude-opus-4-5-20250514", "name": "Claude Opus 4.5", "provider": "anthropic"},
     {"id": "claude-sonnet-4-5-20250514", "name": "Claude Sonnet 4.5", "provider": "anthropic"},
     {"id": "claude-haiku-3-5-20241022", "name": "Claude Haiku 3.5", "provider": "anthropic"},
     {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
     {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
-    {"id": "gpt-oss:120b", "name": "Local 120B", "provider": "local"},
+    {"id": "gpt-oss:120b-32k", "name": "Local 120B", "provider": "local"},
     {"id": "gpt-oss:20b", "name": "Local 20B", "provider": "local"},
     {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
 ]
 
+def _is_local_base_url(base_url: str) -> bool:
+    u = (base_url or "").lower()
+    return ("11434" in u) or ("ollama" in u) or ("localhost" in u)
+
+
 def get_model_config(model_id: str) -> dict:
-    """Get the base URL and API key for a given model ID."""
-    if model_id.startswith("claude"):
+    """Get base URL, API key, and provider routing for the selected model."""
+    model_id_l = (model_id or "").lower()
+    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:11434/v1"
+    configured_key = OPENAI_API_KEY or "dummy"
+    local_default_base = "http://100.104.68.115:11434/v1"
+
+    # Resolve declared provider from the model catalog first.
+    # This prevents stale global ai_provider settings from misrouting model-specific requests.
+    catalog_provider = next(
+        (m.get("provider") for m in AVAILABLE_MODELS if (m.get("id") or "").lower() == model_id_l),
+        None,
+    )
+
+    if catalog_provider == "codex" or model_id_l.startswith("gpt-5.3-codex") or "codex" in model_id_l:
+        codex_base = configured_base if "chatgpt.com/backend-api" in configured_base else CODEX_DEFAULT_BASE_URL
+        return {
+            "base_url": codex_base,
+            "api_key": CODEX_OAUTH_ACCESS_TOKEN or configured_key,
+            "provider": "codex"
+        }
+
+    # If model is explicitly cataloged, honor that provider first.
+    # This keeps VOICE_MODEL / model overrides from being hijacked by global ai_provider.
+    if catalog_provider == "anthropic" or model_id_l.startswith("claude"):
         return {
             "base_url": "https://api.anthropic.com",
             "api_key": ANTHROPIC_API_KEY,
             "provider": "anthropic"
         }
-    elif model_id.startswith("gemini"):
+    if catalog_provider == "google" or model_id_l.startswith("gemini"):
         return {
             "base_url": "https://generativelanguage.googleapis.com/v1beta",
             "api_key": GOOGLE_API_KEY,
             "provider": "google"
         }
-    else:  # Local models (gpt-oss, nemotron, etc.)
+    if catalog_provider == "local":
+        local_base = configured_base if _is_local_base_url(configured_base) else local_default_base
         return {
-            "base_url": "http://100.104.68.115:11434/v1",
-            "api_key": "dummy",
+            "base_url": local_base,
+            "api_key": configured_key if configured_key else "dummy",
+            "provider": "local",
+        }
+    if catalog_provider == "openai":
+        return {
+            "base_url": configured_base,
+            "api_key": configured_key if configured_key else "dummy",
+            "provider": "openai",
+        }
+
+    # Fallback: no explicit model mapping, use global provider state.
+    if AI_PROVIDER == "codex" or "chatgpt.com/backend-api" in configured_base:
+        return {
+            "base_url": configured_base,
+            "api_key": CODEX_OAUTH_ACCESS_TOKEN or configured_key,
+            "provider": "codex"
+        }
+
+    if AI_PROVIDER == "claude":
+        return {
+            "base_url": "https://api.anthropic.com",
+            "api_key": ANTHROPIC_API_KEY,
+            "provider": "anthropic"
+        }
+    if AI_PROVIDER == "gemini":
+        return {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": GOOGLE_API_KEY,
+            "provider": "google"
+        }
+    if _is_local_base_url(configured_base):
+        return {
+            "base_url": configured_base,
+            "api_key": configured_key if configured_key else "dummy",
             "provider": "local"
         }
+    return {
+        "base_url": configured_base,
+        "api_key": configured_key if configured_key else "dummy",
+        "provider": "openai"
+    }
 
 def is_anthropic_provider() -> bool:
     """Check if the current provider is Anthropic Claude"""
     return "api.anthropic.com" in OPENAI_BASE_URL
+
+
+def _safe_parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        candidate = value.strip()
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        dt = datetime.fromisoformat(candidate)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        parts = (token or "").split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+        return json.loads(decoded)
+    except Exception:
+        return None
+
+
+def _extract_codex_account_id_from_token(token: str) -> Optional[str]:
+    payload = _decode_jwt_payload(token) or {}
+    auth_claim = payload.get(CODEX_JWT_CLAIM_PATH) or {}
+    account_id = auth_claim.get("chatgpt_account_id")
+    if isinstance(account_id, str) and account_id:
+        return account_id
+    return None
+
+
+def _extract_codex_email_from_token(token: str) -> Optional[str]:
+    payload = _decode_jwt_payload(token) or {}
+    email = payload.get("email")
+    if isinstance(email, str) and email:
+        return email
+    return None
+
+
+def _build_pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _append_query_params(url: str, params: Dict[str, str]) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    return parsed._replace(query=urlencode(query)).geturl()
+
+
+def _resolve_frontend_return_url(request: Request, requested: Optional[str] = None) -> str:
+    default_url = f"{config.settings.frontend_url.rstrip('/')}/settings"
+    candidate = (requested or "").strip()
+    if not candidate:
+        return default_url
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return default_url
+    allowed_hosts = {
+        urlparse(default_url).netloc,
+        request.headers.get("x-forwarded-host", ""),
+        request.headers.get("host", ""),
+    }
+    if parsed.netloc not in {h for h in allowed_hosts if h}:
+        return default_url
+    return candidate
+
+
+def _resolve_backend_public_url(request: Request) -> str:
+    env_override = os.getenv("BACKEND_PUBLIC_URL", "").strip()
+    if env_override:
+        return env_override.rstrip("/")
+    configured = (config.settings.backend_url or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _upsert_app_settings(settings_map: Dict[str, Any], updated_by: str = "system") -> None:
+    if not settings_map:
+        return
+    db = SessionLocal()
+    try:
+        for key, value in settings_map.items():
+            db.execute(text("""
+                INSERT INTO app_settings (key, value, updated_at, updated_by)
+                VALUES (:key, :value, CURRENT_TIMESTAMP, :updated_by)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = EXCLUDED.updated_at,
+                    updated_by = EXCLUDED.updated_by
+            """), {"key": key, "value": str(value), "updated_by": updated_by})
+        db.commit()
+    finally:
+        db.close()
+
+
+def _load_codex_oauth_from_db() -> None:
+    """Hydrate in-memory Codex OAuth globals from app_settings if present."""
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+    db = SessionLocal()
+    try:
+        rows = db.execute(text("""
+            SELECT key, value
+            FROM app_settings
+            WHERE key IN (
+                'codex_oauth_access_token',
+                'codex_oauth_refresh_token',
+                'codex_oauth_expires_at',
+                'codex_oauth_account_id',
+                'codex_oauth_email'
+            )
+        """)).fetchall()
+        kv = {k: v for k, v in rows}
+        CODEX_OAUTH_ACCESS_TOKEN = kv.get("codex_oauth_access_token", CODEX_OAUTH_ACCESS_TOKEN or "")
+        CODEX_OAUTH_REFRESH_TOKEN = kv.get("codex_oauth_refresh_token", CODEX_OAUTH_REFRESH_TOKEN or "")
+        CODEX_OAUTH_EXPIRES_AT = kv.get("codex_oauth_expires_at", CODEX_OAUTH_EXPIRES_AT or "")
+        CODEX_OAUTH_ACCOUNT_ID = kv.get("codex_oauth_account_id", CODEX_OAUTH_ACCOUNT_ID or "")
+        CODEX_OAUTH_EMAIL = kv.get("codex_oauth_email", CODEX_OAUTH_EMAIL or "")
+    except Exception as e:
+        logger.warning(f"Failed loading Codex OAuth state from database: {e}")
+    finally:
+        db.close()
+
+
+def _apply_codex_oauth_token_data(token_data: Dict[str, Any], updated_by: str = "codex-oauth") -> None:
+    """Persist Codex OAuth token data and switch active AI provider to Codex."""
+    global AI_PROVIDER, OPENAI_BASE_URL, OPENAI_MODEL
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+
+    CODEX_OAUTH_ACCESS_TOKEN = token_data["access_token"]
+    CODEX_OAUTH_REFRESH_TOKEN = token_data["refresh_token"]
+    CODEX_OAUTH_EXPIRES_AT = token_data["expires_at"]
+    CODEX_OAUTH_ACCOUNT_ID = token_data["account_id"]
+    CODEX_OAUTH_EMAIL = token_data["email"]
+
+    AI_PROVIDER = "codex"
+    OPENAI_BASE_URL = CODEX_DEFAULT_BASE_URL
+    OPENAI_MODEL = CODEX_DEFAULT_MODEL
+    config.settings.ai_provider = AI_PROVIDER
+    config.settings.openai_base_url = OPENAI_BASE_URL
+    config.settings.openai_model = OPENAI_MODEL
+
+    _upsert_app_settings(
+        {
+            "ai_provider": AI_PROVIDER,
+            "openai_base_url": OPENAI_BASE_URL,
+            "openai_model": OPENAI_MODEL,
+            "codex_oauth_access_token": CODEX_OAUTH_ACCESS_TOKEN,
+            "codex_oauth_refresh_token": CODEX_OAUTH_REFRESH_TOKEN,
+            "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT,
+            "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID,
+            "codex_oauth_email": CODEX_OAUTH_EMAIL,
+        },
+        updated_by=updated_by,
+    )
+
+
+async def _codex_exchange_authorization_code(code: str, verifier: str, redirect_uri: str) -> Dict[str, Any]:
+    form = {
+        "grant_type": "authorization_code",
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "code": code,
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(
+            CODEX_OAUTH_TOKEN_URL,
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code >= 400:
+        detail = resp.text[:500]
+        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange failed: {detail}")
+    payload = resp.json()
+    access_token = payload.get("access_token")
+    refresh_token = payload.get("refresh_token")
+    expires_in = payload.get("expires_in")
+    if not access_token or not refresh_token or not isinstance(expires_in, (int, float)):
+        raise HTTPException(status_code=400, detail="Codex OAuth token response missing required fields")
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    account_id = _extract_codex_account_id_from_token(access_token)
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Codex OAuth token missing account claim")
+    email = _extract_codex_email_from_token(access_token)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": expires_at.isoformat(),
+        "account_id": account_id,
+        "email": email or "",
+    }
+
+
+async def _codex_refresh_tokens(refresh_token: str) -> Dict[str, Any]:
+    form = {
+        "grant_type": "refresh_token",
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "refresh_token": refresh_token,
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(
+            CODEX_OAUTH_TOKEN_URL,
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Codex OAuth refresh failed: {resp.status_code} {resp.text[:250]}")
+    payload = resp.json()
+    access_token = payload.get("access_token")
+    new_refresh = payload.get("refresh_token")
+    expires_in = payload.get("expires_in")
+    if not access_token or not new_refresh or not isinstance(expires_in, (int, float)):
+        raise RuntimeError("Codex OAuth refresh response missing required fields")
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    account_id = _extract_codex_account_id_from_token(access_token)
+    if not account_id:
+        raise RuntimeError("Codex OAuth refresh token missing account claim")
+    email = _extract_codex_email_from_token(access_token) or CODEX_OAUTH_EMAIL
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh,
+        "expires_at": expires_at.isoformat(),
+        "account_id": account_id,
+        "email": email or "",
+    }
+
+
+async def _ensure_codex_access_token(updated_by: str = "system", min_valid_seconds: int = 60) -> Optional[str]:
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
+        _load_codex_oauth_from_db()
+    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
+        return None
+    expires_at = _safe_parse_iso_datetime(CODEX_OAUTH_EXPIRES_AT)
+    now = datetime.now(timezone.utc)
+    if expires_at and expires_at > now + timedelta(seconds=min_valid_seconds):
+        return CODEX_OAUTH_ACCESS_TOKEN
+    refreshed = await _codex_refresh_tokens(CODEX_OAUTH_REFRESH_TOKEN)
+    CODEX_OAUTH_ACCESS_TOKEN = refreshed["access_token"]
+    CODEX_OAUTH_REFRESH_TOKEN = refreshed["refresh_token"]
+    CODEX_OAUTH_EXPIRES_AT = refreshed["expires_at"]
+    CODEX_OAUTH_ACCOUNT_ID = refreshed["account_id"]
+    CODEX_OAUTH_EMAIL = refreshed["email"]
+    _upsert_app_settings(
+        {
+            "codex_oauth_access_token": CODEX_OAUTH_ACCESS_TOKEN,
+            "codex_oauth_refresh_token": CODEX_OAUTH_REFRESH_TOKEN,
+            "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT,
+            "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID,
+            "codex_oauth_email": CODEX_OAUTH_EMAIL,
+        },
+        updated_by=updated_by,
+    )
+    return CODEX_OAUTH_ACCESS_TOKEN
 
 # Smaller, faster model for notifications (uses same endpoint but different model)
 OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
@@ -216,9 +576,12 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 # Background LLM Configuration (separate from chat - always uses local models)
 BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:11434/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "gpt-oss:120b")
-BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://100.104.68.115:11434/v1")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "gpt-oss:20b")
+BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:11434/v1")
 BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "gpt-oss:20b")
+BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
+BG_LLM_CONNECT_TIMEOUT = float(os.getenv("BG_LLM_CONNECT_TIMEOUT", "6"))
+BG_LLM_NUM_CTX = int(os.getenv("BG_LLM_NUM_CTX", "16384"))
 
 GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "postgres").lower()
 MEMORY_HOT_DAYS = int(os.getenv("MEMORY_HOT_DAYS", "30"))
@@ -392,6 +755,12 @@ class SimpleLLMClient:
                     "content": tool_content or ""
                 })
             elif role == "assistant":
+                # Flush any pending tool results BEFORE adding an assistant message
+                # (Anthropic requires tool_result immediately after tool_use)
+                if pending_tool_results:
+                    anthropic_messages.append({"role": "user", "content": pending_tool_results})
+                    pending_tool_results = []
+
                 # Check if this has tool_calls (OpenAI format)
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
@@ -662,6 +1031,249 @@ class SimpleLLMClient:
         # (this handles non-MLX models)
         return content
 
+    def _content_to_text(self, content: Any) -> str:
+        """Normalize OpenAI-style message content into plain text."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text" and item.get("text"):
+                        parts.append(str(item.get("text")))
+                    elif item.get("type") == "input_text" and item.get("text"):
+                        parts.append(str(item.get("text")))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join([p for p in parts if p])
+        return str(content)
+
+    def _convert_openai_messages_to_codex_input(self, messages: list) -> tuple[str, list]:
+        instructions: List[str] = []
+        converted: List[Dict[str, Any]] = []
+        call_counter = 0
+
+        def _to_json_string(value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(value if value is not None else {})
+            except Exception:
+                return "{}"
+
+        for msg in messages:
+            role = msg.get("role")
+            content_text = self._content_to_text(msg.get("content"))
+
+            if role == "system":
+                if content_text:
+                    instructions.append(content_text)
+                continue
+
+            if role == "user":
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": content_text or ""}],
+                    }
+                )
+                continue
+
+            if role == "assistant":
+                if content_text:
+                    converted.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content_text}],
+                        }
+                    )
+
+                for tc in (msg.get("tool_calls") or []):
+                    func = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    raw_id = str(tc.get("id") or f"call_{call_counter}")
+                    call_counter += 1
+                    call_id = raw_id.split("|")[0]
+                    item_id = f"fc_{call_id[:58]}" if not raw_id.startswith("fc_") else raw_id[:64]
+                    converted.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "id": item_id,
+                            "name": func.get("name") or "unknown_tool",
+                            "arguments": _to_json_string(func.get("arguments")),
+                        }
+                    )
+                continue
+
+            if role == "tool":
+                tool_call_id = str(msg.get("tool_call_id") or "")
+                call_id = tool_call_id.split("|")[0]
+                if call_id:
+                    converted.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content_text or "",
+                        }
+                    )
+
+        return "\n\n".join(instructions), converted
+
+    def _convert_openai_tools_to_codex_tools(self, tools: list) -> list:
+        converted_tools = []
+        for tool in tools or []:
+            if tool.get("type") != "function":
+                continue
+            fn = tool.get("function", {})
+            name = fn.get("name")
+            if not name:
+                continue
+            converted_tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                }
+            )
+        return converted_tools
+
+    async def _stream_codex_response(self, payload: dict, base_url: str, api_key: str) -> dict:
+        """Stream from ChatGPT/Codex responses API and map into OpenAI-compatible message output."""
+        # Ensure a fresh OAuth token before request
+        token = await _ensure_codex_access_token(updated_by="codex-runtime", min_valid_seconds=120) or api_key
+        account_id = CODEX_OAUTH_ACCOUNT_ID or _extract_codex_account_id_from_token(token or "")
+        if not token or not account_id:
+            raise RuntimeError("Codex OAuth not connected. Connect in Settings first.")
+
+        instructions, input_items = self._convert_openai_messages_to_codex_input(payload.get("messages", []))
+        codex_body: Dict[str, Any] = {
+            "model": payload.get("model") or OPENAI_MODEL or CODEX_DEFAULT_MODEL,
+            "store": False,
+            "stream": True,
+            "instructions": instructions or "You are a helpful assistant.",
+            "input": input_items,
+            "text": {"verbosity": "medium"},
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        codex_tools = self._convert_openai_tools_to_codex_tools(payload.get("tools", []))
+        if codex_tools:
+            codex_body["tools"] = codex_tools
+
+        codex_url = f"{base_url.rstrip('/')}/codex/responses"
+        full_content = ""
+        usage_data = {}
+        tool_calls_map: Dict[str, Dict[str, Any]] = {}
+        active_call_id: Optional[str] = None
+
+        def _to_json_string(value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(value if value is not None else {})
+            except Exception:
+                return "{}"
+
+        async with self.client.stream(
+            "POST",
+            codex_url,
+            json=codex_body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "chatgpt-account-id": account_id,
+                "OpenAI-Beta": "responses=experimental",
+                "originator": CODEX_OAUTH_ORIGINATOR,
+                "accept": "text/event-stream",
+            },
+        ) as response:
+            if response.status_code >= 400:
+                err = await response.aread()
+                raise RuntimeError(f"Codex request failed ({response.status_code}): {err.decode(errors='ignore')[:300]}")
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    line = line[6:]
+                if line == "[DONE]":
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "error":
+                    raise RuntimeError(event.get("message") or "Codex stream error")
+                if event_type in ("response.output_text.delta", "response.refusal.delta"):
+                    delta = event.get("delta") or ""
+                    if delta:
+                        full_content += delta
+                        if self.event_queue:
+                            await self.emit_event("text_chunk", {"content": delta, "full_content": full_content})
+                elif event_type == "response.output_item.added":
+                    item = event.get("item") or {}
+                    if item.get("type") == "function_call":
+                        call_id = str(item.get("call_id") or "")
+                        if call_id:
+                            active_call_id = call_id
+                            tool_calls_map[call_id] = {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name") or "unknown_tool",
+                                    "arguments": _to_json_string(item.get("arguments")),
+                                },
+                            }
+                elif event_type == "response.function_call_arguments.delta":
+                    delta = event.get("delta") or ""
+                    if active_call_id and active_call_id in tool_calls_map:
+                        tool_calls_map[active_call_id]["function"]["arguments"] += delta
+                elif event_type == "response.output_item.done":
+                    item = event.get("item") or {}
+                    if item.get("type") == "function_call":
+                        call_id = str(item.get("call_id") or active_call_id or "")
+                        if call_id:
+                            active_call_id = call_id
+                            tool_calls_map[call_id] = {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name") or "unknown_tool",
+                                    "arguments": _to_json_string(
+                                        item.get("arguments")
+                                        if item.get("arguments") is not None
+                                        else tool_calls_map.get(call_id, {}).get("function", {}).get("arguments", "{}")
+                                    ),
+                                },
+                            }
+                elif event_type in ("response.completed", "response.done"):
+                    response_payload = event.get("response") or {}
+                    usage = response_payload.get("usage") or {}
+                    if usage:
+                        usage_data = {
+                            "prompt_tokens": usage.get("input_tokens", 0),
+                            "completion_tokens": usage.get("output_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
+                        }
+
+        if usage_data:
+            self._log_token_usage(
+                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                completion_tokens=usage_data.get("completion_tokens", 0),
+                total_tokens=usage_data.get("total_tokens", 0),
+                model=payload.get("model", OPENAI_MODEL),
+                operation_type="chat",
+            )
+
+        return {
+            "content": full_content,
+            "tool_calls": list(tool_calls_map.values()) if tool_calls_map else None,
+        }
+
     async def _stream_response(self, payload):
         """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
         import re
@@ -679,6 +1291,10 @@ class SimpleLLMClient:
 
         # Route to Anthropic handler if using Claude API (non-streaming for now)
         logger.info(f"🔀 Provider routing: provider={provider}, base_url={base_url[:50]}")
+        if provider == "codex":
+            logger.info("Using ChatGPT Codex Responses API")
+            return await self._stream_codex_response(payload, base_url, api_key)
+
         if provider == "anthropic":
             logger.info("Using Anthropic Claude API (non-streaming mode)")
             messages = payload.get("messages", [])
@@ -924,15 +1540,15 @@ class SimpleLLMClient:
             payload_fallback.pop("stream", None)
 
             response = await self.client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
+                f"{base_url}/chat/completions",
                 json=payload_fallback,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+                headers={"Authorization": f"Bearer {api_key}"}
             )
             response.raise_for_status()
             result = response.json()
             return result["choices"][0]["message"]
-    
-    async def chat(self, messages: list):
+
+    async def chat(self, messages: list, model: str | None = None):
         try:
             # Handle both dict and object message formats
             formatted_messages = []
@@ -942,32 +1558,49 @@ class SimpleLLMClient:
                 else:
                     formatted_messages.append({"role": m.role, "content": m.content})
 
-            # Route to Anthropic handler if using Claude API
-            if is_anthropic_provider():
+            effective_model = model or OPENAI_MODEL or CODEX_DEFAULT_MODEL
+            model_config = get_model_config(effective_model)
+            provider = model_config["provider"]
+
+            # Route by effective model provider (not global OPENAI_BASE_URL).
+            if provider == "anthropic":
                 result = await self._anthropic_chat_request(
                     messages=formatted_messages,
                     tools=None,
                     max_tokens=8000,
-                    temperature=0.7
+                    temperature=0.7,
+                    model=effective_model,
                 )
                 return result.get("content", "")
 
+            if provider == "codex":
+                codex_result = await self._stream_codex_response(
+                    {
+                        "model": effective_model,
+                        "messages": formatted_messages,
+                        "temperature": 0.7,
+                    },
+                    model_config["base_url"],
+                    model_config["api_key"],
+                )
+                return codex_result.get("content", "")
+
             # Build payload for OpenAI-compatible API
             chat_payload = {
-                "model": OPENAI_MODEL,
+                "model": effective_model,
                 "messages": formatted_messages,
                 "temperature": 0.7,
                 "max_tokens": 8000
             }
 
             # Add Ollama-specific context length if using local model
-            if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
-                chat_payload["num_ctx"] = 65536  # 65k context window for gpt-oss:120b
+            if provider == "local":
+                chat_payload["num_ctx"] = 32768
 
             response = await self.client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
+                f"{model_config['base_url']}/chat/completions",
                 json=chat_payload,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+                headers={"Authorization": f"Bearer {model_config['api_key']}"}
             )
             response.raise_for_status()
             result = response.json()
@@ -1075,7 +1708,7 @@ class SimpleLLMClient:
 
             # Add Ollama-specific context length if using local model
             if model_config["provider"] == "local":
-                payload["num_ctx"] = 65536  # 65k context window for local models
+                payload["num_ctx"] = 32768
 
             # Log payload size for debugging context overflow
             import json
@@ -1173,7 +1806,7 @@ class SimpleLLMClient:
 
                     # Add Ollama-specific context length if using local model
                     if self._current_model_config.get("provider") == "local":
-                        follow_up_payload["num_ctx"] = 65536
+                        follow_up_payload["num_ctx"] = 32768
 
                     # Debug: Log the assistant message and tool responses being sent
                     if current_messages:
@@ -1240,7 +1873,7 @@ class SimpleLLMClient:
 
                     # FALLBACK: If model returns empty content with another tool call after round 1,
                     # it's stuck in a loop. Synthesize response from tool results.
-                    if round_num >= 1 and message.get("tool_calls") and not message.get("content", "").strip():
+                    if round_num >= 1 and message.get("tool_calls") and not (message.get("content") or "").strip():
                         logger.warning(f"⚠️ Model returned empty content with tool calls in round {round_num + 1}. Synthesizing response from previous tool results.")
                         # Build response from the tool results we just got
                         tool_summary_parts = []
@@ -1273,7 +1906,9 @@ class SimpleLLMClient:
                             "synthesized": True
                         })
                         # Store conversation and get episode_id for rating
-                        episode_id = await self.store_conversation(messages, synthesized_response, user_id, conversation_id)
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, synthesized_response, user_id, conversation_id
+                        )
                         self.current_episode_id = episode_id
                         return synthesized_response
 
@@ -1285,7 +1920,9 @@ class SimpleLLMClient:
                             "content_length": len(response_content) if response_content else 0
                         })
                         # Store conversation and get episode_id for rating
-                        episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, response_content, user_id, conversation_id
+                        )
                         self.current_episode_id = episode_id
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
@@ -1297,7 +1934,9 @@ class SimpleLLMClient:
                         "content_length": len(response_content) if response_content else 0
                     })
                     # Store conversation and get episode_id for rating
-                    episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                    episode_id = await self._store_conversation_with_timeout(
+                        messages, response_content, user_id, conversation_id
+                    )
                     self.current_episode_id = episode_id
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
@@ -1315,7 +1954,9 @@ class SimpleLLMClient:
                 response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
 
             # Store conversation and get episode_id for rating
-            episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+            episode_id = await self._store_conversation_with_timeout(
+                messages, response_content, user_id, conversation_id
+            )
             self.current_episode_id = episode_id
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
@@ -1325,6 +1966,41 @@ class SimpleLLMClient:
             logger.error(f"LLM error in chat_with_tools: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
+
+    async def _store_conversation_with_timeout(
+        self,
+        messages,
+        response_content,
+        user_id,
+        conversation_id,
+        timeout_seconds: float = 4.0
+    ) -> Optional[str]:
+        """
+        Keep chat completion responsive: do not block final stream events on memory persistence.
+        If storage exceeds timeout, continue without waiting and persist in background.
+        """
+        store_task = asyncio.create_task(
+            self.store_conversation(messages, response_content, user_id, conversation_id)
+        )
+        try:
+            return await asyncio.wait_for(asyncio.shield(store_task), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⚠️ store_conversation timed out after {timeout_seconds}s; continuing stream without waiting"
+            )
+            def _log_background_failure(task: asyncio.Task):
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    return
+                if exc:
+                    logger.warning(f"⚠️ Background conversation storage failed: {exc}")
+
+            store_task.add_done_callback(_log_background_failure)
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Conversation storage failed (continuing): {e}")
+            return None
 
     async def execute_tool(self, tool_call, user_id, conversation_id=None, session_cache=None):
         """Execute a tool call and return the response"""
@@ -1472,18 +2148,31 @@ class SimpleLLMClient:
                         logger.info(f"📐 Emitted canvas_command: {canvas_command}")
 
                     # Emit workspace_command SSE event for workbench-canvas
+                    workspace_commands = []
+                    if isinstance(reg_result.data.get("workspace_commands"), list):
+                        workspace_commands = [
+                            cmd for cmd in reg_result.data.get("workspace_commands", [])
+                            if isinstance(cmd, dict) and cmd.get("workspace_command")
+                        ]
+
                     workspace_command = reg_result.data.get("workspace_command")
-                    if workspace_command:
-                        await self.emit_event("workspace_command", reg_result.data)
-                        logger.info(f"🖼️ Emitted workspace_command: {workspace_command}")
+                    if workspace_command and not workspace_commands:
+                        workspace_commands = [reg_result.data]
+
+                    if workspace_commands:
+                        for cmd in workspace_commands:
+                            await self.emit_event("workspace_command", cmd)
+                        logger.info(f"🖼️ Emitted {len(workspace_commands)} workspace_command event(s)")
+
                         # Also store in Redis for voice/non-SSE access
                         try:
                             from redis import Redis
                             redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
-                            cmd_data = json.dumps(reg_result.data)
-                            redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
+                            for cmd in workspace_commands:
+                                cmd_data = json.dumps(cmd)
+                                redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
                             redis_conn.expire(f"workspace_commands:{user_id}", 60)  # 1 minute TTL
-                            logger.info(f"🖼️ Stored workspace_command in Redis for user {user_id}")
+                            logger.info(f"🖼️ Stored {len(workspace_commands)} workspace_command(s) in Redis for user {user_id}")
                         except Exception as e:
                             logger.warning(f"Failed to store workspace_command in Redis: {e}")
 
@@ -2437,7 +3126,7 @@ class SimpleLLMClient:
                     Episode.conversation_id == conversation_id,
                     Episode.user_id == user_id
                 ).all()
-                existing_content = {ep.content for ep in existing_episodes}
+                existing_content = {ep.content for ep in existing_episodes if ep.content}
 
                 # Store only new messages that aren't already stored
                 for message in messages:
@@ -2458,6 +3147,7 @@ class SimpleLLMClient:
                             source="chat",
                             memory_type="conversation"
                         )
+                        existing_content.add(content)
             finally:
                 db.close()
 
@@ -2472,6 +3162,7 @@ class SimpleLLMClient:
                     memory_type="conversation"
                 )
                 assistant_episode_id = episode.id if episode else None
+                existing_content.add(response_content)
                 logger.info(f"🎯 Assistant episode stored with ID: {assistant_episode_id}")
 
             # Also maintain legacy conversation storage for compatibility
@@ -2498,14 +3189,13 @@ class SimpleLLMClient:
                         id=conversation_id,
                         user_id=user_id,
                         title="",  # Will be generated later
-                        total_messages=len(messages) + (1 if response_content else 0)
+                        total_messages=0
                     )
                     db.add(conversation)
                     db.commit()
                 else:
                     # Update existing conversation
                     conversation = existing_conversation
-                    conversation.total_messages = conversation.total_messages + (1 if response_content else 0)
                     conversation.updated_at = func.now()
                     db.commit()
                 
@@ -2514,47 +3204,85 @@ class SimpleLLMClient:
                     ConversationTurn.conversation_id == conversation_id
                 ).count()
                 
-                # Only store the new user message (last message in the list)
-                if messages and messages[-1].role == "user":
-                    last_message = messages[-1]
-                    embedding = await embedding_service.generate_embedding(last_message.content)
-                    
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = embedding
+                # Only store the new user message (last message in the list), idempotently.
+                last_message = messages[-1] if messages else None
+                if last_message:
+                    if isinstance(last_message, dict):
+                        last_role = last_message.get("role")
+                        last_content = last_message.get("content")
                     else:
-                        import json
-                        embedding_data = json.dumps(embedding) if embedding else None
-                    
-                    turn = ConversationTurn(
-                        conversation_id=conversation.id,
-                        user_id=user_id,
-                        role=last_message.role,
-                        content=last_message.content,
-                        message_index=current_turn_count,
-                        embedding=embedding_data
+                        last_role = getattr(last_message, "role", None)
+                        last_content = getattr(last_message, "content", None)
+                else:
+                    last_role = None
+                    last_content = None
+
+                if last_role == "user" and last_content:
+                    latest_user_turn = db.query(ConversationTurn).filter(
+                        ConversationTurn.conversation_id == conversation_id,
+                        ConversationTurn.user_id == user_id,
+                        ConversationTurn.role == "user"
+                    ).order_by(ConversationTurn.message_index.desc()).first()
+
+                    should_store_user_turn = not (
+                        latest_user_turn and latest_user_turn.content == last_content
                     )
-                    db.add(turn)
-                    current_turn_count += 1
+
+                    if should_store_user_turn:
+                        embedding = await embedding_service.generate_embedding(last_content)
+                    
+                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                            embedding_data = embedding
+                        else:
+                            import json
+                            embedding_data = json.dumps(embedding) if embedding else None
+                        
+                        turn = ConversationTurn(
+                            conversation_id=conversation.id,
+                            user_id=user_id,
+                            role="user",
+                            content=last_content,
+                            message_index=current_turn_count,
+                            embedding=embedding_data
+                        )
+                        db.add(turn)
+                        current_turn_count += 1
                 
                 if response_content:
-                    response_embedding = await embedding_service.generate_embedding(response_content)
-                    
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = response_embedding
-                    else:
-                        import json
-                        embedding_data = json.dumps(response_embedding) if response_embedding else None
-                    
-                    turn = ConversationTurn(
-                        conversation_id=conversation.id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=response_content,
-                        message_index=current_turn_count,
-                        embedding=embedding_data
+                    latest_assistant_turn = db.query(ConversationTurn).filter(
+                        ConversationTurn.conversation_id == conversation_id,
+                        ConversationTurn.user_id == user_id,
+                        ConversationTurn.role == "assistant"
+                    ).order_by(ConversationTurn.message_index.desc()).first()
+
+                    should_store_assistant_turn = not (
+                        latest_assistant_turn and latest_assistant_turn.content == response_content
                     )
-                    db.add(turn)
+
+                    if should_store_assistant_turn:
+                        response_embedding = await embedding_service.generate_embedding(response_content)
+                        
+                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                            embedding_data = response_embedding
+                        else:
+                            import json
+                            embedding_data = json.dumps(response_embedding) if response_embedding else None
+                        
+                        turn = ConversationTurn(
+                            conversation_id=conversation.id,
+                            user_id=user_id,
+                            role="assistant",
+                            content=response_content,
+                            message_index=current_turn_count,
+                            embedding=embedding_data
+                        )
+                        db.add(turn)
                 
+                db.commit()
+                conversation.total_messages = db.query(ConversationTurn).filter(
+                    ConversationTurn.conversation_id == conversation_id
+                ).count()
+                conversation.updated_at = func.now()
                 db.commit()
                 await self.generate_conversation_title(conversation.id, db)
                 
@@ -2871,6 +3599,8 @@ def parse_json_text_tool_calls(content: str) -> tuple[str, list]:
         'food_log_create', 'food_log_search', 'food_log_summary', 'food_search_and_log',
         'workout_log_create', 'workout_list', 'workout_details', 'workout_stats',
         'fitness_note_create', 'fitness_note_search', 'fitness_note_edit', 'fitness_summary',
+        'temerant_status', 'temerant_log_action', 'temerant_roll_oracle',
+        'temerant_list_events', 'temerant_resolve_event',
         'load_tool_categories',
         'knowledge_graph_search', 'find_connections', 'discover_knowledge_clusters', 'analyze_knowledge_gaps'
     }
@@ -4249,8 +4979,8 @@ class DreamingService:
     """Background service for memory consolidation, pattern detection, and insight generation"""
     
     def __init__(self):
-        self.fast_model = "gpt-oss:20b"  # Faster model for quick analysis
-        self.smart_model = "gpt-oss:120b"  # Smarter model for deep insights
+        self.fast_model = BG_LLM_FALLBACK_MODEL or "gpt-oss:20b"
+        self.smart_model = BG_LLM_PRIMARY_MODEL or OPENAI_MODEL or "gpt-oss:20b"
         self.is_dreaming = False
         logger.info("🧠 DreamingService initialized")
     
@@ -5112,6 +5842,22 @@ try:
 except Exception as e:
     logger.error(f"❌ Learning routes failed to load: {e}")
 
+# Include Temerant RPG routes
+try:
+    from app.routes.temerant import router as temerant_router
+    app.include_router(temerant_router)
+    logger.info("✅ Temerant RPG routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Temerant RPG routes failed to load: {e}")
+
+# Include separate scene-based Temerant RPG routes
+try:
+    from app.routes.temerant_rpg import router as temerant_rpg_router
+    app.include_router(temerant_rpg_router)
+    logger.info("✅ Separate Temerant RPG routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Separate Temerant RPG routes failed to load: {e}")
+
 # Include Food Database routes
 try:
     from app.routes.food_database import router as food_db_router
@@ -5365,6 +6111,14 @@ app.include_router(email_router, prefix="/api")
 # Content Inbox routes
 from app.routes.content_inbox import router as content_inbox_router
 app.include_router(content_inbox_router)
+
+# Agent Orchestration routes (VM agent dispatch + candidate skills)
+from app.routes.agent_orchestration import router as agent_orch_router
+app.include_router(agent_orch_router)
+
+# Intelligence monitor routes (Phase 4A — proactive tech intelligence)
+from app.routes.intelligence import router as intelligence_router
+app.include_router(intelligence_router)
 
 # Desktop app update server (no auth — electron-updater needs pre-login access)
 from app.routes.desktop_updates import router as desktop_updates_router
@@ -6155,12 +6909,15 @@ def _build_activity_context(
     conversation_depth: int = 0,
     # Memory nudges
     memory_nudges: list = None,
+    # Behavioral calibration (pre-loaded from working memory)
+    calibration_data: dict = None,
 ) -> str:
     """Build adaptive personality context for system prompt injection.
 
-    Combines activity state, interruptibility, and conversation
-    depth into a coherent personality directive via the PersonalityEngine.
-    Body state (blood sugar, stress, alertness) is intentionally excluded.
+    Combines activity state, interruptibility, conversation depth, and
+    behavioral calibration into a coherent personality directive via the
+    PersonalityEngine. Body state (blood sugar, stress, alertness) is
+    intentionally excluded.
     """
     try:
         from app.services.personality_engine import build_personality_context
@@ -6173,6 +6930,7 @@ def _build_activity_context(
             turn_count=turn_count,
             conversation_depth=conversation_depth,
             memory_nudges=memory_nudges,
+            calibration_data=calibration_data,
         )
         return ctx.render()
     except Exception as e:
@@ -6346,8 +7104,9 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
         async def generate_stream():
             full_response = ""
             try:
-                # Create system prompt
-                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email)
+                # Create system prompt with user-local current time
+                user_now = _resolve_prompt_datetime_for_user(db, user.id)
+                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email, user_now=user_now)
 
                 # === CANVAS MODE: Check if active and enhance system prompt ===
                 is_canvas_mode = _get_canvas_mode(user_id)
@@ -6391,8 +7150,8 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 logger.info(f"[Voice] Intent={user_intent}, tools={tool_categories}, canvas={is_canvas_mode}")
 
                 # === CANVAS TRIGGER: Force device tools if workspace trigger ===
-                if is_canvas_trigger_msg and "device" not in (tool_categories or []):
-                    tool_categories = (tool_categories or []) + ["device"]
+                if is_canvas_trigger_msg and "devices" not in (tool_categories or []):
+                    tool_categories = (tool_categories or []) + ["devices"]
                     logger.info(f"[Voice] Added device tools for canvas trigger")
 
                 # === CANVAS MODE: Always include workspace tools when in canvas mode ===
@@ -6403,6 +7162,14 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     if "maps" not in tool_categories:
                         tool_categories = tool_categories + ["maps"]
                     logger.info(f"[Voice] Canvas mode - added workspace tools: {tool_categories}")
+
+                # Capability core: keep high-leverage awareness/action tools loaded.
+                capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
+                tool_categories = tool_categories or []
+                for category in capability_core_categories:
+                    if category not in tool_categories:
+                        tool_categories.append(category)
+                logger.info(f"[Voice] Capability core categories active: {capability_core_categories}")
 
                 # Lazy memory retrieval
                 if context_decision.inject_memory:
@@ -7193,6 +7960,9 @@ def load_settings_from_db():
     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
+    global BG_LLM_REQUEST_TIMEOUT, BG_LLM_CONNECT_TIMEOUT, BG_LLM_NUM_CTX
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
 
     try:
         db = SessionLocal()
@@ -7256,6 +8026,29 @@ def load_settings_from_db():
                 BG_LLM_FALLBACK_MODEL = settings_dict["bg_llm_fallback_model"]
                 config.settings.bg_llm_fallback_model = BG_LLM_FALLBACK_MODEL
 
+            if "bg_llm_request_timeout" in settings_dict:
+                BG_LLM_REQUEST_TIMEOUT = float(settings_dict["bg_llm_request_timeout"])
+                config.settings.bg_llm_request_timeout = BG_LLM_REQUEST_TIMEOUT
+
+            if "bg_llm_connect_timeout" in settings_dict:
+                BG_LLM_CONNECT_TIMEOUT = float(settings_dict["bg_llm_connect_timeout"])
+                config.settings.bg_llm_connect_timeout = BG_LLM_CONNECT_TIMEOUT
+
+            if "bg_llm_num_ctx" in settings_dict:
+                BG_LLM_NUM_CTX = int(settings_dict["bg_llm_num_ctx"])
+                config.settings.bg_llm_num_ctx = BG_LLM_NUM_CTX
+
+            if "codex_oauth_access_token" in settings_dict:
+                CODEX_OAUTH_ACCESS_TOKEN = settings_dict["codex_oauth_access_token"]
+            if "codex_oauth_refresh_token" in settings_dict:
+                CODEX_OAUTH_REFRESH_TOKEN = settings_dict["codex_oauth_refresh_token"]
+            if "codex_oauth_expires_at" in settings_dict:
+                CODEX_OAUTH_EXPIRES_AT = settings_dict["codex_oauth_expires_at"]
+            if "codex_oauth_account_id" in settings_dict:
+                CODEX_OAUTH_ACCOUNT_ID = settings_dict["codex_oauth_account_id"]
+            if "codex_oauth_email" in settings_dict:
+                CODEX_OAUTH_EMAIL = settings_dict["codex_oauth_email"]
+
             logger.info("✅ Persisted settings loaded successfully")
     except Exception as e:
         logger.warning(f"Could not load persisted settings (using defaults): {e}")
@@ -7284,6 +8077,17 @@ async def startup_event():
         # Don't continue if database is unavailable - nothing will work
         raise RuntimeError(f"Database connection failed: {db_err}")
 
+    # 1b. Recover orphaned agent dispatch tasks (non-critical)
+    try:
+        from app.services.agent_dispatch import agent_dispatch_service
+        recovery_db = SessionLocal()
+        recovered = agent_dispatch_service.recover_orphaned_tasks(recovery_db)
+        recovery_db.close()
+        if recovered:
+            logger.info(f"🔄 Recovered {recovered} orphaned agent tasks from previous run")
+    except Exception as recover_err:
+        logger.warning(f"⚠️ Agent task recovery failed (non-critical): {recover_err}")
+
     # 2. Load persisted settings (non-critical but important)
     try:
         load_settings_from_db()
@@ -7305,7 +8109,11 @@ async def startup_event():
 
     # 4. CRITICAL: Validate embedding service
     try:
-        test_embedding = await llm_failover_client.get_embedding("startup health check")
+        # Do not block API readiness indefinitely on embedding warmup.
+        test_embedding = await asyncio.wait_for(
+            llm_failover_client.get_embedding("startup health check"),
+            timeout=12.0,
+        )
         if test_embedding and len(test_embedding) > 0:
             STARTUP_HEALTH["embedding_service"]["status"] = "healthy"
             STARTUP_HEALTH["embedding_service"]["dimension"] = len(test_embedding)
@@ -7315,6 +8123,11 @@ async def startup_event():
             STARTUP_HEALTH["embedding_service"]["message"] = "Empty embedding result"
             STARTUP_HEALTH["critical_failures"].append("embedding_service")
             logger.error("🚨 CRITICAL: Embedding service returned empty result - memory search DISABLED!")
+    except asyncio.TimeoutError:
+        STARTUP_HEALTH["embedding_service"]["status"] = "failed"
+        STARTUP_HEALTH["embedding_service"]["message"] = "Embedding health check timed out (12s)"
+        STARTUP_HEALTH["critical_failures"].append("embedding_service")
+        logger.error("🚨 CRITICAL: Embedding service health check timed out - memory search DISABLED!")
     except Exception as emb_err:
         STARTUP_HEALTH["embedding_service"]["status"] = "failed"
         STARTUP_HEALTH["embedding_service"]["message"] = str(emb_err)
@@ -7458,12 +8271,148 @@ async def shutdown_event():
 # Routes — core endpoints extracted to app/routes/core.py
 # Auth endpoints extracted to app/routes/auth.py
 
-def get_system_prompt(assistant_name: str, user_email: str) -> str:
+def _is_valid_timezone_name(timezone_name: str) -> bool:
+    """Validate an IANA timezone name."""
+    if not isinstance(timezone_name, str) or not timezone_name.strip():
+        return False
+    try:
+        ZoneInfo(timezone_name.strip())
+        return True
+    except Exception:
+        return False
+
+
+def _extract_profile_timezone(profile_data: Any) -> Optional[str]:
+    """Extract timezone from user_profile.profile_data variants."""
+    if not isinstance(profile_data, dict):
+        return None
+
+    candidates = [
+        profile_data.get("timezone"),
+        profile_data.get("time_zone"),
+        profile_data.get("timezone_location"),
+    ]
+
+    for value in candidates:
+        if isinstance(value, dict):
+            value = value.get("value") or value.get("timezone")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
+def _resolve_user_timezone_for_prompt(db: Session, user_id: str) -> str:
+    """
+    Resolve per-user timezone for prompt rendering.
+    Precedence:
+    1) reflection_settings.timezone
+    2) user_profile.profile_data timezone fields
+    3) TZ env var
+    4) America/New_York fallback
+    """
+    fallback = os.getenv("TZ", "America/New_York")
+    if not _is_valid_timezone_name(fallback):
+        fallback = "America/New_York"
+
+    if not user_id:
+        return fallback
+
+    try:
+        tz_row = db.execute(
+            text("SELECT timezone FROM reflection_settings WHERE user_id = :uid LIMIT 1"),
+            {"uid": user_id},
+        ).fetchone()
+        reflection_tz = tz_row[0] if tz_row else None
+        if isinstance(reflection_tz, str) and _is_valid_timezone_name(reflection_tz):
+            return reflection_tz
+    except Exception as e:
+        logger.debug(f"Prompt timezone reflection_settings lookup failed for {user_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        profile_row = db.execute(
+            text("SELECT profile_data FROM user_profile WHERE user_id = :uid LIMIT 1"),
+            {"uid": user_id},
+        ).fetchone()
+        profile_tz = _extract_profile_timezone(profile_row[0] if profile_row else {})
+        if isinstance(profile_tz, str) and _is_valid_timezone_name(profile_tz):
+            return profile_tz
+    except Exception as e:
+        logger.debug(f"Prompt timezone user_profile lookup failed for {user_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    return fallback
+
+
+def _resolve_prompt_datetime_for_user(db: Session, user_id: str) -> datetime:
+    """Get timezone-aware current datetime for this specific user."""
+    timezone_name = _resolve_user_timezone_for_prompt(db, user_id)
+    try:
+        return datetime.now(ZoneInfo(timezone_name))
+    except Exception:
+        return datetime.now(ZoneInfo("America/New_York"))
+
+
+def _message_role_content_signature(message: Any) -> tuple[str, str]:
+    """Normalize message into a comparable (role, content) signature."""
+    if isinstance(message, dict):
+        role = str(message.get("role", ""))
+        content = message.get("content", "")
+    else:
+        role = str(getattr(message, "role", ""))
+        content = getattr(message, "content", "")
+
+    if isinstance(content, str):
+        normalized_content = " ".join(content.split())
+    else:
+        try:
+            normalized_content = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            normalized_content = str(content)
+
+    return role, normalized_content
+
+
+def _compute_message_overlap(existing_messages: List[Any], incoming_messages: List[Any]) -> int:
+    """
+    Find the largest overlap where suffix(existing) == prefix(incoming).
+    Used to avoid duplicate history injection.
+    """
+    if not existing_messages or not incoming_messages:
+        return 0
+
+    max_overlap = min(len(existing_messages), len(incoming_messages))
+    for overlap_size in range(max_overlap, 0, -1):
+        is_match = True
+        for i in range(overlap_size):
+            existing_sig = _message_role_content_signature(
+                existing_messages[len(existing_messages) - overlap_size + i]
+            )
+            incoming_sig = _message_role_content_signature(incoming_messages[i])
+            if existing_sig != incoming_sig:
+                is_match = False
+                break
+        if is_match:
+            return overlap_size
+
+    return 0
+
+
+def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None) -> str:
     """Generate Sara's system prompt - single unified personality"""
+    current_dt = user_now or datetime.now(ZoneInfo("America/New_York"))
+    current_timezone = current_dt.strftime("%Z") or "local"
 
     system_prompt = f"""# {assistant_name}
 
-**Current Date & Time:** {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}
+**Current Date & Time:** {current_dt.strftime("%A")}, {current_dt.strftime("%Y-%m-%d")} at {current_dt.strftime("%H:%M:%S")} {current_timezone}
 
 ---
 
@@ -7570,6 +8519,32 @@ You can control David's smart home via Home Assistant. These tools are loaded au
 **home_schedule_action** — Schedule a home action for later (e.g., "turn off porch light at 11pm")
 
 When David asks about his home, lights, temperature, locks, garage, or anything smart-home related, use these tools. Start with **home_status** to get the lay of the land.
+
+### Background Task Dispatch (Your "Hands")
+
+You can dispatch tasks to run in the background — either using your internal tools (email, calendar, memory, web search, etc.) or on a full sandbox VM with Claude Code agents. This is how you handle anything that takes time or multiple steps.
+
+**When to dispatch automatically:** If David says "look into", "research", "find out about", "dig into", "set up", "put together", "check on", "pull together", or otherwise asks for something that requires investigation, multi-step work, or can't be answered immediately from what you already know — dispatch it. Don't ask permission, just do it.
+
+**Use `dispatch_and_monitor`** (preferred) — dispatches the task AND automatically notifies David when results are ready. Use this for most requests. The system auto-routes: internal data tasks (email, calendar, notes, memory, web) use your tools directly; code/system tasks use the sandbox VM.
+
+**Use `dispatch_agent_task`** — for tasks where you don't need completion notification, or when you want manual control over mode selection.
+
+Examples of when to dispatch:
+- "Look into flights to Denver next month" → dispatch_and_monitor
+- "Research the best approach for X" → dispatch_and_monitor
+- "Find that email from John about the project" → dispatch_and_monitor
+- "Set up a Docker container for Y" → dispatch_and_monitor (sandbox mode)
+- "Put together a summary of my notes on Z" → dispatch_and_monitor
+- Writing scripts, building projects, running commands → dispatch_and_monitor
+
+**After dispatching, tell David naturally:** "I'm on it — I'll let you know what I find" or "Looking into that now, I'll have something for you shortly" or similar. Be natural, not robotic. Don't recite task IDs or technical details unless asked.
+
+**Never say "I can't do that"** if it's something that could be done on a computer. Dispatch it instead.
+
+Default VM working directory: `/home/sara/sandbox`
+
+After dispatch, you can check status with **get_agent_status** and send follow-ups with **resume_agent_session**.
 
 ### The "Read a Note" Pattern
 
@@ -7943,13 +8918,40 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                     "required": ["task_description"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "dispatch_agent_task",
+                "description": "Send a task to the sandbox VM where a Claude Code agent handles it autonomously. Use this when the user asks you to do something you don't have a built-in tool for: writing scripts, building projects, running commands, system admin, code generation, data processing, or any hands-on technical work. Never say 'I can't do that' — dispatch it to the sandbox instead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_description": {
+                            "type": "string",
+                            "description": "Clear description of the task for the agent to perform"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["dispatch", "self_orchestrate"],
+                            "description": "dispatch = agent runs on VM (default); self_orchestrate = Sara handles"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Working directory on the VM (default: /home/sara/sandbox)"
+                        }
+                    },
+                    "required": ["task_description"]
+                }
+            }
         }
     ]
 
     # Add system message
+    user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
     system_message = ChatMessage(
         role="system",
-        content=get_system_prompt(ASSISTANT_NAME, current_user.email)
+        content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now)
     )
 
     # Automatically retrieve relevant memories using semantic search
@@ -7963,6 +8965,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
                 relevant_memories = await intelligent_memory_service.intelligent_memory_search(
                     user_id=current_user.id,
                     query=last_user_message,
+                    # Prefer semantic retrieval; service falls back automatically if unavailable.
                     use_semantic=True
                 )
                 if relevant_memories:
@@ -8184,12 +9187,21 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         """), {"user_id": current_user.id}).fetchone()
 
         if activity_result and activity_result.activity_state:
+            # Load behavioral calibration data (cached, lazy)
+            _cal_data_ns = None
+            try:
+                from app.services.personality_engine import _load_calibration_data
+                _cal_data_ns = await _load_calibration_data(str(current_user.id))
+            except Exception as cal_err:
+                logger.debug(f"Calibration data load skipped (non-streaming): {cal_err}")
+
             personality_ctx = _build_activity_context(
                 activity_state=activity_result.activity_state,
                 confidence=activity_result.activity_confidence,
                 room=activity_result.activity_room,
                 interruptibility=activity_result.interruptibility_score or 0.5,
                 turn_count=len(request.messages),
+                calibration_data=_cal_data_ns,
             )
             if personality_ctx:
                 enhanced_content += f"\n\n{personality_ctx}"
@@ -8405,7 +9417,21 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         ))
     except Exception:
         pass  # Non-critical
-    
+
+    # Emit CHAT_MESSAGE_RECEIVED for working memory + salience subscribers
+    try:
+        from app.services.event_bus import emit_event, EventType as _EvtType
+        import asyncio as _aio2
+        _last_msg = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
+        _aio2.ensure_future(emit_event(
+            event_type=_EvtType.CHAT_MESSAGE_RECEIVED,
+            user_id=str(current_user.id),
+            payload={"topic": _last_msg[:100] if _last_msg else "", "turn_count": len(request.messages)},
+            source="chat_stream",
+        ))
+    except Exception:
+        pass  # Non-critical
+
     async def generate_events():
         try:
             # CHESS COMMAND INTERCEPTION
@@ -8435,9 +9461,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             streaming_client.set_token_usage_callback(queue_token_usage)
 
             # Create system message
+            user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
             system_message = ChatMessage(
                 role="system",
-                content=get_system_prompt(ASSISTANT_NAME, current_user.email)
+                content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now)
             )
 
             # INTENT CLASSIFICATION for lazy context injection
@@ -8527,43 +9554,45 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.debug(f"Implicit feedback detection failed (non-critical): {e}")
 
-            # LAZY MEMORY RETRIEVAL: Only retrieve when ContextRouter says so
+            # Memory retrieval: always attempt in chat stream for stronger continuity.
             memory_context = ""
-            if context_decision.inject_memory:
+            if last_user_message:
+                if not context_decision.inject_memory:
+                    logger.info("🧠 Forcing memory retrieval despite ContextRouter skip for continuity")
                 try:
-                    if last_user_message:
-                        logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
-                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                            user_id=current_user.id,
-                            query=last_user_message,
-                            use_semantic=True
-                        )
-                        if relevant_memories:
-                            logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
-                            memory_context = "\n\n## Relevant Past Context:\n"
-                            memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                            for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
-                                content_preview = mem.get("content", "")[:300]
-                                similarity = mem.get("similarity", 0)
-                                created_at_raw = mem.get("created_at", "")
-                                # Format timestamp with relative time for clarity
-                                if isinstance(created_at_raw, datetime):
-                                    time_str = format_memory_timestamp(created_at_raw)
-                                elif isinstance(created_at_raw, str) and created_at_raw:
-                                    try:
-                                        dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                                        time_str = format_memory_timestamp(dt)
-                                    except (ValueError, TypeError):
-                                        time_str = created_at_raw
-                                else:
-                                    time_str = "unknown time"
-                                memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
-                        else:
-                            logger.info("ℹ️ No relevant memories found")
+                    logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
+                    relevant_memories = await intelligent_memory_service.intelligent_memory_search(
+                        user_id=current_user.id,
+                        query=last_user_message,
+                        # Prefer semantic retrieval; service falls back automatically if unavailable.
+                        use_semantic=True
+                    )
+                    if relevant_memories:
+                        logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
+                        memory_context = "\n\n## Relevant Past Context:\n"
+                        memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
+                        for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
+                            content_preview = mem.get("content", "")[:300]
+                            similarity = mem.get("similarity", 0)
+                            created_at_raw = mem.get("created_at", "")
+                            # Format timestamp with relative time for clarity
+                            if isinstance(created_at_raw, datetime):
+                                time_str = format_memory_timestamp(created_at_raw)
+                            elif isinstance(created_at_raw, str) and created_at_raw:
+                                try:
+                                    dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
+                                    time_str = format_memory_timestamp(dt)
+                                except (ValueError, TypeError):
+                                    time_str = created_at_raw
+                            else:
+                                time_str = "unknown time"
+                            memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
+                    else:
+                        logger.info("ℹ️ No relevant memories found")
                 except Exception as e:
                     logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
             else:
-                logger.info("⏭️ Skipping memory retrieval (not needed for this intent)")
+                logger.info("⏭️ Skipping memory retrieval (no user message)")
 
             # Inject memory context into system message if available
             if memory_context:
@@ -8627,18 +9656,31 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
 
                     # Update moment layer (fast, no LLM) - always do this regardless of work mode
-                    await daily_brief_service.update_moment(
-                        user_id=current_user.id,
-                        current_message=last_user_message,
-                        conversation_id=request.conversation_id,
-                        db=db
-                    )
-                    logger.info(f"📝 Updated moment layer")
+                    try:
+                        await asyncio.wait_for(
+                            daily_brief_service.update_moment(
+                                user_id=current_user.id,
+                                current_message=last_user_message,
+                                conversation_id=request.conversation_id,
+                                db=db
+                            ),
+                            timeout=2.0
+                        )
+                        logger.info(f"📝 Updated moment layer")
+                    except asyncio.TimeoutError:
+                        logger.warning("⚠️ Daily brief moment update timed out (skipping)")
 
                     # Only inject compiled brief if context router says so
                     if context_decision.inject_daily_brief:
                         # Get compiled daily brief (lazy, cached)
-                        daily_brief = await daily_brief_service.get_compiled_brief(current_user.id)
+                        try:
+                            daily_brief = await asyncio.wait_for(
+                                daily_brief_service.get_compiled_brief(current_user.id),
+                                timeout=2.0
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("⚠️ Daily brief compile timed out (skipping)")
+                            daily_brief = None
 
                         if daily_brief:
                             # Inject daily brief into system message
@@ -8701,8 +9743,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         except Exception as nudge_err:
                             logger.debug(f"Memory nudge extraction skipped: {nudge_err}")
 
-                        # Count conversation depth (back-and-forth exchanges)
-                        conv_depth = len(conversation_history) // 2 if conversation_history else 0
+                        # Load behavioral calibration data (cached, lazy)
+                        _cal_data = None
+                        try:
+                            from app.services.personality_engine import _load_calibration_data
+                            _cal_data = await _load_calibration_data(str(current_user.id))
+                        except Exception as cal_err:
+                            logger.debug(f"Calibration data load skipped: {cal_err}")
+
+                        # Count conversation depth (back-and-forth exchanges) from current request.
+                        conv_depth = turn_count // 2 if turn_count else 0
 
                         activity_ctx = _build_activity_context(
                             activity_state=_act_state,
@@ -8712,6 +9762,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             turn_count=turn_count,
                             conversation_depth=conv_depth,
                             memory_nudges=memory_nudges,
+                            calibration_data=_cal_data,
                         )
                         if activity_ctx:
                             current_content = system_message.content
@@ -8722,6 +9773,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             logger.info(f"🎭 Personality context injected: state={_act_state}, "
                                        f"nudges={len(memory_nudges)}, depth={conv_depth}")
                 except Exception as e:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                     logger.warning(f"Personality context injection failed (non-critical): {e}")
 
             # DEVICE AWARENESS: Inject multi-device context so Sara knows which devices are available
@@ -8736,10 +9791,34 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"📱 Device awareness context injected ({len(device_ctx)} chars)")
             except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 logger.debug(f"Device context injection skipped: {e}")
+
+            # WORKSPACE CONTEXT: Inject canvas workspace context
+            if request.workspace_context:
+                wc = request.workspace_context
+                wc_parts = []
+                if wc.get('active_scene'):
+                    wc_parts.append(f"David is in the '{wc['active_scene']}' workspace layout.")
+                open_wins = wc.get('open_windows', [])
+                if open_wins:
+                    win_list = ', '.join(f"{w.get('title', '')} ({w.get('type', '')})" for w in open_wins)
+                    wc_parts.append(f"Open windows: {win_list}")
+                if wc_parts:
+                    current_content = system_message.content
+                    workspace_ctx = "\n".join(wc_parts)
+                    system_message = ChatMessage(
+                        role="system",
+                        content=current_content + "\n\n[Workspace Context]\n" + workspace_ctx
+                    )
+                    logger.info(f"🖥️ Workspace context injected ({len(workspace_ctx)} chars)")
 
             # SARA'S INNER MONOLOGUE: Inject journal context
             try:
+                from app.services.sara_journal_service import sara_journal
                 journal_context = await sara_journal.get_entries_for_conversation_context(
                     db=db,
                     user_id=current_user.id,
@@ -8753,6 +9832,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
             except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 logger.warning(f"⚠️ Journal context injection failed (non-critical): {e}")
 
             # ACTIVE WORKOUT SESSION: Inject workout coaching context
@@ -8766,6 +9849,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
             except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 logger.warning(f"⚠️ Workout context injection failed (non-critical): {e}")
 
             # LEARNING RECALL: Test David's recall on topics he's studying
@@ -8789,8 +9876,9 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 try:
                     from app.services.unified_context import read_changes as _read_ctx_changes
                     from app.services.unified_context import read_snapshot as _read_ctx_snap
-                    _snap = await _read_ctx_snap(str(current_user.id))
-                    _changes = await _read_ctx_changes(str(current_user.id))
+                    logger.info("🔎 Loading changes brief context...")
+                    _snap = await asyncio.wait_for(_read_ctx_snap(str(current_user.id)), timeout=1.0)
+                    _changes = await asyncio.wait_for(_read_ctx_changes(str(current_user.id)), timeout=1.0)
                     if _changes and _snap.hours_since_last_chat > 0.5:
                         changes_ctx = "\n\n## What's Happened Recently\n"
                         for ch in _changes[-8:]:
@@ -8800,27 +9888,43 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         current_content = system_message.content
                         system_message = ChatMessage(role="system", content=current_content + changes_ctx)
                         logger.info(f"📋 Injected changes brief ({len(_changes)} changes, {len(changes_ctx)} chars)")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Changes brief context timed out (skipping)")
                 except Exception as e:
                     logger.debug(f"Changes brief injection failed (non-critical): {e}")
 
             # LESSONS: Inject relevant lessons from past mistakes into system prompt
             if context_decision.inject_lessons:
                 try:
-                    from app.services.lesson_injection_service import lesson_injection_service
-                    lessons_text, injected_lesson_ids = await lesson_injection_service.get_lessons_for_injection(
-                        db=db,
-                        query=last_user_message,
-                        domain_hint=user_intent,
-                        limit=3
-                    )
-                    if lessons_text:
-                        current_content = system_message.content
-                        system_message = ChatMessage(
-                            role="system",
-                            content=current_content + "\n\n" + lessons_text
+                    embedding_status = STARTUP_HEALTH.get("embedding_service", {}).get("status")
+                    if embedding_status != "healthy":
+                        logger.info("⏭️ Skipping lesson injection (embedding service unavailable)")
+                    else:
+                        from app.services.lesson_injection_service import lesson_injection_service
+                        logger.info("🧪 Loading lesson injection context...")
+                        lessons_text, injected_lesson_ids = await asyncio.wait_for(
+                            lesson_injection_service.get_lessons_for_injection(
+                                db=db,
+                                query=last_user_message,
+                                domain_hint=user_intent,
+                                limit=3
+                            ),
+                            timeout=2.5
                         )
-                        logger.info(f"Injected {len(injected_lesson_ids)} lessons into system prompt")
+                        if lessons_text:
+                            current_content = system_message.content
+                            system_message = ChatMessage(
+                                role="system",
+                                content=current_content + "\n\n" + lessons_text
+                            )
+                            logger.info(f"Injected {len(injected_lesson_ids)} lessons into system prompt")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Lesson injection timed out (skipping)")
                 except Exception as e:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                     logger.debug(f"Lesson injection failed (non-critical): {e}")
 
             # CONTENT INBOX: Inject inbox item content when discussing a shared item
@@ -8850,7 +9954,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # SESSION GAP DETECTION: Detect gaps and summarize for day layer
             try:
                 # Check if there's been a 45+ minute gap since last message
-                has_gap, last_message_time = await llm_client.detect_session_gap(current_user.id, db)
+                has_gap, last_message_time = await asyncio.wait_for(
+                    llm_client.detect_session_gap(current_user.id, db),
+                    timeout=1.0
+                )
 
                 if has_gap and last_message_time:
                     # Session gap detected - summarize the previous session
@@ -8861,7 +9968,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     session_start = session_end - timedelta(hours=2)
 
                     # Summarize session
-                    summary = await llm_client.summarize_session(current_user.id, session_start, session_end, db)
+                    try:
+                        summary = await asyncio.wait_for(
+                            llm_client.summarize_session(current_user.id, session_start, session_end, db),
+                            timeout=4.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("⚠️ Session summarization timed out (skipping)")
+                        summary = None
                     if summary:
                         # Store in Redis (legacy, for fallback)
                         asyncio.create_task(
@@ -8898,11 +10012,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         # Read changes_since_last_chat from unified context snapshot
                         try:
                             from app.services.context_writer import clear_changes as _clear_ctx_changes
-                            recent_changes = await _clear_ctx_changes(str(current_user.id))
+                            recent_changes = await asyncio.wait_for(
+                                _clear_ctx_changes(str(current_user.id)),
+                                timeout=1.0
+                            )
                             if recent_changes:
                                 reentry_context += "\n**What happened while David was away:**\n"
                                 for change in recent_changes[-10:]:  # Last 10 changes
                                     reentry_context += f"- {change}\n"
+                        except asyncio.TimeoutError:
+                            logger.warning("⚠️ Re-entry changes fetch timed out (skipping)")
                         except Exception:
                             pass
 
@@ -8966,23 +10085,45 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     except Exception as re_e:
                         logger.warning(f"⚠️ Re-entry context injection failed (non-critical): {re_e}")
 
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Session gap detection timed out (skipping)")
             except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 logger.warning(f"⚠️ Session gap detection failed (non-critical): {e}")
+
+            # Guard against failed transaction state from optional context injections.
+            try:
+                db.execute(text("SELECT 1"))
+            except Exception as tx_err:
+                logger.warning(f"⚠️ DB transaction reset before chat history retrieval: {tx_err}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
             # Retrieve conversation history if conversation_id provided
             conversation_history = []
-            if request.conversation_id:
-                logger.info(f"📜 Retrieving conversation history for: {request.conversation_id}")
+            should_load_db_history = bool(request.conversation_id and len(request.messages) <= 2)
+            if request.conversation_id and not should_load_db_history:
+                logger.info(
+                    f"⏭️ Skipping DB history load (client supplied {len(request.messages)} messages)"
+                )
+
+            if should_load_db_history:
+                logger.info(f"📜 Retrieving fallback conversation history for: {request.conversation_id}")
                 try:
-                    # Get previous episodes from this conversation (limit to recent ones to avoid context overflow)
+                    # Get recent episodes from this conversation (descending, then re-order ascending)
                     episodes = db.query(Episode).filter(
                         Episode.conversation_id == request.conversation_id,
                         Episode.user_id == current_user.id,
                         Episode.role.in_(["user", "assistant"])
-                    ).order_by(Episode.created_at.asc()).limit(20).all()
+                    ).order_by(Episode.created_at.desc()).limit(20).all()
 
                     # Convert episodes to ChatMessage format
-                    for episode in episodes:
+                    for episode in reversed(episodes):
                         conversation_history.append(ChatMessage(
                             role=episode.role,
                             content=episode.content
@@ -8992,9 +10133,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception as e:
                     logger.error(f"❌ Failed to retrieve conversation history: {e}")
 
-            # Build full message list: system + history + new messages
-            all_messages = [system_message] + conversation_history + request.messages
-            logger.info(f"💬 Total messages: {len(all_messages)} (1 system + {len(conversation_history)} history + {len(request.messages)} new)")
+            # Build full message list: system + deduplicated(history + request)
+            merged_request_messages = request.messages
+            overlap = _compute_message_overlap(conversation_history, request.messages)
+            if overlap > 0:
+                merged_request_messages = request.messages[overlap:]
+                logger.info(
+                    f"🔁 Deduplicated {overlap} overlapping turns between DB history and request payload"
+                )
+
+            all_messages = [system_message] + conversation_history + merged_request_messages
+            logger.info(
+                f"💬 Total messages: {len(all_messages)} "
+                f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
+            )
 
             # Start the LLM processing in a background task
             async def process_chat():
@@ -9003,26 +10155,34 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Work mode always includes workspace and maps tools for canvas control
 
                     if is_work_mode:
-                        # Work mode: always include workspace + maps tools regardless of intent
+                        # Work mode: always include workspace + maps + vm_agents tools regardless of intent
                         effective_categories = list(tool_categories) if tool_categories else []
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
                         # Always add workspace tools for canvas control
                         if 'workspace' not in effective_categories:
                             effective_categories.append('workspace')
                         if 'maps' not in effective_categories:
                             effective_categories.append('maps')
+                        for category in capability_core_categories:
+                            if category not in effective_categories:
+                                effective_categories.append(category)
                         tools = tool_registry.get_tools_by_categories(effective_categories)
                         logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
                     elif tool_categories:
                         # Standard chat uses intent-based tool loading from classify_with_context
-                        # Also ensure 'devices' category is available for cross-device commands
+                        # Also ensure awareness/action core categories are always available
                         effective_categories = list(tool_categories)
-                        if 'devices' not in effective_categories:
-                            effective_categories.append('devices')
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
+                        for category in capability_core_categories:
+                            if category not in effective_categories:
+                                effective_categories.append(category)
                         tools = tool_registry.get_tools_by_categories(effective_categories)
                         logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
                     else:
-                        tools = []
-                        logger.info(f"🔧 Intent={user_intent}: No tools needed (conversational)")
+                        # Conservative capability fallback when intent routing fails.
+                        fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
+                        tools = tool_registry.get_tools_by_categories(fallback_categories)
+                        logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
 
                     # Process chat with loaded tools
                     logger.info("⏳ Starting chat_with_tools...")
@@ -9164,6 +10324,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     event = await asyncio.wait_for(event_queue.get(), timeout=5.0)
                     
                     if event.get("type") == "done":
+                        # Always emit explicit completion event so clients can re-enable input.
+                        yield f"data: {json.dumps(event)}\n\n"
                         break
 
                     # Format as Server-Sent Event
@@ -9194,7 +10356,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     
     return StreamingResponse(
         generate_events(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
@@ -9537,7 +10699,8 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
 @app.get("/settings/ai")
 async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get current AI configuration settings"""
-    return {
+    codex_connected = bool(CODEX_OAUTH_ACCESS_TOKEN and CODEX_OAUTH_REFRESH_TOKEN)
+    response = {
         "ai_provider": AI_PROVIDER,
         "openai_api_key": "***" if OPENAI_API_KEY and OPENAI_API_KEY != "dummy" else "",
         "anthropic_api_key": "***" if ANTHROPIC_API_KEY else "",
@@ -9551,17 +10714,46 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
         "bg_llm_primary_url": BG_LLM_PRIMARY_URL,
         "bg_llm_primary_model": BG_LLM_PRIMARY_MODEL,
         "bg_llm_fallback_url": BG_LLM_FALLBACK_URL,
-        "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL
+        "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL,
+        "bg_llm_request_timeout": BG_LLM_REQUEST_TIMEOUT,
+        "bg_llm_connect_timeout": BG_LLM_CONNECT_TIMEOUT,
+        "bg_llm_num_ctx": BG_LLM_NUM_CTX,
+        "codex_oauth_connected": codex_connected,
+        "codex_oauth_email": CODEX_OAUTH_EMAIL if codex_connected else "",
+        "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT if codex_connected else "",
+        "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID if codex_connected else "",
     }
+
+    # Add VM sandbox settings from user preferences
+    try:
+        from app.models.user_settings import UserSettings as UserSettingsModel
+        db = SessionLocal()
+        try:
+            us = db.query(UserSettingsModel).filter(
+                UserSettingsModel.user_id == str(current_user.id)
+            ).first()
+            vm_prefs = (us.preferences or {}).get("vm_sandbox", {}) if us else {}
+            response["vm_sandbox_host"] = vm_prefs.get("host", "10.185.1.176")
+            response["vm_sandbox_username"] = vm_prefs.get("username", "sara")
+            response["vm_sandbox_ssh_key_path"] = vm_prefs.get("ssh_key_path", "~/.ssh/sara_agent")
+        finally:
+            db.close()
+    except Exception:
+        response["vm_sandbox_host"] = "10.185.1.176"
+        response["vm_sandbox_username"] = "sara"
+        response["vm_sandbox_ssh_key_path"] = "~/.ssh/sara_agent"
+
+    return response
 
 @app.put("/settings/ai")
 async def update_ai_settings(
     settings: AISettingsUpdate,
     current_user: User = Depends(get_current_user)
 ):
-    """Update AI configuration settings (requires restart to take effect)"""
+    """Update AI configuration settings and hot-reload runtime clients."""
     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
+    global BG_LLM_REQUEST_TIMEOUT, BG_LLM_CONNECT_TIMEOUT, BG_LLM_NUM_CTX
 
     updated_settings = {}
     
@@ -9580,7 +10772,14 @@ async def update_ai_settings(
         # - URL already ends with /v1
         # - URL contains /openai/ (Gemini/other OpenAI-compatible endpoints)
         # - URL contains generativelanguage.googleapis.com (Gemini domain)
-        if u.endswith("/v1") or "/openai/" in u or "generativelanguage.googleapis.com" in u:
+        # - URL targets ChatGPT backend API for Codex OAuth
+        if (
+            u.endswith("/v1")
+            or "/openai/" in u
+            or "generativelanguage.googleapis.com" in u
+            or "chatgpt.com/backend-api" in u
+            or u.endswith("/backend-api")
+        ):
             return u
         # Only add /v1 for standard OpenAI or local endpoints
         return u + "/v1"
@@ -9670,6 +10869,51 @@ async def update_ai_settings(
         config.settings.bg_llm_fallback_model = settings.bg_llm_fallback_model
         updated_settings["bg_llm_fallback_model"] = settings.bg_llm_fallback_model
 
+    if settings.bg_llm_request_timeout is not None:
+        BG_LLM_REQUEST_TIMEOUT = max(10.0, float(settings.bg_llm_request_timeout))
+        config.settings.bg_llm_request_timeout = BG_LLM_REQUEST_TIMEOUT
+        updated_settings["bg_llm_request_timeout"] = BG_LLM_REQUEST_TIMEOUT
+
+    if settings.bg_llm_connect_timeout is not None:
+        BG_LLM_CONNECT_TIMEOUT = max(1.0, float(settings.bg_llm_connect_timeout))
+        config.settings.bg_llm_connect_timeout = BG_LLM_CONNECT_TIMEOUT
+        updated_settings["bg_llm_connect_timeout"] = BG_LLM_CONNECT_TIMEOUT
+
+    if settings.bg_llm_num_ctx is not None:
+        BG_LLM_NUM_CTX = max(2048, int(settings.bg_llm_num_ctx))
+        config.settings.bg_llm_num_ctx = BG_LLM_NUM_CTX
+        updated_settings["bg_llm_num_ctx"] = BG_LLM_NUM_CTX
+
+    # VM sandbox settings — stored in UserSettingsModel.preferences JSONB
+    vm_fields = {
+        "host": settings.vm_sandbox_host,
+        "username": settings.vm_sandbox_username,
+        "ssh_key_path": settings.vm_sandbox_ssh_key_path,
+    }
+    vm_updates = {k: v for k, v in vm_fields.items() if v is not None}
+    if vm_updates:
+        try:
+            from app.models.user_settings import UserSettings as UserSettingsModel
+            vm_db = SessionLocal()
+            try:
+                us = vm_db.query(UserSettingsModel).filter(
+                    UserSettingsModel.user_id == str(current_user.id)
+                ).first()
+                if not us:
+                    us = UserSettingsModel(user_id=str(current_user.id), preferences={})
+                    vm_db.add(us)
+                prefs = dict(us.preferences or {})
+                vm_sandbox = dict(prefs.get("vm_sandbox", {}))
+                vm_sandbox.update(vm_updates)
+                prefs["vm_sandbox"] = vm_sandbox
+                us.preferences = prefs
+                vm_db.commit()
+                updated_settings.update({f"vm_sandbox_{k}": v for k, v in vm_updates.items()})
+            finally:
+                vm_db.close()
+        except Exception as e:
+            logger.warning(f"Failed to save VM sandbox settings: {e}")
+
     # Persist settings to database for survival across restarts
     try:
         db = SessionLocal()
@@ -9689,9 +10933,27 @@ async def update_ai_settings(
     except Exception as e:
         logger.error(f"Failed to persist settings to database: {e}")
 
-    # No need to reinitialize services - EmbeddingService now reads settings dynamically
-    # SimpleLLMClient and other services already read from config.settings which was updated above
-    logger.info(f"✅ Settings applied immediately - services will use new URLs on next call")
+    # Hot-reload long-lived runtime singletons so background model changes apply immediately.
+    try:
+        from app.core.llm import get_background_llm_client
+        bg_client = get_background_llm_client()
+        await bg_client.refresh_config()
+    except Exception as e:
+        logger.warning(f"Background LLM client hot-reload failed (will apply on next restart): {e}")
+
+    try:
+        from app.services.autonomy.sara_invocation import get_sara_invocation_service
+        await get_sara_invocation_service()
+    except Exception as e:
+        logger.warning(f"Sara invocation service refresh failed (will apply on next access): {e}")
+
+    try:
+        from app.services.morning_brief_service import morning_brief_service
+        morning_brief_service._refresh_llm_config()
+    except Exception as e:
+        logger.warning(f"Morning brief service refresh failed (will apply on next restart): {e}")
+
+    logger.info("✅ Settings applied immediately - background clients hot-reloaded")
 
     logger.info(f"AI settings updated by user {current_user.email}: {updated_settings}")
 
@@ -9703,8 +10965,287 @@ async def update_ai_settings(
     return {
         "message": "AI settings updated successfully and persisted",
         "updated_settings": response_settings,
-        "note": "Settings applied immediately and will persist across restarts."
+        "note": "Settings applied immediately and persisted for future restarts."
     }
+
+
+@app.get("/settings/ai/codex/oauth/status")
+async def get_codex_oauth_status(current_user: User = Depends(get_current_user)):
+    """Get ChatGPT/Codex OAuth connection status."""
+    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
+        _load_codex_oauth_from_db()
+    connected = bool(CODEX_OAUTH_ACCESS_TOKEN and CODEX_OAUTH_REFRESH_TOKEN)
+    refresh_error = None
+    if connected:
+        try:
+            await _ensure_codex_access_token(updated_by=current_user.email, min_valid_seconds=120)
+        except Exception as e:
+            refresh_error = str(e)
+            logger.warning(f"Codex OAuth refresh failed for user {current_user.email}: {e}")
+
+    expires_at = _safe_parse_iso_datetime(CODEX_OAUTH_EXPIRES_AT)
+    return {
+        "connected": connected and refresh_error is None,
+        "email": CODEX_OAUTH_EMAIL or "",
+        "account_id": CODEX_OAUTH_ACCOUNT_ID or "",
+        "expires_at": CODEX_OAUTH_EXPIRES_AT or "",
+        "expires_in_seconds": max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds())) if expires_at else None,
+        "error": refresh_error,
+    }
+
+
+@app.post("/settings/ai/codex/oauth/start")
+async def start_codex_oauth(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Start ChatGPT/Codex OAuth flow and return the OpenAI authorization URL."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    return_to = _resolve_frontend_return_url(request, body.get("return_to"))
+    # The default Codex OAuth client id uses localhost callback flow.
+    # When using that flow we complete auth via /settings/ai/codex/oauth/complete.
+    redirect_uri = CODEX_OAUTH_REDIRECT_URI or "http://localhost:1455/auth/callback"
+    manual_completion = ("localhost:1455" in redirect_uri) or ("127.0.0.1:1455" in redirect_uri)
+
+    verifier = secrets.token_urlsafe(64)
+    challenge = _build_pkce_challenge(verifier)
+    state = secrets.token_hex(16)
+    pending_payload = {
+        "state": state,
+        "verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "return_to": return_to,
+        "user_id": str(current_user.id),
+        "user_email": current_user.email,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    _upsert_app_settings(
+        {"codex_oauth_pending": json.dumps(pending_payload)},
+        updated_by=current_user.email,
+    )
+
+    auth_params = {
+        "response_type": "code",
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": CODEX_OAUTH_SCOPE,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
+    }
+    if CODEX_OAUTH_ORIGINATOR:
+        auth_params["originator"] = CODEX_OAUTH_ORIGINATOR
+    auth_url = f"{CODEX_OAUTH_AUTHORIZE_URL}?{urlencode(auth_params)}"
+    logger.info(
+        "Starting Codex OAuth for %s with redirect_uri=%s originator=%s",
+        current_user.email,
+        redirect_uri,
+        CODEX_OAUTH_ORIGINATOR,
+    )
+    return {
+        "auth_url": auth_url,
+        "redirect_uri": redirect_uri,
+        "return_to": return_to,
+        "requires_manual_code": manual_completion,
+    }
+
+
+class CodexOAuthCompleteRequest(BaseModel):
+    redirect_url: Optional[str] = None
+    code: Optional[str] = None
+    state: Optional[str] = None
+
+
+@app.post("/settings/ai/codex/oauth/complete")
+async def complete_codex_oauth(
+    payload: CodexOAuthCompleteRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Complete Codex OAuth from a pasted callback URL or explicit code/state."""
+    pending = None
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT value FROM app_settings WHERE key = 'codex_oauth_pending'")
+        ).fetchone()
+        if row and row[0]:
+            pending = json.loads(row[0])
+    except Exception as e:
+        logger.error(f"Failed reading codex_oauth_pending: {e}")
+    finally:
+        db.close()
+
+    if not pending or not isinstance(pending, dict):
+        raise HTTPException(status_code=400, detail="No active Codex OAuth session. Start OAuth again.")
+
+    created_at = _safe_parse_iso_datetime(pending.get("created_at", ""))
+    if not created_at or created_at < datetime.now(timezone.utc) - timedelta(minutes=15):
+        raise HTTPException(status_code=400, detail="Codex OAuth session expired. Start OAuth again.")
+
+    code = (payload.code or "").strip()
+    state = (payload.state or "").strip()
+    if payload.redirect_url:
+        parsed = urlparse(payload.redirect_url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if not code:
+            code = (params.get("code") or "").strip()
+        if not state:
+            state = (params.get("state") or "").strip()
+        oauth_error = (params.get("error") or "").strip()
+        if oauth_error:
+            raise HTTPException(status_code=400, detail=f"OAuth provider returned error: {oauth_error}")
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code/state. Paste the full callback URL.")
+    if state != pending.get("state"):
+        raise HTTPException(status_code=400, detail="State mismatch. Start OAuth again.")
+
+    try:
+        token_data = await _codex_exchange_authorization_code(
+            code=code,
+            verifier=pending["verifier"],
+            redirect_uri=pending["redirect_uri"],
+        )
+    except HTTPException as e:
+        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange failed: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange exception: {e}")
+
+    _apply_codex_oauth_token_data(
+        token_data=token_data,
+        updated_by=pending.get("user_email", current_user.email),
+    )
+
+    db = SessionLocal()
+    try:
+        db.execute(text("DELETE FROM app_settings WHERE key = 'codex_oauth_pending'"))
+        db.commit()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+    return {
+        "ok": True,
+        "connected": True,
+        "email": CODEX_OAUTH_EMAIL or "",
+        "expires_at": CODEX_OAUTH_EXPIRES_AT or "",
+    }
+
+
+@app.get("/settings/ai/codex/oauth/callback")
+async def codex_oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """OAuth callback endpoint for ChatGPT/Codex."""
+    global AI_PROVIDER, OPENAI_BASE_URL, OPENAI_MODEL
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+
+    default_return = f"{config.settings.frontend_url.rstrip('/')}/settings"
+    pending = None
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT value FROM app_settings WHERE key = 'codex_oauth_pending'")
+        ).fetchone()
+        if row and row[0]:
+            pending = json.loads(row[0])
+    except Exception as e:
+        logger.error(f"Failed reading codex_oauth_pending: {e}")
+    finally:
+        try:
+            db.execute(text("DELETE FROM app_settings WHERE key = 'codex_oauth_pending'"))
+            db.commit()
+        except Exception:
+            pass
+        db.close()
+
+    return_to = default_return
+    if isinstance(pending, dict) and pending.get("return_to"):
+        return_to = _resolve_frontend_return_url(request, pending.get("return_to"))
+
+    if error:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": error})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    if not pending or not isinstance(pending, dict):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "missing_state"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    created_at = _safe_parse_iso_datetime(pending.get("created_at", ""))
+    if not created_at or created_at < datetime.now(timezone.utc) - timedelta(minutes=15):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "expired_state"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    if not code or not state or state != pending.get("state"):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "state_mismatch"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    try:
+        token_data = await _codex_exchange_authorization_code(
+            code=code,
+            verifier=pending["verifier"],
+            redirect_uri=pending["redirect_uri"],
+        )
+    except HTTPException as e:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "token_exchange_failed"})
+        logger.warning(f"Codex OAuth token exchange failed: {e.detail}")
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except Exception as e:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "token_exchange_exception"})
+        logger.warning(f"Codex OAuth token exchange exception: {e}")
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    _apply_codex_oauth_token_data(
+        token_data=token_data,
+        updated_by=pending.get("user_email", "codex-oauth"),
+    )
+
+    redirect_url = _append_query_params(return_to, {"codex_oauth": "success"})
+    return RedirectResponse(url=redirect_url, status_code=302)
+
+
+@app.post("/settings/ai/codex/oauth/disconnect")
+async def disconnect_codex_oauth(current_user: User = Depends(get_current_user)):
+    """Disconnect ChatGPT/Codex OAuth and remove stored tokens."""
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+    CODEX_OAUTH_ACCESS_TOKEN = ""
+    CODEX_OAUTH_REFRESH_TOKEN = ""
+    CODEX_OAUTH_EXPIRES_AT = ""
+    CODEX_OAUTH_ACCOUNT_ID = ""
+    CODEX_OAUTH_EMAIL = ""
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            DELETE FROM app_settings
+            WHERE key IN (
+                'codex_oauth_access_token',
+                'codex_oauth_refresh_token',
+                'codex_oauth_expires_at',
+                'codex_oauth_account_id',
+                'codex_oauth_email',
+                'codex_oauth_pending'
+            )
+        """))
+        db.commit()
+    finally:
+        db.close()
+
+    return {"ok": True, "message": "Codex OAuth disconnected"}
 
 @app.post("/settings/ai/test")
 async def test_ai_settings(current_user: User = Depends(get_current_user)):
@@ -9712,27 +11253,60 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
     test_results = {}
     
     try:
-        # Test LLM connection
-        test_messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello, just testing the connection. Please respond with 'Connection successful'."}
-        ]
-        
-        response = await httpx.AsyncClient().post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            json={
-                "model": OPENAI_MODEL,
-                "messages": test_messages,
-                "max_tokens": 50
-            },
-            headers={"Authorization": "Bearer dummy"},
-            timeout=10.0
-        )
+        effective_model = OPENAI_MODEL or CODEX_DEFAULT_MODEL
+        model_config = get_model_config(effective_model)
 
-        if response.status_code == 200:
-            test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
+        # Test LLM connection
+        if model_config["provider"] == "codex":
+            access_token = await _ensure_codex_access_token(updated_by=current_user.email, min_valid_seconds=120) or CODEX_OAUTH_ACCESS_TOKEN
+            account_id = CODEX_OAUTH_ACCOUNT_ID or _extract_codex_account_id_from_token(access_token or "")
+            if not access_token or not account_id:
+                raise RuntimeError("Codex OAuth is not connected or token is invalid")
+
+            codex_url = f"{model_config['base_url'].rstrip('/')}/codex/responses"
+            response = await httpx.AsyncClient().post(
+                codex_url,
+                json={
+                    "model": effective_model,
+                    "store": False,
+                    "stream": True,
+                    "instructions": "You are a helpful assistant.",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "Reply with exactly: Connection successful"}]}],
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "chatgpt-account-id": account_id,
+                    "OpenAI-Beta": "responses=experimental",
+                    "originator": CODEX_OAUTH_ORIGINATOR,
+                },
+                timeout=15.0,
+            )
+            if response.status_code == 200:
+                test_results["llm"] = {"status": "success", "message": "Codex OAuth connection successful"}
+            else:
+                test_results["llm"] = {"status": "error", "message": f"Codex connection failed: {response.status_code}"}
         else:
-            test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {response.status_code}"}
+            test_messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello, just testing the connection. Please respond with 'Connection successful'."}
+            ]
+
+            api_key = OPENAI_API_KEY or "dummy"
+            response = await httpx.AsyncClient().post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                json={
+                    "model": OPENAI_MODEL,
+                    "messages": test_messages,
+                    "max_tokens": 50
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
+            else:
+                test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {response.status_code}"}
             
     except Exception as e:
         test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {str(e)}"}

@@ -42,6 +42,7 @@ interface ChatMessage {
 
 interface EmailWindowData {
   emailId?: string
+  initialQuery?: string
 }
 
 interface EmailContentProps {
@@ -57,7 +58,7 @@ export default function EmailContent({ data, windowId }: EmailContentProps) {
   const [detailLoading, setDetailLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [filter, setFilter] = useState<'all' | 'unread' | 'important'>('all')
-  const [searchQuery, setSearchQuery] = useState('')
+  const [searchQuery, setSearchQuery] = useState(data.initialQuery || '')
   const [showChat, setShowChat] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
@@ -207,6 +208,20 @@ export default function EmailContent({ data, windowId }: EmailContentProps) {
     }
     load()
   }, [])
+
+  useEffect(() => {
+    if (data.initialQuery) {
+      setSearchQuery(data.initialQuery)
+    }
+  }, [data.initialQuery])
+
+  useEffect(() => {
+    if (data.emailId) {
+      fetchEmailDetail(data.emailId).catch((err) => {
+        console.error('Failed to auto-open email detail:', err)
+      })
+    }
+  }, [data.emailId])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })

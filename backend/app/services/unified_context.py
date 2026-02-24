@@ -63,6 +63,7 @@ class UnifiedContextSnapshot:
     last_heartbeat_at: Optional[str] = None
     last_heartbeat_handoff: Optional[str] = None
     last_heartbeat_watching_for: Optional[str] = None
+    last_handoff_set_at: Optional[str] = None
     last_anticipation_note: Optional[str] = None
     notifications_sent_today: int = 0
 
@@ -83,6 +84,35 @@ class UnifiedContextSnapshot:
     # ── Quiet Mode ──
     quiet_mode: bool = False
     quiet_mode_until: Optional[str] = None  # ISO timestamp
+
+    # ── Sara Internal State ──
+    sara_focus: Optional[str] = None  # what Sara is paying attention to
+    sara_emotional_tone: Optional[str] = None  # curious/concerned/playful/proud/etc
+    sara_curiosities: Optional[List[str]] = None  # things Sara wants to explore (max 5)
+    sara_last_deliberation_at: Optional[str] = None  # ISO timestamp
+    sara_deliberation_count_today: int = 0
+    observation_count: int = 0  # pending observations awaiting deliberation
+    salience_high_water: float = 0.0  # highest unprocessed salience score
+
+    # ── Derived State (event-driven) ──
+    hours_since_last_meal: float = 0.0
+    last_meal_type: Optional[str] = None
+    today_habit_status: Optional[str] = None  # "3/7 done, pending: meditation, reading"
+    recent_notes_summary: Optional[str] = None  # "3 notes edited: Memory Architecture, ..."
+    active_project_summary: Optional[str] = None
+
+    # ── Notification Calibration ──
+    notification_engagement_stats: Optional[str] = None  # JSON: {category: {sent, engaged, dismissed, ignored, rate}}
+    behavioral_calibration: Optional[str] = None  # JSON: {category_scores, best_hours, worst_hours, insights}
+
+    # ── Jetson / Sensory ──
+    desk_presence: bool = False
+    voice_conversation_active: bool = False
+    jetson_online: bool = False
+
+    # ── PKG Growth ──
+    pkg_validation_report: Optional[str] = None  # JSON: {confirmed, contradictions_count, stale, ...}
+    pkg_knowledge_gaps: Optional[str] = None  # JSON: [{"topic": ..., "mentions": N, "suggested_type": ...}]
 
     # ── Meta ──
     version: int = 0

@@ -1,18 +1,16 @@
 """
-Task Runner Package - Phase 6 TODO
+Task runner package status.
 
-This package provides autonomous background task execution:
-- Task specifications and validation
-- Redis RQ-based worker system
-- Multi-tool research and analysis
-- Confirmation workflows for high-impact actions
-
-TODO: Implement in Phase 6
+This namespace is intentionally disabled until a concrete Phase 6
+implementation is delivered and wired into production entrypoints.
 """
 
-# TODO: Implement task runner components in Phase 6
-# from .task_runner import TaskRunner
-# from .research_tasks import ResearchTask
-# from .confirmation_service import ConfirmationService
+TASK_RUNNER_ENABLED = False
+TASK_RUNNER_STATUS = "deprecated_placeholder_removed"
+TASK_RUNNER_NOTE = "No runtime task runner is currently shipped."
 
-__all__ = []
+__all__ = [
+    "TASK_RUNNER_ENABLED",
+    "TASK_RUNNER_STATUS",
+    "TASK_RUNNER_NOTE",
+]

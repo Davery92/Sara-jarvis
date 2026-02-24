@@ -8,9 +8,16 @@ import NotesPicker from './components/NotesPicker'
 import MapPicker from './components/maps/MapPicker'
 import MapImportModal from './components/maps/MapImportModal'
 import MapNodeEditor from './components/maps/MapNodeEditor'
+import SaraStatusStrip from './components/SaraStatusStrip'
+import AttentionFeedPanel from './components/AttentionFeedPanel'
+import ScenePicker from './components/ScenePicker'
+import PartnerThoughts from './components/PartnerThoughts'
+import PartnerActionQueue from './components/PartnerActionQueue'
+import MissionFeed from './components/MissionFeed'
 import { ThreeScene } from './components/three'
-import { modelsApi, workspaceApi } from './services/api'
-import type { FileViewerWindowData, WindowType } from './types'
+import { modelsApi } from './services/api'
+import { pollPendingWorkspaceCommands } from './services/workspaceCommands'
+import type { FileViewerWindowData } from './types'
 
 const MODEL_3D_EXTENSIONS = ['stl', 'obj', 'gltf', 'glb']
 
@@ -32,13 +39,24 @@ function App() {
     setNotesPickerOpen,
     setMapPickerOpen,
     setEditingNodeId,
+    loadStateFromServer,
   } = useCanvasStore()
   const [isDragOver, setIsDragOver] = useState(false)
+  const [isAttentionOpen, setIsAttentionOpen] = useState(false)
+  const [isScenePickerOpen, setIsScenePickerOpen] = useState(false)
 
   // Check authentication on mount
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
+
+  // Load persisted workspace state once authenticated
+  useEffect(() => {
+    if (!user) return
+    loadStateFromServer().catch((err) => {
+      console.error('[App] Failed to load workspace state:', err)
+    })
+  }, [user, loadStateFromServer])
 
   // Request fullscreen on first interaction
   useEffect(() => {
@@ -121,6 +139,9 @@ function App() {
           case 'g': // Gym/Fitness
             openWindow('fitness', {})
             break
+          case 'l': // Learning
+            openWindow('learning', {})
+            break
           case 'f': // Fullscreen
             if (document.fullscreenElement) {
               document.exitFullscreen()
@@ -142,106 +163,12 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [cancelConnection, clearMapSelection, deleteMapEdge, deleteMapNode, openWindow, setEditingNodeId, setMapPickerOpen, setNotesPickerOpen])
 
-  // Handle workspace commands from voice/non-SSE sources
-  const handleWorkspaceCommand = useCallback((data: any) => {
-    if (!data) return
-    const { openWindow: openWin, closeWindow, bringToFront, windows, addMap, updateMap } = useCanvasStore.getState()
-    const command = data.workspace_command
-
-    console.log('[App] Workspace command from voice:', command, data)
-
-    switch (command) {
-      case 'open_window': {
-        // Map window_type to our WindowType
-        const typeMap: Record<string, WindowType> = {
-          notes: 'note',
-          chat: 'chat',
-          fitness: 'fitness',
-          calendar: 'note',
-          tasks: 'note',
-          intelligence: 'note',
-          settings: 'settings',
-          projects: 'projects',
-          timers: 'timers',
-          research: 'research',
-        }
-        const windowType = typeMap[data.window_type] || 'note'
-        openWin(windowType, data.data || {}, { title: data.title })
-        console.log('[App] Opened window:', windowType, data.title)
-        break
-      }
-
-      case 'close_window': {
-        if (data.window_id) {
-          closeWindow(data.window_id)
-        } else if (data.window_title) {
-          const targetWindow = windows.find(w =>
-            w.title.toLowerCase().includes(data.window_title.toLowerCase())
-          )
-          if (targetWindow) {
-            closeWindow(targetWindow.id)
-          }
-        }
-        break
-      }
-
-      case 'focus_window': {
-        if (data.window_id) {
-          bringToFront(data.window_id)
-        } else if (data.window_title) {
-          const targetWindow = windows.find(w =>
-            w.title.toLowerCase().includes(data.window_title.toLowerCase())
-          )
-          if (targetWindow) {
-            bringToFront(targetWindow.id)
-          }
-        }
-        break
-      }
-
-      case 'show_map':
-      case 'update_map': {
-        const mapData = data.map
-        if (!mapData) break
-        const currentMaps = useCanvasStore.getState().maps
-        const existingMap = currentMaps.find(m => m.id === mapData.id)
-        if (existingMap) {
-          updateMap(mapData.id, { mapData: mapData.map_data })
-        } else {
-          addMap({
-            id: mapData.id,
-            name: mapData.name,
-            description: mapData.description,
-            mapData: mapData.map_data,
-            isReadonly: mapData.is_readonly || false,
-            canvasPosition: data.position || { x: 200, y: 200 },
-            collapsed: false,
-          })
-        }
-        break
-      }
-
-      default:
-        console.warn('[App] Unknown workspace command:', command)
-    }
-  }, [])
-
   // Poll for pending workspace commands from voice
   useEffect(() => {
     if (!user) return // Only poll when authenticated
 
     const pollPendingCommands = async () => {
-      try {
-        const result = await workspaceApi.getPendingCommands()
-        if (result.commands && result.commands.length > 0) {
-          console.log('[App] Received pending workspace commands:', result.commands)
-          for (const cmd of result.commands) {
-            handleWorkspaceCommand(cmd)
-          }
-        }
-      } catch (error) {
-        // Silently ignore errors - this is just polling
-      }
+      await pollPendingWorkspaceCommands('app')
     }
 
     // Poll every 2 seconds
@@ -251,7 +178,7 @@ function App() {
     pollPendingCommands()
 
     return () => clearInterval(interval)
-  }, [user, handleWorkspaceCommand])
+  }, [user])
 
   // Handle drag and drop for files
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -385,6 +312,20 @@ function App() {
       <div className="absolute inset-0 z-10 pointer-events-none">
         <Canvas />
       </div>
+
+      {/* Sara ambient presence */}
+      {user && (
+        <SaraStatusStrip
+          onAttentionClick={() => setIsAttentionOpen(prev => !prev)}
+          onScenePickerClick={() => setIsScenePickerOpen(prev => !prev)}
+          attentionOpen={isAttentionOpen}
+        />
+      )}
+      <AttentionFeedPanel isOpen={isAttentionOpen} onClose={() => setIsAttentionOpen(false)} />
+      <ScenePicker isOpen={isScenePickerOpen} onClose={() => setIsScenePickerOpen(false)} />
+      <PartnerThoughts />
+      <PartnerActionQueue />
+      <MissionFeed />
 
       {/* UI overlays */}
       <ModeWheel />

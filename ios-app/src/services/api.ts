@@ -12,7 +12,7 @@ const TOKEN_KEY = '@sara_auth_token';
 export interface ChatModel {
   id: string;
   name: string;
-  provider: 'anthropic' | 'google' | 'local';
+  provider: 'anthropic' | 'google' | 'local' | 'openai' | 'codex';
 }
 
 export interface ChatModelsResponse {
@@ -32,6 +32,23 @@ export interface ChatOptions {
   onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
 }
 
+export interface CodexOAuthStatus {
+  connected: boolean;
+  email?: string;
+  account_id?: string;
+  expires_at?: string;
+  expires_in_seconds?: number | null;
+  error?: string | null;
+}
+
+export interface AutonomyFlags {
+  temerant_enabled: boolean;
+  temerant_rpg_enabled?: boolean;
+  temerant_oracle_enabled?: boolean;
+  temerant_narrative_enabled?: boolean;
+  temerant_auto_ingestion_enabled?: boolean;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   public baseURL: string;
@@ -47,12 +64,17 @@ class ApiClient {
       },
     });
 
-    // Request interceptor to add auth token
+    // Request interceptor to add auth token and fix FormData headers
     this.client.interceptors.request.use(
       async (config) => {
         const token = await AsyncStorage.getItem(TOKEN_KEY);
         if (token && config.headers) {
           config.headers.Authorization = `Bearer ${token}`;
+        }
+        // For FormData uploads, delete Content-Type so the RN networking
+        // layer auto-sets multipart/form-data WITH the boundary parameter.
+        if (config.data instanceof FormData) {
+          delete config.headers['Content-Type'];
         }
         return config;
       },
@@ -111,12 +133,11 @@ class ApiClient {
   }
 
   async upload<T>(url: string, formData: FormData, config?: AxiosRequestConfig): Promise<T> {
+    // The request interceptor strips Content-Type for FormData so the RN
+    // networking layer sets multipart/form-data with the correct boundary.
     const response: AxiosResponse<T> = await this.client.post(url, formData, {
       ...config,
-      headers: {
-        ...config?.headers,
-        'Content-Type': 'multipart/form-data',
-      },
+      timeout: 300000,  // 5 min for large file uploads
     });
     return response.data;
   }
@@ -166,17 +187,84 @@ class ApiClient {
         let lastProcessedIndex = 0;
         let receivedConversationId: string | undefined = undefined;
         let receivedEpisodeId: string | undefined = undefined;
+        let emittedText = '';
+        let completed = false;
+        let sawAnyStreamBytes = false;
+        let firstEventTimer: ReturnType<typeof setTimeout> | null = null;
+        let postTextFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const clearTimers = () => {
+          if (firstEventTimer) {
+            clearTimeout(firstEventTimer);
+            firstEventTimer = null;
+          }
+          if (postTextFinalizeTimer) {
+            clearTimeout(postTextFinalizeTimer);
+            postTextFinalizeTimer = null;
+          }
+        };
+
+        const schedulePostTextFinalizeWatchdog = () => {
+          if (postTextFinalizeTimer) {
+            clearTimeout(postTextFinalizeTimer);
+          }
+          // If text has arrived but completion markers never come, recover automatically.
+          postTextFinalizeTimer = setTimeout(() => {
+            if (!completed && emittedText.trim().length > 0) {
+              console.warn('[API] No completion marker after streamed text; forcing complete');
+              completeOnce();
+            }
+          }, 20000);
+        };
+
+        const completeOnce = () => {
+          if (completed) return;
+          completed = true;
+          clearTimers();
+          if (receivedConversationId) {
+            console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId, 'episode_id:', receivedEpisodeId);
+          } else {
+            console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
+          }
+          onComplete(receivedConversationId, receivedEpisodeId);
+          resolve();
+          try {
+            xhr.abort();
+          } catch {
+            // no-op
+          }
+        };
 
         xhr.open('POST', `${API_URL}/chat/stream`, true);
         xhr.setRequestHeader('Content-Type', 'application/json');
+        // Never let chat stream hang forever on iOS.
+        xhr.timeout = 180000;
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         }
+
+        firstEventTimer = setTimeout(() => {
+          if (!completed && !sawAnyStreamBytes) {
+            const error = new Error('No stream events received from server');
+            console.error('[API] Stream startup timeout:', error);
+            try {
+              xhr.abort();
+            } catch {
+              // no-op
+            }
+            onError(error);
+            reject(error);
+          }
+        }, 25000);
 
         xhr.onprogress = () => {
           // Get the new chunk of data
           const newData = xhr.responseText.substring(lastProcessedIndex);
           lastProcessedIndex = xhr.responseText.length;
+          if (newData.length > 0) {
+            sawAnyStreamBytes = true;
+            clearTimers();
+          }
 
           // Add new data to buffer
           buffer += newData;
@@ -199,11 +287,32 @@ class ApiClient {
                 const parsed = JSON.parse(data);
                 // Handle text_chunk events from backend
                 if (parsed.type === 'text_chunk' && parsed.data?.content) {
-                  onChunk(parsed.data.content);
+                  const chunk = String(parsed.data.content);
+                  if (chunk) {
+                    emittedText += chunk;
+                    onChunk(chunk);
+                    schedulePostTextFinalizeWatchdog();
+                  }
                 } else if (parsed.type === 'final_response') {
                   // Final response event - extract conversation_id and episode_id
                   console.log('[API] Received final_response event');
                   console.log('[API] Full final_response data:', JSON.stringify(parsed.data));
+                  const finalContent = parsed.data?.content || parsed.content || '';
+                  if (finalContent) {
+                    const finalText = String(finalContent);
+                    if (finalText.startsWith(emittedText)) {
+                      const delta = finalText.slice(emittedText.length);
+                      if (delta) {
+                        emittedText += delta;
+                        onChunk(delta);
+                        schedulePostTextFinalizeWatchdog();
+                      }
+                    } else if (!emittedText) {
+                      emittedText = finalText;
+                      onChunk(finalText);
+                      schedulePostTextFinalizeWatchdog();
+                    }
+                  }
                   if (parsed.data?.conversation_id) {
                     receivedConversationId = parsed.data.conversation_id;
                     console.log('[API] ✅ Got conversation_id:', receivedConversationId);
@@ -216,6 +325,9 @@ class ApiClient {
                   } else {
                     console.warn('[API] ⚠️ No episode_id in final_response!');
                   }
+                  completeOnce();
+                } else if (parsed.type === 'done') {
+                  completeOnce();
                 } else if (parsed.type === 'content_card' && options?.onContentCard) {
                   options.onContentCard(parsed.data);
                 } else if (parsed.type === 'tool_executing' && options?.onToolStatus) {
@@ -226,7 +338,11 @@ class ApiClient {
                   options.onSuggestedActions(parsed.data?.actions || []);
                 } else if (parsed.content) {
                   // Fallback for other formats
-                  onChunk(parsed.content);
+                  const fallbackChunk = String(parsed.content);
+                  if (fallbackChunk) {
+                    emittedText += fallbackChunk;
+                    onChunk(fallbackChunk);
+                  }
                 }
               } catch (e) {
                 // Skip invalid JSON or non-JSON lines
@@ -237,6 +353,7 @@ class ApiClient {
         };
 
         xhr.onload = () => {
+          clearTimers();
           if (xhr.status === 200) {
             // Process any remaining buffered data
             if (buffer.trim()) {
@@ -246,8 +363,29 @@ class ApiClient {
                 try {
                   const parsed = JSON.parse(data);
                   if (parsed.type === 'text_chunk' && parsed.data?.content) {
-                    onChunk(parsed.data.content);
-                  } else if (parsed.type === 'final_response') {
+                    const chunk = String(parsed.data.content);
+                  if (chunk) {
+                    emittedText += chunk;
+                    onChunk(chunk);
+                    schedulePostTextFinalizeWatchdog();
+                  }
+                } else if (parsed.type === 'final_response') {
+                    const finalContent = parsed.data?.content || parsed.content || '';
+                    if (finalContent) {
+                      const finalText = String(finalContent);
+                      if (finalText.startsWith(emittedText)) {
+                        const delta = finalText.slice(emittedText.length);
+                        if (delta) {
+                          emittedText += delta;
+                          onChunk(delta);
+                          schedulePostTextFinalizeWatchdog();
+                        }
+                      } else if (!emittedText) {
+                        emittedText = finalText;
+                        onChunk(finalText);
+                        schedulePostTextFinalizeWatchdog();
+                      }
+                    }
                     if (parsed.data?.conversation_id) {
                       receivedConversationId = parsed.data.conversation_id;
                       console.log('[API] ✅ Got conversation_id from final buffer:', receivedConversationId);
@@ -256,6 +394,9 @@ class ApiClient {
                       receivedEpisodeId = parsed.data.episode_id;
                       console.log('[API] ✅ Got episode_id from final buffer:', receivedEpisodeId);
                     }
+                    completeOnce();
+                  } else if (parsed.type === 'done') {
+                    completeOnce();
                   }
                 } catch (e) {
                   // Ignore parse errors for final buffer
@@ -263,14 +404,9 @@ class ApiClient {
               }
             }
 
-            if (receivedConversationId) {
-              console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId, 'episode_id:', receivedEpisodeId);
-            } else {
-              console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
+            if (!completed) {
+              completeOnce();
             }
-            // Call onComplete with the conversation_id and episode_id from backend
-            onComplete(receivedConversationId, receivedEpisodeId);
-            resolve();
           } else {
             const error = new Error(`HTTP error! status: ${xhr.status} - ${xhr.responseText}`);
             console.error('[API] Chat error:', error);
@@ -280,8 +416,19 @@ class ApiClient {
         };
 
         xhr.onerror = () => {
+          if (completed) return;
+          clearTimers();
           const error = new Error('Network error during streaming');
           console.error('[API] Network error:', error);
+          onError(error);
+          reject(error);
+        };
+
+        xhr.ontimeout = () => {
+          if (completed) return;
+          clearTimers();
+          const error = new Error('Chat stream timed out');
+          console.error('[API] Stream timeout:', error);
           onError(error);
           reject(error);
         };
@@ -381,7 +528,7 @@ class ApiClient {
 
   // Detected Patterns endpoints
   async getDetectedPatterns(): Promise<any[]> {
-    const response = await this.client.get('/api/patterns');
+    const response = await this.client.get('/api/detected-patterns');
     return response.data;
   }
 
@@ -398,6 +545,45 @@ class ApiClient {
 
   async testAISettings(): Promise<any> {
     const response = await this.client.post('/settings/ai/test');
+    return response.data;
+  }
+
+  async getCodexOAuthStatus(): Promise<CodexOAuthStatus> {
+    const response = await this.client.get('/settings/ai/codex/oauth/status');
+    return response.data;
+  }
+
+  async startCodexOAuth(returnTo?: string): Promise<{ auth_url: string; redirect_uri: string; return_to: string; requires_manual_code?: boolean }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/start', {
+      return_to: returnTo,
+    });
+    return response.data;
+  }
+
+  async completeCodexOAuth(payload: { redirect_url?: string; code?: string; state?: string }): Promise<{ ok: boolean; connected: boolean; email: string; expires_at: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/complete', payload);
+    return response.data;
+  }
+
+  async disconnectCodexOAuth(): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/disconnect');
+    return response.data;
+  }
+
+  // ==================== NOTIFICATION PREFERENCES ====================
+
+  async getNotificationPreferences(): Promise<{ preferences: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }> }> {
+    const response = await this.client.get('/api/settings/notification-preferences');
+    return response.data;
+  }
+
+  async updateNotificationPreferences(prefs: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }>): Promise<{ preferences: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }> }> {
+    const response = await this.client.put('/api/settings/notification-preferences', { preferences: prefs });
+    return response.data;
+  }
+
+  async getAutonomyFlags(): Promise<AutonomyFlags> {
+    const response = await this.client.get('/api/settings/autonomy-flags');
     return response.data;
   }
 
@@ -478,6 +664,22 @@ class ApiClient {
 
   async archiveAttentionItem(id: string): Promise<void> {
     await this.client.post(`/autonomy/attention/${id}/archive`);
+  }
+
+  async sendNotificationFeedback(
+    notificationId: number,
+    action: 'read' | 'engaged' | 'dismissed',
+    responseText?: string,
+  ): Promise<void> {
+    try {
+      await this.client.post(`/api/notifications/${notificationId}/feedback`, {
+        action,
+        response_text: responseText || null,
+      });
+    } catch (error) {
+      // Best-effort — don't fail the calling flow
+      console.log('[API] Notification feedback failed (non-critical):', error);
+    }
   }
 
   async getMissions(state?: string): Promise<any[]> {

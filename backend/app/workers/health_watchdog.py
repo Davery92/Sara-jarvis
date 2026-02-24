@@ -505,52 +505,52 @@ Format your response as JSON:
 
             content = result['choices'][0]['message']['content']
 
-                # Parse JSON from response
-                try:
-                    # Strip markdown code blocks if present
-                    clean_content = content.strip()
-                    if clean_content.startswith('```'):
-                        # Remove opening code block (```json or ```)
-                        lines = clean_content.split('\n')
-                        lines = lines[1:]  # Remove first line with ```
-                        clean_content = '\n'.join(lines)
-                    if clean_content.endswith('```'):
-                        clean_content = clean_content[:-3]
-                    clean_content = clean_content.strip()
+            # Parse JSON from response
+            try:
+                # Strip markdown code blocks if present
+                clean_content = content.strip()
+                if clean_content.startswith('```'):
+                    # Remove opening code block (```json or ```)
+                    lines = clean_content.split('\n')
+                    lines = lines[1:]  # Remove first line with ```
+                    clean_content = '\n'.join(lines)
+                if clean_content.endswith('```'):
+                    clean_content = clean_content[:-3]
+                clean_content = clean_content.strip()
 
-                    # Try to extract JSON from the response
-                    if '{' in clean_content and '}' in clean_content:
-                        json_str = clean_content[clean_content.find('{'):clean_content.rfind('}')+1]
-                        insight_data = json.loads(json_str)
-                    else:
-                        # Fallback if LLM didn't return JSON
-                        insight_data = {
-                            "title": "Health Alert",
-                            "content": clean_content,
-                            "recommendation": "Consider taking a rest day."
-                        }
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse LLM JSON response: {e}")
+                # Try to extract JSON from the response
+                if '{' in clean_content and '}' in clean_content:
+                    json_str = clean_content[clean_content.find('{'):clean_content.rfind('}')+1]
+                    insight_data = json.loads(json_str)
+                else:
+                    # Fallback if LLM didn't return JSON
                     insight_data = {
                         "title": "Health Alert",
-                        "content": content,
+                        "content": clean_content,
                         "recommendation": "Consider taking a rest day."
                     }
-
-                # Determine severity from anomalies
-                max_severity = SEVERITY_INFO
-                severity_order = [SEVERITY_INFO, SEVERITY_CAUTION, SEVERITY_WARNING, SEVERITY_URGENT]
-                for anomaly in anomalies:
-                    if severity_order.index(anomaly.get('severity', SEVERITY_INFO)) > severity_order.index(max_severity):
-                        max_severity = anomaly['severity']
-
-                return {
-                    'title': insight_data.get('title', 'Health Update'),
-                    'content': f"{insight_data.get('content', '')}\n\n💡 {insight_data.get('recommendation', '')}",
-                    'severity': max_severity,
-                    'anomalies': anomalies,
-                    'correlations': correlations,
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse LLM JSON response: {e}")
+                insight_data = {
+                    "title": "Health Alert",
+                    "content": content,
+                    "recommendation": "Consider taking a rest day."
                 }
+
+            # Determine severity from anomalies
+            max_severity = SEVERITY_INFO
+            severity_order = [SEVERITY_INFO, SEVERITY_CAUTION, SEVERITY_WARNING, SEVERITY_URGENT]
+            for anomaly in anomalies:
+                if severity_order.index(anomaly.get('severity', SEVERITY_INFO)) > severity_order.index(max_severity):
+                    max_severity = anomaly['severity']
+
+            return {
+                'title': insight_data.get('title', 'Health Update'),
+                'content': f"{insight_data.get('content', '')}\n\n💡 {insight_data.get('recommendation', '')}",
+                'severity': max_severity,
+                'anomalies': anomalies,
+                'correlations': correlations,
+            }
 
         except Exception as e:
             logger.error(f"Error generating insight: {e}")
@@ -625,7 +625,20 @@ Format your response as JSON:
         })
 
     async def _send_push_notification(self, db: Session, user_id: str, insight: Dict[str, Any], insight_id: str):
-        """Send iOS push notification via Expo Push Service."""
+        """Send iOS push notification via Expo Push Service, with 24h dedup."""
+        # Dedup: Check if we already sent a health push in the last 24 hours
+        recent_push = db.execute(text("""
+            SELECT id FROM health_alert
+            WHERE user_id = :user_id
+              AND notification_sent_at IS NOT NULL
+              AND notification_sent_at >= NOW() - INTERVAL '24 hours'
+            LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+
+        if recent_push:
+            logger.info(f"Skipping health push — already sent to user {user_id} in last 24h")
+            return
+
         # Get user's push tokens from push_token table
         tokens_result = db.execute(text("""
             SELECT token FROM push_token

@@ -313,6 +313,28 @@ class TimerSubscriber(EventSubscriber):
             logger.error(f"Timer standing order evaluation failed: {e}")
 
 
+class AgentTaskProgressSubscriber(EventSubscriber):
+    """
+    Forwards AGENT_TASK_PROGRESS events to WebSocket clients
+    via the automation stream broadcast.
+    """
+
+    def __init__(self):
+        super().__init__("agent_task_progress")
+        self.subscribe_to(EventType.AGENT_TASK_PROGRESS)
+
+    async def handle_event(self, event: Event) -> None:
+        user_id = event.user_id or DAVID_USER_ID
+        try:
+            from app.routes.automation import broadcast_automation_event
+            await broadcast_automation_event(user_id, {
+                "type": "agent_task_progress",
+                "data": event.payload,
+            })
+        except Exception as e:
+            logger.debug(f"Failed to broadcast agent task progress: {e}")
+
+
 class ReactiveEngine:
     """
     Manages event subscribers and connects them to the event bus.
@@ -334,6 +356,7 @@ class ReactiveEngine:
         self.presence = PresenceSubscriber()
         self.lights = LightSubscriber()
         self.timer = TimerSubscriber()
+        self.agent_task_progress = AgentTaskProgressSubscriber()
 
         self.subscribers = [
             self.security,
@@ -341,7 +364,24 @@ class ReactiveEngine:
             self.presence,
             self.lights,
             self.timer,
+            self.agent_task_progress,
         ]
+
+        # Working memory subscriber — updates Redis snapshot on every event
+        try:
+            from app.services.memory_subscribers import WorkingMemorySubscriber
+            self.working_memory = WorkingMemorySubscriber()
+            self.subscribers.append(self.working_memory)
+        except Exception as e:
+            logger.warning(f"WorkingMemorySubscriber failed to init: {e}")
+
+        # Salience subscriber — scores events, logs observations, triggers deliberation
+        try:
+            from app.services.salience_subscriber import SalienceSubscriber
+            self.salience = SalienceSubscriber()
+            self.subscribers.append(self.salience)
+        except Exception as e:
+            logger.warning(f"SalienceSubscriber failed to init: {e}")
 
     async def start(self):
         """Register all subscribers with the event bus."""

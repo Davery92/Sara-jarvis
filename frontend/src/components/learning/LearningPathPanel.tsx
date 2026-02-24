@@ -40,6 +40,44 @@ interface LearningPathData {
   progress?: { completed: number; total: number }
 }
 
+interface BlueprintSummary {
+  id: string
+  status?: string
+}
+
+interface BlueprintModule {
+  code?: string
+  title?: string
+  summary?: string | null
+}
+
+interface BlueprintPhase {
+  index?: number
+  title?: string
+  duration_label?: string | null
+  modules?: BlueprintModule[]
+}
+
+interface BlueprintParsedJson {
+  phases?: BlueprintPhase[]
+}
+
+interface BlueprintDetail {
+  id: string
+  title: string
+  description?: string | null
+  status?: string
+  materialized_at?: string | null
+  updated_at?: string | null
+  created_at?: string | null
+  parsed_json?: BlueprintParsedJson
+}
+
+interface BlueprintProgress {
+  completed_modules?: number
+  total_modules?: number
+}
+
 interface LearningPathPanelProps {
   onSelectTopic: (topicId: string) => void
   isVisible: boolean
@@ -56,11 +94,12 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
   const [gatheredSources, setGatheredSources] = useState<Record<number, { count: number; message: string }>>({})
   const [completingStep, setCompletingStep] = useState<number | null>(null)
   const [loadedForTopicId, setLoadedForTopicId] = useState<string | undefined>(undefined)
+  const [isBlueprintPath, setIsBlueprintPath] = useState(false)
 
   useEffect(() => {
     if (isVisible) {
-      // Skip fetch if we already have data for this exact topic
-      if (pathData && !error && loadedForTopicId === focusTopicId) return
+      // Cache only topic-specific paths; global path should refresh so newly imported plans appear.
+      if (focusTopicId && pathData && !error && loadedForTopicId === focusTopicId) return
       loadLearningPath()
     }
   }, [isVisible, focusTopicId])
@@ -141,6 +180,105 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
       persisted: true,
       progress: { completed, total }
     })
+    setIsBlueprintPath(false)
+  }
+
+  const buildPathFromBlueprint = (blueprint: BlueprintDetail, progress: BlueprintProgress | null): LearningPathData | null => {
+    const phases = Array.isArray(blueprint?.parsed_json?.phases) ? blueprint.parsed_json?.phases || [] : []
+    const orderedSteps = phases.flatMap((phase, phaseIndex) => {
+      const modules = Array.isArray(phase.modules) ? phase.modules : []
+      return modules.map((module, moduleIndex) => ({
+        module,
+        phase,
+        phaseIndex,
+        moduleIndex
+      }))
+    })
+
+    if (orderedSteps.length === 0) return null
+
+    const completedCount = Math.max(
+      0,
+      Math.min(progress?.completed_modules || 0, orderedSteps.length)
+    )
+
+    const path = orderedSteps.map(({ module, phase, phaseIndex, moduleIndex }, index) => {
+      const status: PathStep['status'] =
+        index < completedCount ? 'completed' : (index === completedCount ? 'active' : 'pending')
+      return {
+        topic_id: '',
+        topic_title: module.title || module.code || `Module ${index + 1}`,
+        priority_score: Math.max(10, 100 - index * 3),
+        current_mastery: 0,
+        actions: [{
+          type: 'study',
+          description: (module.summary || `Study ${module.title || module.code || 'this module'}`).slice(0, 180)
+        }],
+        estimated_time: phase.duration_label || '60-90 min',
+        reason: `Phase ${phase.index || phaseIndex + 1}${phase.title ? `: ${phase.title}` : ''}${module.code ? ` • ${module.code}` : ''}`,
+        status
+      }
+    })
+
+    const total = progress?.total_modules || orderedSteps.length
+    const completed = Math.min(completedCount, total)
+
+    return {
+      path,
+      summary: blueprint.description || `Showing your imported learning plan: ${blueprint.title}`,
+      recommendations: [],
+      stats: {
+        total_topics: orderedSteps.length,
+        avg_mastery: total > 0 ? completed / total : 0,
+        topics_needing_review: 0,
+        topics_with_gaps: 0
+      },
+      persisted: true,
+      generated_at: blueprint.materialized_at || blueprint.updated_at || blueprint.created_at,
+      progress: { completed, total }
+    }
+  }
+
+  const loadLatestBlueprintPath = async (): Promise<boolean> => {
+    try {
+      const listRes = await fetch(`${APP_CONFIG.apiUrl}/api/learn/blueprints`, {
+        credentials: 'include'
+      })
+      if (!listRes.ok) return false
+
+      const listData = await listRes.json()
+      const rows = Array.isArray(listData?.blueprints) ? (listData.blueprints as BlueprintSummary[]) : []
+      if (rows.length === 0) return false
+
+      const target = rows.find((row) => row.status === 'materialized') || rows[0]
+      if (!target?.id) return false
+
+      const detailRes = await fetch(`${APP_CONFIG.apiUrl}/api/learn/blueprints/${target.id}`, {
+        credentials: 'include'
+      })
+      if (!detailRes.ok) return false
+      const detail = (await detailRes.json()) as BlueprintDetail
+
+      let progress: BlueprintProgress | null = null
+      if (target.status === 'materialized') {
+        const progressRes = await fetch(`${APP_CONFIG.apiUrl}/api/learn/blueprints/${target.id}/progress`, {
+          credentials: 'include'
+        })
+        if (progressRes.ok) {
+          progress = (await progressRes.json()) as BlueprintProgress
+        }
+      }
+
+      const mapped = buildPathFromBlueprint(detail, progress)
+      if (!mapped) return false
+
+      setPathData(mapped)
+      setLoadedForTopicId(undefined)
+      setIsBlueprintPath(true)
+      return true
+    } catch {
+      return false
+    }
   }
 
   const loadLearningPath = async () => {
@@ -181,12 +319,22 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
             progress: { completed, total: steps.length }
           })
           setLoadedForTopicId(focusTopicId)
+          setIsBlueprintPath(false)
           setLoading(false)
           return
         }
         // 404 = no persisted curriculum, fall through to generate
       } catch {
         // fall through
+      }
+    }
+
+    // For global path view, prefer the latest imported blueprint plan.
+    if (!focusTopicId) {
+      const loadedBlueprint = await loadLatestBlueprintPath()
+      if (loadedBlueprint) {
+        setLoading(false)
+        return
       }
     }
 
@@ -203,6 +351,7 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
         const data = await response.json()
         setPathData(data)
         setLoadedForTopicId(focusTopicId)
+        setIsBlueprintPath(false)
       } else {
         setError('Failed to load learning path')
       }
@@ -287,7 +436,9 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
                 {focusTopicTitle ? `Path: ${focusTopicTitle}` : 'Your Learning Path'}
               </h2>
               <p className="text-sm text-gray-400">
-                {focusTopicTitle ? 'How to approach this topic' : 'Personalized study recommendations'}
+                {focusTopicTitle
+                  ? 'How to approach this topic'
+                  : (isBlueprintPath ? 'Loaded from your imported plan' : 'Personalized study recommendations')}
               </p>
             </div>
           </div>
@@ -359,13 +510,14 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
               {pathData.path.length > 0 && (
                 <div>
                   <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
-                    {focusTopicId ? 'Curriculum' : 'Recommended Path'}
+                    {focusTopicId ? 'Curriculum' : (isBlueprintPath ? 'Plan Modules' : 'Recommended Path')}
                   </h3>
                   <div className="space-y-3">
                     {pathData.path.map((step, index) => {
                       const stepStatus = step.status || 'pending'
                       const isCompleted = stepStatus === 'completed'
                       const isActive = stepStatus === 'active'
+                      const canSelectTopic = !focusTopicId && !isBlueprintPath && !!step.topic_id
 
                       return (
                         <div
@@ -376,9 +528,9 @@ export default function LearningPathPanel({ onSelectTopic, isVisible, onClose, f
                               : isCompleted
                                 ? 'border-green-500/30 opacity-75'
                                 : 'border-gray-700 hover:border-teal-500/50'
-                          } ${!focusTopicId ? 'cursor-pointer' : ''}`}
+                          } ${canSelectTopic ? 'cursor-pointer' : ''}`}
                           onClick={() => {
-                            if (!focusTopicId) {
+                            if (canSelectTopic) {
                               onSelectTopic(step.topic_id)
                               onClose()
                             }

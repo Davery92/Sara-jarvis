@@ -295,8 +295,25 @@ class PushNotificationService {
         const actionIdentifier = response.actionIdentifier;
         const userText = (response as any).userText; // Text from reply action
 
-        // Handle navigation based on notification data
+        // Track notification feedback
         const data = response.notification.request.content.data;
+        if (data?.notification_id) {
+          const notifId = Number(data.notification_id);
+          if (!isNaN(notifId)) {
+            if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
+              apiClient.sendNotificationFeedback(notifId, 'dismissed');
+            } else {
+              // Any other interaction (tap, reply, view) counts as engaged
+              apiClient.sendNotificationFeedback(
+                notifId,
+                'engaged',
+                userText || undefined,
+              );
+            }
+          }
+        }
+
+        // Handle navigation based on notification data
         this.handleNotificationNavigation(data, actionIdentifier, userText);
       }
     );

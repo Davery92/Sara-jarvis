@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { Timer, timerService } from '../services/timer';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 
 interface TimerContextType {
   activeTimer: Timer | null;
@@ -13,27 +13,41 @@ const TimerContext = createContext<TimerContextType | undefined>(undefined);
 
 export function TimerProvider({ children }: { children: ReactNode }) {
   const [activeTimer, setActiveTimer] = useState<Timer | null>(null);
+  const appStateRef = useRef(AppState.currentState);
 
   useEffect(() => {
-    // Load any existing active timers
     refreshTimers();
 
-    // Poll for active timers every 30 seconds
-    const interval = setInterval(refreshTimers, 30000);
-    return () => clearInterval(interval);
+    // Only poll when app is in the foreground
+    const interval = setInterval(() => {
+      if (appStateRef.current === 'active') {
+        refreshTimers();
+      }
+    }, 30000);
+
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (appStateRef.current !== 'active' && nextState === 'active') {
+        refreshTimers();
+      }
+      appStateRef.current = nextState;
+    });
+
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
   }, []);
 
   const refreshTimers = async () => {
     try {
       const timers = await timerService.getActiveTimers();
       if (timers.length > 0) {
-        // Show the first active timer
         setActiveTimer(timers[0]);
       } else {
         setActiveTimer(null);
       }
-    } catch (error) {
-      console.error('Failed to refresh timers:', error);
+    } catch (_) {
+      // Silently ignore — this is a background poll, not a user-initiated action
     }
   };
 

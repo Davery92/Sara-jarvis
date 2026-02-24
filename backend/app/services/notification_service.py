@@ -4,6 +4,7 @@ Sends push notifications via Expo Push for iOS/Android devices.
 """
 import asyncio
 import logging
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from enum import Enum
@@ -102,27 +103,77 @@ class NotificationService:
         data: Optional[Dict[str, Any]] = None,
         **kwargs  # Accept but ignore legacy NTFY params
     ) -> bool:
-        """Send a notification via Expo Push"""
+        """Send a notification via the unified notification pipeline."""
         if not self.enabled:
             logger.debug("Notifications disabled, skipping")
             return True
 
-        tokens = await self._get_push_tokens(user_id)
-        if not tokens:
-            logger.info(f"📱 No push tokens for user {user_id}")
-            return False
+        from app.db.session import SessionLocal
+        from app.services.unified_notification import send_notification as unified_send_notification
 
-        notification_data = data or {}
-        notification_data["title"] = title
-        notification_data["message"] = message
-
-        return await self._send_expo_push(
-            tokens=tokens,
+        category = str(kwargs.get("category") or (data or {}).get("type") or "general").lower()
+        explicit_topic = kwargs.get("topic")
+        topic = explicit_topic or self._topic_for_notification(
+            category=category,
             title=title,
-            body=message,
-            data=notification_data,
-            priority=priority.value
+            message=message,
+            data=data or {},
         )
+
+        push_priority = "high" if priority in (NotificationPriority.HIGH, NotificationPriority.URGENT) else "normal"
+        db = SessionLocal()
+        try:
+            result = await unified_send_notification(
+                user_id=user_id,
+                title=title,
+                message=message,
+                priority=push_priority,
+                topic=topic,
+                category=category,
+                source=str(kwargs.get("source") or "notification_service"),
+                cooldown_hours=kwargs.get("cooldown_hours"),
+                db=db,
+                _bypass_attention=True,
+            )
+            db.commit()
+            if not result.get("sent"):
+                logger.debug(f"Notification suppressed: reason={result.get('reason')} topic={topic}")
+            return bool(result.get("sent"))
+        finally:
+            db.close()
+
+    def _topic_for_notification(
+        self,
+        category: str,
+        title: str,
+        message: str,
+        data: Dict[str, Any],
+    ) -> str:
+        """Build stable topics so repeated sends dedupe reliably."""
+        if category == "timer":
+            timer_name = self._slug(data.get("timer_name") or title or "timer")
+            state = "overdue" if data.get("is_overdue") else "complete"
+            return f"timer:{timer_name}:{state}"
+
+        if category == "reminder":
+            due = data.get("due_in_minutes")
+            phase = "due" if isinstance(due, int) and due <= 0 else "upcoming"
+            digest = hashlib.sha256((message or title).strip().lower().encode()).hexdigest()[:16]
+            return f"reminder:{digest}:{phase}"
+
+        if category == "wellness":
+            wellness_type = self._slug(data.get("wellness_type") or "general")
+            digest = hashlib.sha256((message or "").strip().lower().encode()).hexdigest()[:12]
+            return f"wellness:{wellness_type}:{digest}"
+
+        digest = hashlib.sha256(f"{title}:{message[:120]}".encode()).hexdigest()[:16]
+        return f"{self._slug(category or 'general')}:{digest}"
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in (value or "").strip())
+        cleaned = "_".join(part for part in cleaned.split("_") if part)
+        return (cleaned or "item")[:64]
 
     # ==========================================
     # Main notification interface
@@ -217,6 +268,8 @@ class NotificationService:
 
     async def send_wellness_alert(self, user_id: str, wellness_type: str, message: str) -> bool:
         """Send wellness/mood-based alert"""
+        from app.services.deliberation_gate import is_notification_banned
+
         wellness_config = {
             "tired": {"title": "Wellness Check - Rest", "priority": NotificationPriority.LOW},
             "stressed": {"title": "Wellness Check - Stress", "priority": NotificationPriority.NORMAL},
@@ -228,6 +281,13 @@ class NotificationService:
             "title": "Wellness Check",
             "priority": NotificationPriority.LOW
         })
+
+        # Enforce ban system -- wellness notifications bypass the unified pipeline,
+        # so we must check the ban list explicitly here.
+        ban = is_notification_banned(title=config["title"], message=message, category="wellness")
+        if ban:
+            logger.info(f"Wellness notification banned: {ban}")
+            return False
 
         return await self.send_notification(
             user_id=user_id,

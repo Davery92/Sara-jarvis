@@ -7,8 +7,31 @@ import {
   getEmbeddingDimension, setEmbeddingDimension
 } from '../utils/prefs'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient, AISettingsUpdate, TokenStats, Device } from '../api/client'
+import { apiClient, AISettingsUpdate, TokenStats, Device, AutonomyFlags, AutonomyRolloutSummary, CodexOAuthStatus, NotificationPrefItem, NotificationPrefsResponse } from '../api/client'
 import { APP_CONFIG } from '../config'
+
+interface MorningBriefSummary {
+  id: string
+  brief_date: string
+  has_audio: boolean
+  audio_duration_seconds: number | null
+  generated_at: string | null
+  viewed_at: string | null
+}
+
+interface MorningBriefDetail {
+  id: string
+  brief_date: string
+  news_summary: string | null
+  weather_summary: string | null
+  calendar_summary: string | null
+  full_text: string | null
+  has_audio: boolean
+  audio_duration_seconds: number | null
+  recovery_text: string | null
+  has_recovery_audio: boolean
+  generated_at: string | null
+}
 
 function ConnectedDevices() {
   const queryClient = useQueryClient()
@@ -621,11 +644,170 @@ function DesktopAppDownloads() {
   )
 }
 
+function SaraBriefArchive() {
+  const [selectedBriefDate, setSelectedBriefDate] = useState<string | null>(null)
+
+  const {
+    data: briefs = [],
+    isLoading: briefsLoading,
+    error: briefsError,
+    refetch: refetchBriefs,
+  } = useQuery<MorningBriefSummary[]>({
+    queryKey: ['morning-brief', 'history', 21],
+    queryFn: async () => {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/morning-brief/history?limit=21`, {
+        credentials: 'include',
+      })
+      if (!response.ok) throw new Error('Failed to fetch brief history')
+      const data = await response.json()
+      return Array.isArray(data) ? data : []
+    },
+    refetchInterval: 60000,
+  })
+
+  useEffect(() => {
+    if (briefs.length === 0) {
+      setSelectedBriefDate(null)
+      return
+    }
+
+    const selectedStillExists = selectedBriefDate
+      ? briefs.some((brief) => brief.brief_date === selectedBriefDate)
+      : false
+
+    if (!selectedStillExists) {
+      setSelectedBriefDate(briefs[0].brief_date)
+    }
+  }, [briefs, selectedBriefDate])
+
+  const {
+    data: selectedBrief,
+    isLoading: briefDetailLoading,
+    error: briefDetailError,
+  } = useQuery<MorningBriefDetail>({
+    queryKey: ['morning-brief', 'detail', selectedBriefDate],
+    enabled: !!selectedBriefDate,
+    queryFn: async () => {
+      const response = await fetch(
+        `${APP_CONFIG.apiUrl}/api/morning-brief/${selectedBriefDate}?include_recovery=false`,
+        { credentials: 'include' }
+      )
+      if (!response.ok) throw new Error('Failed to fetch brief detail')
+      return await response.json()
+    },
+  })
+
+  const formatDate = (dateStr: string) => {
+    const date = new Date(`${dateStr}T12:00:00`)
+    const today = new Date()
+    const yesterday = new Date(today)
+    yesterday.setDate(yesterday.getDate() - 1)
+
+    if (dateStr === today.toISOString().split('T')[0]) return 'Today'
+    if (dateStr === yesterday.toISOString().split('T')[0]) return 'Yesterday'
+
+    return date.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    })
+  }
+
+  return (
+    <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-lg font-medium text-white">Sara Brief Archive</h3>
+          <p className="text-gray-400 text-sm mt-1">View full briefs Sara generated about your day and context.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => refetchBriefs()}
+          className="px-3 py-1.5 text-xs text-teal-300 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 transition"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {briefsLoading ? (
+        <p className="text-sm text-gray-500 py-8 text-center">Loading brief archive...</p>
+      ) : briefsError ? (
+        <p className="text-sm text-red-300 py-8 text-center">Unable to load briefs right now.</p>
+      ) : briefs.length === 0 ? (
+        <p className="text-sm text-gray-500 py-8 text-center">No briefs generated yet.</p>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-1 border border-gray-700 rounded-lg bg-gray-800/40 overflow-hidden">
+            <div className="px-3 py-2 text-xs uppercase tracking-wider text-gray-400 border-b border-gray-700">
+              Recent Briefs
+            </div>
+            <div className="max-h-72 overflow-y-auto divide-y divide-gray-700/70">
+              {briefs.map((brief) => (
+                <button
+                  key={brief.id}
+                  type="button"
+                  onClick={() => setSelectedBriefDate(brief.brief_date)}
+                  className={`w-full px-3 py-2 text-left transition ${
+                    selectedBriefDate === brief.brief_date ? 'bg-gray-700/50' : 'hover:bg-gray-700/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">{formatDate(brief.brief_date)}</span>
+                    {brief.has_audio && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/30 text-blue-300 border border-blue-700/40">
+                        Audio
+                      </span>
+                    )}
+                  </div>
+                  {brief.generated_at && (
+                    <p className="mt-1 text-xs text-gray-400">
+                      {new Date(brief.generated_at).toLocaleTimeString('en-US', {
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      })}
+                    </p>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="lg:col-span-2 border border-gray-700 rounded-lg bg-gray-800/30 p-4">
+            {briefDetailLoading ? (
+              <p className="text-sm text-gray-500 py-8 text-center">Loading brief...</p>
+            ) : briefDetailError ? (
+              <p className="text-sm text-red-300 py-8 text-center">Unable to load this brief.</p>
+            ) : selectedBrief ? (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-white font-medium">{formatDate(selectedBrief.brief_date)} Brief</h4>
+                  {selectedBrief.generated_at && (
+                    <span className="text-xs text-gray-400">
+                      Generated {new Date(selectedBrief.generated_at).toLocaleString('en-US')}
+                    </span>
+                  )}
+                </div>
+                <div className="max-h-80 overflow-y-auto pr-2">
+                  <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap break-words">
+                    {selectedBrief.full_text || 'No full brief text was saved for this entry.'}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500 py-8 text-center">Select a brief to view details.</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Provider configuration presets
 const PROVIDER_PRESETS = {
   local: {
     openai_base_url: 'http://100.104.68.115:11434/v1',
-    openai_model: 'gpt-oss:120b',
+    openai_model: 'gpt-oss:20b',
     embedding_base_url: 'http://100.104.68.115:11434',
     embedding_model: 'bge-m3',
   },
@@ -640,6 +822,12 @@ const PROVIDER_PRESETS = {
     openai_model: 'gpt-4o',
     embedding_base_url: 'https://api.openai.com/v1',
     embedding_model: 'text-embedding-3-large',
+  },
+  codex: {
+    openai_base_url: 'https://chatgpt.com/backend-api',
+    openai_model: 'gpt-5.3-codex',
+    embedding_base_url: 'http://100.104.68.115:11434',
+    embedding_model: 'bge-m3',
   },
   claude: {
     openai_base_url: 'https://api.anthropic.com/v1',
@@ -672,17 +860,66 @@ export default function Settings() {
     embedding_dimension: getEmbeddingDimension(),
     // Background processing defaults
     bg_llm_primary_url: 'http://100.104.68.115:11434/v1',
-    bg_llm_primary_model: 'gpt-oss:120b',
+    bg_llm_primary_model: 'gpt-oss:20b',
     bg_llm_fallback_url: 'http://100.104.68.115:11434/v1',
     bg_llm_fallback_model: 'gpt-oss:20b',
   })
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [vmTestResult, setVmTestResult] = useState<{ status: string; host: string } | null>(null)
+  const [vmTestLoading, setVmTestLoading] = useState(false)
   const queryClient = useQueryClient()
 
   // Fetch current AI settings
   const { data: settings, isLoading } = useQuery({
     queryKey: ['settings', 'ai'],
     queryFn: () => apiClient.getAISettings(),
+  })
+
+  const {
+    data: autonomyFlags,
+    isLoading: autonomyFlagsLoading,
+    error: autonomyFlagsError,
+  } = useQuery<AutonomyFlags>({
+    queryKey: ['settings', 'autonomy-flags'],
+    queryFn: () => apiClient.getAutonomyFlags(),
+    refetchInterval: 60000,
+  })
+
+  const {
+    data: rolloutSummary,
+    isLoading: rolloutSummaryLoading,
+    error: rolloutSummaryError,
+  } = useQuery<AutonomyRolloutSummary>({
+    queryKey: ['autonomy', 'rollout-summary', 24],
+    queryFn: () => apiClient.getAutonomyRolloutSummary(24),
+    refetchInterval: 60000,
+  })
+
+  const {
+    data: codexOAuthStatus,
+    isLoading: codexOAuthLoading,
+    isFetching: codexOAuthFetching,
+    refetch: refetchCodexOAuthStatus,
+  } = useQuery<CodexOAuthStatus>({
+    queryKey: ['settings', 'codex-oauth'],
+    queryFn: () => apiClient.getCodexOAuthStatus(),
+    refetchInterval: 60000,
+  })
+
+  // Notification preferences
+  const {
+    data: notifPrefsData,
+    isLoading: notifPrefsLoading,
+  } = useQuery<NotificationPrefsResponse>({
+    queryKey: ['settings', 'notification-preferences'],
+    queryFn: () => apiClient.getNotificationPreferences(),
+  })
+
+  const updateNotifPrefsMutation = useMutation({
+    mutationFn: (prefs: NotificationPrefItem[]) => apiClient.updateNotificationPreferences(prefs),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings', 'notification-preferences'] })
+    },
   })
 
   // Update settings mutation
@@ -712,6 +949,58 @@ export default function Settings() {
     },
   })
 
+  const startCodexOAuthMutation = useMutation({
+    mutationFn: () => apiClient.startCodexOAuth(`${window.location.origin}/settings`),
+    onSuccess: async (result) => {
+      const manualFlow = !!result.requires_manual_code || /localhost:1455|127\.0\.0\.1:1455/.test(result.redirect_uri || '')
+      if (!manualFlow) {
+        window.location.href = result.auth_url
+        return
+      }
+
+      window.open(result.auth_url, '_blank', 'noopener,noreferrer')
+      const pastedUrl = window.prompt(
+        'After finishing ChatGPT sign-in, copy the full final URL from the browser address bar (it starts with http://localhost:1455/auth/callback...) and paste it here:'
+      )
+      if (!pastedUrl) {
+        setTestResult({ success: false, message: 'OAuth not completed: no callback URL pasted.' })
+        setTimeout(() => setTestResult(null), 5000)
+        return
+      }
+
+      try {
+        await apiClient.completeCodexOAuth({ redirect_url: pastedUrl.trim() })
+        queryClient.invalidateQueries({ queryKey: ['settings', 'codex-oauth'] })
+        queryClient.invalidateQueries({ queryKey: ['settings', 'ai'] })
+        setAiProviderState('codex')
+        setAIProvider('codex')
+        setTestResult({ success: true, message: 'Codex OAuth connected successfully' })
+        setTimeout(() => setTestResult(null), 5000)
+      } catch (error: any) {
+        setTestResult({ success: false, message: error.response?.data?.detail || 'Failed to complete Codex OAuth' })
+        setTimeout(() => setTestResult(null), 5000)
+      }
+    },
+    onError: (error: any) => {
+      setTestResult({ success: false, message: error.response?.data?.detail || 'Failed to start Codex OAuth' })
+      setTimeout(() => setTestResult(null), 5000)
+    },
+  })
+
+  const disconnectCodexOAuthMutation = useMutation({
+    mutationFn: () => apiClient.disconnectCodexOAuth(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings', 'codex-oauth'] })
+      queryClient.invalidateQueries({ queryKey: ['settings', 'ai'] })
+      setTestResult({ success: true, message: 'Codex OAuth disconnected' })
+      setTimeout(() => setTestResult(null), 3000)
+    },
+    onError: (error: any) => {
+      setTestResult({ success: false, message: error.response?.data?.detail || 'Failed to disconnect Codex OAuth' })
+      setTimeout(() => setTestResult(null), 5000)
+    },
+  })
+
   // Initialize form data when settings load, preferring localStorage values
   useEffect(() => {
     if (settings) {
@@ -729,12 +1018,38 @@ export default function Settings() {
         embedding_dimension: getEmbeddingDimension() || settings.embedding_dimension,
         // Background processing settings
         bg_llm_primary_url: settings.bg_llm_primary_url || 'http://100.104.68.115:11434/v1',
-        bg_llm_primary_model: settings.bg_llm_primary_model || 'gpt-oss:120b',
+        bg_llm_primary_model: settings.bg_llm_primary_model || 'gpt-oss:20b',
         bg_llm_fallback_url: settings.bg_llm_fallback_url || 'http://100.104.68.115:11434/v1',
         bg_llm_fallback_model: settings.bg_llm_fallback_model || 'gpt-oss:20b',
+        // VM sandbox settings
+        vm_sandbox_host: settings.vm_sandbox_host || '10.185.1.176',
+        vm_sandbox_username: settings.vm_sandbox_username || 'sara',
+        vm_sandbox_ssh_key_path: settings.vm_sandbox_ssh_key_path || '~/.ssh/sara_agent',
       })
     }
   }, [settings])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    const oauthStatus = url.searchParams.get('codex_oauth')
+    if (!oauthStatus) return
+
+    const reason = url.searchParams.get('reason')
+    if (oauthStatus === 'success') {
+      setTestResult({ success: true, message: 'Codex OAuth connected successfully' })
+      queryClient.invalidateQueries({ queryKey: ['settings', 'codex-oauth'] })
+      queryClient.invalidateQueries({ queryKey: ['settings', 'ai'] })
+      setAiProviderState('codex')
+      setAIProvider('codex')
+    } else {
+      setTestResult({ success: false, message: `Codex OAuth failed${reason ? `: ${reason}` : ''}` })
+    }
+
+    setTimeout(() => setTestResult(null), 5000)
+    url.searchParams.delete('codex_oauth')
+    url.searchParams.delete('reason')
+    window.history.replaceState({}, document.title, url.toString())
+  }, [queryClient])
 
   const handleProviderChange = (provider: ProviderType) => {
     // Save current API key to provider-specific storage before switching
@@ -751,7 +1066,9 @@ export default function Settings() {
       const preset = PROVIDER_PRESETS[provider]
 
       // Load provider-specific API key from localStorage
-      const savedApiKey = localStorage.getItem(`sara_${provider}_api_key`) || ''
+      const savedApiKey = provider === 'codex'
+        ? ''
+        : (localStorage.getItem(`sara_${provider}_api_key`) || '')
 
       const updated = {
         ...formData,
@@ -834,6 +1151,25 @@ export default function Settings() {
     testSettingsMutation.mutate()
   }
 
+  const handleConnectCodexOAuth = () => {
+    startCodexOAuthMutation.mutate()
+  }
+
+  const handleDisconnectCodexOAuth = () => {
+    disconnectCodexOAuthMutation.mutate()
+  }
+
+  const handleRefreshCodexOAuthStatus = async () => {
+    try {
+      await refetchCodexOAuthStatus()
+      setTestResult({ success: true, message: 'Codex OAuth status refreshed' })
+      setTimeout(() => setTestResult(null), 2500)
+    } catch (error: any) {
+      setTestResult({ success: false, message: error?.response?.data?.detail || 'Failed to refresh Codex OAuth status' })
+      setTimeout(() => setTestResult(null), 5000)
+    }
+  }
+
   const handleReset = () => {
     // Reset to localStorage values (or defaults if none saved)
     const provider = getAIProvider() as ProviderType || 'local'
@@ -850,6 +1186,8 @@ export default function Settings() {
     }
     setFormData(resetData)
   }
+
+  const pct = (value: number) => `${(value * 100).toFixed(1)}%`
 
   if (isLoading) {
     return (
@@ -869,6 +1207,145 @@ export default function Settings() {
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-white mb-2">Settings</h1>
           <p className="text-gray-400">Configure AI models, embeddings, and personalization</p>
+        </div>
+
+        {/* Autonomy Feature Flag Status */}
+        <div className="mb-6 bg-card border border-card rounded-xl p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-medium text-white mb-1">Autonomy Flag Status</h2>
+              <p className="text-sm text-gray-400">
+                Read-only visibility into runtime autonomy rollout flags and admin gate setup.
+              </p>
+            </div>
+          </div>
+          {autonomyFlagsLoading ? (
+            <p className="mt-4 text-sm text-gray-500">Loading autonomy status...</p>
+          ) : autonomyFlagsError || !autonomyFlags ? (
+            <p className="mt-4 text-sm text-red-300">Autonomy status unavailable right now.</p>
+          ) : (
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+              {[
+                ['Traces', autonomyFlags.autonomy_traces_enabled],
+                ['Structured Plan', autonomyFlags.autonomy_structured_plan],
+                ['Policy Engine', autonomyFlags.autonomy_policy_engine],
+                ['Attention Queue', autonomyFlags.autonomy_attention_enabled],
+                ['Missions', autonomyFlags.autonomy_missions_enabled],
+                ['Policy Candidates', autonomyFlags.autonomy_policy_candidates_enabled],
+                ['Temerant', autonomyFlags.temerant_enabled],
+                ['Temerant Oracle', autonomyFlags.temerant_oracle_enabled],
+                ['Temerant Narrative', autonomyFlags.temerant_narrative_enabled],
+                ['Temerant Auto-Ingestion', autonomyFlags.temerant_auto_ingestion_enabled],
+              ].map(([label, enabled]) => (
+                <div
+                  key={label as string}
+                  className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2"
+                >
+                  <span className="text-sm text-gray-200">{label as string}</span>
+                  <span
+                    className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                      enabled
+                        ? 'bg-green-900/40 text-green-300 border border-green-700/50'
+                        : 'bg-gray-700/60 text-gray-300 border border-gray-600/60'
+                    }`}
+                  >
+                    {enabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+              ))}
+              <div className="md:col-span-2 flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2">
+                <span className="text-sm text-gray-200">Automation Admin Access</span>
+                <span
+                  className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                    autonomyFlags.automation_admin_configured
+                      ? 'bg-green-900/40 text-green-300 border border-green-700/50'
+                      : 'bg-red-900/30 text-red-300 border border-red-700/50'
+                  }`}
+                >
+                  {autonomyFlags.automation_admin_configured
+                    ? `Configured (roles: ${autonomyFlags.automation_admin_role_count}, allowlist: ${autonomyFlags.automation_admin_email_count})`
+                    : 'Not Configured'}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="mb-6 bg-card border border-card rounded-xl p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-medium text-white mb-1">Autonomy Rollout Health (24h)</h2>
+              <p className="text-sm text-gray-400">
+                Live rates vs configured thresholds for rollout and rollback decisions.
+              </p>
+            </div>
+          </div>
+          {rolloutSummaryLoading ? (
+            <p className="mt-4 text-sm text-gray-500">Loading rollout health...</p>
+          ) : rolloutSummaryError || !rolloutSummary ? (
+            <p className="mt-4 text-sm text-red-300">Rollout health data unavailable right now.</p>
+          ) : (
+            <div className="mt-4 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {[
+                  ['Agent runs', `${rolloutSummary.run_log.total_runs}`],
+                  ['Plan fallback rate', `${pct(rolloutSummary.rates.fallback_rate)} (max ${pct(rolloutSummary.thresholds.max_fallback_rate)})`],
+                  ['Action failure rate', `${pct(rolloutSummary.rates.action_failure_rate)} (max ${pct(rolloutSummary.thresholds.max_action_failure_rate)})`],
+                  ['Notification dedup block', `${pct(rolloutSummary.rates.dedup_block_rate)} (max ${pct(rolloutSummary.thresholds.max_dedup_block_rate)})`],
+                  ['Attention backlog', `${pct(rolloutSummary.rates.attention_backlog_ratio)} (max ${pct(rolloutSummary.thresholds.max_attention_backlog_ratio)})`],
+                  ['Mission failure', `${pct(rolloutSummary.rates.mission_failure_rate)} (max ${pct(rolloutSummary.thresholds.max_mission_failure_rate)})`],
+                ].map(([label, value]) => (
+                  <div
+                    key={label as string}
+                    className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2"
+                  >
+                    <span className="text-sm text-gray-200">{label as string}</span>
+                    <span className="text-sm text-gray-300">{value as string}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {Object.entries(rolloutSummary.evaluations).map(([flag, evaluation]) => (
+                  <div
+                    key={flag}
+                    className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-3"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-200">{flag}</span>
+                      <span
+                        className={`text-xs font-semibold px-2 py-0.5 rounded border ${
+                          evaluation.status === 'healthy'
+                            ? 'bg-green-900/40 text-green-300 border-green-700/50'
+                            : evaluation.status === 'unhealthy'
+                            ? 'bg-red-900/30 text-red-300 border-red-700/50'
+                            : 'bg-gray-700/60 text-gray-300 border-gray-600/60'
+                        }`}
+                      >
+                        {evaluation.status}
+                      </span>
+                    </div>
+                    {evaluation.reasons.length > 0 && (
+                      <p className="text-xs text-gray-400 mt-2 break-words">{evaluation.reasons.join(' · ')}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {rolloutSummary.rollback_recommendations.length > 0 && (
+                <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-3">
+                  <p className="text-sm font-medium text-red-300 mb-1">Rollback Recommended</p>
+                  <div className="text-xs text-red-200 space-y-1">
+                    {rolloutSummary.rollback_recommendations.map((item) => (
+                      <p key={item.flag}>
+                        {item.flag}: {item.reasons.join(' | ')}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Test Result Alert */}
@@ -917,6 +1394,7 @@ export default function Settings() {
                     <option value="local">Local (Ollama/LM Studio)</option>
                     <option value="gemini">Google Gemini</option>
                     <option value="openai">OpenAI</option>
+                    <option value="codex">ChatGPT Codex (OAuth)</option>
                     <option value="claude">Anthropic Claude</option>
                     <option value="custom">Custom Configuration</option>
                   </select>
@@ -948,6 +1426,62 @@ export default function Settings() {
                         : aiProvider === 'claude'
                         ? 'Get your API key from https://console.anthropic.com/settings/keys'
                         : 'Get your API key from https://platform.openai.com/api-keys'}
+                    </p>
+                  </div>
+                )}
+
+                {aiProvider === 'codex' && (
+                  <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-gray-200">
+                          ChatGPT OAuth Connection
+                        </p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          {codexOAuthLoading
+                            ? 'Checking connection status...'
+                            : codexOAuthStatus?.connected
+                            ? `Connected${codexOAuthStatus.email ? ` as ${codexOAuthStatus.email}` : ''}`
+                            : 'Not connected'}
+                        </p>
+                        {codexOAuthStatus?.expires_at && codexOAuthStatus.connected && (
+                          <p className="text-xs text-gray-500 mt-1">
+                            Token expiry: {new Date(codexOAuthStatus.expires_at).toLocaleString('en-US')}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={handleRefreshCodexOAuthStatus}
+                          disabled={codexOAuthLoading || codexOAuthFetching}
+                          className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                        >
+                          {(codexOAuthLoading || codexOAuthFetching) ? 'Refreshing...' : 'Refresh Status'}
+                        </button>
+                        {!codexOAuthStatus?.connected ? (
+                          <button
+                            type="button"
+                            onClick={handleConnectCodexOAuth}
+                            disabled={startCodexOAuthMutation.isPending}
+                            className="px-3 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-sm disabled:opacity-60"
+                          >
+                            {startCodexOAuthMutation.isPending ? 'Starting...' : 'Connect ChatGPT'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleDisconnectCodexOAuth}
+                            disabled={disconnectCodexOAuthMutation.isPending}
+                            className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                          >
+                            {disconnectCodexOAuthMutation.isPending ? 'Disconnecting...' : 'Disconnect'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <p className="mt-3 text-xs text-gray-400">
+                      Uses your ChatGPT subscription via OAuth. No API key required. If prompted, paste the localhost callback URL back here to complete.
                     </p>
                   </div>
                 )}
@@ -1004,7 +1538,7 @@ export default function Settings() {
                     value={formData.openai_model || ''}
                     onChange={(e) => handleInputChange('openai_model', e.target.value)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
-                    placeholder={settings?.openai_model || 'gpt-oss:120b'}
+                    placeholder={settings?.openai_model || 'gpt-oss:20b'}
                   />
                   <p className="mt-1 text-xs text-gray-400">Model name to use for chat and reasoning</p>
                 </div>
@@ -1112,7 +1646,7 @@ export default function Settings() {
                     value={formData.bg_llm_primary_model || ''}
                     onChange={(e) => handleInputChange('bg_llm_primary_model', e.target.value)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
-                    placeholder="gpt-oss:120b"
+                    placeholder="gpt-oss:20b"
                   />
                   <p className="mt-1 text-xs text-gray-400">Model for deep analysis tasks</p>
                 </div>
@@ -1146,6 +1680,89 @@ export default function Settings() {
                   />
                   <p className="mt-1 text-xs text-gray-400">Faster model for quick background tasks</p>
                 </div>
+              </div>
+            </div>
+
+            {/* Sandbox VM Settings */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Sandbox VM</h3>
+              <p className="text-gray-400 text-sm mb-4">
+                Configure the remote VM where Sara dispatches Claude Code agents to run tasks autonomously.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                  <label htmlFor="vm_sandbox_host" className="block text-sm font-medium text-gray-300 mb-2">
+                    VM Host
+                  </label>
+                  <input
+                    type="text"
+                    id="vm_sandbox_host"
+                    value={formData.vm_sandbox_host || ''}
+                    onChange={(e) => handleInputChange('vm_sandbox_host', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="10.185.1.176"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">IP address or hostname of the sandbox VM</p>
+                </div>
+
+                <div>
+                  <label htmlFor="vm_sandbox_username" className="block text-sm font-medium text-gray-300 mb-2">
+                    SSH Username
+                  </label>
+                  <input
+                    type="text"
+                    id="vm_sandbox_username"
+                    value={formData.vm_sandbox_username || ''}
+                    onChange={(e) => handleInputChange('vm_sandbox_username', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="sara"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">SSH user on the VM</p>
+                </div>
+
+                <div>
+                  <label htmlFor="vm_sandbox_ssh_key_path" className="block text-sm font-medium text-gray-300 mb-2">
+                    SSH Key Path
+                  </label>
+                  <input
+                    type="text"
+                    id="vm_sandbox_ssh_key_path"
+                    value={formData.vm_sandbox_ssh_key_path || ''}
+                    onChange={(e) => handleInputChange('vm_sandbox_ssh_key_path', e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    placeholder="~/.ssh/sara_agent"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Path to SSH private key on the server</p>
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setVmTestLoading(true)
+                    setVmTestResult(null)
+                    try {
+                      const result = await apiClient.testVMConnection()
+                      setVmTestResult(result)
+                    } catch (err: any) {
+                      setVmTestResult({ status: 'error', host: formData.vm_sandbox_host || '' })
+                    } finally {
+                      setVmTestLoading(false)
+                    }
+                  }}
+                  disabled={vmTestLoading}
+                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                >
+                  {vmTestLoading ? 'Testing...' : 'Test Connection'}
+                </button>
+                {vmTestResult && (
+                  <span className={`text-sm ${vmTestResult.status === 'connected' ? 'text-green-400' : 'text-red-400'}`}>
+                    {vmTestResult.status === 'connected'
+                      ? `Connected to ${vmTestResult.host}`
+                      : `Connection failed: ${vmTestResult.status}`}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -1233,6 +1850,63 @@ export default function Settings() {
                   </label>
                 </div>
               </div>
+            </div>
+
+            {/* Notification Preferences */}
+            <div className="border-t border-gray-700 pt-6">
+              <h3 className="text-lg font-medium text-white mb-4">Notification Preferences</h3>
+              <p className="text-gray-400 text-sm mb-4">
+                Control which categories of proactive notifications Sara can send you.
+                Disabled categories are blocked at the notification pipeline level.
+              </p>
+              {notifPrefsLoading ? (
+                <p className="text-sm text-gray-500">Loading preferences...</p>
+              ) : (
+                <div className="space-y-3">
+                  {(notifPrefsData?.preferences || []).map((pref) => {
+                    const categoryLabels: Record<string, { label: string; desc: string }> = {
+                      health: { label: 'Health', desc: 'HRV, heart rate, blood pressure, body temperature, SpO2, etc.' },
+                      fitness: { label: 'Fitness', desc: 'Workouts, steps, calories burned, recovery scores, exercise reminders' },
+                      calendar: { label: 'Calendar', desc: 'Meeting reminders, schedule changes, upcoming events' },
+                      email: { label: 'Email', desc: 'Important unread emails, action-required messages' },
+                      security: { label: 'Security', desc: 'Door locks, motion detection, security alerts' },
+                      home: { label: 'Home', desc: 'Lights, temperature, home automation events' },
+                      general: { label: 'General', desc: 'Check-ins, project updates, misc notifications' },
+                    }
+                    const info = categoryLabels[pref.category] || { label: pref.category, desc: '' }
+
+                    return (
+                      <div
+                        key={pref.category}
+                        className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-white">{info.label}</div>
+                          <div className="text-xs text-gray-400 mt-0.5">{info.desc}</div>
+                        </div>
+                        <label className="inline-flex items-center cursor-pointer ml-4 flex-shrink-0">
+                          <input
+                            type="checkbox"
+                            className="sr-only peer"
+                            checked={pref.enabled}
+                            onChange={(e) => {
+                              const updated = (notifPrefsData?.preferences || []).map(p =>
+                                p.category === pref.category
+                                  ? { ...p, enabled: e.target.checked }
+                                  : p
+                              )
+                              updateNotifPrefsMutation.mutate(updated)
+                            }}
+                          />
+                          <span className={`w-10 h-6 rounded-full p-1 transition-colors duration-200 ${pref.enabled ? 'bg-teal-600' : 'bg-gray-600'}`}>
+                            <span className={`block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 ${pref.enabled ? 'translate-x-4' : 'translate-x-0'}`}></span>
+                          </span>
+                        </label>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Token Usage Statistics */}
@@ -1332,7 +2006,7 @@ export default function Settings() {
                     // Reset form to defaults
                     setFormData({
                       openai_base_url: 'http://100.104.68.115:11434/v1',
-                      openai_model: 'gpt-oss:120b',
+                      openai_model: 'gpt-oss:20b',
                       openai_notification_model: 'gpt-oss:20b',
                       embedding_base_url: 'http://100.104.68.115:11434',
                       embedding_model: 'bge-m3',
@@ -1371,6 +2045,9 @@ export default function Settings() {
 
         {/* Connected Devices */}
         <ConnectedDevices />
+
+        {/* Brief Archive */}
+        <SaraBriefArchive />
 
         {/* Developer Tools */}
         <div className="mt-8 bg-card border border-card rounded-xl p-6">

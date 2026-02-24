@@ -3,7 +3,8 @@
 Morning Brief Generation Script
 
 Generates the morning brief for the configured solo user at 6 AM ET.
-Run via cron:
+Run via cron (with CRON_TZ=America/New_York set above the entry):
+    CRON_TZ=America/New_York
     0 6 * * * SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub" /usr/bin/python3 /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
 
 Push notification is sent automatically when brief is ready (via notification_service).
@@ -15,6 +16,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
@@ -47,8 +49,9 @@ SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
 
 async def generate_brief():
     """Generate morning brief for the solo user."""
+    eastern = ZoneInfo("America/New_York")
     logger.info("=" * 60)
-    logger.info(f"Starting morning brief generation at {datetime.now()}")
+    logger.info(f"Starting morning brief generation at {datetime.now(eastern).strftime('%Y-%m-%d %I:%M %p %Z')}")
     logger.info(f"Solo user: {SOLO_USER_ID}")
     logger.info("=" * 60)
 

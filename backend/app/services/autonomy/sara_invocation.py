@@ -90,7 +90,7 @@ class SaraInvocationService:
 
     # LLM endpoint configuration
     DEFAULT_LLM_ENDPOINT = "http://100.104.68.115:11434/v1"
-    DEFAULT_MODEL = "gpt-oss:120b"
+    DEFAULT_MODEL = "gpt-oss:20b"
 
     # Rate limiting
     MAX_INVOCATIONS_PER_HOUR = 50
@@ -101,9 +101,19 @@ class SaraInvocationService:
         self.db = db
         self._invocation_count = 0
         self._last_reset = datetime.utcnow()
+        self._refresh_llm_config()
 
-        self.llm_endpoint = os.getenv("OPENAI_BASE_URL", self.DEFAULT_LLM_ENDPOINT)
-        self.model = os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
+    def _refresh_llm_config(self):
+        """Refresh endpoint/model from runtime settings without restart."""
+        from app.core.config import settings
+        self.llm_endpoint = (
+            getattr(settings, "bg_llm_primary_url", None)
+            or os.getenv("OPENAI_BASE_URL", self.DEFAULT_LLM_ENDPOINT)
+        )
+        self.model = (
+            getattr(settings, "bg_llm_primary_model", None)
+            or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
+        )
 
     def _check_rate_limit(self) -> bool:
         """Check if we're within rate limits."""
@@ -517,6 +527,8 @@ async def get_sara_invocation_service(db=None) -> SaraInvocationService:
     global _sara_invocation_service
     if _sara_invocation_service is None:
         _sara_invocation_service = SaraInvocationService(db)
-    elif db is not None:
+    # Always refresh config so bg model/url changes apply immediately.
+    _sara_invocation_service._refresh_llm_config()
+    if db is not None:
         _sara_invocation_service.db = db
     return _sara_invocation_service

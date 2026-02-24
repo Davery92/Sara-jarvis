@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { APP_CONFIG } from '../../config'
+import MarkdownRenderer from '../MarkdownRenderer'
 
 interface LearningChatProps {
   topicId: string | null
@@ -201,11 +200,10 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
                 }`}
               >
                 {message.role === 'assistant' ? (
-                  <div className="prose prose-invert prose-sm max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {message.content}
-                    </ReactMarkdown>
-                  </div>
+                  <MarkdownRenderer
+                    content={message.content}
+                    className="prose prose-invert prose-sm max-w-none"
+                  />
                 ) : (
                   <p className="whitespace-pre-wrap">{message.content}</p>
                 )}
@@ -217,11 +215,10 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
           {streamingContent && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-xl px-4 py-3 bg-gray-800 text-gray-100">
-                <div className="prose prose-invert prose-sm max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {streamingContent}
-                  </ReactMarkdown>
-                </div>
+                <MarkdownRenderer
+                  content={streamingContent}
+                  className="prose prose-invert prose-sm max-w-none"
+                />
                 <span className="inline-block w-2 h-4 bg-teal-400 animate-pulse ml-1" />
               </div>
             </div>

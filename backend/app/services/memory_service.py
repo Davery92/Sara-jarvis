@@ -706,8 +706,8 @@ class MemoryService:
         Generate a summary of memory traces using LLM with heuristic fallback.
 
         Uses same LLM failover pattern as memory scorer:
-        - Primary: gpt-oss:120b on primary endpoint
-        - Fallback: gpt-oss:20b on local endpoint
+        - Primary: background primary model on primary endpoint
+        - Fallback: background fallback model on local endpoint
         - Final fallback: keyword-based summary
         """
         import httpx
@@ -727,9 +727,23 @@ Traces:
 Provide a natural, conversational daily summary."""
 
         # LLM endpoints with failover (same as subconscious/memory_scorer)
+        try:
+            from app.core.config import settings
+            primary_url = getattr(settings, "bg_llm_primary_url", "http://100.104.68.115:11434/v1")
+            primary_model = getattr(settings, "bg_llm_primary_model", "gpt-oss:20b")
+            fallback_url = getattr(settings, "bg_llm_fallback_url", "http://10.185.1.8:11434/v1")
+            fallback_model = getattr(settings, "bg_llm_fallback_model", "gpt-oss:20b")
+        except Exception:
+            primary_url = "http://100.104.68.115:11434/v1"
+            primary_model = "gpt-oss:20b"
+            fallback_url = "http://10.185.1.8:11434/v1"
+            fallback_model = "gpt-oss:20b"
+
+        normalized_primary_url = (primary_url or "").rstrip("/").removesuffix("/v1")
+        normalized_fallback_url = (fallback_url or "").rstrip("/").removesuffix("/v1")
         endpoints = [
-            ("http://100.104.68.115:11434", "gpt-oss:120b"),
-            ("http://10.185.1.8:11434", "gpt-oss:20b")
+            (normalized_primary_url, primary_model),
+            (normalized_fallback_url, fallback_model),
         ]
 
         for llm_url, model in endpoints:

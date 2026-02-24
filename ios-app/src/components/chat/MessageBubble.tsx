@@ -100,7 +100,7 @@ export default function MessageBubble({ message, onCardAction }: MessageBubblePr
                 return isAssistant ? (
                   <SimpleMarkdown key={idx} style={styles.text}>{part.text}</SimpleMarkdown>
                 ) : (
-                  <Text key={idx} style={[styles.text, isUser && styles.userText]}>{part.text}</Text>
+                  <SimpleMarkdown key={idx} style={[styles.text, isUser && styles.userText]} linkStyle={{ color: '#93c5fd' }}>{part.text}</SimpleMarkdown>
                 );
               }
               return null;
@@ -109,9 +109,7 @@ export default function MessageBubble({ message, onCardAction }: MessageBubblePr
         ) : isAssistant ? (
           <SimpleMarkdown style={styles.text}>{message.content}</SimpleMarkdown>
         ) : (
-          <Text style={[styles.text, isUser && styles.userText]}>
-            {message.content}
-          </Text>
+          <SimpleMarkdown style={[styles.text, isUser && styles.userText]} linkStyle={{ color: '#93c5fd' }}>{message.content}</SimpleMarkdown>
         )}
 
         {/* Star rating for assistant messages */}

@@ -39,6 +39,7 @@ class TaskResponse(BaseModel):
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -63,7 +64,8 @@ def _task_to_response(task) -> TaskResponse:
         error_message=task.error_message,
         created_at=task.created_at.isoformat() if task.created_at else None,
         started_at=task.started_at.isoformat() if task.started_at else None,
-        completed_at=task.completed_at.isoformat() if task.completed_at else None
+        completed_at=task.completed_at.isoformat() if task.completed_at else None,
+        updated_at=task.updated_at.isoformat() if getattr(task, 'updated_at', None) else None
     )
 
 

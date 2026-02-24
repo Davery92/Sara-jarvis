@@ -62,6 +62,7 @@ class SidecarService:
     def __init__(self):
         self.running = False
         self._tasks = []
+        self._loop = None
 
         # Component instances (lazy loaded)
         self._activity_monitor = None
@@ -79,8 +80,11 @@ class SidecarService:
         logger.info("Starting Sara Desktop Sidecar...")
         logger.info(f"Device ID: {config.device_id}")
         logger.info(f"Backend: {config.backend_url}")
+        logger.info(f"Python executable: {sys.executable}")
+        logger.info(f"Python version: {sys.version.split()[0]}")
 
         self.running = True
+        self._loop = asyncio.get_running_loop()
 
         # Import and initialize components
         try:
@@ -112,8 +116,17 @@ class SidecarService:
 
             # Start electron bridge FIRST so clients can connect
             logger.info("Starting Electron bridge first...")
-            self._tasks = [asyncio.create_task(self._electron_bridge.start())]
+            bridge_task = asyncio.create_task(self._electron_bridge.start())
+            self._tasks = [bridge_task]
             await asyncio.sleep(0.5)  # Give it time to start listening
+            if bridge_task.done():
+                exc = bridge_task.exception()
+                if exc:
+                    raise RuntimeError(f"Electron bridge failed to start: {exc}")
+                raise RuntimeError(
+                    "Electron bridge exited during startup (port in use). "
+                    "Another sidecar instance is likely already running."
+                )
 
             # Then start other services
             self._tasks.extend([
@@ -137,11 +150,12 @@ class SidecarService:
                     port=config.voice_bridge_port,
                     on_state_change=self._on_voice_state_change,
                     on_transcript=self._on_voice_transcript,
+                    config=config,
                 )
                 self._tasks.append(asyncio.create_task(self._voice_bridge.start()))
                 logger.info(f"Voice bridge enabled: {config.voice_bridge_host}:{config.voice_bridge_port}")
             elif not VOICE_BRIDGE_AVAILABLE:
-                logger.warning("Voice bridge not available - missing dependencies (sounddevice)")
+                logger.warning("Voice bridge not available - missing audio or websocket dependencies")
             else:
                 logger.info("Voice bridge disabled by configuration")
 
@@ -277,35 +291,47 @@ class SidecarService:
     def _on_voice_state_change(self, state: str):
         """Called when voice bridge state changes."""
         self._voice_state = state
-        # Forward to Electron for tray icon updates
-        if self._electron_bridge:
-            asyncio.create_task(self._electron_bridge.send_message({
-                "type": "voice_state",
-                "state": state
-            }))
+        self._schedule_electron_message({
+            "type": "voice_state",
+            "state": state
+        })
 
     def _on_voice_transcript(self, user_text: str, sara_text: str):
         """Called when voice transcript is received."""
-        # Forward to Electron for display
-        if self._electron_bridge:
-            asyncio.create_task(self._electron_bridge.send_message({
-                "type": "voice_transcript",
-                "user": user_text,
-                "sara": sara_text
-            }))
+        self._schedule_electron_message({
+            "type": "voice_transcript",
+            "user": user_text,
+            "sara": sara_text
+        })
 
     def _on_audio_playback_change(self, state):
         """Called when audio playback state changes."""
         self._last_playback_state = state.is_playing
         logger.info(f"Audio playback {'started' if state.is_playing else 'stopped'}: {state.applications}")
 
-        # Forward to Electron for UI
-        if self._electron_bridge:
-            asyncio.create_task(self._electron_bridge.send_message({
-                "type": "audio_playback",
-                "is_playing": state.is_playing,
-                "applications": state.applications
-            }))
+        self._schedule_electron_message({
+            "type": "audio_playback",
+            "is_playing": state.is_playing,
+            "applications": state.applications
+        })
+
+    def _schedule_electron_message(self, payload: dict):
+        """Send an Electron bridge message from any thread context."""
+        bridge = self._electron_bridge
+        if not bridge:
+            return
+
+        loop = self._loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(bridge.send_message(payload))
+            )
+            return
+
+        try:
+            asyncio.create_task(bridge.send_message(payload))
+        except RuntimeError as e:
+            logger.debug("Dropping electron message without running loop: %s", e)
 
     async def _audio_playback_report_loop(self):
         """Periodically report audio playback state to backend."""
@@ -359,6 +385,10 @@ class SidecarService:
                     analyze=data.get("analyze", False),
                     analyze_prompt=data.get("analyze_prompt")
                 )
+
+        elif msg_type == "shutdown_sidecar":
+            logger.warning("Shutdown requested by Electron, stopping sidecar")
+            asyncio.create_task(self.stop())
 
     async def _handle_command(self, command: dict):
         """Handle a command received from backend."""
@@ -423,7 +453,7 @@ class SidecarService:
 
         elif cmd_type == "open_workspace":
             # Open the workbench-canvas workspace in browser
-            url = payload.get("url", "http://10.185.1.180:3002")
+            url = payload.get("url", "https://canvas.avery.cloud")
             import webbrowser
             webbrowser.open(url)
             logger.info(f"Opened workspace: {url}")

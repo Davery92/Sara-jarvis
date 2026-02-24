@@ -1,16 +1,17 @@
 """
 User Settings API Routes
-Manage user preferences for vision, screenshots, desktop agent, etc.
+Manage user preferences for vision, screenshots, desktop agent, notification preferences, etc.
 """
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.deps import get_current_user
+from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.models.user import User
 from app.models.user_settings import UserSettings
@@ -51,6 +52,33 @@ class AllSettingsUpdate(BaseModel):
     activity_tracking_enabled: Optional[bool] = None
     cross_device_commands_enabled: Optional[bool] = None
     preferences: Optional[dict] = None
+
+
+class AutonomyFlagsResponse(BaseModel):
+    autonomy_traces_enabled: bool
+    autonomy_structured_plan: bool
+    autonomy_policy_engine: bool
+    autonomy_attention_enabled: bool
+    autonomy_missions_enabled: bool
+    autonomy_policy_candidates_enabled: bool
+    temerant_enabled: bool
+    temerant_oracle_enabled: bool
+    temerant_narrative_enabled: bool
+    temerant_auto_ingestion_enabled: bool
+    temerant_rpg_enabled: bool
+    temerant_rpg_narrative_enabled: bool
+    automation_admin_configured: bool
+    automation_admin_email_count: int
+    automation_admin_role_count: int
+
+
+class TemerantRpgModelResponse(BaseModel):
+    model: str
+    updated_at: Optional[str] = None
+
+
+class TemerantRpgModelUpdate(BaseModel):
+    model: str
 
 
 def get_or_create_settings(db: Session, user_id: str) -> UserSettings:
@@ -103,6 +131,112 @@ async def update_settings(
 
     logger.info(f"Settings updated for user {user_id}")
     return settings.to_dict()
+
+
+@router.get("/autonomy-flags", response_model=AutonomyFlagsResponse)
+async def get_autonomy_flags(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read-only visibility for autonomy rollout flags and admin gate configuration."""
+    admin_emails = [
+        email.strip()
+        for email in (app_settings.automation_admin_emails or "").split(",")
+        if email.strip()
+    ]
+    admin_role_count = 0
+    try:
+        row = db.execute(text("""
+            SELECT COUNT(*)::int
+            FROM app_user_role
+            WHERE role IN ('admin', 'owner')
+        """)).fetchone()
+        admin_role_count = (row[0] if row else 0) or 0
+    except Exception:
+        # Role table may not exist yet on older deployments.
+        admin_role_count = 0
+
+    return AutonomyFlagsResponse(
+        autonomy_traces_enabled=app_settings.autonomy_traces_enabled,
+        autonomy_structured_plan=app_settings.autonomy_structured_plan,
+        autonomy_policy_engine=app_settings.autonomy_policy_engine,
+        autonomy_attention_enabled=app_settings.autonomy_attention_enabled,
+        autonomy_missions_enabled=app_settings.autonomy_missions_enabled,
+        autonomy_policy_candidates_enabled=app_settings.autonomy_policy_candidates_enabled,
+        temerant_enabled=app_settings.temerant_enabled,
+        temerant_oracle_enabled=app_settings.temerant_oracle_enabled,
+        temerant_narrative_enabled=app_settings.temerant_narrative_enabled,
+        temerant_auto_ingestion_enabled=app_settings.temerant_auto_ingestion_enabled,
+        temerant_rpg_enabled=app_settings.temerant_rpg_enabled,
+        temerant_rpg_narrative_enabled=app_settings.temerant_rpg_narrative_enabled,
+        automation_admin_configured=len(admin_emails) > 0 or admin_role_count > 0,
+        automation_admin_email_count=len(admin_emails),
+        automation_admin_role_count=admin_role_count,
+    )
+
+
+@router.get("/temerant-rpg-model", response_model=TemerantRpgModelResponse)
+async def get_temerant_rpg_model(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ = current_user
+    try:
+        row = db.execute(text("""
+            SELECT value, updated_at
+            FROM app_settings
+            WHERE key = 'temerant_rpg_model'
+        """)).fetchone()
+    except Exception:
+        row = None
+    if not row:
+        return TemerantRpgModelResponse(model=app_settings.temerant_rpg_model, updated_at=None)
+    return TemerantRpgModelResponse(
+        model=str(row.value or app_settings.temerant_rpg_model),
+        updated_at=(row.updated_at.isoformat() if row.updated_at else None),
+    )
+
+
+@router.put("/temerant-rpg-model", response_model=TemerantRpgModelResponse)
+async def update_temerant_rpg_model(
+    payload: TemerantRpgModelUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    model = (payload.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="model is required")
+
+    try:
+        db.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at, updated_by)
+            VALUES ('temerant_rpg_model', :value, NOW(), :updated_by)
+            ON CONFLICT (key)
+            DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by
+        """), {
+            "value": model,
+            "updated_by": current_user.email or "system",
+        })
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to persist model setting: {exc}")
+
+    # Apply runtime override immediately for this process.
+    app_settings.temerant_rpg_model = model
+
+    try:
+        row = db.execute(text("""
+            SELECT value, updated_at
+            FROM app_settings
+            WHERE key = 'temerant_rpg_model'
+        """)).fetchone()
+    except Exception:
+        row = None
+    return TemerantRpgModelResponse(
+        model=str((row.value if row else model) or model),
+        updated_at=(row.updated_at.isoformat() if row and row.updated_at else None),
+    )
 
 
 @router.get("/vision")
@@ -226,3 +360,131 @@ async def update_desktop_agent_settings(
         "activity_tracking_enabled": settings.activity_tracking_enabled,
         "cross_device_commands_enabled": settings.cross_device_commands_enabled
     }
+
+
+# ─── Notification Preferences ────────────────────────────────────
+
+
+class NotificationPrefItem(BaseModel):
+    category: str
+    enabled: bool
+    custom_ban_phrases: List[str] = []
+
+
+class NotificationPrefsResponse(BaseModel):
+    preferences: List[NotificationPrefItem]
+
+
+class NotificationPrefsUpdate(BaseModel):
+    preferences: List[NotificationPrefItem]
+
+
+# Default categories seeded if none exist for a user
+_DEFAULT_CATEGORIES = [
+    ("health", False),
+    ("fitness", False),
+    ("calendar", True),
+    ("email", True),
+    ("security", True),
+    ("home", True),
+    ("general", True),
+]
+
+
+@router.get("/notification-preferences", response_model=NotificationPrefsResponse)
+async def get_notification_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all notification category preferences for the current user."""
+    user_id = current_user.id
+
+    try:
+        rows = db.execute(text("""
+            SELECT category, enabled, custom_ban_phrases
+            FROM notification_preference
+            WHERE user_id = :user_id
+            ORDER BY category
+        """), {"user_id": user_id}).fetchall()
+    except Exception:
+        # Table may not exist yet
+        rows = []
+
+    # If no rows, seed defaults
+    if not rows:
+        for cat, enabled in _DEFAULT_CATEGORIES:
+            enabled_str = "TRUE" if enabled else "FALSE"
+            try:
+                db.execute(text("""
+                    INSERT INTO notification_preference (user_id, category, enabled, custom_ban_phrases)
+                    VALUES (:user_id, :category, :enabled, '[]'::jsonb)
+                    ON CONFLICT (user_id, category) DO NOTHING
+                """), {"user_id": user_id, "category": cat, "enabled": enabled})
+            except Exception:
+                pass
+        db.commit()
+
+        try:
+            rows = db.execute(text("""
+                SELECT category, enabled, custom_ban_phrases
+                FROM notification_preference
+                WHERE user_id = :user_id
+                ORDER BY category
+            """), {"user_id": user_id}).fetchall()
+        except Exception:
+            rows = []
+
+    prefs = []
+    for row in rows:
+        phrases = row.custom_ban_phrases if isinstance(row.custom_ban_phrases, list) else []
+        prefs.append(NotificationPrefItem(
+            category=row.category,
+            enabled=row.enabled,
+            custom_ban_phrases=phrases,
+        ))
+
+    return NotificationPrefsResponse(preferences=prefs)
+
+
+@router.put("/notification-preferences", response_model=NotificationPrefsResponse)
+async def update_notification_preferences(
+    body: NotificationPrefsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update notification category preferences (toggle categories, add custom ban phrases)."""
+    import json
+    user_id = current_user.id
+
+    for pref in body.preferences:
+        enabled_str = "TRUE" if pref.enabled else "FALSE"
+        phrases_json = json.dumps(pref.custom_ban_phrases or [])
+        try:
+            db.execute(text("""
+                INSERT INTO notification_preference (user_id, category, enabled, custom_ban_phrases, updated_at)
+                VALUES (:user_id, :category, :enabled, CAST(:phrases AS jsonb), NOW())
+                ON CONFLICT (user_id, category)
+                DO UPDATE SET enabled = :enabled,
+                             custom_ban_phrases = CAST(:phrases AS jsonb),
+                             updated_at = NOW()
+            """), {
+                "user_id": user_id,
+                "category": pref.category,
+                "enabled": pref.enabled,
+                "phrases": phrases_json,
+            })
+        except Exception as e:
+            logger.error(f"Failed to upsert notification_preference: {e}")
+            raise HTTPException(status_code=500, detail="Failed to update notification preferences")
+
+    db.commit()
+
+    # Invalidate the in-memory cache so the notification pipeline picks up changes immediately
+    try:
+        from app.services.unified_notification import invalidate_notification_pref_cache
+        invalidate_notification_pref_cache(user_id)
+    except Exception:
+        pass
+
+    # Return updated preferences
+    return await get_notification_preferences(current_user=current_user, db=db)

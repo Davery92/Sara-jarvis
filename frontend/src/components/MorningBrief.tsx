@@ -36,9 +36,30 @@ export default function MorningBrief() {
   const [playingRecovery, setPlayingRecovery] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const recoveryAudioRef = useRef<HTMLAudioElement | null>(null)
+  const audioBlobUrlRef = useRef<string | null>(null)
+  const recoveryBlobUrlRef = useRef<string | null>(null)
 
   useEffect(() => {
     loadBriefs()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause()
+      }
+      if (recoveryAudioRef.current) {
+        recoveryAudioRef.current.pause()
+      }
+      if (audioBlobUrlRef.current) {
+        URL.revokeObjectURL(audioBlobUrlRef.current)
+        audioBlobUrlRef.current = null
+      }
+      if (recoveryBlobUrlRef.current) {
+        URL.revokeObjectURL(recoveryBlobUrlRef.current)
+        recoveryBlobUrlRef.current = null
+      }
+    }
   }, [])
 
   const loadBriefs = async () => {
@@ -94,32 +115,61 @@ export default function MorningBrief() {
     }
   }
 
-  const playAudio = () => {
-    if (!selectedBrief?.has_audio) return
+  const loadAudioBlob = async (endpoint: string, blobRef: { current: string | null }) => {
+    const response = await fetch(endpoint, { credentials: 'include' })
+    if (!response.ok) {
+      throw new Error(`Audio request failed (${response.status})`)
+    }
+    const blob = await response.blob()
+    if (blobRef.current) {
+      URL.revokeObjectURL(blobRef.current)
+    }
+    blobRef.current = URL.createObjectURL(blob)
+    return blobRef.current
+  }
+
+  const playAudio = async () => {
+    if (!selectedBrief?.has_audio || !selectedBrief.brief_date) return
 
     if (audioRef.current) {
       if (playing) {
         audioRef.current.pause()
         setPlaying(false)
       } else {
-        audioRef.current.src = `${APP_CONFIG.apiUrl}/api/morning-brief/today/audio`
-        audioRef.current.play()
-        setPlaying(true)
+        try {
+          audioRef.current.src = await loadAudioBlob(
+            `${APP_CONFIG.apiUrl}/api/morning-brief/${selectedBrief.brief_date}/audio`,
+            audioBlobUrlRef
+          )
+          await audioRef.current.play()
+          setPlaying(true)
+        } catch (error) {
+          console.error('Failed to play brief audio:', error)
+          setPlaying(false)
+        }
       }
     }
   }
 
-  const playRecoveryAudio = () => {
-    if (!selectedBrief?.has_recovery_audio) return
+  const playRecoveryAudio = async () => {
+    if (!selectedBrief?.has_recovery_audio || !selectedBrief.brief_date) return
 
     if (recoveryAudioRef.current) {
       if (playingRecovery) {
         recoveryAudioRef.current.pause()
         setPlayingRecovery(false)
       } else {
-        recoveryAudioRef.current.src = `${APP_CONFIG.apiUrl}/api/morning-brief/today/recovery-audio`
-        recoveryAudioRef.current.play()
-        setPlayingRecovery(true)
+        try {
+          recoveryAudioRef.current.src = await loadAudioBlob(
+            `${APP_CONFIG.apiUrl}/api/morning-brief/${selectedBrief.brief_date}/recovery-audio`,
+            recoveryBlobUrlRef
+          )
+          await recoveryAudioRef.current.play()
+          setPlayingRecovery(true)
+        } catch (error) {
+          console.error('Failed to play recovery audio:', error)
+          setPlayingRecovery(false)
+        }
       }
     }
   }
@@ -159,11 +209,13 @@ export default function MorningBrief() {
       <audio
         ref={audioRef}
         onEnded={() => setPlaying(false)}
+        onPause={() => setPlaying(false)}
         onError={() => setPlaying(false)}
       />
       <audio
         ref={recoveryAudioRef}
         onEnded={() => setPlayingRecovery(false)}
+        onPause={() => setPlayingRecovery(false)}
         onError={() => setPlayingRecovery(false)}
       />
 

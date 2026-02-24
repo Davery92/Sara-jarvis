@@ -7,6 +7,8 @@ proactive, and anticipation services.
 """
 
 import logging
+import inspect
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
@@ -25,12 +27,100 @@ DEFAULT_COOLDOWNS = {
     "weather": 8.0,
     "checkin": 4.0,
     "email": 4.0,
-    "security": 0.0,
+    "security": 0.25,
     "home": 2.0,
-    "reminder": 0.0,
-    "timer": 0.0,
+    "reminder": 1.0,
+    "timer": 0.5,
     "general": 4.0,
+    "health": 24.0,
+    "fitness": 24.0,
+    "wellness": 24.0,
 }
+
+# Even when category cooldown is 0, block identical duplicates for a short period.
+MIN_EXACT_DEDUP_HOURS = 0.25
+
+# ─── Cached notification preferences ─────────────────────────────
+# In-memory cache of per-user notification preferences.
+# Structure: {user_id: {"disabled_categories": set, "custom_ban_phrases": list, "loaded_at": float}}
+_PREF_CACHE: Dict[str, Dict[str, Any]] = {}
+_PREF_CACHE_TTL = 300  # seconds — reload from DB every 5 minutes
+
+
+async def _load_notification_preferences(user_id: str, db: Optional[AsyncSession] = None) -> Dict[str, Any]:
+    """Load notification preferences from DB (with in-memory cache)."""
+    now = time.time()
+    cached = _PREF_CACHE.get(user_id)
+    if cached and (now - cached["loaded_at"]) < _PREF_CACHE_TTL:
+        return cached
+
+    disabled_categories: set = set()
+    custom_phrases: list = []
+
+    if db:
+        try:
+            result = await _db_execute(db, text("""
+                SELECT category, enabled, custom_ban_phrases
+                FROM notification_preference
+                WHERE user_id = :user_id
+            """), {"user_id": user_id})
+            rows = result.fetchall()
+            for row in rows:
+                if not row.enabled:
+                    disabled_categories.add(row.category.lower())
+                if row.custom_ban_phrases:
+                    phrases = row.custom_ban_phrases if isinstance(row.custom_ban_phrases, list) else []
+                    custom_phrases.extend(phrases)
+        except Exception as e:
+            # Table may not exist yet on older deployments — fail open
+            logger.debug(f"notification_preference table read failed (OK if not migrated): {e}")
+
+    entry = {
+        "disabled_categories": disabled_categories,
+        "custom_ban_phrases": custom_phrases,
+        "loaded_at": now,
+    }
+    _PREF_CACHE[user_id] = entry
+    return entry
+
+
+def invalidate_notification_pref_cache(user_id: str) -> None:
+    """Invalidate the cached preferences for a user (called after settings update)."""
+    _PREF_CACHE.pop(user_id, None)
+
+
+async def _check_notification_ban(
+    user_id: str,
+    title: str,
+    message: str,
+    category: str,
+    db: Optional[AsyncSession] = None,
+) -> Optional[str]:
+    """
+    Check if a notification should be banned based on:
+    1. Static hard-ban list in deliberation_gate
+    2. Dynamic per-user category toggles from notification_preference table
+    3. User custom ban phrases
+
+    Returns ban reason or None.
+    """
+    from app.services.deliberation_gate import is_notification_banned
+
+    # Load user prefs (cached)
+    prefs = await _load_notification_preferences(user_id, db)
+
+    # Merge dynamic disabled categories into the check
+    # If the category is disabled in user preferences, reject immediately
+    if category.lower() in prefs["disabled_categories"]:
+        return f"User disabled category: {category}"
+
+    # Static ban list + user custom phrases
+    return is_notification_banned(
+        title=title,
+        message=message,
+        category=category,
+        custom_ban_phrases=prefs["custom_ban_phrases"],
+    )
 
 
 async def send_notification(
@@ -67,6 +157,18 @@ async def send_notification(
     Returns:
         Dict with {sent: bool, reason: str, ...}
     """
+    # ── Ban check: reject health/fitness/banned notifications before any delivery ──
+    ban_reason = await _check_notification_ban(user_id, title, message, category, db)
+    if ban_reason:
+        logger.info(f"Notification banned at pipeline entry: {ban_reason} | title={title[:60]}")
+        if db:
+            await _log_notification(
+                db, user_id, topic or f"{category}:{_hash_topic(title, message)}",
+                category, title, message, priority, source, agent_run_id,
+                0, sent=False, dedup_blocked=True,
+            )
+        return {"sent": False, "reason": "banned_topic", "ban_reason": ban_reason}
+
     # Route through attention queue when enabled (Phase 2 — Cortana Evolution)
     if not _bypass_attention and db:
         try:
@@ -83,15 +185,25 @@ async def send_notification(
     effective_cooldown = cooldown_hours if cooldown_hours is not None else DEFAULT_COOLDOWNS.get(category, 4.0)
     effective_topic = topic or f"{category}:{_hash_topic(title, message)}"
 
-    # Dedup check if we have a db session and a cooldown window
-    if db and effective_cooldown > 0:
-        is_dup = await _check_dedup(db, user_id, effective_topic, effective_cooldown)
+    # Dedup check:
+    # - normal path: category cooldown window
+    # - fallback safety net: short exact-topic window even when category cooldown is 0
+    if db:
+        dedup_window = effective_cooldown if effective_cooldown > 0 else MIN_EXACT_DEDUP_HOURS
+        include_category_limits = effective_cooldown > 0
+        is_dup = await _check_dedup(
+            db,
+            user_id,
+            effective_topic,
+            dedup_window,
+            include_category_limits=include_category_limits,
+        )
         if is_dup:
-            logger.info(f"Notification dedup blocked: topic={effective_topic} cooldown={effective_cooldown}h")
+            logger.info(f"Notification dedup blocked: topic={effective_topic} cooldown={dedup_window}h")
             # Log the blocked attempt
             await _log_notification(
                 db, user_id, effective_topic, category, title, message,
-                priority, source, agent_run_id, effective_cooldown,
+                priority, source, agent_run_id, dedup_window,
                 sent=False, dedup_blocked=True,
                 attention_item_id=_attention_item_id,
             )
@@ -125,25 +237,36 @@ async def send_notification(
         logger.warning(f"No push tokens for user {user_id}")
         return {"sent": False, "reason": "no_tokens"}
 
-    # Send via Expo push only if desktop delivery failed or wasn't available
-    success = desktop_sent
-    if tokens and not desktop_sent:
-        expo_success = await _send_expo_push(tokens, title, message, priority, source)
-        success = success or expo_success
-
-    if not success:
-        return {"sent": False, "reason": "expo_failed"}
-
-    # Log successful send
+    # Log optimistically before push so we can include notification_id in payload
+    notification_id = None
     if db:
+        logged_cooldown = effective_cooldown if effective_cooldown > 0 else MIN_EXACT_DEDUP_HOURS
         notification_id = await _log_notification(
             db, user_id, effective_topic, category, title, message,
-            priority, source, agent_run_id, effective_cooldown,
+            priority, source, agent_run_id, logged_cooldown,
             sent=True, dedup_blocked=False,
             attention_item_id=_attention_item_id,
         )
-    else:
-        notification_id = None
+
+    # Send via Expo push only if desktop delivery failed or wasn't available
+    success = desktop_sent
+    if tokens and not desktop_sent:
+        expo_success = await _send_expo_push(
+            tokens, title, message, priority, source,
+            notification_id=notification_id,
+        )
+        success = success or expo_success
+
+    if not success:
+        # Mark log as unsent if push failed
+        if notification_id and db:
+            try:
+                await _db_execute(db, text("""
+                    UPDATE notification_log SET sent = FALSE WHERE id = :id
+                """), {"id": notification_id})
+            except Exception:
+                pass
+        return {"sent": False, "reason": "expo_failed"}
 
     logger.info(f"Notification sent: topic={effective_topic} title={title[:50]}")
     return {
@@ -210,26 +333,40 @@ async def send_consolidated_notification(
             "details": results,
         }
 
-    # Filter through dedup
+    # Filter through ban check + dedup
     to_send = []
     results = []
     for notif in notifications:
         topic = notif.get("topic") or f"{notif.get('category', 'general')}:{_hash_topic(notif['title'], notif['message'])}"
         category = notif.get("category", "general")
-        cooldown = notif.get("cooldown_hours") or DEFAULT_COOLDOWNS.get(category, 4.0)
 
-        if db and cooldown and cooldown > 0:
-            is_dup = await _check_dedup(db, user_id, topic, cooldown)
+        # Ban check for each individual notification
+        ban_reason = await _check_notification_ban(user_id, notif["title"], notif["message"], category, db)
+        if ban_reason:
+            logger.info(f"Consolidated notif banned: {ban_reason} | title={notif['title'][:60]}")
+            results.append({"topic": topic, "sent": False, "reason": "banned_topic", "ban_reason": ban_reason})
+            continue
+
+        configured_cooldown = notif.get("cooldown_hours")
+        if configured_cooldown is None:
+            configured_cooldown = DEFAULT_COOLDOWNS.get(category, 4.0)
+        dedup_window = configured_cooldown if configured_cooldown > 0 else MIN_EXACT_DEDUP_HOURS
+        include_category_limits = configured_cooldown > 0
+
+        if db and dedup_window > 0:
+            is_dup = await _check_dedup(
+                db, user_id, topic, dedup_window, include_category_limits=include_category_limits
+            )
             if is_dup:
                 await _log_notification(
                     db, user_id, topic, category, notif["title"], notif["message"],
-                    notif.get("priority", "normal"), source, agent_run_id, cooldown,
+                    notif.get("priority", "normal"), source, agent_run_id, dedup_window,
                     sent=False, dedup_blocked=True
                 )
                 results.append({"topic": topic, "sent": False, "reason": "dedup"})
                 continue
 
-        to_send.append({**notif, "topic": topic, "category": category, "cooldown": cooldown})
+        to_send.append({**notif, "topic": topic, "category": category, "cooldown": dedup_window})
 
     if not to_send:
         return {"sent": False, "reason": "all_deduped", "details": results}
@@ -472,7 +609,7 @@ async def route_through_attention_queue(
         # Feature off — send directly (bypass attention to avoid recursion)
         return await send_notification(
             user_id=user_id, title=title, message=message,
-            priority=priority, category=category, source=source, db=db,
+            priority=priority, topic=dedupe_key, category=category, source=source, db=db,
             _bypass_attention=True,
         )
 
@@ -485,11 +622,24 @@ async def route_through_attention_queue(
         dedupe_key=dedupe_key, payload=payload,
     )
 
+    # If attention queue persistence is unavailable (e.g., missing table/migration),
+    # fail open to direct delivery rather than silently dropping low/normal notices.
+    if not item_id:
+        logger.warning(
+            "Attention queue unavailable for notification; falling back to direct send "
+            f"(category={category}, priority={priority}, topic={dedupe_key})"
+        )
+        return await send_notification(
+            user_id=user_id, title=title, message=message,
+            priority=priority, topic=dedupe_key, category=category, source=source, db=db,
+            _bypass_attention=True,
+        )
+
     # High priority and above: also send push (bypass attention to avoid recursion)
     if priority in ("high", "urgent", "critical"):
         result = await send_notification(
             user_id=user_id, title=title, message=message,
-            priority=priority, category=category, source=source, db=db,
+            priority=priority, topic=dedupe_key, category=category, source=source, db=db,
             _bypass_attention=True,
             _attention_item_id=item_id,
         )
@@ -510,7 +660,7 @@ async def get_todays_notifications(
     user_id: str,
 ) -> List[Dict[str, Any]]:
     """Get all notifications sent today for context injection."""
-    result = await db.execute(text("""
+    result = await _db_execute(db, text("""
         SELECT topic, category, title, message, priority, source, sent_at, sent, dedup_blocked
         FROM notification_log
         WHERE user_id = :user_id
@@ -550,10 +700,11 @@ async def _check_dedup(
     user_id: str,
     topic: str,
     cooldown_hours: float,
+    include_category_limits: bool = True,
 ) -> bool:
     """Check if a notification with this topic OR same category was sent within the cooldown window."""
     # Exact topic match check
-    result = await db.execute(text("""
+    result = await _db_execute(db, text("""
         SELECT COUNT(*) FROM notification_log
         WHERE user_id = :user_id
           AND topic = :topic
@@ -576,10 +727,13 @@ async def _check_dedup(
         "security": (4, 6.0),  # max 4 per 6 hours
         "checkin": (1, 6.0),   # max 1 per 6 hours
         "weather": (2, 8.0),   # max 2 per 8 hours
+        "health": (1, 24.0),   # max 1 per 24 hours
+        "fitness": (1, 24.0),  # max 1 per 24 hours
+        "wellness": (1, 24.0), # max 1 per 24 hours
     }
-    if category in category_limits:
+    if include_category_limits and category in category_limits:
         max_count, window_hours = category_limits[category]
-        result = await db.execute(text("""
+        result = await _db_execute(db, text("""
             SELECT COUNT(*) FROM notification_log
             WHERE user_id = :user_id
               AND category = :category
@@ -614,7 +768,7 @@ async def _log_notification(
     attention_item_id: Optional[str] = None,
 ) -> Optional[int]:
     """Log a notification attempt to notification_log."""
-    result = await db.execute(text("""
+    result = await _db_execute(db, text("""
         INSERT INTO notification_log
         (user_id, topic, category, title, message, priority, source,
          agent_run_id, cooldown_hours, sent, dedup_blocked, sent_at,
@@ -644,9 +798,10 @@ async def _log_notification(
 
 async def _get_push_tokens(db: AsyncSession, user_id: str) -> List[str]:
     """Get active push tokens using async session."""
-    result = await db.execute(text("""
-        SELECT token FROM push_token
+    result = await _db_execute(db, text("""
+        SELECT DISTINCT token FROM push_token
         WHERE user_id = :user_id AND is_active = true
+        ORDER BY token
     """), {"user_id": user_id})
     return [r.token for r in result.fetchall()]
 
@@ -662,8 +817,9 @@ async def _get_push_tokens_sync(user_id: str) -> List[str]:
     db = Session()
     try:
         result = db.execute(text("""
-            SELECT token FROM push_token
+            SELECT DISTINCT token FROM push_token
             WHERE user_id = :user_id AND is_active = true
+            ORDER BY token
         """), {"user_id": user_id}).fetchall()
         return [r.token for r in result]
     finally:
@@ -676,27 +832,32 @@ async def _send_expo_push(
     body: str,
     priority: str = "normal",
     source: str = "unified_heartbeat",
+    notification_id: Optional[int] = None,
 ) -> bool:
     """Send push notification via Expo Push API."""
-    if not tokens:
+    unique_tokens = [t for t in dict.fromkeys(tokens) if t]
+    if not unique_tokens:
         return False
 
     expo_priority = "high" if priority == "high" else "default"
+    push_data = {
+        "type": "heartbeat" if source == "unified_heartbeat" else source,
+        "priority": priority,
+        "title": title,
+        "message": body,
+    }
+    if notification_id is not None:
+        push_data["notification_id"] = notification_id
     messages = [
         {
             "to": token,
             "sound": "default",
             "title": title,
             "body": body,
-            "data": {
-                "type": "heartbeat" if source == "unified_heartbeat" else source,
-                "priority": priority,
-                "title": title,
-                "message": body,
-            },
+            "data": push_data,
             "priority": expo_priority,
         }
-        for token in tokens
+        for token in unique_tokens
     ]
 
     try:
@@ -710,7 +871,7 @@ async def _send_expo_push(
                 },
             )
             if response.status_code == 200:
-                logger.info(f"Expo push sent: {title[:50]}")
+                logger.info(f"Expo push sent to {len(unique_tokens)} token(s): {title[:50]}")
                 return True
             else:
                 logger.error(f"Expo push failed: {response.status_code} - {response.text[:200]}")
@@ -718,3 +879,14 @@ async def _send_expo_push(
     except Exception as e:
         logger.error(f"Expo push error: {e}")
         return False
+
+
+async def _db_execute(db: Any, query, params: Dict[str, Any]):
+    """
+    Execute SQL against either AsyncSession or sync Session.
+    This lets callers pass whichever session type they already have.
+    """
+    result = db.execute(query, params)
+    if inspect.isawaitable(result):
+        return await result
+    return result

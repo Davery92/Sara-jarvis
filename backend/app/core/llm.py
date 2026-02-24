@@ -13,6 +13,7 @@ import asyncio
 import httpx
 import json
 import logging
+import time
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field
@@ -21,6 +22,41 @@ from typing import Dict, List, Any, Optional, Callable
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _load_persisted_ai_setting_overrides() -> Dict[str, str]:
+    """
+    Load persisted AI settings from app_settings.
+
+    Background workers (e.g., Celery) don't run the FastAPI startup hook that
+    hydrates runtime globals from the DB, so they can drift back to defaults.
+    Reading app_settings here keeps model selection consistent across processes.
+    """
+    try:
+        from sqlalchemy import text
+        from app.db.session import SessionLocal
+
+        db = SessionLocal()
+        try:
+            rows = db.execute(text("""
+                SELECT key, value
+                FROM app_settings
+                WHERE key IN (
+                    'bg_llm_primary_url',
+                    'bg_llm_primary_model',
+                    'bg_llm_fallback_url',
+                    'bg_llm_fallback_model',
+                    'bg_llm_request_timeout',
+                    'bg_llm_connect_timeout',
+                    'bg_llm_num_ctx'
+                )
+            """)).fetchall()
+            return {row[0]: row[1] for row in rows}
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"Could not load persisted AI setting overrides: {e}")
+        return {}
 
 # Global callback for token usage logging (set by application)
 _token_usage_callback: Optional[Callable] = None
@@ -672,33 +708,76 @@ class BackgroundLLMClient:
     """
 
     def __init__(self):
-        self.primary_url = settings.bg_llm_primary_url
-        self.primary_model = settings.bg_llm_primary_model
-        self.fallback_url = settings.bg_llm_fallback_url
-        self.fallback_model = settings.bg_llm_fallback_model
+        self._load_config_from_settings()
 
         # HTTP clients (lazy initialization)
         self._primary_client: Optional[httpx.AsyncClient] = None
         self._fallback_client: Optional[httpx.AsyncClient] = None
         self._started = False
+        self._lesson_lock_group = "lesson_generation"
+        self._lesson_lock_poll_seconds = 5.0
+        self._lesson_lock_log_interval_seconds = 60.0
+
+    def _load_config_from_settings(self):
+        """Load current background LLM configuration from runtime settings."""
+        # Start from in-memory settings.
+        primary_url = settings.bg_llm_primary_url
+        primary_model = settings.bg_llm_primary_model
+        fallback_url = settings.bg_llm_fallback_url
+        fallback_model = settings.bg_llm_fallback_model
+        request_timeout = settings.bg_llm_request_timeout
+        connect_timeout = settings.bg_llm_connect_timeout
+        num_ctx = settings.bg_llm_num_ctx
+
+        # Override from persisted DB settings when available (important for
+        # Celery/background processes that don't run FastAPI startup hydration).
+        persisted = _load_persisted_ai_setting_overrides()
+        if persisted:
+            primary_url = persisted.get("bg_llm_primary_url", primary_url)
+            primary_model = persisted.get("bg_llm_primary_model", primary_model)
+            fallback_url = persisted.get("bg_llm_fallback_url", fallback_url)
+            fallback_model = persisted.get("bg_llm_fallback_model", fallback_model)
+            request_timeout = persisted.get("bg_llm_request_timeout", request_timeout)
+            connect_timeout = persisted.get("bg_llm_connect_timeout", connect_timeout)
+            num_ctx = persisted.get("bg_llm_num_ctx", num_ctx)
+
+            # Keep process-local settings object aligned so other code reading
+            # from settings sees the same values.
+            settings.bg_llm_primary_url = str(primary_url)
+            settings.bg_llm_primary_model = str(primary_model)
+            settings.bg_llm_fallback_url = str(fallback_url)
+            settings.bg_llm_fallback_model = str(fallback_model)
+            settings.bg_llm_request_timeout = float(request_timeout)
+            settings.bg_llm_connect_timeout = float(connect_timeout)
+            settings.bg_llm_num_ctx = int(num_ctx)
+
+        self.primary_url = str(primary_url)
+        self.primary_model = str(primary_model)
+        self.fallback_url = str(fallback_url)
+        self.fallback_model = str(fallback_model)
+        self.request_timeout = max(10.0, float(request_timeout))
+        self.connect_timeout = max(1.0, float(connect_timeout))
+        self.default_num_ctx = max(2048, int(num_ctx))
 
     async def _ensure_started(self):
         """Initialize HTTP clients if not already started"""
         if self._started:
             return
 
+        request_timeout = httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
         self._primary_client = httpx.AsyncClient(
             base_url=self.primary_url,
-            timeout=60.0  # Longer timeout for background tasks
+            timeout=request_timeout
         )
         self._fallback_client = httpx.AsyncClient(
             base_url=self.fallback_url,
-            timeout=60.0
+            timeout=request_timeout
         )
         self._started = True
         logger.info(
             f"Background LLM client started. Primary: {self.primary_url} ({self.primary_model}), "
-            f"Fallback: {self.fallback_url} ({self.fallback_model})"
+            f"Fallback: {self.fallback_url} ({self.fallback_model}), num_ctx={self.default_num_ctx}, "
+            f"timeouts(connect={self.connect_timeout}s, request={self.request_timeout}s)"
         )
 
     async def chat_completion(
@@ -706,7 +785,11 @@ class BackgroundLLMClient:
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        model: Optional[str] = None  # Allow override for specific tasks
+        model: Optional[str] = None,  # Allow override for specific tasks
+        options: Optional[Dict[str, Any]] = None,
+        allow_during_lesson_generation: bool = False,
+        allow_fallback: bool = True,
+        request_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Send chat completion with simple failover for background tasks.
@@ -715,7 +798,12 @@ class BackgroundLLMClient:
         1. Try primary model/endpoint first
         2. On failure, fall back to fallback model/endpoint
         """
+        if not allow_during_lesson_generation:
+            await self._wait_for_lesson_generation_window()
+
         await self._ensure_started()
+        req_timeout = float(request_timeout) if request_timeout is not None else float(self.request_timeout)
+        req_timeout = max(10.0, req_timeout)
 
         use_model = model or self.primary_model
         payload = {
@@ -725,33 +813,179 @@ class BackgroundLLMClient:
         }
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        merged_options: Dict[str, Any] = {}
+        if options:
+            merged_options.update(options)
+        if "num_ctx" not in merged_options:
+            merged_options["num_ctx"] = self.default_num_ctx
+        if merged_options:
+            payload["options"] = merged_options
 
         try:
             logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
-            response = await self._primary_client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            result = response.json()
+            result = await self._request_chat_with_compat(
+                client=self._primary_client,
+                payload=payload,
+                endpoint_url=self.primary_url,
+                request_timeout=req_timeout,
+            )
             logger.debug(f"Background LLM request successful via primary endpoint")
             return result
 
         except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
+            if not allow_fallback:
+                logger.warning(
+                    f"Background LLM primary request failed with fallback disabled: {e}"
+                )
+                raise
+
             logger.warning(f"Background LLM primary request failed: {e}, trying fallback")
 
             # Try fallback
             try:
+                fallback_model = self.fallback_model if model in (None, self.primary_model) else model
                 fallback_payload = {
                     **payload,
-                    "model": model if model else self.fallback_model
+                    "model": fallback_model,
                 }
                 logger.debug(f"Background LLM failover to {self.fallback_url} with model {self.fallback_model}")
-                response = await self._fallback_client.post("/chat/completions", json=fallback_payload)
-                response.raise_for_status()
-                result = response.json()
+                result = await self._request_chat_with_compat(
+                    client=self._fallback_client,
+                    payload=fallback_payload,
+                    endpoint_url=self.fallback_url,
+                    request_timeout=req_timeout,
+                )
                 logger.info(f"Background LLM failover to {self.fallback_url} successful")
                 return result
             except Exception as fallback_error:
                 logger.error(f"Background LLM fallback also failed: {fallback_error}")
                 raise
+
+    async def _request_chat_with_compat(
+        self,
+        client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        endpoint_url: str,
+        request_timeout: float,
+    ) -> Dict[str, Any]:
+        """
+        Request chat completion with compatibility fallback.
+
+        Normal path: OpenAI-compatible /chat/completions.
+        Compatibility path: if endpoint returns 404, try Ollama /api/chat
+        and convert response to OpenAI-like schema expected by callers.
+        """
+        try:
+            response = await client.post("/chat/completions", json=payload, timeout=request_timeout)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 404:
+                logger.warning(
+                    f"Endpoint {endpoint_url} returned 404 for /chat/completions; "
+                    "trying Ollama compatibility at /api/chat"
+                )
+                return await self._ollama_chat_completion(
+                    client=client,
+                    payload=payload,
+                    request_timeout=request_timeout,
+                )
+            raise
+
+    async def _ollama_chat_completion(
+        self,
+        client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        request_timeout: float,
+    ) -> Dict[str, Any]:
+        """Call Ollama /api/chat and normalize output to OpenAI schema."""
+        options = dict(payload.get("options") or {})
+        temperature = payload.get("temperature")
+        max_tokens = payload.get("max_tokens")
+        if temperature is not None and "temperature" not in options:
+            options["temperature"] = temperature
+        if max_tokens is not None and "num_predict" not in options:
+            options["num_predict"] = max_tokens
+
+        ollama_payload: Dict[str, Any] = {
+            "model": payload.get("model"),
+            "messages": payload.get("messages", []),
+            "stream": False,
+        }
+        if options:
+            ollama_payload["options"] = options
+
+        response = await client.post("/api/chat", json=ollama_payload, timeout=request_timeout)
+        response.raise_for_status()
+        raw = response.json()
+
+        message = raw.get("message") if isinstance(raw, dict) else {}
+        content = ""
+        if isinstance(message, dict):
+            content = str(message.get("content") or "").strip()
+        if not content:
+            content = str(raw.get("response") or "").strip() if isinstance(raw, dict) else ""
+
+        prompt_tokens = int(raw.get("prompt_eval_count") or 0) if isinstance(raw, dict) else 0
+        completion_tokens = int(raw.get("eval_count") or 0) if isinstance(raw, dict) else 0
+        total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "id": str(raw.get("id") or f"ollama-{int(time.time() * 1000)}") if isinstance(raw, dict) else f"ollama-{int(time.time() * 1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": str(raw.get("model") or payload.get("model") or "") if isinstance(raw, dict) else str(payload.get("model") or ""),
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+        }
+
+    async def _wait_for_lesson_generation_window(self) -> None:
+        """
+        Pause background LLM requests while high-context lesson generation is active.
+
+        This prevents periodic background model jobs from competing with
+        lesson generation and destabilizing the model process.
+        """
+        try:
+            from app.services.autonomy.coordination import get_coordinator
+
+            coordinator = get_coordinator()
+            waited_seconds = 0.0
+            next_log_at = 0.0
+            while True:
+                holder = await coordinator.get_lock_holder(self._lesson_lock_group)
+                if not holder:
+                    if waited_seconds > 0:
+                        logger.info(
+                            f"Background LLM resumed after waiting {int(waited_seconds)}s "
+                            "for lesson generation lock"
+                        )
+                    return
+
+                if waited_seconds >= next_log_at:
+                    logger.info(
+                        "Background LLM paused while lesson generation is active "
+                        f"(holder={holder}, waited={int(waited_seconds)}s)"
+                    )
+                    next_log_at = waited_seconds + self._lesson_lock_log_interval_seconds
+                await asyncio.sleep(self._lesson_lock_poll_seconds)
+                waited_seconds += self._lesson_lock_poll_seconds
+        except Exception as e:
+            # Fail-open: if lock coordination is unavailable, avoid breaking
+            # all background model traffic.
+            logger.debug(f"Lesson-generation pause check unavailable: {e}")
 
     async def close(self):
         """Close HTTP clients"""
@@ -759,8 +993,29 @@ class BackgroundLLMClient:
             await self._primary_client.aclose()
         if self._fallback_client:
             await self._fallback_client.aclose()
+        self._primary_client = None
+        self._fallback_client = None
         self._started = False
         logger.info("Background LLM client closed")
+
+    async def refresh_config(self):
+        """
+        Hot-reload client configuration after settings changes.
+        Safe to call repeatedly.
+        """
+        old = (self.primary_url, self.primary_model, self.fallback_url, self.fallback_model)
+        self._load_config_from_settings()
+        new = (self.primary_url, self.primary_model, self.fallback_url, self.fallback_model)
+
+        # Force client recreation so base URLs/timeouts update immediately.
+        await self.close()
+
+        if old != new:
+            logger.info(
+                "Background LLM config refreshed. "
+                f"Primary: {self.primary_url} ({self.primary_model}), "
+                f"Fallback: {self.fallback_url} ({self.fallback_model})"
+            )
 
     def get_status(self) -> Dict[str, Any]:
         """Get current configuration status"""
@@ -769,6 +1024,9 @@ class BackgroundLLMClient:
             "primary_model": self.primary_model,
             "fallback_url": self.fallback_url,
             "fallback_model": self.fallback_model,
+            "request_timeout": self.request_timeout,
+            "connect_timeout": self.connect_timeout,
+            "num_ctx": self.default_num_ctx,
             "started": self._started
         }
 

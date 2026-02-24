@@ -102,7 +102,7 @@ export default function SmartInsightsDashboard() {
 
   const loadPatterns = async () => {
     try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/api/patterns`, {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/detected-patterns`, {
         credentials: 'include'
       })
       if (response.ok) {

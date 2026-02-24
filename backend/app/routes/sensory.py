@@ -811,3 +811,233 @@ async def get_voice_listening(current_user=Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Failed to get voice listening status: {e}")
         return {"status": "error", "listening_enabled": True}
+
+
+# ── Jetson Health & Sensory Events (new voice+vision system) ──
+
+class JetsonHealthReport(BaseModel):
+    uptime_seconds: float = 0
+    cpu_percent: float = 0
+    memory_percent: float = 0
+    memory_used_mb: int = 0
+    gpu_available: bool = False
+    gpu_temperature_c: int = 0
+    gpu_memory_total_mb: int = 0
+    gpu_memory_used_mb: int = 0
+    gpu_memory_free_mb: int = 0
+    gpu_utilization_pct: int = 0
+    service_state: str = "unknown"
+
+
+class FaceDetectedEvent(BaseModel):
+    is_david: bool = False
+    confidence: float = 0.0
+    similarity: float = 0.0
+    source: str = "jetson_obsbot"
+    timestamp: Optional[float] = None
+
+
+class PresenceChangedEvent(BaseModel):
+    state: str  # "present", "absent", "unknown"
+    reason: str = ""
+    source: str = "jetson_obsbot"
+    timestamp: Optional[float] = None
+
+
+class ConversationStartEvent(BaseModel):
+    source: str = "jetson_voice"
+    timestamp: Optional[float] = None
+
+
+class ConversationEndEvent(BaseModel):
+    turns: int = 0
+    duration_seconds: float = 0.0
+    summary: str = ""
+    source: str = "jetson_voice"
+    timestamp: Optional[float] = None
+
+
+@router.post("/jetson/health")
+async def report_jetson_health(
+    report: JetsonHealthReport,
+    current_user=Depends(get_current_user),
+):
+    """Receive Jetson health report — store in Redis with 60s TTL."""
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r.setex("sara:jetson:health", 60, json.dumps(report.dict()))
+        r.setex("sara:jetson:online", 90, "1")
+
+        # Update unified context
+        try:
+            from app.services.unified_context import read_snapshot, write_snapshot
+            snapshot = await read_snapshot(current_user.id)
+            snapshot.jetson_online = True
+            await write_snapshot(current_user.id, snapshot)
+        except Exception as e:
+            logger.debug(f"Couldn't update unified context: {e}")
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Jetson health report failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/jetson/health")
+async def get_jetson_health(current_user=Depends(get_current_user)):
+    """Get latest Jetson health report from Redis."""
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        data = r.get("sara:jetson:health")
+        online = r.get("sara:jetson:online")
+        if data:
+            health = json.loads(data)
+            health["online"] = online == "1"
+            return health
+        return {"online": False, "service_state": "no_report"}
+    except Exception as e:
+        return {"online": False, "error": str(e)}
+
+
+@router.post("/vision/face-detected")
+async def report_face_detected(
+    event: FaceDetectedEvent,
+    current_user=Depends(get_current_user),
+):
+    """Report face detection from Jetson vision system."""
+    try:
+        from app.services.event_bus import emit_event, EventType
+        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
+
+        # Emit event bus event
+        await emit_event(
+            EventType.FACE_DETECTED,
+            user_id=current_user.id,
+            payload={
+                "is_david": event.is_david,
+                "confidence": event.confidence,
+                "similarity": event.similarity,
+            },
+            source=event.source,
+        )
+
+        # Feed activity state machine
+        if event.is_david:
+            activity_state_machine.process_signal(ActivitySignal(
+                signal_type="face",
+                source=event.source,
+                value="david_detected",
+                metadata={"is_david": True, "confidence": event.confidence},
+            ))
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Face detected report failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/vision/presence-changed")
+async def report_presence_changed(
+    event: PresenceChangedEvent,
+    current_user=Depends(get_current_user),
+):
+    """Report desk presence change from Jetson vision system."""
+    try:
+        from app.services.event_bus import emit_event, EventType
+        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
+
+        # Emit event bus event
+        await emit_event(
+            EventType.DESK_PRESENCE_CHANGED,
+            user_id=current_user.id,
+            payload={"state": event.state, "reason": event.reason},
+            source=event.source,
+        )
+
+        # Feed activity state machine
+        activity_state_machine.process_signal(ActivitySignal(
+            signal_type="desk_presence",
+            source=event.source,
+            value=event.state,
+            metadata={"reason": event.reason},
+        ))
+
+        # Update unified context
+        try:
+            from app.services.unified_context import read_snapshot, write_snapshot
+            snapshot = await read_snapshot(current_user.id)
+            snapshot.desk_presence = (event.state == "present")
+            await write_snapshot(current_user.id, snapshot)
+        except Exception as e:
+            logger.debug(f"Couldn't update unified context: {e}")
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Presence changed report failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/voice/conversation-started")
+async def report_conversation_started(
+    event: ConversationStartEvent,
+    current_user=Depends(get_current_user),
+):
+    """Report voice conversation start from Jetson."""
+    try:
+        from app.services.event_bus import emit_event, EventType
+
+        await emit_event(
+            EventType.VOICE_CONVERSATION_STARTED,
+            user_id=current_user.id,
+            payload={"source": event.source},
+            source=event.source,
+        )
+
+        # Update unified context
+        try:
+            from app.services.unified_context import read_snapshot, write_snapshot
+            snapshot = await read_snapshot(current_user.id)
+            snapshot.voice_conversation_active = True
+            await write_snapshot(current_user.id, snapshot)
+        except Exception as e:
+            logger.debug(f"Couldn't update unified context: {e}")
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Conversation start report failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/voice/conversation-ended")
+async def report_conversation_ended(
+    event: ConversationEndEvent,
+    current_user=Depends(get_current_user),
+):
+    """Report voice conversation end from Jetson."""
+    try:
+        from app.services.event_bus import emit_event, EventType
+
+        await emit_event(
+            EventType.VOICE_CONVERSATION_ENDED,
+            user_id=current_user.id,
+            payload={
+                "turns": event.turns,
+                "duration_seconds": event.duration_seconds,
+                "summary": event.summary,
+            },
+            source=event.source,
+        )
+
+        # Update unified context
+        try:
+            from app.services.unified_context import read_snapshot, write_snapshot
+            snapshot = await read_snapshot(current_user.id)
+            snapshot.voice_conversation_active = False
+            await write_snapshot(current_user.id, snapshot)
+        except Exception as e:
+            logger.debug(f"Couldn't update unified context: {e}")
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Conversation end report failed: {e}")
+        return {"status": "error", "message": str(e)}

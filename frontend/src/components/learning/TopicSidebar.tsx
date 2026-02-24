@@ -39,6 +39,21 @@ export default function TopicSidebar({
     topic.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (topic.description && topic.description.toLowerCase().includes(searchQuery.toLowerCase()))
   )
+  const showTree = searchQuery.trim().length === 0
+  const treeSource = showTree ? topics : filteredTopics
+  const childrenByParent = new Map<string | null, LearningTopic[]>()
+  for (const topic of treeSource) {
+    const key = topic.parent_id || null
+    const group = childrenByParent.get(key)
+    if (group) {
+      group.push(topic)
+    } else {
+      childrenByParent.set(key, [topic])
+    }
+  }
+  for (const group of childrenByParent.values()) {
+    group.sort((a, b) => (b.priority - a.priority) || a.title.localeCompare(b.title))
+  }
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -58,6 +73,62 @@ export default function TopicSidebar({
     if (level >= 0.5) return 'text-yellow-400'
     if (level >= 0.2) return 'text-orange-400'
     return 'text-gray-500'
+  }
+
+  const renderTopicNode = (topic: LearningTopic, depth: number = 0): React.ReactNode => {
+    const children = childrenByParent.get(topic.id) || []
+    return (
+      <React.Fragment key={topic.id}>
+        <button
+          onClick={() => onSelectTopic(topic)}
+          className={`w-full text-left px-4 py-3 hover:bg-gray-800 transition-colors border-l-2 ${
+            currentTopic?.id === topic.id
+              ? 'bg-gray-800 border-teal-500'
+              : 'border-transparent'
+          }`}
+          style={{ paddingLeft: `${16 + Math.min(depth, 6) * 14}px` }}
+        >
+          <div className="flex items-start gap-3 group">
+            <div className={`w-2 h-2 rounded-full mt-2 ${getStatusColor(topic.status)}`} />
+            <div className="flex-1 min-w-0">
+              <p className={`font-medium truncate ${
+                currentTopic?.id === topic.id ? 'text-white' : 'text-gray-300'
+              }`}>
+                {topic.title}
+              </p>
+              {topic.description && (
+                <p className="text-gray-500 text-xs mt-0.5 line-clamp-2">
+                  {topic.description}
+                </p>
+              )}
+              <div className="flex items-center gap-3 mt-1.5 text-xs">
+                <span className={getMasteryColor(topic.mastery_level)}>
+                  {Math.round(topic.mastery_level * 100)}% mastery
+                </span>
+                <span className="text-gray-600">
+                  P{topic.priority}
+                </span>
+              </div>
+            </div>
+            {onDeleteTopic && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (confirm(`Delete "${topic.title}"?`)) {
+                    onDeleteTopic(topic.id)
+                  }
+                }}
+                className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all mt-1 flex-shrink-0"
+                title="Delete topic"
+              >
+                <span className="material-icons text-sm">delete</span>
+              </button>
+            )}
+          </div>
+        </button>
+        {children.map((child) => renderTopicNode(child, depth + 1))}
+      </React.Fragment>
+    )
   }
 
   return (
@@ -151,7 +222,7 @@ export default function TopicSidebar({
           <div className="flex items-center justify-center py-8">
             <span className="text-gray-500">Loading...</span>
           </div>
-        ) : filteredTopics.length === 0 ? (
+        ) : treeSource.length === 0 ? (
           <div className="text-center py-8 px-4">
             <span className="material-icons text-4xl text-gray-600 mb-2">menu_book</span>
             <p className="text-gray-500 text-sm">
@@ -168,55 +239,9 @@ export default function TopicSidebar({
           </div>
         ) : (
           <div className="py-2">
-            {filteredTopics.map(topic => (
-              <button
-                key={topic.id}
-                onClick={() => onSelectTopic(topic)}
-                className={`w-full text-left px-4 py-3 hover:bg-gray-800 transition-colors border-l-2 ${
-                  currentTopic?.id === topic.id
-                    ? 'bg-gray-800 border-teal-500'
-                    : 'border-transparent'
-                }`}
-              >
-                <div className="flex items-start gap-3 group">
-                  <div className={`w-2 h-2 rounded-full mt-2 ${getStatusColor(topic.status)}`} />
-                  <div className="flex-1 min-w-0">
-                    <p className={`font-medium truncate ${
-                      currentTopic?.id === topic.id ? 'text-white' : 'text-gray-300'
-                    }`}>
-                      {topic.title}
-                    </p>
-                    {topic.description && (
-                      <p className="text-gray-500 text-xs mt-0.5 line-clamp-2">
-                        {topic.description}
-                      </p>
-                    )}
-                    <div className="flex items-center gap-3 mt-1.5 text-xs">
-                      <span className={getMasteryColor(topic.mastery_level)}>
-                        {Math.round(topic.mastery_level * 100)}% mastery
-                      </span>
-                      <span className="text-gray-600">
-                        P{topic.priority}
-                      </span>
-                    </div>
-                  </div>
-                  {onDeleteTopic && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (confirm(`Delete "${topic.title}"?`)) {
-                          onDeleteTopic(topic.id)
-                        }
-                      }}
-                      className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all mt-1 flex-shrink-0"
-                      title="Delete topic"
-                    >
-                      <span className="material-icons text-sm">delete</span>
-                    </button>
-                  )}
-                </div>
-              </button>
-            ))}
+            {showTree
+              ? (childrenByParent.get(null) || []).map(topic => renderTopicNode(topic))
+              : filteredTopics.map(topic => renderTopicNode(topic, 0))}
           </div>
         )}
       </div>

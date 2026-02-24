@@ -405,6 +405,34 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     sendMessage: (text: string) => handleSendMessage(text),
   }));
 
+  const messageContentToText = (content: any): string => {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .filter((part: any) => part?.type === 'text' && typeof part?.text === 'string')
+      .map((part: any) => part.text)
+      .join('\n')
+      .trim();
+  };
+
+  const resolveAssistantResponseText = async (rawText: string, convId?: string | null): Promise<string> => {
+    const direct = (rawText || '').trim();
+    if (direct) return direct;
+    if (!convId) return '';
+    try {
+      const history = await chatService.getConversationHistory(convId);
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const msg = history[i];
+        if (msg.role !== 'assistant') continue;
+        const text = messageContentToText(msg.content);
+        if (text) return text;
+      }
+    } catch (e) {
+      console.warn('[Chat] Failed to recover assistant response from history:', e);
+    }
+    return '';
+  };
+
   const handleSendMessage = async (messageText: string, images?: ImageAttachment[], inboxItemId?: string) => {
     // Clear previous suggestions when sending new message
     setSuggestedActions([]);
@@ -464,15 +492,21 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         setStreamingMessage(streamingMessageRef.current);
       },
       // onComplete - called when streaming finishes
-      (newConversationId: string, episodeId?: string) => {
+      async (newConversationId: string, episodeId?: string) => {
         // Haptic feedback on complete
         try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+
+        const resolvedConversationId = newConversationId || conversationId;
+        const responseText = await resolveAssistantResponseText(
+          streamingMessageRef.current,
+          resolvedConversationId
+        );
 
         // Add the complete assistant message with episode_id and cards
         const assistantMessage: Message = {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
-          content: streamingMessageRef.current,
+          content: responseText || 'I finished thinking, but no visible response text was returned.',
           created_at: new Date().toISOString(),
           episode_id: episodeId,  // Include episode_id for star rating
           cards: [...pendingCards],  // Attach accumulated cards
@@ -489,10 +523,10 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         // Always update conversation_id if backend provides one
         console.log('[Chat] 📨 Received conversation_id from backend:', newConversationId);
         console.log('[Chat] 📊 Current conversation_id:', conversationId);
-        if (newConversationId) {
-          if (newConversationId !== conversationId) {
-            console.log('[Chat] 🔄 Updating conversation_id from', conversationId, 'to', newConversationId);
-            setConversationId(newConversationId);
+        if (resolvedConversationId) {
+          if (resolvedConversationId !== conversationId) {
+            console.log('[Chat] 🔄 Updating conversation_id from', conversationId, 'to', resolvedConversationId);
+            setConversationId(resolvedConversationId);
           } else {
             console.log('[Chat] ✅ conversation_id already matches');
           }
@@ -670,13 +704,16 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         },
         // onComplete
         async (newConversationId: string, episodeId?: string) => {
-          const responseText = streamingMessageRef.current;
+          const responseText = await resolveAssistantResponseText(
+            streamingMessageRef.current,
+            newConversationId || conversationId
+          );
 
           // Add assistant message with episode_id for rating
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
             role: 'assistant',
-            content: responseText,
+            content: responseText || 'I finished thinking, but no visible response text was returned.',
             created_at: new Date().toISOString(),
             episode_id: episodeId,  // Include episode_id for star rating
           };
@@ -931,7 +968,15 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
               {Object.entries(groupedModels).map(([provider, models]) => (
                 <View key={provider}>
                   <Text style={styles.providerLabel}>
-                    {provider === 'anthropic' ? 'Claude' : provider === 'google' ? 'Gemini' : 'Local'}
+                    {provider === 'anthropic'
+                      ? 'Claude'
+                      : provider === 'google'
+                      ? 'Gemini'
+                      : provider === 'openai'
+                      ? 'OpenAI'
+                      : provider === 'codex'
+                      ? 'ChatGPT Codex'
+                      : 'Local'}
                   </Text>
                   {models.map((model) => (
                     <TouchableOpacity

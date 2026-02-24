@@ -156,7 +156,7 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             # Get the previous periodic entry for continuity (skip heartbeat entries)
             prev_result = db.execute(text("""
                 SELECT content, created_at, watching_for FROM sara_journal
-                WHERE user_id = :user_id AND entry_type IN ('periodic', 'unified')
+                WHERE user_id = :user_id AND entry_type IN ('periodic', 'unified', 'deliberation', 'consolidation')
                 ORDER BY created_at DESC LIMIT 1
             """), {"user_id": user_id}).fetchone()
             previous = prev_result if prev_result else None
@@ -265,7 +265,7 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             recent_unified = db.execute(text("""
                 SELECT id FROM sara_journal
                 WHERE user_id = :user_id
-                  AND entry_type = 'unified'
+                  AND entry_type IN ('unified', 'deliberation')
                   AND created_at >= :cutoff
                 LIMIT 1
             """), {"user_id": user_id, "cutoff": cutoff}).fetchone()

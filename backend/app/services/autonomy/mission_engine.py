@@ -15,9 +15,16 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+async def _exec(db, stmt, params=None):
+    """Execute SQL with either a sync or async session."""
+    result = db.execute(stmt, params) if params else db.execute(stmt)
+    if hasattr(result, '__await__'):
+        result = await result
+    return result
 
 
 class MissionEngine:
@@ -25,7 +32,7 @@ class MissionEngine:
 
     async def create_mission(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
         title: str,
         steps: List[Dict[str, Any]],
@@ -37,7 +44,7 @@ class MissionEngine:
     ) -> Optional[str]:
         """Create a new mission with steps."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 INSERT INTO autonomy_mission
                 (user_id, title, description, source, state, priority,
                  total_steps, requires_confirmation, metadata)
@@ -61,10 +68,10 @@ class MissionEngine:
 
             # Create steps
             for i, step in enumerate(steps):
-                await db.execute(text("""
+                await _exec(db, text("""
                     INSERT INTO autonomy_mission_step
                     (mission_id, step_index, action_name, action_args, description)
-                    VALUES (:mission_id::uuid, :step_index, :action_name,
+                    VALUES (CAST(:mission_id AS uuid), :step_index, :action_name,
                             CAST(:action_args AS jsonb), :description)
                     ON CONFLICT (mission_id, step_index) DO NOTHING
                 """), {
@@ -80,20 +87,20 @@ class MissionEngine:
             logger.error(f"Failed to create mission: {e}")
             return None
 
-    async def start_mission(self, db: AsyncSession, mission_id: str) -> bool:
+    async def start_mission(self, db, mission_id: str) -> bool:
         """Start a pending mission."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 UPDATE autonomy_mission
                 SET state = 'running', started_at = NOW(), updated_at = NOW()
-                WHERE id = :id::uuid AND state = 'pending'
+                WHERE id = CAST(:id AS uuid) AND state = 'pending'
             """), {"id": mission_id})
             return result.rowcount > 0
         except Exception as e:
             logger.error(f"Failed to start mission: {e}")
             return False
 
-    async def advance_mission(self, db: AsyncSession, mission_id: str) -> Dict[str, Any]:
+    async def advance_mission(self, db, mission_id: str) -> Dict[str, Any]:
         """
         Execute the next pending step of a mission.
 
@@ -101,11 +108,11 @@ class MissionEngine:
         """
         try:
             # Load mission
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 SELECT id::text, user_id, state, current_step_index, total_steps,
                        requires_confirmation, confirmed_at
                 FROM autonomy_mission
-                WHERE id = :id::uuid
+                WHERE id = CAST(:id AS uuid)
                 FOR UPDATE SKIP LOCKED
             """), {"id": mission_id})
             mission = result.fetchone()
@@ -119,26 +126,26 @@ class MissionEngine:
 
             # Auto-start if pending
             if state == "pending":
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission
                     SET state = 'running', started_at = NOW(), updated_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": mission_id})
 
             if current_idx >= total_steps:
                 # All steps done
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission
                     SET state = 'done', completed_at = NOW(), updated_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": mission_id})
                 return {"status": "completed", "mission_id": m_id}
 
             # Load current step
-            step_result = await db.execute(text("""
+            step_result = await _exec(db, text("""
                 SELECT id::text, action_name, action_args, status
                 FROM autonomy_mission_step
-                WHERE mission_id = :mid::uuid AND step_index = :idx
+                WHERE mission_id = CAST(:mid AS uuid) AND step_index = :idx
             """), {"mid": mission_id, "idx": current_idx})
             step = step_result.fetchone()
             if not step:
@@ -152,40 +159,40 @@ class MissionEngine:
 
             # Check confirmation requirement
             if req_confirm and not confirmed_at and current_idx == 0:
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission
                     SET state = 'awaiting_confirm', updated_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": mission_id})
                 return {"status": "awaiting_confirmation"}
 
             # Execute step
-            await db.execute(text("""
+            await _exec(db, text("""
                 UPDATE autonomy_mission_step
                 SET status = 'running', started_at = NOW()
-                WHERE id = :id::uuid
+                WHERE id = CAST(:id AS uuid)
             """), {"id": step_id})
 
             exec_result = await self._execute_step(action_name, action_args or {}, user_id, db)
             success = exec_result.get("success", False)
 
             if success:
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission_step
                     SET status = 'done', result = CAST(:result AS jsonb), completed_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": step_id, "result": json.dumps(exec_result, default=str)})
 
                 new_idx = current_idx + 1
                 completed_steps = new_idx
                 new_state = "done" if new_idx >= total_steps else "running"
 
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission
                     SET current_step_index = :idx, completed_steps = :completed,
                         state = :state, updated_at = NOW(),
                         completed_at = CASE WHEN :state = 'done' THEN NOW() ELSE completed_at END
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {
                     "idx": new_idx, "completed": completed_steps,
                     "state": new_state, "id": mission_id,
@@ -199,17 +206,17 @@ class MissionEngine:
                 }
             else:
                 error = exec_result.get("error", "Unknown error")
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission_step
                     SET status = 'failed', error_message = :error,
                         result = CAST(:result AS jsonb), completed_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": step_id, "error": error, "result": json.dumps(exec_result, default=str)})
 
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_mission
                     SET state = 'failed', completed_at = NOW(), updated_at = NOW()
-                    WHERE id = :id::uuid
+                    WHERE id = CAST(:id AS uuid)
                 """), {"id": mission_id})
 
                 return {
@@ -221,16 +228,16 @@ class MissionEngine:
             logger.error(f"Failed to advance mission {mission_id}: {e}")
             return {"status": "error", "error": str(e)}
 
-    async def confirm_mission(self, db: AsyncSession, mission_id: str, user_id: Optional[str] = None) -> bool:
+    async def confirm_mission(self, db, mission_id: str, user_id: Optional[str] = None) -> bool:
         """Confirm a mission that's awaiting confirmation. Scoped by user_id when provided."""
         try:
-            conditions = ["id = :id::uuid", "state = 'awaiting_confirm'"]
+            conditions = ["id = CAST(:id AS uuid)", "state = 'awaiting_confirm'"]
             params: Dict[str, Any] = {"id": mission_id}
             if user_id:
                 conditions.append("user_id = :user_id")
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
-            result = await db.execute(text(f"""
+            result = await _exec(db, text(f"""
                 UPDATE autonomy_mission
                 SET state = 'running', confirmed_at = NOW(), updated_at = NOW()
                 WHERE {where}
@@ -240,16 +247,16 @@ class MissionEngine:
             logger.error(f"Failed to confirm mission: {e}")
             return False
 
-    async def cancel_mission(self, db: AsyncSession, mission_id: str, user_id: Optional[str] = None) -> bool:
+    async def cancel_mission(self, db, mission_id: str, user_id: Optional[str] = None) -> bool:
         """Cancel a mission. Scoped by user_id when provided."""
         try:
-            conditions = ["id = :id::uuid", "state NOT IN ('done', 'failed', 'cancelled')"]
+            conditions = ["id = CAST(:id AS uuid)", "state NOT IN ('done', 'failed', 'cancelled')"]
             params: Dict[str, Any] = {"id": mission_id}
             if user_id:
                 conditions.append("user_id = :user_id")
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
-            result = await db.execute(text(f"""
+            result = await _exec(db, text(f"""
                 UPDATE autonomy_mission
                 SET state = 'cancelled', completed_at = NOW(), updated_at = NOW()
                 WHERE {where}
@@ -261,7 +268,7 @@ class MissionEngine:
 
     async def list_missions(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
         state: Optional[str] = None,
         limit: int = 20,
@@ -277,7 +284,7 @@ class MissionEngine:
         where = " AND ".join(conditions)
 
         try:
-            result = await db.execute(text(f"""
+            result = await _exec(db, text(f"""
                 SELECT id::text, title, description, source, state, priority,
                        total_steps, completed_steps, current_step_index,
                        requires_confirmation, metadata,
@@ -293,7 +300,7 @@ class MissionEngine:
                     "source": r[3], "state": r[4], "priority": r[5],
                     "total_steps": r[6], "completed_steps": r[7],
                     "current_step_index": r[8], "requires_confirmation": r[9],
-                    "metadata": r[10],
+                    "mission_metadata": r[10],
                     "created_at": r[11].isoformat() if r[11] else None,
                     "started_at": r[12].isoformat() if r[12] else None,
                     "completed_at": r[13].isoformat() if r[13] else None,
@@ -304,16 +311,16 @@ class MissionEngine:
             logger.error(f"Failed to list missions: {e}")
             return []
 
-    async def get_mission(self, db: AsyncSession, mission_id: str) -> Optional[Dict[str, Any]]:
+    async def get_mission(self, db, mission_id: str) -> Optional[Dict[str, Any]]:
         """Get a mission with its steps."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 SELECT id::text, user_id, title, description, source, state, priority,
                        total_steps, completed_steps, current_step_index,
                        requires_confirmation, metadata,
                        created_at, started_at, completed_at
                 FROM autonomy_mission
-                WHERE id = :id::uuid
+                WHERE id = CAST(:id AS uuid)
             """), {"id": mission_id})
             row = result.fetchone()
             if not row:
@@ -324,18 +331,18 @@ class MissionEngine:
                 "description": row[3], "source": row[4], "state": row[5],
                 "priority": row[6], "total_steps": row[7],
                 "completed_steps": row[8], "current_step_index": row[9],
-                "requires_confirmation": row[10], "metadata": row[11],
+                "requires_confirmation": row[10], "mission_metadata": row[11],
                 "created_at": row[12].isoformat() if row[12] else None,
                 "started_at": row[13].isoformat() if row[13] else None,
                 "completed_at": row[14].isoformat() if row[14] else None,
             }
 
             # Load steps
-            steps_result = await db.execute(text("""
+            steps_result = await _exec(db, text("""
                 SELECT id::text, step_index, action_name, action_args, description,
                        status, result, error_message, started_at, completed_at
                 FROM autonomy_mission_step
-                WHERE mission_id = :mid::uuid
+                WHERE mission_id = CAST(:mid AS uuid)
                 ORDER BY step_index
             """), {"mid": mission_id})
             mission["steps"] = [
@@ -354,12 +361,36 @@ class MissionEngine:
             logger.error(f"Failed to get mission: {e}")
             return None
 
+    async def get_runnable_missions(self, db) -> List[str]:
+        """Get IDs of missions that need to be advanced."""
+        try:
+            result = await _exec(db, text("""
+                SELECT id::text
+                FROM autonomy_mission
+                WHERE state IN ('running', 'pending')
+                  AND current_step_index < total_steps
+                ORDER BY
+                    CASE priority
+                        WHEN 'critical' THEN 0
+                        WHEN 'urgent' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'normal' THEN 3
+                        WHEN 'low' THEN 4
+                    END,
+                    created_at
+                LIMIT 5
+            """))
+            return [r[0] for r in result.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get runnable missions: {e}")
+            return []
+
     async def _execute_step(
         self,
         action_name: str,
         action_args: Dict[str, Any],
         user_id: str,
-        db: AsyncSession,
+        db,
     ) -> Dict[str, Any]:
         """Execute a single mission step using orchestrator primitives."""
         try:
@@ -387,30 +418,6 @@ class MissionEngine:
                 return {"success": False, "error": f"No executor for {action_name}: {e}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
-
-    async def get_runnable_missions(self, db: AsyncSession) -> List[str]:
-        """Get IDs of missions that need to be advanced."""
-        try:
-            result = await db.execute(text("""
-                SELECT id::text
-                FROM autonomy_mission
-                WHERE state IN ('running', 'pending')
-                  AND current_step_index < total_steps
-                ORDER BY
-                    CASE priority
-                        WHEN 'critical' THEN 0
-                        WHEN 'urgent' THEN 1
-                        WHEN 'high' THEN 2
-                        WHEN 'normal' THEN 3
-                        WHEN 'low' THEN 4
-                    END,
-                    created_at
-                LIMIT 5
-            """))
-            return [r[0] for r in result.fetchall()]
-        except Exception as e:
-            logger.error(f"Failed to get runnable missions: {e}")
-            return []
 
 
 # Module-level singleton

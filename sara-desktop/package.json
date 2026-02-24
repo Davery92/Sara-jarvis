@@ -1,6 +1,6 @@
 {
   "name": "sara-desktop",
-  "version": "1.0.41",
+  "version": "1.0.50",
   "description": "Sara Desktop Companion - Activity tracking, screenshots, and cross-device commands",
   "author": "Sara AI <sara@avery.cloud>",
   "type": "commonjs",

@@ -15,6 +15,8 @@ import asyncio
 from datetime import datetime, timedelta
 
 from app.celery_app import celery_app
+from sqlalchemy import text
+from app.core.timezone import USER_TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +28,20 @@ DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
     name="app.tasks.autonomy.unified_heartbeat",
     bind=True,
     queue="cognitive",
-    max_retries=2
+    max_retries=0
 )
 def unified_heartbeat(self):
     """
-    DEPRECATED: Use unified_agent instead.
-    Kept for backward compatibility — redirects to unified_agent.
+    DEPRECATED: The heartbeat/unified-agent system has been replaced by:
+    - derived-signal-refresh (5 min) — working memory updates
+    - salience-triggered deliberation (on-demand) — event-driven
+    - periodic-deliberation-fallback (30 min) — safety net
+    - afternoon/evening consolidation (2 PM, 9 PM) — deep reflection
+
+    This task is a no-op. Remove after confirming new system is stable.
     """
-    logger.info("unified_heartbeat called (deprecated) — redirecting to unified_agent")
-    return unified_agent(self)
+    logger.info("unified_heartbeat called (DEPRECATED no-op)")
+    return {"status": "deprecated_noop"}
 
 
 @celery_app.task(
@@ -100,12 +107,77 @@ async def _unified_agent_async():
 
         try:
             async with async_session() as db:
+                min_gap_seconds = int(os.getenv("UNIFIED_AGENT_MIN_GAP_SECONDS", "480"))
+                if min_gap_seconds > 0:
+                    last_run = await db.execute(
+                        text("""
+                            SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) AS seconds_since
+                            FROM agent_run_log
+                            WHERE user_id = :uid AND source = 'unified_agent'
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        """),
+                        {"uid": DEFAULT_USER_ID},
+                    )
+                    row = last_run.fetchone()
+                    if row and row.seconds_since is not None and float(row.seconds_since) < min_gap_seconds:
+                        return {
+                            "skipped": "recent_run_guard",
+                            "seconds_since_last_run": round(float(row.seconds_since), 1),
+                            "min_gap_seconds": min_gap_seconds,
+                        }
+
                 result = await run_unified_agent(db, DEFAULT_USER_ID)
                 return result
         finally:
             await engine.dispose()
     finally:
-        await coordinator.release_exclusive("heavy_llm")
+        await coordinator.release_exclusive("heavy_llm", "unified-agent")
+
+
+# ─── Standing Order Time Check ─────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.autonomy.standing_order_time_check",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def standing_order_time_check(self):
+    """
+    Lightweight periodic evaluator for time-based standing orders.
+
+    This keeps critical time automations (e.g., "all lights off at 11 PM")
+    running even when unified_agent is not scheduled.
+    """
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _standing_order_time_check_async()
+        )
+        return result
+    except RuntimeError:
+        return asyncio.run(_standing_order_time_check_async())
+    except Exception as e:
+        logger.error(f"Standing order time check failed: {e}")
+        raise self.retry(countdown=30, exc=e)
+
+
+async def _standing_order_time_check_async():
+    """Async implementation for standing order time checks."""
+    from app.db.session import SessionLocal
+    from app.services.standing_order_service import standing_order_service
+
+    now = datetime.now(USER_TIMEZONE)
+    sync_db = SessionLocal()
+    try:
+        results = await standing_order_service.evaluate_time_orders(sync_db, now)
+        return {
+            "status": "ok",
+            "checked_at": now.isoformat(),
+            "executed": len(results),
+        }
+    finally:
+        sync_db.close()
 
 
 # ─── Mission Worker (Phase 2 — Cortana Evolution) ───────────────────
@@ -184,7 +256,7 @@ async def _mission_worker_async():
         finally:
             await engine.dispose()
     finally:
-        await coordinator.release_exclusive("mission_processing")
+        await coordinator.release_exclusive("mission_processing", "mission-worker")
 
 
 @celery_app.task(
@@ -328,7 +400,7 @@ async def _anticipation_async(time_of_day: str):
         finally:
             await engine.dispose()
     finally:
-        await coordinator.release_exclusive("heavy_llm")
+        await coordinator.release_exclusive("heavy_llm", task_name)
 
 
 @celery_app.task(
@@ -403,7 +475,7 @@ async def _memory_consolidation_async():
                 # Mark low-importance episodes for decay (simplified)
                 decay_result = await db.execute(
                     text("""
-                        UPDATE episodes
+                        UPDATE episode
                         SET importance = importance * 0.95
                         WHERE created_at < :today
                         AND importance < 0.3
@@ -433,7 +505,7 @@ async def _memory_consolidation_async():
         finally:
             await engine.dispose()
     finally:
-        await coordinator.release_exclusive("reflection")
+        await coordinator.release_exclusive("reflection", "nightly-consolidation")
 
 
 @celery_app.task(
@@ -1392,3 +1464,193 @@ async def _autonomy_retention_async():
             return results
     finally:
         await engine.dispose()
+
+
+# ─── Derived Signal Refresh (Phase 1: Working Memory) ───────────
+
+@celery_app.task(
+    name="app.tasks.autonomy.derived_signal_refresh",
+    bind=True,
+    queue="low_priority",
+    max_retries=1,
+)
+def derived_signal_refresh(self):
+    """Refresh DB-dependent working memory signals every 5 minutes."""
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _derived_signal_refresh_async()
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_derived_signal_refresh_async())
+        return result
+    except Exception as e:
+        logger.error(f"Derived signal refresh failed: {e}")
+        raise self.retry(countdown=30, exc=e)
+
+
+async def _derived_signal_refresh_async():
+    from app.services.memory_subscribers import refresh_derived_signals
+    return await refresh_derived_signals(DEFAULT_USER_ID)
+
+
+# ─── Deliberation Tasks (Phase 3: Event-Driven Deliberation) ────
+
+@celery_app.task(
+    name="app.tasks.autonomy.trigger_deliberation",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def trigger_deliberation(self, user_id: str = None):
+    """
+    Run a deliberation cycle. Called by salience subscriber when threshold crossed,
+    or by periodic fallback.
+    """
+    uid = user_id or DEFAULT_USER_ID
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _deliberation_async(uid)
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_deliberation_async(uid))
+        return result
+    except Exception as e:
+        logger.error(f"Deliberation failed: {e}")
+        raise self.retry(countdown=60, exc=e)
+
+
+async def _deliberation_async(user_id: str):
+    from app.services.autonomy.coordination import get_coordinator
+
+    coordinator = get_coordinator()
+    if not await coordinator.acquire_exclusive("deliberation", "heavy_llm"):
+        return {"skipped": "exclusive_group_busy"}
+
+    try:
+        from app.services.salience import salience_scorer
+        # Double-check should_deliberate (may have been consumed since trigger)
+        if not await salience_scorer.should_deliberate(user_id):
+            return {"skipped": "below_threshold"}
+
+        from app.services.deliberation import deliberation_engine
+        from app.services.deliberation_gate import process_deliberation_result
+
+        result = await deliberation_engine.run(user_id)
+        summary = await process_deliberation_result(result, user_id)
+        return {
+            "status": "completed",
+            "thought": result.thought[:200],
+            "notifications": summary["notifications_sent"],
+            "home_actions": summary["home_actions_executed"],
+            "observations_consumed": summary["observations_consumed"],
+            "duration": result.duration_seconds,
+        }
+    finally:
+        await coordinator.release_exclusive("heavy_llm", "deliberation")
+
+
+@celery_app.task(
+    name="app.tasks.autonomy.periodic_deliberation_fallback",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def periodic_deliberation_fallback(self):
+    """
+    Safety net: check should_deliberate every 30 min in case event-driven triggers missed something.
+    Also prunes old observations.
+    """
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _deliberation_fallback_async()
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_deliberation_fallback_async())
+        return result
+    except Exception as e:
+        logger.error(f"Deliberation fallback failed: {e}")
+        return {"error": str(e)}
+
+
+async def _deliberation_fallback_async():
+    from app.services.salience import salience_scorer
+    from app.services.observation_log import prune_old
+
+    user_id = DEFAULT_USER_ID
+
+    # Prune old observations
+    pruned = await prune_old(user_id, max_age_hours=24)
+
+    # Check if deliberation is needed
+    if await salience_scorer.should_deliberate(user_id):
+        from app.services.deliberation import deliberation_engine
+        from app.services.deliberation_gate import process_deliberation_result
+        from app.services.autonomy.coordination import get_coordinator
+
+        coordinator = get_coordinator()
+        if not await coordinator.acquire_exclusive("deliberation-fallback", "heavy_llm"):
+            return {"skipped": "exclusive_group_busy", "pruned": pruned}
+
+        try:
+            result = await deliberation_engine.run(user_id)
+            summary = await process_deliberation_result(result, user_id)
+            return {
+                "status": "deliberated",
+                "pruned": pruned,
+                "notifications": summary["notifications_sent"],
+                "duration": result.duration_seconds,
+            }
+        finally:
+            await coordinator.release_exclusive("heavy_llm", "deliberation-fallback")
+
+    return {"status": "no_deliberation_needed", "pruned": pruned}
+
+
+# ─── Consolidation Task (Phase 4: Deep Reflection) ──────────────
+
+@celery_app.task(
+    name="app.tasks.autonomy.run_consolidation",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def run_consolidation(self):
+    """
+    Run consolidation — deep reflection on patterns and calibration.
+    Scheduled 2x daily: 2 PM and 9 PM.
+    """
+    try:
+        result = asyncio.get_event_loop().run_until_complete(
+            _consolidation_async()
+        )
+        return result
+    except RuntimeError:
+        result = asyncio.run(_consolidation_async())
+        return result
+    except Exception as e:
+        logger.error(f"Consolidation failed: {e}")
+        raise self.retry(countdown=120, exc=e)
+
+
+async def _consolidation_async():
+    from app.services.autonomy.coordination import get_coordinator
+
+    coordinator = get_coordinator()
+    if not await coordinator.acquire_exclusive("consolidation", "heavy_llm"):
+        return {"skipped": "exclusive_group_busy"}
+
+    try:
+        from app.services.consolidation import consolidation_engine
+        result = await consolidation_engine.run(DEFAULT_USER_ID)
+        return {
+            "status": "completed",
+            "patterns": len(result.patterns_noticed),
+            "pkg_extractions": len(result.pkg_extractions),
+            "journal_written": bool(result.journal_entry),
+            "duration": result.duration_seconds,
+        }
+    finally:
+        await coordinator.release_exclusive("heavy_llm", "consolidation")

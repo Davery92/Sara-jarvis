@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { PALETTE_NAV_VIEWS } from '../navigation/views';
 
 interface Command {
   id: string;
@@ -33,20 +34,19 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const commands: Command[] = [
-    // Navigation
-    { id: 'nav-home', title: 'Go to Home', icon: '🏠', keywords: ['home', 'dashboard'], action: () => onNavigate('dashboard'), category: 'navigation' },
-    { id: 'nav-chat', title: 'Go to Chat', icon: '💬', keywords: ['chat', 'talk', 'conversation'], action: () => onNavigate('chat'), category: 'navigation' },
-    { id: 'nav-notes', title: 'Go to Notes', icon: '📝', keywords: ['notes', 'knowledge', 'write'], action: () => onNavigate('notes'), category: 'navigation' },
-    { id: 'nav-calendar', title: 'Go to Calendar', icon: '📅', keywords: ['calendar', 'events', 'schedule', 'meetings'], action: () => onNavigate('calendar'), category: 'navigation' },
-    { id: 'nav-habits', title: 'Go to Habits', icon: '🎯', keywords: ['habits', 'tracking', 'goals'], action: () => onNavigate('habits'), category: 'navigation' },
-    { id: 'nav-memory', title: 'Go to Memory Garden', icon: '🧠', keywords: ['memory', 'garden', 'graph'], action: () => onNavigate('memory-garden'), category: 'navigation' },
-    { id: 'nav-insights', title: 'Go to Insights', icon: '💡', keywords: ['insights', 'sara', 'suggestions'], action: () => onNavigate('insights'), category: 'navigation' },
-    { id: 'nav-docs', title: 'Go to Documents', icon: '📄', keywords: ['documents', 'files', 'uploads'], action: () => onNavigate('documents'), category: 'navigation' },
-    { id: 'nav-email', title: 'Go to Email', icon: '📧', keywords: ['email', 'mail', 'inbox', 'messages'], action: () => onNavigate('email'), category: 'navigation' },
-    { id: 'nav-settings', title: 'Go to Settings', icon: '⚙️', keywords: ['settings', 'preferences', 'config'], action: () => onNavigate('settings'), category: 'navigation' },
+  const navigationCommands: Command[] = PALETTE_NAV_VIEWS
+    .filter((entry) => entry.view !== 'login' && entry.view !== currentView)
+    .map((entry) => ({
+      id: `nav-${entry.view}`,
+      title: `Go to ${entry.title}`,
+      icon: entry.icon,
+      keywords: entry.keywords,
+      action: () => onNavigate(entry.view),
+      category: 'navigation' as const,
+    }));
 
-    // Creation
+  const commands: Command[] = [
+    ...navigationCommands,
     ...(onCreateNote ? [{ id: 'create-note', title: 'Create New Note', icon: '✍️', keywords: ['new', 'create', 'note', 'write'], action: onCreateNote, category: 'create' as const }] : []),
     ...(onCreateEvent ? [{ id: 'create-event', title: 'Create New Event', icon: '📅', keywords: ['new', 'create', 'event', 'meeting', 'schedule'], action: onCreateEvent, category: 'create' as const }] : []),
     ...(onCreateThread ? [{ id: 'create-thread', title: 'New Conversation', icon: '💬', keywords: ['new', 'conversation', 'thread', 'chat'], action: onCreateThread, category: 'create' as const }] : []),

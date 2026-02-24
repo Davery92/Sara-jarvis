@@ -276,8 +276,11 @@ class ProactiveIntelligenceEngine:
             if typical_day is None or typical_hour is None:
                 return None
 
-            # Check if today matches typical day and approaching typical hour
-            if now.weekday() == typical_day and typical_hour - 1 <= now.hour < typical_hour:
+            # EXTRACT(DOW) uses Sunday=0..Saturday=6; Python weekday uses Monday=0..Sunday=6.
+            python_weekday = (int(typical_day) + 6) % 7
+
+            # Check if today matches typical day and we're approaching the typical hour.
+            if now.weekday() == python_weekday and typical_hour - 1 <= now.hour < typical_hour:
                 # Check if already worked out today
                 today_workout = await self._check_workout_today(user_id)
                 if today_workout:
@@ -351,7 +354,7 @@ class ProactiveIntelligenceEngine:
                 SELECT COUNT(*) as count
                 FROM food_log
                 WHERE user_id = :user_id
-                AND logged_at > NOW() - INTERVAL ':hours hours'
+                AND logged_at > NOW() - (:hours || ' hours')::interval
             """)
 
             result = self.db.execute(query, {"user_id": user_id, "hours": hours})
@@ -413,7 +416,7 @@ class ProactiveIntelligenceEngine:
                 FROM proactive_suggestion
                 WHERE user_id = :user_id
                 AND suggestion_type = :suggestion_type
-                AND created_at > NOW() - INTERVAL ':hours hours'
+                AND created_at > NOW() - (:hours || ' hours')::interval
             """)
 
             result = self.db.execute(query, {

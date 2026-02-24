@@ -37,6 +37,14 @@ def _is_quiet_hours(now: datetime) -> bool:
     return start <= h < end
 
 
+def _to_user_timezone(dt: datetime) -> datetime:
+    """Normalize event timestamps to the user's timezone."""
+    if dt.tzinfo is None:
+        # HA `last_changed` should be timezone-aware; treat naive as UTC.
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(USER_TZ)
+
+
 def _classify_ha_event(
     entity_id: str,
     domain: str,
@@ -54,6 +62,8 @@ def _classify_ha_event(
       activity_signal: signal dict for the activity state machine (or None)
       anomaly: anomaly description (or None)
     """
+    local_changed_at = _to_user_timezone(changed_at)
+
     result = {
         "event_type": "home.state_changed",
         "payload": {
@@ -63,6 +73,7 @@ def _classify_ha_event(
             "to_state": to_state,
             "friendly_name": attributes.get("friendly_name", entity_id),
             "changed_at": changed_at.isoformat(),
+            "changed_at_local": local_changed_at.isoformat(),
         },
         "activity_signal": None,
         "anomaly": None,
@@ -89,8 +100,11 @@ def _classify_ha_event(
             }
 
             # Anomaly: motion during quiet hours
-            if _is_quiet_hours(changed_at):
-                result["anomaly"] = f"Motion detected in {room or entity_id} during quiet hours ({changed_at.strftime('%H:%M')})"
+            if _is_quiet_hours(local_changed_at):
+                result["anomaly"] = (
+                    f"Motion detected in {room or entity_id} during quiet hours "
+                    f"({local_changed_at.strftime('%H:%M')})"
+                )
 
     # --- Door / window sensors ---
     elif domain == "binary_sensor" and any(
@@ -101,8 +115,11 @@ def _classify_ha_event(
         result["payload"]["opened"] = opened
         result["payload"]["location"] = _extract_room(entity_id) or friendly
 
-        if opened and _is_quiet_hours(changed_at):
-            result["anomaly"] = f"Door/window opened: {friendly or entity_id} at {changed_at.strftime('%H:%M')} (quiet hours)"
+        if opened and _is_quiet_hours(local_changed_at):
+            result["anomaly"] = (
+                f"Door/window opened: {friendly or entity_id} at "
+                f"{local_changed_at.strftime('%H:%M')} (quiet hours)"
+            )
 
     # --- Lights ---
     elif domain == "light":
@@ -120,8 +137,11 @@ def _classify_ha_event(
     # --- Lock ---
     elif domain == "lock":
         result["payload"]["locked"] = to_state == "locked"
-        if to_state == "unlocked" and _is_quiet_hours(changed_at):
-            result["anomaly"] = f"Lock unlocked: {friendly or entity_id} at {changed_at.strftime('%H:%M')} (quiet hours)"
+        if to_state == "unlocked" and _is_quiet_hours(local_changed_at):
+            result["anomaly"] = (
+                f"Lock unlocked: {friendly or entity_id} at "
+                f"{local_changed_at.strftime('%H:%M')} (quiet hours)"
+            )
 
     # --- Media player ---
     elif domain == "media_player":
@@ -205,7 +225,7 @@ async def bridge_ha_event(
                     signal_type=sig["signal_type"],
                     source=sig["source"],
                     value=sig["value"],
-                    timestamp=changed_at if changed_at.tzinfo else changed_at.replace(tzinfo=USER_TZ),
+                    timestamp=changed_at if changed_at.tzinfo else changed_at.replace(tzinfo=ZoneInfo("UTC")),
                     metadata=sig.get("metadata", {}),
                 )
             )

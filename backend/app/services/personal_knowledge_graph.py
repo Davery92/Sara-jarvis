@@ -10,6 +10,7 @@ temporal versioning.
 import os
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
@@ -397,6 +398,418 @@ class PersonalKnowledgeGraph:
         except Exception as e:
             logger.error(f"PKG: decay_stale_knowledge failed: {e}")
 
+    def validate_against_recent(self, db_session=None) -> Dict[str, Any]:
+        """
+        Validate active PKG facts against recent episode content.
+
+        Queries all active (non-superseded) PKG nodes (up to 200), then checks
+        30 days of episodes for confirmations, contradictions, or staleness.
+
+        No LLM calls — uses keyword matching and negation pattern detection.
+
+        Args:
+            db_session: Optional SQLAlchemy session. If None, creates one.
+
+        Returns:
+            {confirmed: int, contradictions: [...], stale: int, total_checked: int}
+        """
+        if not self._ensure_driver():
+            return {"confirmed": 0, "contradictions": [], "stale": 0, "total_checked": 0}
+
+        # 1. Fetch all active PKG nodes
+        try:
+            with self.driver.session() as neo_session:
+                result = neo_session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    RETURN labels(n) as labels, properties(n) as props
+                    ORDER BY n.confidence DESC
+                    LIMIT 200
+                """)
+                nodes = []
+                for record in result:
+                    nodes.append({
+                        "type": self._extract_pkg_label(record["labels"]),
+                        "props": dict(record["props"]),
+                    })
+        except Exception as e:
+            logger.error(f"PKG: validate_against_recent — Neo4j query failed: {e}")
+            return {"confirmed": 0, "contradictions": [], "stale": 0, "total_checked": 0}
+
+        if not nodes:
+            return {"confirmed": 0, "contradictions": [], "stale": 0, "total_checked": 0}
+
+        # 2. Fetch recent episode content from PostgreSQL
+        episode_texts = self._fetch_recent_episodes(db_session, days=30)
+
+        # 3. For each fact, check against episode content
+        now = datetime.now(timezone.utc)
+        stale_cutoff = now - timedelta(days=60)
+        confirmed = 0
+        contradictions = []
+        stale = 0
+
+        # Negation patterns that suggest a fact has changed
+        NEGATION_PATTERNS = [
+            r"(?:don'?t|doesn'?t|do not|does not)\s+(?:like|want|enjoy|prefer|use|do|eat|drink)",
+            r"(?:stopped|quit|gave up|no longer|not anymore|switched from|changed to)",
+            r"(?:hate|hates|dislike|dislikes|can'?t stand)",
+            r"(?:used to|formerly|previously)\s+(?:like|enjoy|prefer|do)",
+            r"(?:actually|now)\s+(?:prefer|like|enjoy|want|use)",
+        ]
+        negation_re = re.compile("|".join(NEGATION_PATTERNS), re.IGNORECASE)
+
+        for node in nodes:
+            props = node["props"]
+            pkg_id = props.get("pkg_id")
+            if not pkg_id:
+                continue
+
+            # Extract searchable terms from the fact
+            terms = self._extract_search_terms(node["type"], props)
+            if not terms:
+                continue
+
+            # Search episodes for term mentions
+            found_mention = False
+            found_contradiction = False
+            contradiction_evidence = ""
+
+            for episode_content in episode_texts:
+                content_lower = episode_content.lower()
+
+                # Check if any key terms appear in episode content
+                matching_terms = [t for t in terms if t.lower() in content_lower]
+                if not matching_terms:
+                    continue
+
+                found_mention = True
+
+                # Check for negation patterns near the matching terms
+                for term in matching_terms:
+                    # Find positions of the term in content
+                    term_lower = term.lower()
+                    idx = content_lower.find(term_lower)
+                    while idx != -1:
+                        # Check surrounding context (100 chars before and after)
+                        start = max(0, idx - 100)
+                        end = min(len(episode_content), idx + len(term) + 100)
+                        context_window = episode_content[start:end]
+
+                        if negation_re.search(context_window):
+                            found_contradiction = True
+                            contradiction_evidence = context_window.strip()[:200]
+                            break
+
+                        idx = content_lower.find(term_lower, idx + 1)
+
+                    if found_contradiction:
+                        break
+                if found_contradiction:
+                    break
+
+            # Apply results
+            if found_contradiction:
+                fact_summary = self._format_fact_natural(node["type"], props)
+                contradictions.append({
+                    "node_id": pkg_id,
+                    "fact_type": node["type"],
+                    "fact_summary": fact_summary,
+                    "contradiction_evidence": contradiction_evidence,
+                    "confidence": props.get("confidence", 0),
+                })
+                # Flag the node in Neo4j
+                try:
+                    with self.driver.session() as neo_session:
+                        neo_session.run("""
+                            MATCH (n {pkg_id: $pkg_id})
+                            SET n.needs_review = true,
+                                n.review_reason = 'contradiction_detected',
+                                n.review_evidence = $evidence,
+                                n.review_flagged_at = $now
+                        """, {
+                            "pkg_id": pkg_id,
+                            "evidence": contradiction_evidence[:500],
+                            "now": now.isoformat(),
+                        })
+                except Exception as e:
+                    logger.debug(f"PKG: Failed to flag node {pkg_id}: {e}")
+
+            elif found_mention:
+                # Fact is confirmed — bump confidence slightly
+                confirmed += 1
+                try:
+                    with self.driver.session() as neo_session:
+                        neo_session.run("""
+                            MATCH (n {pkg_id: $pkg_id})
+                            SET n.confidence = CASE
+                                WHEN n.confidence + 0.05 > 0.99 THEN 0.99
+                                ELSE n.confidence + 0.05
+                            END,
+                            n.last_confirmed = $now
+                        """, {"pkg_id": pkg_id, "now": now.isoformat()})
+                except Exception as e:
+                    logger.debug(f"PKG: Failed to confirm node {pkg_id}: {e}")
+
+            else:
+                # Fact not mentioned at all — check if it's stale
+                last_confirmed = props.get("last_confirmed", "")
+                if last_confirmed:
+                    try:
+                        # Handle both datetime and string
+                        if isinstance(last_confirmed, str):
+                            lc_dt = datetime.fromisoformat(last_confirmed.replace("Z", "+00:00"))
+                        else:
+                            lc_dt = last_confirmed
+                        if lc_dt.tzinfo is None:
+                            lc_dt = lc_dt.replace(tzinfo=timezone.utc)
+                        if lc_dt < stale_cutoff:
+                            stale += 1
+                            # Reduce confidence slightly for stale facts
+                            try:
+                                with self.driver.session() as neo_session:
+                                    neo_session.run("""
+                                        MATCH (n {pkg_id: $pkg_id})
+                                        WHERE n.confidence > 0.2
+                                        SET n.confidence = n.confidence - 0.05
+                                    """, {"pkg_id": pkg_id})
+                            except Exception as e:
+                                logger.debug(f"PKG: Failed to decay stale node {pkg_id}: {e}")
+                    except (ValueError, TypeError):
+                        pass  # Unparseable timestamp, skip
+
+        report = {
+            "confirmed": confirmed,
+            "contradictions": contradictions,
+            "stale": stale,
+            "total_checked": len(nodes),
+            "validated_at": now.isoformat(),
+        }
+
+        logger.info(
+            f"PKG: Validation complete — {confirmed} confirmed, "
+            f"{len(contradictions)} contradictions, {stale} stale "
+            f"(of {len(nodes)} checked)"
+        )
+        return report
+
+    def get_needs_review(self) -> List[Dict]:
+        """
+        Return all PKG nodes flagged with needs_review = true.
+        Used by the UI to show items needing human verification.
+        """
+        if not self._ensure_driver():
+            return []
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    AND n.needs_review = true
+                    RETURN labels(n) as labels, properties(n) as props
+                    ORDER BY n.review_flagged_at DESC
+                """)
+
+                items = []
+                for record in result:
+                    props = dict(record["props"])
+                    items.append({
+                        "type": self._extract_pkg_label(record["labels"]),
+                        "pkg_id": props.get("pkg_id"),
+                        "fact_summary": self._format_fact_natural(
+                            self._extract_pkg_label(record["labels"]), props
+                        ),
+                        "review_reason": props.get("review_reason", "unknown"),
+                        "review_evidence": props.get("review_evidence", ""),
+                        "review_flagged_at": props.get("review_flagged_at", ""),
+                        "confidence": props.get("confidence", 0),
+                        **{k: v for k, v in props.items()
+                           if k not in ("dedup_key", "needs_review",
+                                        "review_reason", "review_evidence",
+                                        "review_flagged_at")},
+                    })
+
+                return items
+        except Exception as e:
+            logger.error(f"PKG: get_needs_review failed: {e}")
+            return []
+
+    def mark_reviewed(self, pkg_id: str, new_confidence: Optional[float] = None) -> bool:
+        """
+        Clear the needs_review flag after a user reviews a fact.
+        Optionally update confidence if the user adjusts it.
+
+        Args:
+            pkg_id: The PKG node ID
+            new_confidence: Optional new confidence value (0.0–1.0)
+
+        Returns:
+            True on success
+        """
+        if not self._ensure_driver():
+            return False
+
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            with self.driver.session() as session:
+                if new_confidence is not None:
+                    new_confidence = min(max(new_confidence, 0.0), 0.99)
+                    session.run("""
+                        MATCH (n {pkg_id: $pkg_id})
+                        SET n.needs_review = false,
+                            n.confidence = $confidence,
+                            n.last_confirmed = $now
+                        REMOVE n.review_reason, n.review_evidence, n.review_flagged_at
+                    """, {
+                        "pkg_id": pkg_id,
+                        "confidence": new_confidence,
+                        "now": now,
+                    })
+                else:
+                    session.run("""
+                        MATCH (n {pkg_id: $pkg_id})
+                        SET n.needs_review = false,
+                            n.last_confirmed = $now
+                        REMOVE n.review_reason, n.review_evidence, n.review_flagged_at
+                    """, {"pkg_id": pkg_id, "now": now})
+
+                logger.info(f"PKG: Marked {pkg_id} as reviewed"
+                           + (f" (confidence={new_confidence})" if new_confidence is not None else ""))
+                return True
+        except Exception as e:
+            logger.error(f"PKG: mark_reviewed failed: {e}")
+            return False
+
+    def _extract_search_terms(self, fact_type: str, props: Dict) -> List[str]:
+        """
+        Extract key terms from a PKG fact for text-matching against episodes.
+        Returns a list of terms that are meaningful enough to search for.
+        """
+        terms = []
+
+        # Type-specific key fields
+        if fact_type == "Person":
+            name = props.get("name", "")
+            if name and len(name) >= 2:
+                terms.append(name)
+
+        elif fact_type == "Preference":
+            value = props.get("value", "")
+            key = props.get("key", "")
+            if value and len(value) >= 3:
+                terms.append(value)
+            if key and len(key) >= 3:
+                terms.append(key)
+
+        elif fact_type == "Routine":
+            activity = props.get("activity", "")
+            if activity and len(activity) >= 3:
+                terms.append(activity)
+
+        elif fact_type == "Goal":
+            desc = props.get("description", "")
+            if desc:
+                # Extract significant words from goal description
+                words = [w for w in desc.split() if len(w) >= 4]
+                terms.extend(words[:3])
+
+        elif fact_type == "Interest":
+            topic = props.get("topic", "")
+            if topic and len(topic) >= 3:
+                terms.append(topic)
+
+        elif fact_type == "Health":
+            metric = props.get("metric", "")
+            if metric and len(metric) >= 3:
+                terms.append(metric)
+
+        elif fact_type == "Place":
+            name = props.get("name", "")
+            if name and len(name) >= 3:
+                terms.append(name)
+
+        elif fact_type == "Fact":
+            subject = props.get("subject", "")
+            obj = props.get("object", "")
+            if subject and len(subject) >= 3:
+                terms.append(subject)
+            if obj and len(obj) >= 3:
+                terms.append(obj)
+
+        # Also check generic value/name fields
+        for field in ("name", "value", "topic", "activity", "metric"):
+            val = props.get(field, "")
+            if val and len(val) >= 3 and val not in terms:
+                terms.append(val)
+
+        # Deduplicate
+        seen = set()
+        unique_terms = []
+        for t in terms:
+            t_lower = t.lower()
+            if t_lower not in seen:
+                seen.add(t_lower)
+                unique_terms.append(t)
+
+        return unique_terms
+
+    def _fetch_recent_episodes(self, db_session=None, days: int = 30) -> List[str]:
+        """
+        Fetch recent episode content from PostgreSQL.
+        Returns a list of episode content strings.
+        """
+        from sqlalchemy import text as sa_text
+
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        # If a synchronous session is provided, use it
+        if db_session is not None:
+            try:
+                rows = db_session.execute(sa_text("""
+                    SELECT content FROM episode
+                    WHERE created_at >= :since
+                    AND content IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                """), {"since": since}).fetchall()
+                return [row.content for row in rows if row.content]
+            except Exception as e:
+                logger.error(f"PKG: _fetch_recent_episodes (sync) failed: {e}")
+                return []
+
+        # Otherwise create our own sync session
+        try:
+            database_url = os.getenv("DATABASE_URL", "")
+            # Ensure we use a sync driver
+            if "asyncpg" in database_url:
+                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+            elif "psycopg" in database_url:
+                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+            from sqlalchemy import create_engine
+            engine = create_engine(database_url, echo=False)
+            from sqlalchemy.orm import sessionmaker as sync_sessionmaker
+            Session = sync_sessionmaker(bind=engine)
+            session = Session()
+            try:
+                rows = session.execute(sa_text("""
+                    SELECT content FROM episode
+                    WHERE created_at >= :since
+                    AND content IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                """), {"since": since}).fetchall()
+                return [row.content for row in rows if row.content]
+            finally:
+                session.close()
+                engine.dispose()
+        except Exception as e:
+            logger.error(f"PKG: _fetch_recent_episodes (own session) failed: {e}")
+            return []
+
     def detect_contradictions(self, fact_type: str, properties: Dict) -> List[Dict]:
         """
         Find potentially conflicting existing facts.
@@ -774,6 +1187,234 @@ class PersonalKnowledgeGraph:
         except Exception as e:
             logger.error(f"PKG: _get_top_facts failed: {e}")
             return []
+
+    def identify_knowledge_gaps(self, db_session=None) -> List[Dict]:
+        """
+        Find topics David discusses frequently but that have no PKG representation.
+
+        Queries the last 30 days of episodes for recurring topics/entities,
+        then cross-references against existing PKG nodes. If a topic appears
+        3+ times in user messages but has no matching PKG node, it's a gap.
+
+        Args:
+            db_session: Optional SQLAlchemy sync session. Creates one if None.
+
+        Returns:
+            List of gap dicts: [{"topic": ..., "mentions": N, "suggested_type": "Interest/Fact/Person"}]
+        """
+        # 1. Get episode content (user messages only, last 30 days)
+        from sqlalchemy import text as sa_text
+
+        if db_session is not None:
+            try:
+                rows = db_session.execute(sa_text("""
+                    SELECT content FROM episode
+                    WHERE role = 'user'
+                      AND content IS NOT NULL
+                      AND created_at >= NOW() - INTERVAL '30 days'
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                """)).fetchall()
+                user_texts = [row.content for row in rows if row.content]
+            except Exception as e:
+                logger.error(f"PKG: identify_knowledge_gaps — episode query failed: {e}")
+                return []
+        else:
+            try:
+                database_url = os.getenv("DATABASE_URL", "")
+                if "asyncpg" in database_url:
+                    database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+                elif "psycopg" in database_url:
+                    database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+                from sqlalchemy import create_engine
+                from sqlalchemy.orm import sessionmaker as sync_sessionmaker
+                engine = create_engine(database_url, echo=False)
+                Session = sync_sessionmaker(bind=engine)
+                session = Session()
+                try:
+                    rows = session.execute(sa_text("""
+                        SELECT content FROM episode
+                        WHERE role = 'user'
+                          AND content IS NOT NULL
+                          AND created_at >= NOW() - INTERVAL '30 days'
+                        ORDER BY created_at DESC
+                        LIMIT 500
+                    """)).fetchall()
+                    user_texts = [row.content for row in rows if row.content]
+                finally:
+                    session.close()
+                    engine.dispose()
+            except Exception as e:
+                logger.error(f"PKG: identify_knowledge_gaps — own session failed: {e}")
+                return []
+
+        if not user_texts:
+            return []
+
+        # 2. Extract meaningful multi-word phrases and single significant words
+        import re
+        from collections import Counter
+
+        stop_words = {
+            "that", "this", "with", "from", "have", "been", "will",
+            "would", "could", "should", "about", "which", "their",
+            "there", "what", "when", "where", "your", "just",
+            "like", "know", "make", "also", "well", "some",
+            "them", "than", "then", "into", "over", "such",
+            "more", "most", "much", "many", "each", "very",
+            "they", "here", "were", "being", "does", "doing",
+            "done", "going", "want", "need", "sure", "yeah",
+            "okay", "really", "think", "good", "thanks", "thank",
+            "please", "right", "thing", "things", "look", "help",
+            "can't", "don't", "it's", "i'm", "i've", "let's",
+            "didn't", "doesn't", "isn't", "aren't", "wasn't",
+            "weren't", "hadn't", "hasn't", "haven't", "won't",
+            "wouldn't", "couldn't", "shouldn't", "might", "still",
+            "sara", "tell", "show", "give", "take", "come",
+            "time", "even", "back", "only", "gets", "keep",
+        }
+
+        # Count significant words per message (unique per message)
+        word_counter = Counter()
+        for text_content in user_texts:
+            words = re.findall(r'\b[a-z]{4,}\b', text_content.lower())
+            significant = set(w for w in words if w not in stop_words)
+            word_counter.update(significant)
+
+        # Topics mentioned 3+ times across distinct messages
+        frequent = [(word, count) for word, count in word_counter.most_common(50) if count >= 3]
+
+        if not frequent:
+            return []
+
+        # 3. Cross-reference against existing PKG nodes
+        if not self._ensure_driver():
+            return []
+
+        # Get all active PKG node text content for matching
+        existing_terms = set()
+        try:
+            with self.driver.session() as neo_session:
+                result = neo_session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    RETURN
+                        coalesce(toLower(n.topic), '') as topic,
+                        coalesce(toLower(n.name), '') as name,
+                        coalesce(toLower(n.activity), '') as activity,
+                        coalesce(toLower(n.key), '') as key_prop,
+                        coalesce(toLower(n.value), '') as value_prop,
+                        coalesce(toLower(n.subject), '') as subject,
+                        coalesce(toLower(n.metric), '') as metric,
+                        coalesce(toLower(n.description), '') as description
+                """)
+                for record in result:
+                    for field_val in [record["topic"], record["name"], record["activity"],
+                                     record["key_prop"], record["value_prop"],
+                                     record["subject"], record["metric"],
+                                     record["description"]]:
+                        if field_val and len(field_val) >= 3:
+                            existing_terms.add(field_val)
+                            # Also add individual words for fuzzy matching
+                            for word in re.findall(r'\b[a-z]{4,}\b', field_val):
+                                existing_terms.add(word)
+        except Exception as e:
+            logger.error(f"PKG: identify_knowledge_gaps — Neo4j query failed: {e}")
+            return []
+
+        # 4. Find gaps: frequently discussed topics NOT in PKG
+        gaps = []
+        for topic, mentions in frequent:
+            # Check if this word (or a close form) exists in PKG
+            if topic in existing_terms:
+                continue
+
+            # Guess the likely PKG type
+            # Proper nouns (capitalized in original text) are likely Person names
+            # Check original text for capitalization
+            is_capitalized = False
+            for text_content in user_texts[:50]:  # check first 50 messages
+                pattern = re.compile(r'\b' + re.escape(topic) + r'\b', re.IGNORECASE)
+                match = pattern.search(text_content)
+                if match:
+                    # Check if it was capitalized in original
+                    original_word = match.group()
+                    if original_word[0].isupper():
+                        is_capitalized = True
+                        break
+
+            if is_capitalized and len(topic) <= 15:
+                suggested_type = "Person"
+            elif topic in ("project", "goal", "plan", "build", "create", "finish", "learn"):
+                suggested_type = "Goal"
+            else:
+                suggested_type = "Interest"
+
+            gaps.append({
+                "topic": topic,
+                "mentions": mentions,
+                "suggested_type": suggested_type,
+            })
+
+        # Sort by mention count descending, cap at 10
+        gaps.sort(key=lambda g: g["mentions"], reverse=True)
+        gaps = gaps[:10]
+
+        logger.info(f"PKG: Identified {len(gaps)} knowledge gaps")
+        return gaps
+
+    def promote_high_confidence(self, db_session=None, min_confirmations: int = 3) -> int:
+        """
+        Promote facts confirmed multiple times in the last 30 days to high confidence (0.9+).
+
+        Checks times_confirmed and recent confirmation evidence to boost
+        well-established facts.
+
+        Args:
+            db_session: Optional SQLAlchemy sync session (unused, kept for consistency)
+            min_confirmations: Minimum times_confirmed to qualify for promotion
+
+        Returns:
+            Number of facts promoted
+        """
+        if not self._ensure_driver():
+            return 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    AND n.confidence < 0.9
+                    AND n.confidence >= 0.5
+                    AND n.times_confirmed >= $min_confirmations
+                    AND n.last_confirmed >= $since
+                    SET n.confidence = CASE
+                        WHEN n.confidence + 0.1 > 0.95 THEN 0.95
+                        ELSE n.confidence + 0.1
+                    END,
+                    n.last_confirmed = $now
+                    RETURN count(n) as promoted
+                """, {
+                    "min_confirmations": min_confirmations,
+                    "since": thirty_days_ago,
+                    "now": now,
+                })
+                record = result.single()
+                promoted = record["promoted"] if record else 0
+
+                if promoted > 0:
+                    logger.info(f"PKG: Promoted {promoted} well-confirmed facts to higher confidence")
+                return promoted
+        except Exception as e:
+            logger.error(f"PKG: promote_high_confidence failed: {e}")
+            return 0
 
     def close(self):
         """Close Neo4j driver"""

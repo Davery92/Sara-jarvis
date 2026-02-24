@@ -79,10 +79,15 @@ class ContextLayer:
         """
         previous_context = self._read_layer(user_id)
 
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y")
+
         prompt = CONTEXT_LAYER_UPDATE.format(
             day_content=day_content or "No conversations today.",
             previous_context=previous_context or "No previous context.",
-            dream_insights="No recent dream insights."
+            dream_insights="No recent dream insights.",
+            today_date=today_str,
         )
 
         try:

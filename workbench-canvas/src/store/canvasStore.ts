@@ -4,13 +4,15 @@ import { workspaceApi, mapsApi, type WorkspaceStateData } from '../services/api'
 import type {
   CanvasTransform, CanvasMode, WindowInstance, Position, Size, NoteWindowData,
   WindowType, WindowData, SceneObject, Position3D, Rotation3D, ModelFormat,
-  MapInstance, MapNode, MapEdge, MapSelection, MapData, MapNodeContent, VisibleMapState
+  MapInstance, MapNode, MapEdge, MapSelection, MapData, MapNodeContent, VisibleMapState,
+  WorkspaceScene,
 } from '../types'
 
 // Window defaults for each type
 const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title: string }> = {
   note: { width: 800, height: 500, title: 'Notes' },
   chat: { width: 600, height: 700, title: 'Chat with Sara' },
+  learning: { width: 980, height: 720, title: 'Learning' },
   fitness: { width: 800, height: 600, title: 'Fitness' },
   projects: { width: 900, height: 700, title: 'Projects' },
   timers: { width: 400, height: 350, title: 'Timers' },
@@ -20,6 +22,11 @@ const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title
   research: { width: 700, height: 600, title: 'Research' },
   report: { width: 500, height: 450, title: 'Report' },
   email: { width: 700, height: 600, title: 'Email' },
+  documents: { width: 900, height: 650, title: 'Documents' },
+  automation: { width: 900, height: 700, title: 'Automation' },
+  pkg: { width: 900, height: 700, title: 'Personal Knowledge Graph' },
+  intelligence: { width: 900, height: 700, title: 'Intelligence Feed' },
+  temerant: { width: 900, height: 720, title: 'Temerant' },
 }
 
 interface WindowOptions {
@@ -53,6 +60,10 @@ interface CanvasState {
   // Maps (mindmaps/flowcharts)
   maps: MapInstance[]
   mapSelection: MapSelection | null
+
+  // Workspace scenes
+  scenes: WorkspaceScene[]
+  activeSceneId: string | null
 
   // Transform actions
   setTransform: (transform: Partial<CanvasTransform>) => void
@@ -111,6 +122,11 @@ interface CanvasState {
   completeConnection: (targetNodeId: string, targetHandle: 'top' | 'right' | 'bottom' | 'left') => void
   cancelConnection: () => void
 
+  // Scene actions
+  saveScene: (name: string, description?: string) => void
+  loadScene: (sceneId: string) => void
+  deleteScene: (sceneId: string) => void
+
   // Persistence actions
   saveStateToServer: () => Promise<void>
   loadStateFromServer: () => Promise<void>
@@ -118,9 +134,71 @@ interface CanvasState {
 }
 
 const modes: CanvasMode[] = ['notes', 'sketch', 'reference']
+const VALID_WINDOW_TYPES = new Set<WindowType>(Object.keys(WINDOW_DEFAULTS) as WindowType[])
 
 // Helper to generate unique IDs
 const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+
+// Built-in workspace scenes
+const BUILT_IN_SCENES: WorkspaceScene[] = [
+  {
+    id: 'builtin-morning',
+    name: 'Morning',
+    description: 'Chat + Food logging to start the day',
+    windows: [
+      { type: 'chat', title: 'Chat with Sara', position: { x: 60, y: 60 }, size: { width: 600, height: 700 }, data: {} },
+      { type: 'fitness', title: 'Fitness', position: { x: 700, y: 60 }, size: { width: 600, height: 600 }, data: { initialView: 'food' } },
+    ],
+    transform: { x: 0, y: 0, scale: 1 },
+    isBuiltIn: true,
+    suggestedTimePeriods: ['morning'],
+  },
+  {
+    id: 'builtin-focus',
+    name: 'Focus',
+    description: 'Chat + Projects for deep work',
+    windows: [
+      { type: 'chat', title: 'Chat with Sara', position: { x: 60, y: 60 }, size: { width: 550, height: 700 }, data: {} },
+      { type: 'projects', title: 'Projects', position: { x: 650, y: 60 }, size: { width: 900, height: 700 }, data: {} },
+    ],
+    transform: { x: 0, y: 0, scale: 1 },
+    isBuiltIn: true,
+    suggestedTimePeriods: ['morning', 'afternoon'],
+  },
+  {
+    id: 'builtin-learning',
+    name: 'Learning',
+    description: 'Learning + Notes + Research',
+    windows: [
+      { type: 'learning', title: 'Learning', position: { x: 60, y: 60 }, size: { width: 700, height: 700 }, data: {} },
+      { type: 'note', title: 'Notes', position: { x: 800, y: 60 }, size: { width: 600, height: 400 }, data: {} },
+      { type: 'research', title: 'Research', position: { x: 800, y: 500 }, size: { width: 600, height: 400 }, data: {} },
+    ],
+    transform: { x: 0, y: 0, scale: 1 },
+    isBuiltIn: true,
+    suggestedTimePeriods: ['afternoon', 'evening'],
+  },
+  {
+    id: 'builtin-winddown',
+    name: 'Wind Down',
+    description: 'Fitness dashboard + Notes for the evening',
+    windows: [
+      { type: 'fitness', title: 'Fitness', position: { x: 60, y: 60 }, size: { width: 700, height: 600 }, data: { initialView: 'dashboard' } },
+      { type: 'note', title: 'Notes', position: { x: 800, y: 60 }, size: { width: 600, height: 600 }, data: {} },
+    ],
+    transform: { x: 0, y: 0, scale: 1 },
+    isBuiltIn: true,
+    suggestedTimePeriods: ['evening', 'night'],
+  },
+]
+
+const normalizeWindowType = (rawType: string): WindowType => {
+  const normalized = rawType === 'learn' ? 'learning' : rawType
+  if (VALID_WINDOW_TYPES.has(normalized as WindowType)) {
+    return normalized as WindowType
+  }
+  return 'note'
+}
 
 // Debounced auto-save for window state changes
 let autoSaveTimeout: NodeJS.Timeout | null = null
@@ -154,6 +232,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   selectedObjectId: null,
   maps: [],
   mapSelection: null,
+  scenes: [],
+  activeSceneId: null,
 
   // Transform actions
   setTransform: (newTransform) => {
@@ -648,6 +728,63 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }))
   },
 
+  // Scene actions
+  saveScene: (name, description) => {
+    const state = get()
+    const scene: WorkspaceScene = {
+      id: `scene-${Date.now()}`,
+      name,
+      description,
+      windows: state.windows.map(w => ({
+        type: w.type,
+        title: w.title,
+        position: { ...w.position },
+        size: { ...w.size },
+        data: w.data,
+      })),
+      transform: { ...state.transform },
+      isBuiltIn: false,
+    }
+    set({ scenes: [...state.scenes, scene], activeSceneId: scene.id })
+    scheduleAutoSave()
+  },
+
+  loadScene: (sceneId) => {
+    const state = get()
+    const scene = state.scenes.find(s => s.id === sceneId)
+    if (!scene) return
+
+    // Replace all windows with scene windows
+    const newWindows: WindowInstance[] = scene.windows.map((w, i) => ({
+      id: `${w.type}-scene-${Date.now()}-${i}`,
+      type: w.type,
+      title: w.title,
+      position: { ...w.position },
+      size: { ...w.size },
+      zIndex: i + 1,
+      data: w.data,
+    }))
+
+    set({
+      windows: newWindows,
+      transform: { ...scene.transform },
+      maxZIndex: newWindows.length,
+      activeSceneId: sceneId,
+    })
+    scheduleAutoSave()
+  },
+
+  deleteScene: (sceneId) => {
+    const state = get()
+    const scene = state.scenes.find(s => s.id === sceneId)
+    if (!scene || scene.isBuiltIn) return
+    set({
+      scenes: state.scenes.filter(s => s.id !== sceneId),
+      activeSceneId: state.activeSceneId === sceneId ? null : state.activeSceneId,
+    })
+    scheduleAutoSave()
+  },
+
   // Persistence actions
   saveStateToServer: async () => {
     const state = get()
@@ -677,6 +814,22 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         position: m.canvasPosition,
         collapsed: m.collapsed,
       })),
+      scenes: state.scenes.filter(s => !s.isBuiltIn).map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        windows: s.windows.map(w => ({
+          type: w.type,
+          title: w.title,
+          position: w.position,
+          size: w.size,
+          data: w.data,
+        })),
+        transform: s.transform,
+        isBuiltIn: false,
+        suggestedTimePeriods: s.suggestedTimePeriods,
+      })),
+      activeSceneId: state.activeSceneId,
     }
     try {
       await workspaceApi.saveState(stateData)
@@ -706,14 +859,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       )
 
       if (hasData) {
-        const { transform, windows, sceneObjects, visibleMaps } = response.state_data!
+        const { transform, windows, sceneObjects, visibleMaps, scenes: savedScenes, activeSceneId: savedActiveSceneId } = response.state_data! as any
         // Find max zIndex from loaded windows
         const maxZ = (windows || []).reduce((max, w) => Math.max(max, w.zIndex || 0), 0)
 
         // Map loaded windows back to WindowInstance format
         const loadedWindows: WindowInstance[] = (windows || []).map(w => ({
           id: w.id,
-          type: w.type as WindowType,
+          type: normalizeWindowType(w.type),
           title: w.title,
           position: w.position,
           size: w.size,
@@ -754,18 +907,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           }
         }
 
+        // Load user-saved scenes and merge with built-in scenes
+        const userScenes: WorkspaceScene[] = (savedScenes || []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          windows: s.windows || [],
+          transform: s.transform || { x: 0, y: 0, scale: 1 },
+          isBuiltIn: false,
+          suggestedTimePeriods: s.suggestedTimePeriods,
+        }))
+        const allScenes = [...BUILT_IN_SCENES, ...userScenes]
+
         set({
           transform: transform || { x: 0, y: 0, scale: 1 },
           windows: loadedWindows,
           sceneObjects: loadedSceneObjects,
           maps: loadedMaps,
           maxZIndex: maxZ,
+          scenes: allScenes,
+          activeSceneId: savedActiveSceneId || null,
           isStateLoaded: true,
         })
-        console.log('[canvasStore] State loaded from server:', loadedWindows.length, 'windows,', loadedSceneObjects.length, 'scene objects,', loadedMaps.length, 'maps')
+        console.log('[canvasStore] State loaded from server:', loadedWindows.length, 'windows,', loadedSceneObjects.length, 'scene objects,', loadedMaps.length, 'maps,', allScenes.length, 'scenes')
       } else {
-        set({ isStateLoaded: true })
-        console.log('[canvasStore] No saved state found')
+        set({ isStateLoaded: true, scenes: [...BUILT_IN_SCENES] })
+        console.log('[canvasStore] No saved state found, loaded built-in scenes')
       }
     } catch (error) {
       console.error('[canvasStore] Failed to load state:', error)

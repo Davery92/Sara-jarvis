@@ -3,10 +3,14 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { APP_CONFIG } from './config'
+import { AppView, pathForView, resolveViewAlias, viewForPath } from './navigation/views'
 import Notes from './components/Notes'
 import CalendarView from './components/CalendarView'
 import Settings from './pages/Settings'
+import TemerantPage from './pages/TemerantPage'
+import TemerantRpgPage from './pages/TemerantRpgPage'
 import HabitToday from './components/HabitToday'
 import HabitCreate from './components/HabitCreate'
 import HabitInsights from './components/HabitInsights'
@@ -26,10 +30,17 @@ import NotificationBanner from './components/NotificationBanner'
 import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
 import AutomationTasksIndicator from './components/AutomationTasksIndicator'
 import MiniChatOverlay from './components/MiniChatOverlay'
-import HealthAlertChat from './components/HealthAlertChat'
+// import HealthAlertChat from './components/HealthAlertChat'  // Disabled: health notifications are hard-banned per HEARTBEAT.md
 import SensoryMonitor from './components/SensoryMonitor'
 import EmailPage from './components/EmailPage'
 import ContentInbox from './components/ContentInbox'
+import AttentionInbox from './components/AttentionInbox'
+import MissionPanel from './components/MissionPanel'
+import MissionControlBoard from './components/MissionControlBoard'
+import SaraInnerLife from './components/SaraInnerLife'
+import PersonalKnowledge from './components/PersonalKnowledge'
+import IntelligenceFeed from './components/IntelligenceFeed'
+import ConfirmDialog from './components/ConfirmDialog'
 
 // LiveTimer component that updates every second without causing parent re-renders
 function LiveTimer({ endTime, className = "" }) {
@@ -72,9 +83,11 @@ function LiveTimer({ endTime, className = "" }) {
 }
 
 function App() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, fitness, recipes, settings, briefings, context-mode, smart-insights, orchestrator-lab
+  const [view, setView] = useState<AppView>(() => viewForPath(location.pathname)) // login, dashboard, chat, notes, habits, documents, calendar, fitness, recipes, settings, briefings, orchestrator-lab
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -107,6 +120,8 @@ function App() {
   const [analytics, setAnalytics] = useState(null)
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
+  const [temerantEnabled, setTemerantEnabled] = useState(true)
+  const [temerantRpgEnabled, setTemerantRpgEnabled] = useState(true)
 
   // Dashboard state
   const [morningBrief, setMorningBrief] = useState<any>(null)
@@ -117,33 +132,37 @@ function App() {
   const [connectedDevices, setConnectedDevices] = useState<any[]>([])
   const [standingOrders, setStandingOrders] = useState<any[]>([])
   const [journalEntries, setJournalEntries] = useState<any[]>([])
+  const [expandedJournalEntries, setExpandedJournalEntries] = useState<Set<string>>(new Set())
+  const [attentionCounts, setAttentionCounts] = useState<any>({ new: 0, sent: 0, read: 0, archived: 0, unread: 0 })
+  const [attentionItems, setAttentionItems] = useState<any[]>([])
+  const [missions, setMissions] = useState<any[]>([])
+  const [contentInboxStats, setContentInboxStats] = useState<any>({ unread: 0, read: 0, kept: 0, total: 0 })
+  const [inboxTab, setInboxTab] = useState<'attention' | 'missions' | 'content'>('attention')
   const [briefAudioPlaying, setBriefAudioPlaying] = useState(false)
   const briefAudioRef = useRef<HTMLAudioElement>(null)
-
-  // Health alert chat state
-  const [activeHealthAlert, setActiveHealthAlert] = useState<{
-    severity: string
+  const briefAudioUrlRef = useRef<string | null>(null)
+  const [isDesktopMoreOpen, setIsDesktopMoreOpen] = useState(false)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean
     title: string
-    body: string
-    insightId?: string
-  } | null>(null)
-  const [dismissedHealthAlertIds, setDismissedHealthAlertIds] = useState<Set<string>>(() => {
-    // Load dismissed IDs from localStorage on mount
-    try {
-      const stored = localStorage.getItem('dismissedHealthAlertIds')
-      if (stored) {
-        const parsed = JSON.parse(stored)
-        // Only keep IDs from last 24 hours (they're timestamped as id:timestamp)
-        const now = Date.now()
-        const valid = parsed.filter((entry: string) => {
-          const [, timestamp] = entry.split(':')
-          return timestamp && (now - parseInt(timestamp)) < 24 * 60 * 60 * 1000
-        })
-        return new Set(valid.map((entry: string) => entry.split(':')[0]))
-      }
-    } catch {}
-    return new Set()
+    message: string
+    confirmLabel: string
+    tone: 'danger' | 'neutral'
+    busy: boolean
+    action: null | (() => Promise<void> | void)
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    confirmLabel: 'Confirm',
+    tone: 'danger',
+    busy: false,
+    action: null,
   })
+
+  // Health alert chat state — DISABLED: health notifications are hard-banned per HEARTBEAT.md
+  // const [activeHealthAlert, setActiveHealthAlert] = useState(null)
+  // const [dismissedHealthAlertIds, setDismissedHealthAlertIds] = useState(new Set())
 
   // Ref for scrolling main content to top on view change
   const mainContentRef = useRef<HTMLDivElement>(null)
@@ -159,6 +178,24 @@ function App() {
     const scrollable = mainContentRef.current?.querySelector('.overflow-y-auto')
     scrollable?.scrollTo(0, 0)
   }, [view])
+
+  // Keep view state in sync with URL when using browser navigation.
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    const resolvedView = location.pathname === '/login'
+      ? 'dashboard'
+      : viewForPath(location.pathname)
+    setView(prev => (prev === resolvedView ? prev : resolvedView))
+  }, [isAuthenticated, location.pathname])
+
+  // Push URL updates when in-app view state changes.
+  useEffect(() => {
+    const targetPath = pathForView(view)
+    if (location.pathname !== targetPath) {
+      navigate(targetPath, { replace: view === 'login' })
+    }
+  }, [view, location.pathname, navigate])
 
   // Activity monitoring for autonomous behaviors
   const { activityState, getIdleMinutes } = useActivityMonitor({
@@ -209,6 +246,22 @@ function App() {
     checkAuth()
   }, [])
 
+  useEffect(() => {
+    if (!isAuthenticated) return
+    loadRuntimeFlags()
+  }, [isAuthenticated])
+
+  useEffect(() => {
+    if (!temerantEnabled && view === 'temerant') {
+      setView('dashboard')
+      navigate(pathForView('dashboard'), { replace: true })
+    }
+    if (!temerantRpgEnabled && view === 'temerant-rpg') {
+      setView('dashboard')
+      navigate(pathForView('dashboard'), { replace: true })
+    }
+  }, [temerantEnabled, temerantRpgEnabled, view, navigate])
+
   // Update current time only when day changes, but check timers every second
   useEffect(() => {
     const interval = setInterval(() => {
@@ -247,45 +300,29 @@ function App() {
     }
   }, [isAuthenticated])
 
-  // Poll for health alerts that need attention
+  // Load mission-control signal data used by dashboard lanes and nav badges.
   useEffect(() => {
     if (!isAuthenticated) return
 
-    const checkHealthAlerts = async () => {
-      try {
-        const res = await fetch(`${APP_CONFIG.apiUrl}/api/health/insights?limit=1&severity=warning`, {
-          credentials: 'include'
-        })
-        if (!res.ok) return
-
-        const data = await res.json()
-        if (data.insights && data.insights.length > 0) {
-          const insight = data.insights[0]
-          // Only show if not dismissed and not already showing
-          if (!dismissedHealthAlertIds.has(insight.id) && !activeHealthAlert) {
-            setActiveHealthAlert({
-              severity: insight.severity,
-              title: insight.title,
-              body: insight.content,
-              insightId: insight.id
-            })
-          }
-        }
-      } catch (error) {
-        // Log error but don't block - health alerts are optional
-        console.warn('Health alerts check failed:', error instanceof Error ? error.message : error)
-      }
-    }
-
-    checkHealthAlerts()
-    const interval = setInterval(checkHealthAlerts, 60000) // Check every minute
+    loadMissionControlData()
+    const interval = setInterval(loadMissionControlData, 60000)
     return () => clearInterval(interval)
-  }, [isAuthenticated, dismissedHealthAlertIds, activeHealthAlert])
+  }, [isAuthenticated])
 
-  // Load dashboard data when view changes to dashboard
+  // Health alert polling — DISABLED: health notifications are hard-banned per HEARTBEAT.md
+  // The old useEffect polled /api/health/insights every 60s and showed popups.
+  // Removed to enforce the ban system consistently.
+
+  // Load primary view data when switching views (including URL-driven navigation).
   useEffect(() => {
-    if (isAuthenticated && view === 'dashboard') {
+    if (!isAuthenticated) return
+
+    if (view === 'dashboard') {
       loadDashboardData()
+    } else if (view === 'notes') {
+      loadNotes()
+    } else if (view === 'documents') {
+      loadDocuments()
     }
   }, [isAuthenticated, view])
 
@@ -307,6 +344,10 @@ function App() {
     return () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort()
+      }
+      if (briefAudioUrlRef.current) {
+        URL.revokeObjectURL(briefAudioUrlRef.current)
+        briefAudioUrlRef.current = null
       }
     }
   }, [])
@@ -330,13 +371,74 @@ function App() {
   useEffect(() => {
     const handleNavigate = (e: CustomEvent<{ view: string }>) => {
       if (e.detail?.view) {
-        setView(e.detail.view)
+        const resolved = resolveViewAlias(e.detail.view)
+        if (resolved) {
+          setView(resolved)
+        }
       }
     }
 
     window.addEventListener('navigate', handleNavigate as EventListener)
     return () => window.removeEventListener('navigate', handleNavigate as EventListener)
   }, [])
+
+  const openWorkspaceCanvas = useCallback(() => {
+    window.open(APP_CONFIG.workbenchUrl, '_blank', 'noopener,noreferrer')
+  }, [])
+
+  const navigateToView = useCallback((nextView: string, closeMobileMenu = false) => {
+    const resolved = resolveViewAlias(nextView)
+    if (!resolved) return
+
+    if (resolved === 'workspace') {
+      openWorkspaceCanvas()
+    }
+
+    setView(resolved)
+    setIsDesktopMoreOpen(false)
+    if (closeMobileMenu) {
+      setIsMobileMenuOpen(false)
+    }
+  }, [openWorkspaceCanvas])
+
+  const openConfirmDialog = useCallback((config: {
+    title: string
+    message: string
+    confirmLabel?: string
+    tone?: 'danger' | 'neutral'
+    action: () => Promise<void> | void
+  }) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: config.title,
+      message: config.message,
+      confirmLabel: config.confirmLabel || 'Confirm',
+      tone: config.tone || 'danger',
+      busy: false,
+      action: config.action,
+    })
+  }, [])
+
+  const closeConfirmDialog = useCallback(() => {
+    setConfirmDialog(prev => {
+      if (prev.busy) return prev
+      return { ...prev, isOpen: false, action: null }
+    })
+  }, [])
+
+  const confirmDialogAction = useCallback(async () => {
+    const action = confirmDialog.action
+    if (!action || confirmDialog.busy) return
+
+    setConfirmDialog(prev => ({ ...prev, busy: true }))
+    try {
+      await action()
+      setConfirmDialog(prev => ({ ...prev, isOpen: false, busy: false, action: null }))
+    } catch (error) {
+      console.error('Confirm action failed:', error)
+      setConfirmDialog(prev => ({ ...prev, busy: false }))
+    }
+  }, [confirmDialog.action, confirmDialog.busy])
 
   const loadTimersAndReminders = async () => {
     try {
@@ -448,10 +550,28 @@ function App() {
         const userData = await response.json()
         setUser(userData)
         setIsAuthenticated(true)
-        setView('dashboard')
+        setView(location.pathname === '/login' ? 'dashboard' : viewForPath(location.pathname))
       }
     } catch (error) {
       console.log('Not authenticated')
+    }
+  }
+
+  const loadRuntimeFlags = async () => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/settings/autonomy-flags`, {
+        credentials: 'include',
+      })
+      if (!response.ok) return
+      const flags = await response.json()
+      if (typeof flags?.temerant_enabled === 'boolean') {
+        setTemerantEnabled(flags.temerant_enabled)
+      }
+      if (typeof flags?.temerant_rpg_enabled === 'boolean') {
+        setTemerantRpgEnabled(flags.temerant_rpg_enabled)
+      }
+    } catch {
+      // Keep defaults if settings endpoint is unavailable.
     }
   }
 
@@ -735,9 +855,7 @@ function App() {
     setLoading(false)
   }
 
-  const deleteNote = async (noteId) => {
-    if (!confirm('Are you sure you want to delete this note?')) return
-
+  const executeDeleteNote = async (noteId) => {
     setLoading(true)
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/notes/${noteId}`, {
@@ -750,8 +868,19 @@ function App() {
       }
     } catch (error) {
       console.error('Failed to delete note:', error)
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
+  }
+
+  const deleteNote = (noteId) => {
+    openConfirmDialog({
+      title: 'Delete note',
+      message: 'Are you sure you want to delete this note? This action cannot be undone.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+      action: () => executeDeleteNote(noteId),
+    })
   }
 
   const startEditNote = (note) => {
@@ -838,6 +967,16 @@ function App() {
     'partly-cloudy-day': '\u26c5', 'partly-cloudy-night': '\ud83c\udf24\ufe0f',
     'rain': '\ud83c\udf27\ufe0f', 'snow': '\u2744\ufe0f', 'wind': '\ud83c\udf2c\ufe0f',
     'fog': '\ud83c\udf2b\ufe0f', 'thunderstorm': '\u26c8\ufe0f',
+    // OpenWeather icon codes returned by /api/morning-brief/weather
+    '01d': '\u2600\ufe0f', '01n': '\ud83c\udf19',
+    '02d': '\u26c5', '02n': '\ud83c\udf24\ufe0f',
+    '03d': '\u2601\ufe0f', '03n': '\u2601\ufe0f',
+    '04d': '\u2601\ufe0f', '04n': '\u2601\ufe0f',
+    '09d': '\ud83c\udf27\ufe0f', '09n': '\ud83c\udf27\ufe0f',
+    '10d': '\ud83c\udf27\ufe0f', '10n': '\ud83c\udf27\ufe0f',
+    '11d': '\u26c8\ufe0f', '11n': '\u26c8\ufe0f',
+    '13d': '\u2744\ufe0f', '13n': '\u2744\ufe0f',
+    '50d': '\ud83c\udf2b\ufe0f', '50n': '\ud83c\udf2b\ufe0f',
   }
 
   const EMOTION_EMOJI: Record<string, string> = {
@@ -903,10 +1042,104 @@ function App() {
       const res = await fetch(`${APP_CONFIG.apiUrl}/api/sara/activity?hours=24&limit=20&activity_type=journal`, { credentials: 'include' })
       if (res.ok) {
         const data = await res.json()
-        setJournalEntries(Array.isArray(data) ? data : data.activities || [])
+        const entries = Array.isArray(data) ? data : data.activities || []
+        const normalized = entries.map((entry: any) => ({
+          ...entry,
+          content: entry?.details?.full_content || entry?.content || entry?.summary || entry?.text || '',
+          emotional_state: entry?.emotional_state || entry?.details?.emotional_state || null,
+        }))
+        const dedupeWindowMs = 8 * 60 * 1000
+        const semanticWindowMs = 12 * 60 * 60 * 1000
+        const normalize = (value: string) => (value || '')
+          .toLowerCase()
+          .replace(/https?:\/\/\S+/g, '')
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        const similarity = (a: string, b: string) => {
+          const aw = new Set(normalize(a).split(' ').filter(Boolean))
+          const bw = new Set(normalize(b).split(' ').filter(Boolean))
+          if (aw.size === 0 || bw.size === 0) return 0
+          let overlap = 0
+          aw.forEach((w) => { if (bw.has(w)) overlap += 1 })
+          return overlap / Math.max(aw.size, bw.size)
+        }
+        const deduped: any[] = []
+        let lastUnifiedTimestampMs: number | null = null
+        let lastSemantic: { content: string; ts: number } | null = null
+
+        for (const entry of normalized) {
+          const entryType = entry?.details?.entry_type || entry?.entry_type || ''
+          const timestampRaw = entry?.timestamp || entry?.created_at
+          const timestampMs = timestampRaw ? new Date(timestampRaw).getTime() : NaN
+
+          if (entryType === 'unified' && Number.isFinite(timestampMs)) {
+            if (
+              lastUnifiedTimestampMs !== null &&
+              (lastUnifiedTimestampMs - timestampMs) < dedupeWindowMs
+            ) {
+              continue
+            }
+            lastUnifiedTimestampMs = timestampMs
+          }
+
+          const fullContent = entry.content || ''
+          if (
+            lastSemantic &&
+            Number.isFinite(timestampMs) &&
+            Math.abs(lastSemantic.ts - timestampMs) <= semanticWindowMs &&
+            similarity(fullContent, lastSemantic.content) >= 0.9
+          ) {
+            continue
+          }
+
+          deduped.push(entry)
+          if (fullContent && Number.isFinite(timestampMs)) {
+            lastSemantic = { content: fullContent, ts: timestampMs }
+          }
+        }
+
+        setJournalEntries(deduped)
+        setExpandedJournalEntries(new Set())
       }
     } catch (e) { setJournalEntries([]) }
   }
+
+  const loadMissionControlData = useCallback(async () => {
+    try {
+      const [attentionCountRes, attentionItemsRes, missionsRes, inboxStatsRes] = await Promise.all([
+        fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/count`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/autonomy/attention?limit=20`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/autonomy/missions?limit=20`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/inbox/stats`, { credentials: 'include' }),
+      ])
+
+      if (attentionCountRes.ok) {
+        const attentionCountData = await attentionCountRes.json()
+        setAttentionCounts({
+          ...(attentionCountData.counts || {}),
+          unread: attentionCountData.unread || 0,
+        })
+      }
+
+      if (attentionItemsRes.ok) {
+        const attentionItemsData = await attentionItemsRes.json()
+        setAttentionItems(attentionItemsData.items || [])
+      }
+
+      if (missionsRes.ok) {
+        const missionsData = await missionsRes.json()
+        setMissions(missionsData.missions || [])
+      }
+
+      if (inboxStatsRes.ok) {
+        const inboxStatsData = await inboxStatsRes.json()
+        setContentInboxStats(inboxStatsData || { unread: 0, read: 0, kept: 0, total: 0 })
+      }
+    } catch (e) {
+      console.warn('Mission control data load failed:', e)
+    }
+  }, [])
 
   const loadDashboardData = () => {
     Promise.allSettled([
@@ -918,14 +1151,44 @@ function App() {
       loadStandingOrders(),
       loadJournalEntries(),
       loadTimersAndReminders(),
+      loadMissionControlData(),
     ])
   }
 
-  const playBriefAudio = () => {
+  const playBriefAudio = async () => {
     const el = briefAudioRef.current
-    if (!el) return
-    if (briefAudioPlaying) { el.pause(); setBriefAudioPlaying(false) }
-    else { el.play(); setBriefAudioPlaying(true) }
+    if (!el || !morningBrief?.brief_date) return
+
+    if (briefAudioPlaying) {
+      el.pause()
+      setBriefAudioPlaying(false)
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `${APP_CONFIG.apiUrl}/api/morning-brief/${morningBrief.brief_date}/audio`,
+        { credentials: 'include' }
+      )
+      if (!response.ok) {
+        throw new Error(`Audio request failed (${response.status})`)
+      }
+
+      const blob = await response.blob()
+
+      if (briefAudioUrlRef.current) {
+        URL.revokeObjectURL(briefAudioUrlRef.current)
+      }
+      briefAudioUrlRef.current = URL.createObjectURL(blob)
+
+      el.src = briefAudioUrlRef.current
+      await el.play()
+      setBriefAudioPlaying(true)
+    } catch (error) {
+      console.error('Failed to play brief audio:', error)
+      showToast('Unable to play brief audio right now.', 'error')
+      setBriefAudioPlaying(false)
+    }
   }
 
   const uploadDocument = async (file) => {
@@ -985,9 +1248,7 @@ function App() {
     }
   }
 
-  const deleteDocument = async (documentId) => {
-    if (!confirm('Are you sure you want to delete this document?')) return
-    
+  const executeDeleteDocument = async (documentId) => {
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/documents/${documentId}`, {
         method: 'DELETE',
@@ -1004,6 +1265,16 @@ function App() {
       console.error('Delete error:', error)
       showToast('Failed to delete document', 'error')
     }
+  }
+
+  const deleteDocument = (documentId) => {
+    openConfirmDialog({
+      title: 'Delete document',
+      message: 'Are you sure you want to delete this document? This action cannot be undone.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+      action: () => executeDeleteDocument(documentId),
+    })
   }
 
   const updateDocumentTitle = async (documentId, newTitle) => {
@@ -1105,6 +1376,125 @@ function App() {
     setNotes([])
   }
 
+  const handleWorkspaceNavigation = async (noteId: string) => {
+    if (noteId === 'workspace') {
+      navigateToView('workspace')
+      return
+    }
+
+    // Navigate to notes view and open the specific note
+    setView('notes')
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/notes/${noteId}`, { credentials: 'include' })
+      if (res.ok) {
+        const note = await res.json()
+        setEditingNote(note)
+        setEditNoteTitle(note.title || '')
+        setEditNoteContent(note.content || '')
+      }
+    } catch (err) {
+      console.error('Failed to load result note:', err)
+    }
+  }
+
+  const attentionUnreadCount = Number(attentionCounts?.unread || 0)
+  const awaitingDecisionCount = missions.filter((mission) => mission.state === 'awaiting_confirm').length + attentionUnreadCount
+  const inboxUnreadCount = attentionUnreadCount + Number(contentInboxStats?.unread || 0)
+  const missionAwaitingCount = missions.filter((mission) => mission.state === 'awaiting_confirm').length
+  const runningMissionCount = missions.filter((mission) => mission.state === 'running').length
+  const nextCalendarEvent = [...calendarEvents]
+    .map((event) => ({
+      ...event,
+      _start: new Date(event.start_time || event.start || event.dtstart),
+    }))
+    .filter((event: any) => !Number.isNaN(event._start.getTime()) && event._start.getTime() >= Date.now())
+    .sort((a: any, b: any) => a._start.getTime() - b._start.getTime())[0]
+
+  const getNavBadgeCount = (navView: AppView): number => {
+    if (navView === 'inbox') return inboxUnreadCount
+    if (navView === 'dashboard') return awaitingDecisionCount
+    return 0
+  }
+
+  const handleChatQuickAction = (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => {
+    if (actionId === 'inbox_attention') {
+      setInboxTab('attention')
+      navigateToView('inbox')
+      return
+    }
+    if (actionId === 'missions') {
+      setInboxTab('missions')
+      navigateToView('inbox')
+      return
+    }
+    if (actionId === 'calendar') {
+      navigateToView('calendar')
+      return
+    }
+    if (actionId === 'standing_orders') {
+      setMessage('Review my active standing orders and tell me what is scheduled next.')
+    }
+  }
+
+  const mobileOverlayNavItems: Array<{ view: AppView; label: string; icon: string }> = [
+    { view: 'dashboard', label: 'Home', icon: 'home' },
+    { view: 'chat', label: 'Chat', icon: 'chat' },
+    { view: 'notes', label: 'Notes', icon: 'notes' },
+    { view: 'workspace', label: 'Canvas', icon: 'dashboard_customize' },
+    { view: 'habits', label: 'Habits', icon: 'track_changes' },
+    { view: 'documents', label: 'Documents', icon: 'description' },
+    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
+    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
+    { view: 'learn', label: 'Learn', icon: 'school' },
+    { view: 'projects', label: 'Projects', icon: 'work' },
+    { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
+    ...(temerantEnabled ? [{ view: 'temerant' as AppView, label: 'Temerant', icon: 'auto_stories' }] : []),
+    ...(temerantRpgEnabled ? [{ view: 'temerant-rpg' as AppView, label: 'Temerant RPG', icon: 'theater_comedy' }] : []),
+    { view: 'briefings', label: 'Morning Brief', icon: 'wb_sunny' },
+    { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
+    { view: 'saras-mind', label: "Sara's Mind", icon: 'self_improvement' },
+    { view: 'knowledge', label: 'Knowledge', icon: 'psychology' },
+    { view: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { view: 'settings', label: 'Settings', icon: 'settings' },
+  ]
+
+  const desktopCoreNavItems: Array<{ view: AppView; label: string; icon: string }> = [
+    { view: 'dashboard', label: 'Home', icon: 'home' },
+    { view: 'chat', label: 'Chat', icon: 'chat' },
+    { view: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
+    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'workspace', label: 'Canvas', icon: 'dashboard_customize' },
+  ]
+
+  const desktopMoreNavItems: Array<{ view: AppView; label: string; icon: string }> = [
+    { view: 'notes', label: 'Notes', icon: 'notes' },
+    { view: 'documents', label: 'Documents', icon: 'description' },
+    { view: 'learn', label: 'Learn', icon: 'school' },
+    { view: 'projects', label: 'Projects', icon: 'work' },
+    { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
+    ...(temerantEnabled ? [{ view: 'temerant' as AppView, label: 'Temerant', icon: 'auto_stories' }] : []),
+    ...(temerantRpgEnabled ? [{ view: 'temerant-rpg' as AppView, label: 'Temerant RPG', icon: 'theater_comedy' }] : []),
+    { view: 'briefings', label: 'Brief', icon: 'wb_sunny' },
+    { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
+    { view: 'saras-mind', label: "Sara's Mind", icon: 'self_improvement' },
+    { view: 'knowledge', label: 'Knowledge', icon: 'psychology' },
+    { view: 'habits', label: 'Habits', icon: 'track_changes' },
+    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
+    { view: 'settings', label: 'Settings', icon: 'settings' },
+  ]
+
+  const mobileBottomNavItems: Array<{ view: AppView; label: string; icon: string }> = [
+    { view: 'dashboard', label: 'Home', icon: 'home' },
+    { view: 'chat', label: 'Chat', icon: 'chat' },
+    { view: 'notes', label: 'Notes', icon: 'notes' },
+    { view: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
+    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'workspace', label: 'Canvas', icon: 'dashboard_customize' },
+  ]
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen flex items-center justify-center p-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9'}}>
@@ -1176,7 +1566,7 @@ function App() {
       <CommandPalette
         isOpen={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        onNavigate={(v) => { setView(v); if (v === 'notes') loadNotes(); }}
+        onNavigate={navigateToView}
         currentView={view}
       />
 
@@ -1202,111 +1592,23 @@ function App() {
                 <button onClick={() => setIsMobileMenuOpen(false)} className="text-gray-400 text-2xl tap-target">✕</button>
               </div>
               <nav className="flex-1 overflow-y-auto p-4 space-y-2">
-                <button
-                  onClick={() => { setView('dashboard'); loadDashboardData(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">home</span>
-                  <span>Home</span>
-                </button>
-                <button
-                  onClick={() => { setView('chat'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">chat</span>
-                  <span>Chat</span>
-                </button>
-                <button
-                  onClick={() => { setView('notes'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">notes</span>
-                  <span>Notes</span>
-                </button>
-                <button
-                  onClick={() => { setView('habits'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">track_changes</span>
-                  <span>Habits</span>
-                </button>
-                <button
-                  onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">description</span>
-                  <span>Documents</span>
-                </button>
-                <button
-                  onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">calendar_today</span>
-                  <span>Calendar</span>
-                </button>
-                <button
-                  onClick={() => { setView('email'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'email' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">email</span>
-                  <span>Email</span>
-                </button>
-                <button
-                  onClick={() => { setView('fitness'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">💪</span>
-                  <span>Fitness</span>
-                </button>
-                <button
-                  onClick={() => { setView('learn'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'learn' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">school</span>
-                  <span>Learn</span>
-                </button>
-                <button
-                  onClick={() => { setView('projects'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'projects' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">work</span>
-                  <span>Projects</span>
-                </button>
-                <button
-                  onClick={() => { setView('recipes'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'recipes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">👨‍🍳</span>
-                  <span>Recipes</span>
-                </button>
-                <button
-                  onClick={() => { setView('briefings'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'briefings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">wb_sunny</span>
-                  <span>Morning Brief</span>
-                </button>
-                <button
-                  onClick={() => { setView('sensory-monitor'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'sensory-monitor' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">sensors</span>
-                  <span>Sensory</span>
-                </button>
-                <button
-                  onClick={() => { setView('inbox'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'inbox' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">inbox</span>
-                  <span>Inbox</span>
-                </button>
-                <button
-                  onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">settings</span>
-                  <span>Settings</span>
-                </button>
+                {mobileOverlayNavItems.map((item) => (
+                  <button
+                    key={item.view}
+                    onClick={() => navigateToView(item.view, true)}
+                    className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === item.view ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    <span className="material-icons">{item.icon}</span>
+                    <span className="flex items-center gap-2">
+                      {item.label}
+                      {getNavBadgeCount(item.view) > 0 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-teal-500/20 text-teal-300">
+                          {getNavBadgeCount(item.view) > 99 ? '99+' : getNavBadgeCount(item.view)}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                ))}
                 <button
                   onClick={() => { logout(); setIsMobileMenuOpen(false); }}
                   className="flex items-center space-x-3 p-3 rounded w-full text-gray-400 hover:text-white mt-6 border-t border-gray-700 pt-6 tap-target"
@@ -1323,111 +1625,53 @@ function App() {
         <aside className="hidden md:flex flex-col items-center bg-card border border-card rounded-xl p-4 max-h-full overflow-y-auto scrollbar-hidden flex-shrink-0">
           <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl flex-shrink-0">S</div>
           <nav className="flex flex-col items-center space-y-4 mt-4">
+            {desktopCoreNavItems.map((item) => (
+              <button
+                key={item.view}
+                onClick={() => navigateToView(item.view)}
+                className={`flex flex-col items-center ${view === item.view ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              >
+                <div className="relative">
+                  <span className="material-icons">{item.icon}</span>
+                  {getNavBadgeCount(item.view) > 0 && (
+                    <span className="absolute -top-2 -right-3 text-[9px] px-1 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30">
+                      {getNavBadgeCount(item.view) > 99 ? '99+' : getNavBadgeCount(item.view)}
+                    </span>
+                  )}
+                </div>
+                <span className="text-xs">{item.label}</span>
+              </button>
+            ))}
+
             <button
-              onClick={() => { setView('dashboard'); loadDashboardData(); }}
-              className={`flex flex-col items-center ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setIsDesktopMoreOpen(prev => !prev)}
+              className={`flex flex-col items-center ${isDesktopMoreOpen ? 'text-teal-300' : 'text-gray-400 hover:text-white'}`}
             >
-              <span className="material-icons">home</span>
-              <span className="text-xs">Home</span>
+              <span className="material-icons">more_horiz</span>
+              <span className="text-xs">More</span>
             </button>
-            <button
-              onClick={() => setView('chat')}
-              className={`flex flex-col items-center ${view === 'chat' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">chat</span>
-              <span className="text-xs">Chat</span>
-            </button>
-            <button
-              onClick={() => { setView('notes'); loadNotes(); }}
-              className={`flex flex-col items-center ${view === 'notes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">notes</span>
-              <span className="text-xs">Notes</span>
-            </button>
-            <button
-              onClick={() => setView('habits')}
-              className={`flex flex-col items-center ${view === 'habits' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">track_changes</span>
-              <span className="text-xs">Habits</span>
-            </button>
-            <button
-              onClick={() => { setView('documents'); loadDocuments(); }}
-              className={`flex flex-col items-center ${view === 'documents' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">description</span>
-              <span className="text-xs">Documents</span>
-            </button>
-            <button
-              onClick={() => setView('calendar')}
-              className={`flex flex-col items-center ${view === 'calendar' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">calendar_today</span>
-              <span className="text-xs">Calendar</span>
-            </button>
-            <button
-              onClick={() => setView('email')}
-              className={`flex flex-col items-center ${view === 'email' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">email</span>
-              <span className="text-xs">Email</span>
-            </button>
-            <button
-              onClick={() => setView('fitness')}
-              className={`flex flex-col items-center ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">💪</span>
-              <span className="text-xs">Fitness</span>
-            </button>
-            <button
-              onClick={() => setView('learn')}
-              className={`flex flex-col items-center ${view === 'learn' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">school</span>
-              <span className="text-xs">Learn</span>
-            </button>
-            <button
-              onClick={() => setView('projects')}
-              className={`flex flex-col items-center ${view === 'projects' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">work</span>
-              <span className="text-xs">Projects</span>
-            </button>
-            <button
-              onClick={() => setView('recipes')}
-              className={`flex flex-col items-center ${view === 'recipes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">👨‍🍳</span>
-              <span className="text-xs">Recipes</span>
-            </button>
-            <button
-              onClick={() => setView('briefings')}
-              className={`flex flex-col items-center ${view === 'briefings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">wb_sunny</span>
-              <span className="text-xs">Brief</span>
-            </button>
-            <button
-              onClick={() => setView('sensory-monitor')}
-              className={`flex flex-col items-center ${view === 'sensory-monitor' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">sensors</span>
-              <span className="text-xs">Sensory</span>
-            </button>
-            <button
-              onClick={() => setView('inbox')}
-              className={`flex flex-col items-center ${view === 'inbox' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">inbox</span>
-              <span className="text-xs">Inbox</span>
-            </button>
-            <button
-              onClick={() => setView('settings')}
-              className={`flex flex-col items-center ${view === 'settings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">settings</span>
-              <span className="text-xs">Settings</span>
-            </button>
+
+            {isDesktopMoreOpen && (
+              <div className="w-full border-t border-gray-700 pt-3 flex flex-col items-center space-y-3">
+                {desktopMoreNavItems.map((item) => (
+                  <button
+                    key={item.view}
+                    onClick={() => navigateToView(item.view)}
+                    className={`flex flex-col items-center ${view === item.view ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    <div className="relative">
+                      <span className="material-icons">{item.icon}</span>
+                      {getNavBadgeCount(item.view) > 0 && (
+                        <span className="absolute -top-2 -right-3 text-[9px] px-1 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30">
+                          {getNavBadgeCount(item.view) > 99 ? '99+' : getNavBadgeCount(item.view)}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </nav>
           <div className="mt-auto">
             <button
@@ -1445,13 +1689,10 @@ function App() {
             <h1 className="text-4xl font-bold">{APP_CONFIG.assistantName}</h1>
             <div className="flex items-center space-x-4">
               <AutomationTasksIndicator
-                onOpenAutomations={() => setView('orchestrator')}
+                onOpenAutomations={() => navigateToView('orchestrator-lab')}
               />
               <BackgroundTasksIndicator
-                onNavigateToWorkspace={(noteId) => {
-                  setView('notes')
-                  console.log('Navigate to workspace note:', noteId)
-                }}
+                onNavigateToWorkspace={handleWorkspaceNavigation}
               />
               <span className="text-gray-400 text-sm">Hello, {user?.email}</span>
             </div>
@@ -1461,6 +1702,15 @@ function App() {
             <div className="flex-1 overflow-y-auto min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
               {/* ===== LEFT COLUMN (2/3) ===== */}
               <div className="lg:col-span-2 space-y-4 md:space-y-6">
+                <MissionControlBoard
+                  attentionItems={attentionItems}
+                  attentionUnreadCount={attentionUnreadCount}
+                  missions={missions}
+                  reminders={reminders}
+                  timers={timers}
+                  calendarEvents={calendarEvents}
+                  onNavigate={navigateToView}
+                />
 
                 {/* Morning Brief Hero Card */}
                 <div className="bg-gradient-to-br from-[#161b22] to-[#1a2332] border border-gray-700/50 rounded-xl p-6 md:p-8">
@@ -1471,8 +1721,18 @@ function App() {
                       </h1>
                       {weather && (
                         <p className="text-gray-400 mt-1 text-sm md:text-base">
-                          {WEATHER_EMOJI[weather.icon] || WEATHER_EMOJI['clear-day']}{' '}
-                          {Math.round(weather.temperature || weather.temp || 0)}&deg;F &mdash; {weather.description || weather.summary || 'Clear'}
+                          {WEATHER_EMOJI[weather.current?.icon || weather.icon] || WEATHER_EMOJI['clear-day']}{' '}
+                          {Math.round(
+                            weather.current?.temperature ??
+                            weather.temperature ??
+                            weather.temp ??
+                            0
+                          )}&deg;F &mdash; {
+                            weather.current?.description ||
+                            weather.description ||
+                            weather.summary ||
+                            'Clear'
+                          }
                         </p>
                       )}
                     </div>
@@ -1490,8 +1750,12 @@ function App() {
                   {morningBrief && (
                     <audio
                       ref={briefAudioRef}
-                      src={`${APP_CONFIG.apiUrl}/api/morning-brief/${morningBrief.brief_date}/audio`}
                       onEnded={() => setBriefAudioPlaying(false)}
+                      onPause={() => setBriefAudioPlaying(false)}
+                      onError={() => {
+                        setBriefAudioPlaying(false)
+                        showToast('Unable to load brief audio.', 'error')
+                      }}
                       style={{ display: 'none' }}
                     />
                   )}
@@ -1583,9 +1847,37 @@ function App() {
                               : ''}
                           </span>
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm text-gray-300 leading-relaxed">
-                              {entry.summary || entry.content || entry.text || ''}
-                            </p>
+                            {(() => {
+                              const entryKey = String(entry.id || i)
+                              const fullContent = entry.content || entry.details?.full_content || entry.summary || entry.text || ''
+                              const isExpanded = expandedJournalEntries.has(entryKey)
+                              const shouldTruncate = fullContent.length > 280 && !isExpanded
+                              const displayText = shouldTruncate
+                                ? `${fullContent.slice(0, 280).trimEnd()}...`
+                                : fullContent
+                              return (
+                                <>
+                                  <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap break-words">
+                                    {displayText}
+                                  </p>
+                                  {fullContent.length > 280 && (
+                                    <button
+                                      onClick={() => {
+                                        setExpandedJournalEntries((prev) => {
+                                          const next = new Set(prev)
+                                          if (next.has(entryKey)) next.delete(entryKey)
+                                          else next.add(entryKey)
+                                          return next
+                                        })
+                                      }}
+                                      className="mt-1 text-xs text-teal-400 hover:text-teal-300 transition-colors"
+                                    >
+                                      {isExpanded ? 'Show less' : 'Read full entry'}
+                                    </button>
+                                  )}
+                                </>
+                              )
+                            })()}
                             {entry.emotional_state && (
                               <span className="text-xs text-gray-500 mt-0.5 inline-block">
                                 {EMOTION_EMOJI[entry.emotional_state] || ''} {entry.emotional_state}
@@ -1686,14 +1978,14 @@ function App() {
                   <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Quick Actions</h2>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { icon: 'chat', label: 'Chat', view: 'chat', color: 'text-teal-400' },
-                      { icon: 'edit_note', label: 'Notes', view: 'notes', color: 'text-blue-400' },
-                      { icon: 'calendar_month', label: 'Calendar', view: 'calendar', color: 'text-purple-400' },
-                      { icon: 'summarize', label: 'Briefs', view: 'briefings', color: 'text-amber-400' },
+                      { icon: 'chat', label: 'Chat', view: 'chat' as AppView, color: 'text-teal-400' },
+                      { icon: 'edit_note', label: 'Notes', view: 'notes' as AppView, color: 'text-blue-400' },
+                      { icon: 'calendar_month', label: 'Calendar', view: 'calendar' as AppView, color: 'text-purple-400' },
+                      { icon: 'dashboard_customize', label: 'Canvas', view: 'workspace' as AppView, color: 'text-cyan-400' },
                     ].map(action => (
                       <button
                         key={action.view}
-                        onClick={() => setView(action.view)}
+                        onClick={() => navigateToView(action.view)}
                         className="flex flex-col items-center gap-1 py-3 rounded-lg bg-gray-800/50 hover:bg-gray-700/50 transition-colors"
                       >
                         <span className={`material-icons ${action.color}`}>{action.icon}</span>
@@ -1735,6 +2027,16 @@ function App() {
               message={message}
               setMessage={setMessage}
               abortControllerRef={abortControllerRef}
+              quickActionContext={{
+                inboxUnreadCount,
+                attentionUnreadCount,
+                missionAwaitingCount,
+                runningMissionCount,
+                standingOrdersCount: standingOrders.length,
+                nextCalendarEventTitle: nextCalendarEvent?.title || nextCalendarEvent?.summary || null,
+                nextCalendarEventStart: nextCalendarEvent?.start_time || nextCalendarEvent?.start || nextCalendarEvent?.dtstart || null,
+              }}
+              onQuickAction={handleChatQuickAction}
             />
             </div>
           )}
@@ -1751,6 +2053,38 @@ function App() {
               editNoteTitle={editNoteTitle}
               setEditNoteTitle={setEditNoteTitle}
             />
+            </div>
+          )}
+
+          {view === 'workspace' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+              <div className="max-w-3xl mx-auto bg-card border border-card rounded-xl p-8 space-y-4">
+                <div className="flex items-center gap-3">
+                  <span className="material-icons text-cyan-400 text-3xl">dashboard_customize</span>
+                  <h2 className="text-2xl font-semibold text-white">Canvas Workspace</h2>
+                </div>
+                <p className="text-gray-300">
+                  The full workbench canvas runs as a dedicated app so you can manage multiple windows and maps in one space.
+                </p>
+                <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-4">
+                  <p className="text-xs uppercase tracking-wider text-gray-500 mb-1">Workspace URL</p>
+                  <p className="text-sm text-cyan-300 break-all">{APP_CONFIG.workbenchUrl}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={openWorkspaceCanvas}
+                    className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white font-medium"
+                  >
+                    Open Canvas
+                  </button>
+                  <button
+                    onClick={() => navigateToView('chat')}
+                    className="px-4 py-2 rounded-lg border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500"
+                  >
+                    Back to Chat
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2015,6 +2349,14 @@ function App() {
             </div>
           )}
 
+          {view === 'temerant' && (
+            <TemerantPage />
+          )}
+
+          {view === 'temerant-rpg' && (
+            <TemerantRpgPage />
+          )}
+
           {/* GTKY now managed within Settings; reflection views removed */}
 
           {view === 'privacy-dashboard' && (
@@ -2052,24 +2394,91 @@ function App() {
             </div>
           )}
 
+          {view === 'saras-mind' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+              <SaraInnerLife />
+            </div>
+          )}
+
+          {view === 'knowledge' && (
+            <div className="flex-1 min-h-0">
+              <PersonalKnowledge />
+            </div>
+          )}
+
           {view === 'email' && (
             <div className="flex-1 overflow-y-auto min-h-0">
             <EmailPage />
             </div>
           )}
 
+          {view === 'intelligence' && (
+            <div className="flex-1 min-h-0">
+              <IntelligenceFeed />
+            </div>
+          )}
+
           {view === 'inbox' && (
-            <div className="flex-1 overflow-y-auto min-h-0">
-            <ContentInbox
-              onNavigateToChat={(inboxItemId, title) => {
-                // Navigate to chat with inbox item context
-                setMessage(`Let's talk about this: ${title}`);
-                setChatMessages([]);
-                setView('chat');
-                // Store inbox_item_id for next chat request
-                (window as any).__inboxItemId = inboxItemId;
-              }}
-            />
+            <div className="flex-1 min-h-0 flex flex-col gap-4">
+              <div className="flex-shrink-0 bg-card border border-card rounded-xl p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Inbox</h2>
+                  <span className="text-xs text-gray-500">{inboxUnreadCount} unread signal(s)</span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setInboxTab('attention')}
+                    className={`px-3 py-1.5 rounded-md text-sm ${
+                      inboxTab === 'attention'
+                        ? 'bg-teal-500/20 text-teal-400'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    Attention {attentionUnreadCount > 0 ? `(${attentionUnreadCount})` : ''}
+                  </button>
+                  <button
+                    onClick={() => setInboxTab('missions')}
+                    className={`px-3 py-1.5 rounded-md text-sm ${
+                      inboxTab === 'missions'
+                        ? 'bg-teal-500/20 text-teal-400'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    Missions
+                  </button>
+                  <button
+                    onClick={() => setInboxTab('content')}
+                    className={`px-3 py-1.5 rounded-md text-sm ${
+                      inboxTab === 'content'
+                        ? 'bg-teal-500/20 text-teal-400'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    Content {contentInboxStats?.unread ? `(${contentInboxStats.unread})` : ''}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                {inboxTab === 'attention' && (
+                  <AttentionInbox />
+                )}
+
+                {inboxTab === 'missions' && (
+                  <MissionPanel />
+                )}
+
+                {inboxTab === 'content' && (
+                  <ContentInbox
+                    onNavigateToChat={(inboxItemId, title) => {
+                      setMessage(`Let's talk about this: ${title}`)
+                      setChatMessages([])
+                      setView('chat')
+                      ;(window as any).__inboxItemId = inboxItemId
+                    }}
+                  />
+                )}
+              </div>
             </div>
           )}
         </main>
@@ -2078,48 +2487,23 @@ function App() {
       {/* Mobile Bottom Navigation */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40 overflow-x-auto scrollbar-hidden">
         <div className="flex py-2 px-2 gap-1" style={{minWidth: 'fit-content'}}>
-          <button
-            onClick={() => { setView('dashboard'); loadDashboardData(); }}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">home</span>
-            <span className="text-xs whitespace-nowrap">Home</span>
-          </button>
-          <button
-            onClick={() => setView('chat')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">chat</span>
-            <span className="text-xs whitespace-nowrap">Chat</span>
-          </button>
-          <button
-            onClick={() => { setView('notes'); loadNotes(); }}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">notes</span>
-            <span className="text-xs whitespace-nowrap">Notes</span>
-          </button>
-          <button
-            onClick={() => setView('calendar')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">calendar_today</span>
-            <span className="text-xs whitespace-nowrap">Calendar</span>
-          </button>
-          <button
-            onClick={() => setView('email')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'email' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">email</span>
-            <span className="text-xs whitespace-nowrap">Email</span>
-          </button>
-          <button
-            onClick={() => setView('fitness')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="text-xl">💪</span>
-            <span className="text-xs whitespace-nowrap">Fitness</span>
-          </button>
+          {mobileBottomNavItems.map((item) => (
+            <button
+              key={item.view}
+              onClick={() => navigateToView(item.view)}
+              className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === item.view ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
+            >
+              <div className="relative">
+                <span className="material-icons text-lg">{item.icon}</span>
+                {getNavBadgeCount(item.view) > 0 && (
+                  <span className="absolute -top-2 -right-3 text-[9px] px-1 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30">
+                    {getNavBadgeCount(item.view) > 99 ? '99+' : getNavBadgeCount(item.view)}
+                  </span>
+                )}
+              </div>
+              <span className="text-xs whitespace-nowrap">{item.label}</span>
+            </button>
+          ))}
           <button
             onClick={() => setIsMobileMenuOpen(true)}
             className="flex flex-col items-center px-3 py-2 rounded flex-shrink-0 text-gray-400 tap-target"
@@ -2133,12 +2517,7 @@ function App() {
 
       {/* Background Task Notifications */}
       <NotificationBanner
-        onNavigateToWorkspace={(noteId) => {
-          // Navigate to notes view and select the result note
-          setView('notes')
-          // You can pass the noteId to Notes component to auto-select it
-          console.log('Navigate to workspace note:', noteId)
-        }}
+        onNavigateToWorkspace={handleWorkspaceNavigation}
         onShowToast={(message, type) => {
           const newToast = { id: Date.now().toString(), message, type }
           setToasts(prev => [...prev, newToast])
@@ -2151,25 +2530,18 @@ function App() {
       {/* Mini Chat Overlay for Agent Clarifications */}
       <MiniChatOverlay />
 
-      {/* Health Alert Chat Overlay */}
-      {activeHealthAlert && (
-        <HealthAlertChat
-          alert={activeHealthAlert}
-          onClose={() => {
-            // Mark as dismissed so it doesn't reappear (persisted to localStorage)
-            if (activeHealthAlert.insightId) {
-              const newDismissed = new Set([...dismissedHealthAlertIds, activeHealthAlert.insightId!])
-              setDismissedHealthAlertIds(newDismissed)
-              // Save to localStorage with timestamp for 24-hour expiry
-              try {
-                const entries = Array.from(newDismissed).map(id => `${id}:${Date.now()}`)
-                localStorage.setItem('dismissedHealthAlertIds', JSON.stringify(entries))
-              } catch {}
-            }
-            setActiveHealthAlert(null)
-          }}
-        />
-      )}
+      {/* Health Alert Chat Overlay — DISABLED: health notifications are hard-banned per HEARTBEAT.md */}
+
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmLabel={confirmDialog.confirmLabel}
+        tone={confirmDialog.tone}
+        busy={confirmDialog.busy}
+        onConfirm={confirmDialogAction}
+        onCancel={closeConfirmDialog}
+      />
 
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-50 space-y-2">

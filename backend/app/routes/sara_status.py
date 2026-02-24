@@ -9,8 +9,11 @@ with time-adaptive contextual data.
 """
 
 import logging
+import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -22,6 +25,85 @@ from app.core.deps import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sara-status"])
+
+
+def _extract_latest_thought(content: Optional[str]) -> str:
+    """Extract a clean, human-readable thought line from raw journal content."""
+    raw = (content or "").strip()
+    if not raw:
+        return "Keeping an eye on things."
+
+    thought = re.split(r'\*{0,2}HANDOFF:?\*{0,2}', raw, flags=re.IGNORECASE)[0].strip()
+    thought = re.sub(r'```.*?```', '', thought, flags=re.DOTALL)
+    thought = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', thought)
+    thought = re.sub(r'#{1,3}\s*', '', thought)
+    thought = re.sub(r'`[^`]+`', '', thought)
+    thought = re.sub(r'\(topic\s+\S+\)', '', thought)
+    thought = re.sub(r'^\s*[\{\[].*[\}\]]\s*$', '', thought, flags=re.MULTILINE)
+    thought = re.sub(r'\{[^}]{20,}\}', '', thought)
+
+    lines = []
+    for line in thought.split('\n'):
+        clean = line.strip('- ').strip()
+        if not clean:
+            continue
+        if re.match(r'^(Summary of actions|Actions taken|Status|Checked|Confirmed):?\s*$', clean, re.IGNORECASE):
+            continue
+        if clean.startswith('{') and clean.endswith('}'):
+            continue
+        lines.append(clean)
+
+    notable = [l for l in lines if not re.match(r'^(Checked|Confirmed|Verified|Queried|Retrieved)\b', l)]
+    text = ' '.join((notable or lines)[:2]).strip()
+    text = re.sub(r'\s+([.,!?])', r'\1', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+
+    if len(text) > 250:
+        cut = text[:250].rfind('.')
+        if cut > 40:
+            text = text[:cut + 1]
+        else:
+            text = text[:250].rsplit(' ', 1)[0] + '...'
+
+    return text or "Keeping an eye on things."
+
+
+def _extract_watching_for(content: Optional[str]) -> List[str]:
+    """Return concise 'watching for' items as a list, never raw text blobs."""
+    raw = (content or "").strip()
+    if not raw:
+        return []
+
+    items: List[str] = []
+    for line in raw.split('\n'):
+        if not any(w in line.lower() for w in ["watching", "looking for", "keeping an eye"]):
+            continue
+        cleaned = re.sub(r'\*{1,2}', '', line).strip('- ').strip()
+        cleaned = re.sub(r'^\s*[\{\[].*[\}\]]\s*$', '', cleaned)
+        if cleaned and cleaned not in items:
+            items.append(cleaned)
+        if len(items) >= 3:
+            break
+    return items
+
+
+def _local_day_bounds_naive(now_utc: datetime) -> tuple[datetime, datetime]:
+    """Build start/end-of-day bounds in local timezone for naive DB timestamps."""
+    local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+    local_now = now_utc.astimezone(local_tz)
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_end = local_start + timedelta(days=1)
+    return local_start.replace(tzinfo=None), local_end.replace(tzinfo=None)
+
+
+def _calendar_source_label(source: Optional[str], ios_calendar_name: Optional[str]) -> str:
+    if source == "ios_calendar":
+        return ios_calendar_name or "iOS Calendar"
+    if source == "sara":
+        return "Sara"
+    if source:
+        return source.replace("_", " ").title()
+    return "Calendar"
 
 
 @router.get("/api/sara/status")
@@ -38,7 +120,7 @@ async def get_sara_status(
 
     result = {
         "emotional_state": "neutral",
-        "watching_for": None,
+        "watching_for": [],
         "latest_thought": None,
         "last_action": None,
         "pending_observations": 0,
@@ -59,41 +141,8 @@ async def get_sara_status(
         if journal:
             result["emotional_state"] = journal.emotional_state or "curious"
             content = journal.content or ""
-            # Clean up raw markdown/JSON before serving as "thought"
-            import re
-            thought = re.split(r'\*{0,2}HANDOFF:?\*{0,2}', content, flags=re.IGNORECASE)[0].strip()
-            thought = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', thought)  # strip markdown bold
-            thought = re.sub(r'#{1,3}\s*', '', thought)  # strip markdown headers
-            thought = re.sub(r'```.*?```', '', thought, flags=re.DOTALL)  # strip code blocks
-            thought = re.sub(r'\{[^}]{20,}\}', '', thought)  # strip inline JSON
-            thought = re.sub(r'\(topic\s+\S+\)', '', thought)  # strip (topic ...) refs
-            thought = re.sub(r'`[^`]+`', '', thought)  # strip inline code
-            # Remove header-only lines and operational noise
-            lines = [l.strip('- ').strip() for l in thought.split('\n') if l.strip() and not re.match(r'^(Summary of actions|Actions taken|Status|Checked|Confirmed):?\s*$', l.strip(), re.IGNORECASE)]
-            # Pick the most interesting line(s) — skip generic "checked X" lines
-            notable = [l for l in lines if not re.match(r'^(Checked|Confirmed|Verified|Queried|Retrieved)\b', l)]
-            if notable:
-                thought = ' '.join(notable[:2]).strip()
-            else:
-                thought = ' '.join(lines[:2]).strip()
-            thought = re.sub(r'\s+([.,!?])', r'\1', thought)  # fix "word ." → "word."
-            thought = re.sub(r'\s{2,}', ' ', thought)  # collapse multiple spaces
-            # Truncate at sentence boundary
-            if len(thought) > 250:
-                # Find last sentence-ending punctuation before 250
-                cut = thought[:250].rfind('.')
-                if cut > 40:
-                    thought = thought[:cut + 1]
-                else:
-                    thought = thought[:250].rsplit(' ', 1)[0] + '...'
-            result["latest_thought"] = thought or "Keeping an eye on things."
-            # Try to extract "watching for" from journal content
-            if "watching" in content.lower() or "looking" in content.lower():
-                for line in content.split("\n"):
-                    if any(w in line.lower() for w in ["watching", "looking for", "keeping an eye"]):
-                        cleaned = re.sub(r'\*{1,2}', '', line).strip('- ').strip()
-                        result["watching_for"] = cleaned
-                        break
+            result["latest_thought"] = _extract_latest_thought(content)
+            result["watching_for"] = _extract_watching_for(content)
 
         # Get latest agent_run_log for last action
         agent_run = db.execute(text("""
@@ -119,7 +168,7 @@ async def get_sara_status(
             SELECT COUNT(*) as cnt
             FROM sara_journal
             WHERE user_id = :uid
-            AND entry_type IN ('heartbeat', 'periodic', 'unified')
+            AND entry_type IN ('heartbeat', 'periodic', 'unified', 'deliberation', 'consolidation')
             AND created_at >= :since
         """), {"uid": user_id, "since": four_hours_ago}).fetchone()
 
@@ -243,56 +292,35 @@ async def get_sara_brief(
             WHERE user_id = :uid ORDER BY created_at DESC LIMIT 1
         """), {"uid": user_id}).fetchone()
         if journal:
-            import re
             result["sara_status"]["emotional_state"] = journal.emotional_state or "curious"
             raw = journal.content or ""
-            t = re.split(r'\*{0,2}HANDOFF:?\*{0,2}', raw, flags=re.IGNORECASE)[0].strip()
-            t = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', t)
-            t = re.sub(r'#{1,3}\s*', '', t)
-            t = re.sub(r'\{[^}]{20,}\}', '', t)
-            t = re.sub(r'\(topic\s+\S+\)', '', t)
-            t = re.sub(r'`[^`]+`', '', t)
-            lines = [l.strip('- ').strip() for l in t.split('\n') if l.strip() and not re.match(r'^(Summary of actions|Actions taken|Status|Checked|Confirmed):?\s*$', l.strip(), re.IGNORECASE)]
-            notable = [l for l in lines if not re.match(r'^(Checked|Confirmed|Verified|Queried|Retrieved)\b', l)]
-            if notable:
-                t = ' '.join(notable[:2]).strip()
-            else:
-                t = ' '.join(lines[:2]).strip()
-            t = re.sub(r'\s+([.,!?])', r'\1', t)
-            t = re.sub(r'\s{2,}', ' ', t)
-            if len(t) > 250:
-                cut = t[:250].rfind('.')
-                if cut > 40:
-                    t = t[:cut + 1]
-                else:
-                    t = t[:250].rsplit(' ', 1)[0] + '...'
-            result["sara_status"]["latest_thought"] = t or "Keeping an eye on things."
+            result["sara_status"]["latest_thought"] = _extract_latest_thought(raw)
+            result["sara_status"]["watching_for"] = _extract_watching_for(raw)
 
-        # --- Activity state ---
+        # --- Activity state + interruptibility ---
         try:
             from app.services.activity_state_machine import activity_state_machine
-            state = activity_state_machine.get_state()
-            result["activity_state"] = state.value if hasattr(state, 'value') else str(state)
-        except Exception:
-            pass
-
-        try:
             from app.services.interruptibility import compute_interruptibility
-            result["interruptibility"] = compute_interruptibility()
+
+            snapshot = activity_state_machine.current
+            result["activity_state"] = snapshot.state.value
+            score = compute_interruptibility(snapshot)
+            result["interruptibility"] = score.score
         except Exception:
             pass
 
         # --- Calendar section ---
         try:
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            today_end = today_start + timedelta(days=1)
+            today_start, today_end = _local_day_bounds_naive(now)
             events = db.execute(text("""
-                SELECT id, title, start_time, end_time, all_day
-                FROM calendar_events
-                WHERE user_id = :uid AND start_time >= :start AND start_time < :end
+                SELECT id, title, start_time, end_time, all_day, source, ios_calendar_name
+                FROM calendar_event
+                WHERE user_id = :uid
+                AND start_time < :day_end
+                AND end_time >= :day_start
                 ORDER BY start_time
                 LIMIT 5
-            """), {"uid": user_id, "start": today_start, "end": today_end}).fetchall()
+            """), {"uid": user_id, "day_start": today_start, "day_end": today_end}).fetchall()
 
             if events:
                 event_items = []
@@ -303,10 +331,15 @@ async def get_sara_brief(
                         "start_time": ev.start_time.isoformat() if ev.start_time else "",
                         "end_time": ev.end_time.isoformat() if ev.end_time else "",
                         "all_day": ev.all_day,
+                        "source": ev.source,
+                        "calendar_label": _calendar_source_label(ev.source, ev.ios_calendar_name),
                     })
-                    if next_in_minutes is None and ev.start_time and ev.start_time > now:
-                        delta = (ev.start_time - now).total_seconds() / 60
-                        next_in_minutes = int(delta)
+                    if next_in_minutes is None and ev.start_time:
+                        local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+                        ev_start_aware = ev.start_time.replace(tzinfo=local_tz)
+                        if ev_start_aware > now:
+                            delta = (ev_start_aware - now).total_seconds() / 60
+                            next_in_minutes = int(delta)
 
                 result["brief_sections"].append({
                     "type": "calendar",

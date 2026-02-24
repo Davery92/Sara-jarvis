@@ -3,7 +3,7 @@ import { FileText, Download, Copy, Check, Loader2, AlertCircle } from 'lucide-re
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { FileViewerWindowData } from '../../types'
-import { projectsApi } from '../../services/api'
+import { projectsApi, getToken } from '../../services/api'
 
 interface FileViewerContentProps {
   data: FileViewerWindowData
@@ -99,6 +99,7 @@ function isTextFile(filename: string, mimeType?: string): boolean {
 
 export default function FileViewerContent({ data }: FileViewerContentProps) {
   const [content, setContent] = useState<string | null>(data.content || null)
+  const [resolvedContent, setResolvedContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(!data.content && data.projectId && data.fileId)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -110,6 +111,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
   const isImage = isImageFile(filename, mimeType)
   const isWord = isWordFile(filename, mimeType)
   const isText = isTextFile(filename, mimeType)
+  const viewerContent = resolvedContent || content
 
   // Fetch content if not provided
   useEffect(() => {
@@ -131,6 +133,42 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
 
     fetchContent()
   }, [projectId, fileId, content])
+
+  useEffect(() => {
+    let objectUrl: string | null = null
+    const raw = content || ''
+    const isRemoteUrl = raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/')
+    const shouldResolveToBlob = isRemoteUrl && (isPdf || isImage || isWord)
+    if (!shouldResolveToBlob) {
+      setResolvedContent(null)
+      return
+    }
+
+    const fetchBlob = async () => {
+      try {
+        const token = getToken()
+        const response = await fetch(raw, {
+          credentials: 'include',
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        })
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const blob = await response.blob()
+        objectUrl = URL.createObjectURL(blob)
+        setResolvedContent(objectUrl)
+      } catch (err) {
+        console.warn('FileViewer blob fetch failed, falling back to direct URL', err)
+        setResolvedContent(null)
+      }
+    }
+
+    fetchBlob()
+
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [content, isImage, isPdf, isWord])
 
   const handleCopy = async () => {
     if (!content) return
@@ -191,10 +229,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
   }
 
   // PDF viewer
-  if (isPdf && content) {
-    // For blob URLs, use object tag; for regular URLs, can use iframe
-    const isBlobUrl = content.startsWith('blob:')
-
+  if (isPdf && viewerContent) {
     return (
       <div className="flex flex-col h-full bg-canvas-bg">
         {/* Header */}
@@ -208,7 +243,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
           </div>
           <div className="flex items-center gap-2">
             <a
-              href={content}
+              href={viewerContent}
               target="_blank"
               rel="noopener noreferrer"
               className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
@@ -217,7 +252,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
               <FileText size={18} />
             </a>
             <a
-              href={content}
+              href={viewerContent}
               download={filename}
               className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
               title="Download file"
@@ -228,17 +263,18 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
         </div>
         {/* PDF Embed */}
         <div className="flex-1 overflow-hidden bg-gray-800">
-          <object
-            data={content}
-            type="application/pdf"
+          <iframe
+            src={viewerContent}
+            title={filename}
             className="w-full h-full"
-          >
+          />
+          <div className="hidden">
             <div className="flex flex-col items-center justify-center h-full text-canvas-muted p-8">
               <FileText size={64} className="mb-4 opacity-30" />
               <p className="text-lg mb-2">PDF Preview not available</p>
-              <p className="text-sm text-center mb-4">Your browser may not support inline PDF viewing</p>
+              <p className="text-sm text-center mb-4">Open it in a new tab instead.</p>
               <a
-                href={content}
+                href={viewerContent}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-4 py-2 bg-purple-500 hover:bg-purple-600 rounded-lg text-white transition-colors"
@@ -246,14 +282,14 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
                 Open PDF in New Tab
               </a>
             </div>
-          </object>
+          </div>
         </div>
       </div>
     )
   }
 
   // Image viewer
-  if (isImage && content) {
+  if (isImage && viewerContent) {
     return (
       <div className="flex flex-col h-full bg-canvas-bg">
         {/* Header */}
@@ -267,7 +303,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
           </div>
           <div className="flex items-center gap-2">
             <a
-              href={content}
+              href={viewerContent}
               download={filename}
               className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
               title="Download file"
@@ -279,7 +315,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
         {/* Image Display */}
         <div className="flex-1 overflow-auto flex items-center justify-center p-4 bg-gray-900">
           <img
-            src={content}
+            src={viewerContent}
             alt={filename}
             className="max-w-full max-h-full object-contain"
           />
@@ -300,7 +336,7 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
           Download to view in Microsoft Word or another compatible app.
         </p>
         <a
-          href={content || '#'}
+          href={viewerContent || '#'}
           download={filename}
           className="mt-6 px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg text-white transition-colors flex items-center gap-2"
         >

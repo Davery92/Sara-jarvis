@@ -15,9 +15,16 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+async def _exec(db, stmt, params=None):
+    """Execute SQL with either a sync or async session."""
+    result = db.execute(stmt, params) if params else db.execute(stmt)
+    if hasattr(result, '__await__'):
+        result = await result
+    return result
 
 
 class AttentionQueueService:
@@ -25,7 +32,7 @@ class AttentionQueueService:
 
     async def create_item(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
         title: str,
         body: Optional[str] = None,
@@ -41,7 +48,7 @@ class AttentionQueueService:
         Returns item ID on success, or existing item ID on dedup conflict.
         """
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 INSERT INTO autonomy_attention_item
                 (user_id, title, body, category, priority, source, dedupe_key, payload)
                 VALUES (:user_id, :title, :body, :category, :priority, :source,
@@ -66,7 +73,7 @@ class AttentionQueueService:
 
             # Dedup conflict — find existing item
             if dedupe_key:
-                existing = await db.execute(text("""
+                existing = await _exec(db, text("""
                     SELECT id::text FROM autonomy_attention_item
                     WHERE user_id = :user_id AND dedupe_key = :dedupe_key
                       AND status IN ('new', 'sent')
@@ -81,7 +88,7 @@ class AttentionQueueService:
 
     async def list_items(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
         status: Optional[str] = None,
         limit: int = 50,
@@ -100,7 +107,7 @@ class AttentionQueueService:
         where = " AND ".join(conditions)
 
         try:
-            result = await db.execute(text(f"""
+            result = await _exec(db, text(f"""
                 SELECT id::text, title, body, category, priority, source, status,
                        dedupe_key, payload, created_at, updated_at, read_at, archived_at
                 FROM autonomy_attention_item
@@ -134,12 +141,12 @@ class AttentionQueueService:
 
     async def count_by_status(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
     ) -> Dict[str, int]:
         """Count items by status."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 SELECT status, COUNT(*) as count
                 FROM autonomy_attention_item
                 WHERE user_id = :user_id
@@ -150,7 +157,7 @@ class AttentionQueueService:
             logger.error(f"Failed to count attention items: {e}")
             return {}
 
-    async def mark_read(self, db: AsyncSession, item_id: str, user_id: Optional[str] = None) -> bool:
+    async def mark_read(self, db, item_id: str, user_id: Optional[str] = None) -> bool:
         """Mark an item as read. Scoped by user_id when provided."""
         try:
             conditions = ["id = :id", "status IN ('new', 'sent')"]
@@ -159,17 +166,19 @@ class AttentionQueueService:
                 conditions.append("user_id = :user_id")
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
-            await db.execute(text(f"""
+            await _exec(db, text(f"""
                 UPDATE autonomy_attention_item
                 SET status = 'read', read_at = NOW(), updated_at = NOW()
                 WHERE {where}
             """), params)
+            # Propagate read feedback to linked notification_log entries
+            await self._propagate_feedback(db, item_id, action="read")
             return True
         except Exception as e:
             logger.error(f"Failed to mark attention item read: {e}")
             return False
 
-    async def mark_archived(self, db: AsyncSession, item_id: str, user_id: Optional[str] = None) -> bool:
+    async def mark_archived(self, db, item_id: str, user_id: Optional[str] = None) -> bool:
         """Archive an item. Scoped by user_id when provided."""
         try:
             conditions = ["id = :id", "status NOT IN ('archived', 'dropped')"]
@@ -178,20 +187,50 @@ class AttentionQueueService:
                 conditions.append("user_id = :user_id")
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
-            await db.execute(text(f"""
+            await _exec(db, text(f"""
                 UPDATE autonomy_attention_item
                 SET status = 'archived', archived_at = NOW(), updated_at = NOW()
                 WHERE {where}
             """), params)
+            # Propagate dismissed feedback to linked notification_log entries
+            await self._propagate_feedback(db, item_id, action="dismissed")
             return True
         except Exception as e:
             logger.error(f"Failed to archive attention item: {e}")
             return False
 
-    async def archive_all(self, db: AsyncSession, user_id: str) -> int:
+    async def _propagate_feedback(self, db, item_id: str, action: str) -> None:
+        """Propagate attention item feedback to linked notification_log entries."""
+        try:
+            if action == "read":
+                await _exec(db, text("""
+                    UPDATE notification_log
+                    SET read_at = COALESCE(read_at, NOW())
+                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                      AND read_at IS NULL
+                """), {"item_id": item_id})
+            elif action == "engaged":
+                await _exec(db, text("""
+                    UPDATE notification_log
+                    SET read_at = COALESCE(read_at, NOW()),
+                        engaged = TRUE
+                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                """), {"item_id": item_id})
+            elif action == "dismissed":
+                await _exec(db, text("""
+                    UPDATE notification_log
+                    SET dismissed_at = COALESCE(dismissed_at, NOW())
+                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                      AND dismissed_at IS NULL
+                      AND engaged = FALSE
+                """), {"item_id": item_id})
+        except Exception as e:
+            logger.debug(f"Failed to propagate feedback to notification_log: {e}")
+
+    async def archive_all(self, db, user_id: str) -> int:
         """Archive all active items for a user."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 UPDATE autonomy_attention_item
                 SET status = 'archived', archived_at = NOW(), updated_at = NOW()
                 WHERE user_id = :user_id AND status NOT IN ('archived', 'dropped')
@@ -203,12 +242,12 @@ class AttentionQueueService:
 
     async def flush_urgent(
         self,
-        db: AsyncSession,
+        db,
         user_id: str,
     ) -> List[Dict[str, Any]]:
         """Get urgent/high priority items that should trigger push notifications."""
         try:
-            result = await db.execute(text("""
+            result = await _exec(db, text("""
                 SELECT id::text, title, body, category, priority, source, payload
                 FROM autonomy_attention_item
                 WHERE user_id = :user_id
@@ -226,10 +265,10 @@ class AttentionQueueService:
             # Mark as sent
             if items:
                 ids = [i["id"] for i in items]
-                await db.execute(text("""
+                await _exec(db, text("""
                     UPDATE autonomy_attention_item
                     SET status = 'sent', updated_at = NOW()
-                    WHERE id = ANY(:ids::uuid[])
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
                 """), {"ids": ids})
             return items
         except Exception as e:

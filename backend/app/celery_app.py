@@ -53,6 +53,7 @@ celery_app = Celery(
         "app.tasks.automation",
         "app.tasks.content_inbox",
         "app.tasks.learning",
+        "app.tasks.intelligence",
     ]
 )
 
@@ -174,12 +175,46 @@ celery_app.conf.beat_schedule = {
     # PHASE 4: Autonomy
     # ============================================
 
-    # Unified agent - consolidated sensing + thinking + acting
-    # Replaces both subconscious worker (systemd) and unified heartbeat (Celery)
-    # Runs every 15 min with 4-phase cycle: SENSE → THINK → ACT → RECORD
-    "unified-agent": {
-        "task": "app.tasks.autonomy.unified_agent",
-        "schedule": 900.0,  # 15 minutes
+    # DEPRECATED: unified-agent replaced by event-driven deliberation system:
+    #   - derived-signal-refresh (5 min) — keeps working memory fresh
+    #   - salience-triggered deliberation (on-demand) — event subscribers trigger when needed
+    #   - periodic-deliberation-fallback (30 min) — safety net
+    #   - afternoon/evening-consolidation (2 PM, 9 PM) — deep pattern review
+    # The unified_agent task definition is kept for rollback; beat entry removed.
+
+    # Standing order time check — ensures time-based standing orders always fire
+    # even without unified_agent scheduling.
+    "standing-order-time-check": {
+        "task": "app.tasks.autonomy.standing_order_time_check",
+        "schedule": 60.0,  # every minute
+        "options": {"queue": "cognitive"}
+    },
+
+    # Derived signal refresh — DB-dependent working memory updates
+    # Body state, activity state, hours-since-chat/meal, habits, calendar, etc.
+    "derived-signal-refresh": {
+        "task": "app.tasks.autonomy.derived_signal_refresh",
+        "schedule": 300.0,  # 5 minutes
+        "options": {"queue": "low_priority"}
+    },
+
+    # Periodic deliberation fallback — safety net for event-driven deliberation
+    # Checks accumulated salience and runs deliberation if needed
+    "periodic-deliberation-fallback": {
+        "task": "app.tasks.autonomy.periodic_deliberation_fallback",
+        "schedule": 1800.0,  # 30 minutes
+        "options": {"queue": "cognitive"}
+    },
+
+    # Consolidation — deep reflection on patterns (2 PM and 9 PM)
+    "afternoon-consolidation": {
+        "task": "app.tasks.autonomy.run_consolidation",
+        "schedule": crontab(hour=14, minute=0),
+        "options": {"queue": "cognitive"}
+    },
+    "evening-consolidation": {
+        "task": "app.tasks.autonomy.run_consolidation",
+        "schedule": crontab(hour=21, minute=0),
         "options": {"queue": "cognitive"}
     },
 
@@ -314,6 +349,31 @@ celery_app.conf.beat_schedule = {
         "schedule": 30.0,
         "options": {"queue": "cognitive"}
     },
+
+    # ============================================
+    # PHASE 8: Intelligence Monitor
+    # ============================================
+
+    # Intelligence scan - discover new items from RSS, HN, GitHub releases (every 2 hours)
+    "intelligence-scan": {
+        "task": "app.tasks.intelligence.intelligence_scan",
+        "schedule": 7200.0,  # 2 hours
+        "options": {"queue": "low_priority"}
+    },
+
+    # Intelligence digest - synthesize high-scoring items at noon
+    "intelligence-digest-noon": {
+        "task": "app.tasks.intelligence.intelligence_digest",
+        "schedule": crontab(hour=12, minute=30),
+        "options": {"queue": "cognitive"}
+    },
+
+    # Intelligence digest - synthesize high-scoring items in the evening
+    "intelligence-digest-evening": {
+        "task": "app.tasks.intelligence.intelligence_digest",
+        "schedule": crontab(hour=18, minute=30),
+        "options": {"queue": "cognitive"}
+    },
 }
 
 # Task routing - send tasks to appropriate queues
@@ -329,6 +389,7 @@ celery_app.conf.task_routes = {
     "app.tasks.automation.*": {"queue": "cognitive"},
     "app.tasks.content_inbox.*": {"queue": "cognitive"},
     "app.tasks.learning.*": {"queue": "cognitive"},
+    "app.tasks.intelligence.*": {"queue": "low_priority"},
 }
 
 # Define queues with priorities

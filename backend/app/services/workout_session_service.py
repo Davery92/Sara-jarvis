@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Local LLM for workout coaching - use gpt-oss:120b on local endpoint
+# Local LLM for workout coaching
 WORKOUT_LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-WORKOUT_LLM_MODEL = "gpt-oss:120b"
+WORKOUT_LLM_MODEL = os.getenv("WORKOUT_LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-oss:20b"))
 
 
 class WorkoutSessionService:
@@ -645,6 +645,8 @@ Current situation:
 
             return {
                 "success": True,
+                "session_id": session["id"],
+                "completed_at": datetime.now(timezone.utc).isoformat(),
                 "summary": {
                     "workout_name": session["workout_snapshot"].get("template_name", "Workout"),
                     "duration_minutes": duration_minutes,

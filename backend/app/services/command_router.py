@@ -348,7 +348,7 @@ class CommandRouterService:
         self,
         db: Session,
         user_id: str,
-        workspace_url: str = "http://10.185.1.180:3002",
+        workspace_url: str = "https://canvas.avery.cloud",
         source_device_id: Optional[str] = None,
         target_device_id: Optional[str] = None
     ) -> bool:

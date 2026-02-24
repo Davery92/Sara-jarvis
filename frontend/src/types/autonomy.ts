@@ -58,13 +58,14 @@ export interface Mission {
   title: string
   description: string | null
   source: string
-  state: 'pending' | 'running' | 'awaiting_confirm' | 'done' | 'failed' | 'cancelled'
+  state: 'pending' | 'running' | 'awaiting_confirm' | 'needs_clarification' | 'done' | 'failed' | 'cancelled'
   priority: string
   total_steps: number
   completed_steps: number
   current_step_index: number
   requires_confirmation: boolean
   metadata: Record<string, any> | null
+  mission_metadata?: Record<string, any> | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -98,4 +99,20 @@ export interface PolicyCandidate {
   decided_at: string | null
   decided_action: string | null
   result_id: string | null
+}
+
+export interface CandidateSkill {
+  id: string
+  name: string
+  description: string | null
+  instructions?: string
+  contexts: string[]
+  priority: number
+  status: 'pending' | 'testing' | 'accepted' | 'rejected'
+  source_mission_id: string | null
+  source_task_id: string | null
+  vm_artifacts: Record<string, any> | null
+  review_notes: string | null
+  created_at: string
+  reviewed_at: string | null
 }

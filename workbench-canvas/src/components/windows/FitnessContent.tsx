@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Dumbbell, Apple, Activity, Moon, Calendar, Loader2, Plus, Trash2 } from 'lucide-react'
+import { Dumbbell, Apple, Activity, Moon, Calendar, Loader2, Plus, Trash2, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { fitnessApi } from '../../services/api'
 import type { FitnessWindowData } from '../../types'
 
@@ -126,11 +126,23 @@ function DashboardTab() {
 
 function FoodTab() {
   const queryClient = useQueryClient()
-  const today = new Date().toISOString().split('T')[0]
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
+  const [addingMealType, setAddingMealType] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<any[]>([])
+  const [isSearching, setIsSearching] = useState(false)
+  const [selectedFoods, setSelectedFoods] = useState<{ name: string; quantity: number; unit: string; calories: number; protein: number; carbs: number; fats: number }[]>([])
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const { data: logs = [], isLoading, error } = useQuery({
-    queryKey: ['fitness', 'food', today],
-    queryFn: () => fitnessApi.getFoodLogs(today),
+    queryKey: ['fitness', 'food', selectedDate],
+    queryFn: () => fitnessApi.getFoodLogs(selectedDate),
+  })
+
+  const { data: recentFoods = [] } = useQuery({
+    queryKey: ['fitness', 'recent-foods'],
+    queryFn: () => fitnessApi.getRecentFoods(15),
+    staleTime: 5 * 60 * 1000,
   })
 
   const deleteMutation = useMutation({
@@ -138,67 +150,320 @@ function FoodTab() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fitness', 'food'] }),
   })
 
+  const logMutation = useMutation({
+    mutationFn: fitnessApi.logFood,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fitness', 'food'] })
+      queryClient.invalidateQueries({ queryKey: ['fitness', 'recent-foods'] })
+      queryClient.invalidateQueries({ queryKey: ['fitness', 'dashboard'] })
+      setAddingMealType(null)
+      setSelectedFoods([])
+      setSearchQuery('')
+      setSearchResults([])
+    },
+  })
+
+  const navigateDate = (delta: number) => {
+    const d = new Date(selectedDate)
+    d.setDate(d.getDate() + delta)
+    setSelectedDate(d.toISOString().split('T')[0])
+  }
+
+  const isToday = selectedDate === new Date().toISOString().split('T')[0]
+
+  const handleSearch = (query: string) => {
+    setSearchQuery(query)
+    if (searchTimeout.current) clearTimeout(searchTimeout.current)
+    if (!query.trim()) {
+      setSearchResults([])
+      return
+    }
+    searchTimeout.current = setTimeout(async () => {
+      setIsSearching(true)
+      try {
+        const results = await fitnessApi.searchFoods(query)
+        setSearchResults(results)
+      } catch {
+        setSearchResults([])
+      }
+      setIsSearching(false)
+    }, 300)
+  }
+
+  const addFoodItem = (food: any) => {
+    const defaultUnit = food.unit || food.serving_unit || 'serving'
+    const defaultQuantityRaw = Number(food.quantity ?? food.serving_qty ?? food.serving_size ?? 1)
+    const defaultQuantity = Number.isFinite(defaultQuantityRaw) && defaultQuantityRaw > 0 ? defaultQuantityRaw : 1
+    setSelectedFoods(prev => [...prev, {
+      name: food.name || food.food_name || food.description || 'Unknown',
+      quantity: defaultQuantity,
+      unit: defaultUnit,
+      calories: food.calories || food.nf_calories || 0,
+      protein: food.protein || food.nf_protein || 0,
+      carbs: food.carbs || food.nf_total_carbohydrate || 0,
+      fats: food.fats || food.fat || food.nf_total_fat || 0,
+    }])
+    setSearchQuery('')
+    setSearchResults([])
+  }
+
+  const updateQuantity = (index: number, quantity: number) => {
+    if (!Number.isFinite(quantity) || quantity <= 0) return
+    setSelectedFoods(prev => prev.map((f, i) => i === index ? { ...f, quantity } : f))
+  }
+
+  const updateUnit = (index: number, unit: string) => {
+    const nextUnit = unit.trim() || 'serving'
+    setSelectedFoods(prev => prev.map((f, i) => i === index ? { ...f, unit: nextUnit } : f))
+  }
+
+  const removeSelectedFood = (index: number) => {
+    setSelectedFoods(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const handleSubmit = () => {
+    if (!addingMealType || selectedFoods.length === 0) return
+    const totalCals = selectedFoods.reduce((s, f) => s + f.calories * f.quantity, 0)
+    const totalProtein = selectedFoods.reduce((s, f) => s + f.protein * f.quantity, 0)
+    const totalCarbs = selectedFoods.reduce((s, f) => s + f.carbs * f.quantity, 0)
+    const totalFats = selectedFoods.reduce((s, f) => s + f.fats * f.quantity, 0)
+
+    logMutation.mutate({
+      meal_type: addingMealType,
+      food_items: selectedFoods.map(f => ({ name: f.name, quantity: f.quantity, unit: f.unit })),
+      calories: Math.round(totalCals),
+      protein: Math.round(totalProtein),
+      carbs: Math.round(totalCarbs),
+      fats: Math.round(totalFats),
+      logged_at: selectedDate !== new Date().toISOString().split('T')[0] ? `${selectedDate}T12:00:00` : undefined,
+    })
+  }
+
   if (isLoading) return <LoadingState message="Loading food log..." />
   if (error) return <ErrorState message="Failed to load food log" />
 
   const totalCalories = logs.reduce((sum, log) => sum + (log.calories || 0), 0)
   const totalProtein = logs.reduce((sum, log) => sum + (log.protein || 0), 0)
+  const totalCarbs = logs.reduce((sum, log) => sum + (log.carbs || 0), 0)
+  const totalFat = logs.reduce((sum, log) => sum + (log.fat || 0), 0)
 
-  const mealGroups = {
-    breakfast: logs.filter(l => l.meal_type === 'breakfast'),
-    lunch: logs.filter(l => l.meal_type === 'lunch'),
-    dinner: logs.filter(l => l.meal_type === 'dinner'),
-    snack: logs.filter(l => l.meal_type === 'snack'),
+  const mealTypes = ['breakfast', 'lunch', 'dinner', 'snack'] as const
+  const mealGroups = Object.fromEntries(mealTypes.map(m => [m, logs.filter(l => l.meal_type === m)]))
+
+  const formatDate = (dateStr: string) => {
+    const d = new Date(dateStr + 'T00:00:00')
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
   }
 
   return (
-    <div className="space-y-4">
-      {/* Summary */}
-      <div className="flex gap-4 p-3 bg-canvas-surface rounded-lg">
-        <div>
-          <div className="text-xl font-bold text-white">{totalCalories}</div>
-          <div className="text-xs text-canvas-muted">calories</div>
+    <div className="space-y-3">
+      {/* Date Navigation */}
+      <div className="flex items-center justify-between">
+        <button onClick={() => navigateDate(-1)} className="p-1.5 hover:bg-canvas-surface rounded text-canvas-muted hover:text-white">
+          <ChevronLeft size={18} />
+        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-white font-medium text-sm">{formatDate(selectedDate)}</span>
+          {!isToday && (
+            <button onClick={() => setSelectedDate(new Date().toISOString().split('T')[0])} className="text-xs px-2 py-0.5 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30">
+              Today
+            </button>
+          )}
         </div>
-        <div>
-          <div className="text-xl font-bold text-white">{totalProtein.toFixed(0)}g</div>
-          <div className="text-xs text-canvas-muted">protein</div>
+        <button onClick={() => navigateDate(1)} className="p-1.5 hover:bg-canvas-surface rounded text-canvas-muted hover:text-white">
+          <ChevronRight size={18} />
+        </button>
+      </div>
+
+      {/* Macro Summary */}
+      <div className="grid grid-cols-4 gap-2">
+        <div className="p-2 bg-canvas-surface rounded-lg text-center">
+          <div className="text-lg font-bold text-white">{totalCalories}</div>
+          <div className="text-[10px] text-canvas-muted">calories</div>
+        </div>
+        <div className="p-2 bg-canvas-surface rounded-lg text-center">
+          <div className="text-lg font-bold text-blue-400">{totalProtein.toFixed(0)}g</div>
+          <div className="text-[10px] text-canvas-muted">protein</div>
+        </div>
+        <div className="p-2 bg-canvas-surface rounded-lg text-center">
+          <div className="text-lg font-bold text-yellow-400">{totalCarbs.toFixed(0)}g</div>
+          <div className="text-[10px] text-canvas-muted">carbs</div>
+        </div>
+        <div className="p-2 bg-canvas-surface rounded-lg text-center">
+          <div className="text-lg font-bold text-orange-400">{totalFat.toFixed(0)}g</div>
+          <div className="text-[10px] text-canvas-muted">fat</div>
         </div>
       </div>
 
       {/* Meals */}
-      {Object.entries(mealGroups).map(([mealType, items]) => (
-        <div key={mealType}>
-          <h4 className="text-sm font-medium text-canvas-muted capitalize mb-2">{mealType}</h4>
-          {items.length === 0 ? (
-            <div className="text-sm text-canvas-muted/50 py-2">No items logged</div>
-          ) : (
-            <div className="space-y-1">
-              {items.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between p-2 bg-canvas-surface rounded"
-                >
-                  <div>
-                    <span className="text-white">{item.food_name}</span>
-                    <span className="text-canvas-muted text-sm ml-2">
-                      {item.servings}x
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm text-canvas-muted">{item.calories} cal</span>
-                    <button
-                      onClick={() => deleteMutation.mutate(item.id)}
-                      className="p-1 text-red-400 hover:bg-canvas-elevated rounded"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
+      {mealTypes.map((mealType) => {
+        const items = mealGroups[mealType] || []
+        const isAdding = addingMealType === mealType
+
+        return (
+          <div key={mealType}>
+            <div className="flex items-center justify-between mb-1.5">
+              <h4 className="text-sm font-medium text-canvas-muted capitalize">{mealType}</h4>
+              <button
+                onClick={() => {
+                  setAddingMealType(isAdding ? null : mealType)
+                  setSelectedFoods([])
+                  setSearchQuery('')
+                  setSearchResults([])
+                }}
+                className={`p-1 rounded transition-colors ${isAdding ? 'bg-red-500/20 text-red-400' : 'hover:bg-canvas-surface text-canvas-muted hover:text-green-400'}`}
+              >
+                {isAdding ? <X size={14} /> : <Plus size={14} />}
+              </button>
             </div>
-          )}
-        </div>
-      ))}
+
+            {/* Inline Add Form */}
+            {isAdding && (
+              <div className="mb-2 p-3 bg-canvas-surface/80 rounded-lg border border-canvas-border space-y-2">
+                {/* Search */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => handleSearch(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    placeholder="Search foods..."
+                    className="w-full px-3 py-2 bg-canvas-bg rounded border border-canvas-border text-white text-sm placeholder-canvas-muted focus:outline-none focus:border-green-500"
+                    autoFocus
+                  />
+                  {isSearching && <Loader2 size={14} className="absolute right-3 top-2.5 animate-spin text-canvas-muted" />}
+
+                  {/* Search Results Dropdown */}
+                  {searchResults.length > 0 && (
+                    <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-canvas-surface border border-canvas-border rounded-lg shadow-xl max-h-48 overflow-y-auto custom-scrollbar">
+                      {searchResults.slice(0, 10).map((food, i) => (
+                        <button
+                          key={i}
+                          onClick={() => addFoodItem(food)}
+                          className="w-full text-left px-3 py-2 hover:bg-canvas-elevated text-sm transition-colors"
+                        >
+                          <div className="text-white">{food.name || food.food_name || food.description}</div>
+                          <div className="text-xs text-canvas-muted">
+                            {food.calories || food.nf_calories || 0} cal
+                            {' / '}
+                            {food.protein || food.nf_protein || 0}g P
+                            {' / '}
+                            {food.serving_unit || food.unit || 'serving'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Recent Foods (show when search is empty) */}
+                {!searchQuery && selectedFoods.length === 0 && recentFoods.length > 0 && (
+                  <div>
+                    <div className="text-xs text-canvas-muted mb-1">Recently logged</div>
+                    <div className="flex flex-wrap gap-1">
+                      {recentFoods.slice(0, 8).map((food: any, i: number) => (
+                        <button
+                          key={i}
+                          onClick={() => addFoodItem(food)}
+                          className="px-2 py-1 bg-canvas-bg rounded text-xs text-white hover:bg-canvas-elevated transition-colors"
+                        >
+                          {food.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Selected Foods */}
+                {selectedFoods.length > 0 && (
+                  <div className="space-y-1.5">
+                    {selectedFoods.map((food, i) => (
+                      <div key={i} className="flex items-center gap-2 p-2 bg-canvas-bg rounded">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-white truncate">{food.name}</div>
+                          <div className="text-xs text-canvas-muted">
+                            {Math.round(food.calories * food.quantity)} cal / {Math.round(food.protein * food.quantity)}g P
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => updateQuantity(i, Math.max(0.25, Number((food.quantity - 0.25).toFixed(2))))} className="w-6 h-6 flex items-center justify-center bg-canvas-surface rounded text-white hover:bg-canvas-elevated">-</button>
+                          <input
+                            type="number"
+                            min={0.25}
+                            step={0.25}
+                            value={food.quantity}
+                            onChange={(e) => updateQuantity(i, Number(e.target.value))}
+                            className="w-14 px-1 py-0.5 text-xs text-center bg-canvas-surface border border-canvas-border rounded text-white"
+                          />
+                          <button onClick={() => updateQuantity(i, Number((food.quantity + 0.25).toFixed(2)))} className="w-6 h-6 flex items-center justify-center bg-canvas-surface rounded text-white hover:bg-canvas-elevated">+</button>
+                          <input
+                            type="text"
+                            value={food.unit}
+                            onChange={(e) => updateUnit(i, e.target.value)}
+                            placeholder="unit"
+                            className="w-20 px-1.5 py-0.5 text-xs bg-canvas-surface border border-canvas-border rounded text-white"
+                          />
+                        </div>
+                        <button onClick={() => removeSelectedFood(i)} className="p-1 text-red-400 hover:bg-canvas-surface rounded">
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+
+                    {/* Totals + Submit */}
+                    <div className="flex items-center justify-between pt-2 border-t border-canvas-border">
+                      <div className="text-xs text-canvas-muted">
+                        {Math.round(selectedFoods.reduce((s, f) => s + f.calories * f.quantity, 0))} cal
+                        {' / '}
+                        {Math.round(selectedFoods.reduce((s, f) => s + f.protein * f.quantity, 0))}g P
+                        {' / '}
+                        {Math.round(selectedFoods.reduce((s, f) => s + f.carbs * f.quantity, 0))}g C
+                        {' / '}
+                        {Math.round(selectedFoods.reduce((s, f) => s + f.fats * f.quantity, 0))}g F
+                      </div>
+                      <button
+                        onClick={handleSubmit}
+                        disabled={logMutation.isPending}
+                        className="px-3 py-1.5 bg-green-500 hover:bg-green-600 disabled:opacity-50 rounded text-sm text-white font-medium transition-colors"
+                      >
+                        {logMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : 'Log'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Existing items */}
+            {items.length === 0 && !isAdding ? (
+              <div className="text-sm text-canvas-muted/50 py-1">No items logged</div>
+            ) : (
+              <div className="space-y-1">
+                {items.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between p-2 bg-canvas-surface rounded">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-white text-sm">{item.food_name}</span>
+                      <span className="text-canvas-muted text-xs ml-2">
+                        {item.servings} {item.serving_unit || 'serving'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="text-xs text-canvas-muted">{item.calories} cal</span>
+                      <span className="text-xs text-blue-400">{item.protein}g P</span>
+                      <button
+                        onClick={() => deleteMutation.mutate(item.id)}
+                        className="p-1 text-red-400 hover:bg-canvas-elevated rounded"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

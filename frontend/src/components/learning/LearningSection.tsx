@@ -5,6 +5,10 @@ import TopicSidebar from './TopicSidebar'
 import TopicCanvas from './TopicCanvas'
 import Scratchpad from './Scratchpad'
 import LearningPathPanel from './LearningPathPanel'
+import BlueprintImporter from './BlueprintImporter'
+import ArtifactLibrary from './ArtifactLibrary'
+import LessonReader from './LessonReader'
+import FloatingLearningPanel, { PanelRect } from './FloatingLearningPanel'
 
 // Types
 export interface LearningTopic {
@@ -42,7 +46,110 @@ export interface LearningArtifact {
   updated_at: string
 }
 
-type LearningView = 'chat' | 'canvas' | 'sources'
+type LearningView = 'chat' | 'canvas' | 'sources' | 'library'
+type FloatingPanelId = 'learning-chat' | 'learning-reader'
+const LEARNING_DETACHED_PANELS_PREF_KEY = 'sara.learning.detachedPanels.v1'
+
+interface TopicDetachedPanelsPrefs {
+  chatDetached?: boolean
+  chatRect?: PanelRect
+  readerDetached?: boolean
+  readerRect?: PanelRect
+  readerArtifactId?: string | null
+}
+
+interface DetachedPanelsPrefsStore {
+  topics?: Record<string, TopicDetachedPanelsPrefs>
+}
+
+function defaultChatRect(): PanelRect {
+  return {
+    x: Math.max(24, window.innerWidth - 520),
+    y: 88,
+    width: 480,
+    height: Math.max(420, window.innerHeight - 176)
+  }
+}
+
+function defaultReaderRect(): PanelRect {
+  return {
+    x: 90,
+    y: 84,
+    width: Math.min(820, Math.max(560, window.innerWidth - 380)),
+    height: Math.max(460, window.innerHeight - 150)
+  }
+}
+
+function normalizeRect(value: unknown, fallback: PanelRect): PanelRect {
+  if (!value || typeof value !== 'object') return fallback
+  const raw = value as Partial<PanelRect>
+  if (
+    typeof raw.x !== 'number' ||
+    typeof raw.y !== 'number' ||
+    typeof raw.width !== 'number' ||
+    typeof raw.height !== 'number'
+  ) {
+    return fallback
+  }
+  if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y) || !Number.isFinite(raw.width) || !Number.isFinite(raw.height)) {
+    return fallback
+  }
+  return {
+    x: raw.x,
+    y: raw.y,
+    width: raw.width,
+    height: raw.height
+  }
+}
+
+function readDetachedPanelsPrefsStore(): DetachedPanelsPrefsStore {
+  try {
+    const raw = localStorage.getItem(LEARNING_DETACHED_PANELS_PREF_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as DetachedPanelsPrefsStore
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeDetachedPanelsPrefsStore(store: DetachedPanelsPrefsStore) {
+  try {
+    localStorage.setItem(LEARNING_DETACHED_PANELS_PREF_KEY, JSON.stringify(store))
+  } catch {
+    // ignore
+  }
+}
+
+function readTopicDetachedPanelsPrefs(topicId: string): TopicDetachedPanelsPrefs {
+  const store = readDetachedPanelsPrefsStore()
+  return store.topics?.[topicId] || {}
+}
+
+function writeTopicDetachedPanelsPrefs(topicId: string, prefs: TopicDetachedPanelsPrefs) {
+  const store = readDetachedPanelsPrefsStore()
+  writeDetachedPanelsPrefsStore({
+    ...store,
+    topics: {
+      ...(store.topics || {}),
+      [topicId]: prefs
+    }
+  })
+}
+
+function getArtifactTypeLabel(artifactType: string): string {
+  if (artifactType === 'lesson') return 'Lesson'
+  if (artifactType === 'study_guide_pareto') return 'Pareto Guide'
+  if (artifactType === 'study_guide_deep') return 'Deep Guide'
+  return artifactType.replace(/_/g, ' ')
+}
+
+function getArtifactTypeIcon(artifactType: string): string {
+  if (artifactType === 'lesson') return 'menu_book'
+  if (artifactType === 'study_guide_pareto') return 'bolt'
+  if (artifactType === 'study_guide_deep') return 'psychology'
+  return 'article'
+}
 
 export default function LearningSection() {
   // State
@@ -54,8 +161,23 @@ export default function LearningSection() {
   const [loading, setLoading] = useState(true)
   const [showScratchpad, setShowScratchpad] = useState(true)
   const [showLearningPath, setShowLearningPath] = useState(false)
+  const [showBlueprintImporter, setShowBlueprintImporter] = useState(false)
   const [autoResearching, setAutoResearching] = useState(false)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
+  const [artifacts, setArtifacts] = useState<LearningArtifact[]>([])
+  const [activeArtifact, setActiveArtifact] = useState<LearningArtifact | null>(null)
+  const [detachedArtifact, setDetachedArtifact] = useState<LearningArtifact | null>(null)
+  const [pendingDetachedArtifactId, setPendingDetachedArtifactId] = useState<string | null>(null)
+  const [isChatDetached, setIsChatDetached] = useState(false)
+  const [chatRect, setChatRect] = useState<PanelRect>(() => defaultChatRect())
+  const [readerRect, setReaderRect] = useState<PanelRect>(() => defaultReaderRect())
+  const [prefsReadyTopicId, setPrefsReadyTopicId] = useState<string | null>(null)
+  const [floatingZIndex, setFloatingZIndex] = useState<Record<FloatingPanelId, number>>({
+    'learning-chat': 100,
+    'learning-reader': 101
+  })
+  const [loadingArtifacts, setLoadingArtifacts] = useState(false)
+  const [mobileReaderMode, setMobileReaderMode] = useState<'reader' | 'chat'>('reader')
 
   // Load topics on mount
   useEffect(() => {
@@ -66,29 +188,77 @@ export default function LearningSection() {
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  // Load sources when topic changes
+  // Load sources and artifacts when topic changes
   useEffect(() => {
     if (currentTopic) {
       loadSources(currentTopic.id)
       loadScratchpad(currentTopic.id)
+      loadArtifacts(currentTopic.id)
     } else {
       setSources([])
       setScratchpadContent('')
+      setArtifacts([])
     }
   }, [currentTopic?.id])
 
-  const loadTopics = async () => {
+  // Keep opened artifacts scoped to selected topic
+  useEffect(() => {
+    if (!currentTopic?.id) {
+      setActiveArtifact(null)
+      setDetachedArtifact(null)
+      return
+    }
+
+    setActiveArtifact((prev) => (prev && prev.topic_id === currentTopic.id ? prev : null))
+    setDetachedArtifact((prev) => (prev && prev.topic_id === currentTopic.id ? prev : null))
+  }, [currentTopic?.id])
+
+  // Disable detached panels on mobile; desktop-only behavior.
+  useEffect(() => {
+    if (!isMobile) return
+    setIsChatDetached(false)
+    setDetachedArtifact(null)
+    setPendingDetachedArtifactId(null)
+  }, [isMobile])
+
+  // Restore detached panel preferences whenever topic changes.
+  useEffect(() => {
+    const topicId = currentTopic?.id
+    setPrefsReadyTopicId(null)
+
+    if (!topicId) {
+      setPendingDetachedArtifactId(null)
+      setIsChatDetached(false)
+      return
+    }
+
+    if (isMobile) return
+
+    const prefs = readTopicDetachedPanelsPrefs(topicId)
+    setChatRect(normalizeRect(prefs.chatRect, defaultChatRect()))
+    setReaderRect(normalizeRect(prefs.readerRect, defaultReaderRect()))
+    setIsChatDetached(Boolean(prefs.chatDetached))
+    setPendingDetachedArtifactId(
+      prefs.readerDetached && prefs.readerArtifactId ? prefs.readerArtifactId : null
+    )
+    setPrefsReadyTopicId(topicId)
+  }, [currentTopic?.id, isMobile])
+
+  const loadTopics = async (): Promise<LearningTopic[]> => {
     try {
       setLoading(true)
-      const response = await fetch(`${APP_CONFIG.apiUrl}/api/learn/topics`, {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/learn/topics?include_all=true`, {
         credentials: 'include'
       })
       if (response.ok) {
         const data = await response.json()
         setTopics(data)
+        return data
       }
+      return []
     } catch (error) {
       console.error('Failed to load topics:', error)
+      return []
     } finally {
       setLoading(false)
     }
@@ -121,6 +291,125 @@ export default function LearningSection() {
       console.error('Failed to load scratchpad:', error)
     }
   }
+
+  const loadArtifacts = async (topicId: string) => {
+    setLoadingArtifacts(true)
+    try {
+      const types = ['lesson', 'study_guide_pareto', 'study_guide_deep']
+      const results = await Promise.all(
+        types.map(async (type) => {
+          try {
+            const response = await fetch(
+              `${APP_CONFIG.apiUrl}/api/learn/artifacts?topic_id=${topicId}&artifact_type=${type}`,
+              { credentials: 'include' }
+            )
+            if (response.ok) {
+              const data = await response.json()
+              return Array.isArray(data) ? data : (data?.artifacts || [])
+            }
+            return []
+          } catch {
+            return []
+          }
+        })
+      )
+      setArtifacts(results.flat())
+    } catch (error) {
+      console.error('Failed to load artifacts:', error)
+      setArtifacts([])
+    } finally {
+      setLoadingArtifacts(false)
+    }
+  }
+
+  const bringFloatingPanelToFront = (panelId: FloatingPanelId) => {
+    setFloatingZIndex((prev) => {
+      const max = Math.max(...Object.values(prev), 100)
+      return {
+        ...prev,
+        [panelId]: max + 1
+      }
+    })
+  }
+
+  const handleOpenArtifact = (artifact: LearningArtifact) => {
+    setPendingDetachedArtifactId(null)
+    setDetachedArtifact(null)
+    setActiveArtifact(artifact)
+    setMobileReaderMode('reader')
+  }
+
+  const handleDetachArtifact = () => {
+    if (!activeArtifact) return
+    setPendingDetachedArtifactId(null)
+    setDetachedArtifact(activeArtifact)
+    setActiveArtifact(null)
+    bringFloatingPanelToFront('learning-reader')
+  }
+
+  const handleAttachArtifact = () => {
+    if (!detachedArtifact) return
+    setPendingDetachedArtifactId(null)
+    setActiveArtifact(detachedArtifact)
+    setDetachedArtifact(null)
+  }
+
+  const handleDetachChat = () => {
+    setIsChatDetached(true)
+    bringFloatingPanelToFront('learning-chat')
+  }
+
+  const handleAttachChat = () => {
+    setIsChatDetached(false)
+    if (!activeArtifact) {
+      setCurrentView('chat')
+    }
+  }
+
+  // When preferences request a detached reader, restore the referenced artifact once loaded.
+  useEffect(() => {
+    if (!pendingDetachedArtifactId || !currentTopic?.id || isMobile) return
+
+    const match = artifacts.find(
+      (artifact) => artifact.id === pendingDetachedArtifactId && artifact.topic_id === currentTopic.id
+    )
+    if (match) {
+      setDetachedArtifact(match)
+      setActiveArtifact(null)
+      setPendingDetachedArtifactId(null)
+      bringFloatingPanelToFront('learning-reader')
+      return
+    }
+
+    if (!loadingArtifacts) {
+      setPendingDetachedArtifactId(null)
+    }
+  }, [pendingDetachedArtifactId, artifacts, loadingArtifacts, currentTopic?.id, isMobile])
+
+  // Persist detached state + geometry per topic for continuity.
+  useEffect(() => {
+    if (isMobile) return
+    const topicId = currentTopic?.id
+    if (!topicId || prefsReadyTopicId !== topicId) return
+    if (pendingDetachedArtifactId) return
+
+    writeTopicDetachedPanelsPrefs(topicId, {
+      chatDetached: isChatDetached,
+      chatRect,
+      readerDetached: Boolean(detachedArtifact),
+      readerRect,
+      readerArtifactId: detachedArtifact?.id || null
+    })
+  }, [
+    isMobile,
+    currentTopic?.id,
+    prefsReadyTopicId,
+    pendingDetachedArtifactId,
+    isChatDetached,
+    chatRect,
+    readerRect,
+    detachedArtifact?.id
+  ])
 
   const handleCreateTopic = async (title: string, description?: string, parentId?: string, autoResearch?: boolean) => {
     try {
@@ -334,6 +623,17 @@ export default function LearningSection() {
     }
   }
 
+  const handleBlueprintMaterialized = async (rootTopicId?: string) => {
+    const refreshedTopics = await loadTopics()
+    if (rootTopicId) {
+      const matched = refreshedTopics.find(t => t.id === rootTopicId)
+      if (matched) {
+        setCurrentTopic(matched)
+      }
+    }
+    setCurrentView('chat')
+  }
+
   const handleFetchSource = async (sourceId: string) => {
     try {
       // Update local state to show fetching status
@@ -371,55 +671,130 @@ export default function LearningSection() {
   // Mobile layout
   if (isMobile) {
     return (
-      <div className="flex flex-col h-full bg-gray-900">
-        {/* Mobile Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-          <div className="flex items-center gap-2">
-            <span className="material-icons text-teal-400">school</span>
-            <span className="font-semibold text-white">
-              {currentTopic?.title || 'Learning'}
-            </span>
+      <>
+        <div className="flex flex-col h-full bg-gray-900">
+          {/* Mobile Header */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+            <div className="flex items-center gap-2">
+              <span className="material-icons text-teal-400">school</span>
+              <span className="font-semibold text-white">
+                {currentTopic?.title || 'Learning'}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowBlueprintImporter(true)}
+                className="px-3 py-1 rounded text-sm text-teal-300 hover:text-white hover:bg-gray-800"
+                title="Import Learning Plan"
+              >
+                Import
+              </button>
+              <button
+                onClick={() => setCurrentView('chat')}
+                className={`px-3 py-1 rounded text-sm ${
+                  currentView === 'chat' ? 'bg-teal-600 text-white' : 'text-gray-400'
+                }`}
+              >
+                Chat
+              </button>
+              <button
+                onClick={() => setCurrentView('canvas')}
+                className={`px-3 py-1 rounded text-sm ${
+                  currentView === 'canvas' ? 'bg-teal-600 text-white' : 'text-gray-400'
+                }`}
+              >
+                Canvas
+              </button>
+              <button
+                onClick={() => setCurrentView('library')}
+                className={`px-3 py-1 rounded text-sm ${
+                  currentView === 'library' ? 'bg-teal-600 text-white' : 'text-gray-400'
+                }`}
+              >
+                Library
+              </button>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setCurrentView('chat')}
-              className={`px-3 py-1 rounded text-sm ${
-                currentView === 'chat' ? 'bg-teal-600 text-white' : 'text-gray-400'
-              }`}
-            >
-              Chat
-            </button>
-            <button
-              onClick={() => setCurrentView('canvas')}
-              className={`px-3 py-1 rounded text-sm ${
-                currentView === 'canvas' ? 'bg-teal-600 text-white' : 'text-gray-400'
-              }`}
-            >
-              Canvas
-            </button>
-          </div>
-        </div>
 
-        {/* Mobile Content */}
-        <div className="flex-1 overflow-hidden">
-          {currentView === 'chat' ? (
-            <LearningChat
-              topicId={currentTopic?.id || null}
-              topicTitle={currentTopic?.title}
-            />
-          ) : (
-            <TopicCanvas
-              topicId={currentTopic?.id || null}
-            />
-          )}
+          {/* Mobile Content */}
+          <div className="flex-1 overflow-hidden">
+            {activeArtifact ? (
+              <div className="flex flex-col h-full">
+                {/* Toggle bar for mobile reader/chat */}
+                <div className="flex border-b border-gray-700">
+                  <button
+                    onClick={() => setMobileReaderMode('reader')}
+                    className={`flex-1 py-2 text-sm font-medium text-center transition-colors ${
+                      mobileReaderMode === 'reader'
+                        ? 'bg-teal-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Reader
+                  </button>
+                  <button
+                    onClick={() => setMobileReaderMode('chat')}
+                    className={`flex-1 py-2 text-sm font-medium text-center transition-colors ${
+                      mobileReaderMode === 'chat'
+                        ? 'bg-teal-600 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Chat
+                  </button>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  {mobileReaderMode === 'reader' ? (
+                    <LessonReader
+                      artifact={activeArtifact}
+                      onClose={() => setActiveArtifact(null)}
+                    />
+                  ) : (
+                    <LearningChat
+                      topicId={currentTopic?.id || null}
+                      topicTitle={currentTopic?.title}
+                    />
+                  )}
+                </div>
+              </div>
+            ) : currentView === 'chat' ? (
+              <LearningChat
+                topicId={currentTopic?.id || null}
+                topicTitle={currentTopic?.title}
+              />
+            ) : currentView === 'library' ? (
+              <ArtifactLibrary
+                artifacts={artifacts}
+                loading={loadingArtifacts}
+                onOpenArtifact={handleOpenArtifact}
+                onRefresh={() => currentTopic && loadArtifacts(currentTopic.id)}
+              />
+            ) : (
+              <TopicCanvas
+                topicId={currentTopic?.id || null}
+              />
+            )}
+          </div>
         </div>
-      </div>
+        <BlueprintImporter
+          isVisible={showBlueprintImporter}
+          onClose={() => setShowBlueprintImporter(false)}
+          onMaterialized={handleBlueprintMaterialized}
+          parentTopicId={currentTopic?.id || null}
+          parentTopicTitle={currentTopic?.title || null}
+          availableTopics={topics}
+          onOpenArtifact={(artifact) => {
+            handleOpenArtifact(artifact)
+            setShowBlueprintImporter(false)
+          }}
+        />
+      </>
     )
   }
 
   // Desktop layout - 3 zone
   return (
-    <div className="flex h-full bg-gray-900">
+    <div className="flex h-full bg-gray-900 relative">
       {/* Left Sidebar - Topics */}
       <div className="w-64 border-r border-gray-700 flex flex-col">
         <TopicSidebar
@@ -440,6 +815,14 @@ export default function LearningSection() {
             <h2 className="text-lg font-semibold text-white">
               {currentTopic?.title || 'Select a topic to start learning'}
             </h2>
+            <button
+              onClick={() => setShowBlueprintImporter(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-teal-400 hover:bg-teal-500/10 transition-colors"
+              title="Import Blueprint"
+            >
+              <span className="material-icons text-sm">upload_file</span>
+              Import Plan
+            </button>
             <button
               onClick={() => setShowLearningPath(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-teal-400 hover:bg-teal-500/10 transition-colors"
@@ -490,6 +873,24 @@ export default function LearningSection() {
               </span>
             </button>
             <button
+              onClick={() => setCurrentView('library')}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                currentView === 'library'
+                  ? 'bg-teal-600 text-white'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800'
+              }`}
+            >
+              <span className="flex items-center gap-2">
+                <span className="material-icons text-sm">local_library</span>
+                Library
+                {artifacts.length > 0 && (
+                  <span className="bg-teal-700/50 text-teal-300 text-[10px] px-1.5 py-0.5 rounded-full">
+                    {artifacts.length}
+                  </span>
+                )}
+              </span>
+            </button>
+            <button
               onClick={() => setShowScratchpad(!showScratchpad)}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                 showScratchpad
@@ -502,22 +903,88 @@ export default function LearningSection() {
                 Notes
               </span>
             </button>
+            <button
+              onClick={isChatDetached ? handleAttachChat : handleDetachChat}
+              disabled={!currentTopic}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                isChatDetached
+                  ? 'bg-blue-700/50 text-blue-100 hover:bg-blue-700/70'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800'
+              } disabled:bg-gray-800 disabled:text-gray-600`}
+              title={isChatDetached ? 'Attach chat back' : 'Detach chat into a floating panel'}
+            >
+              <span className="flex items-center gap-2">
+                <span className="material-icons text-sm">
+                  {isChatDetached ? 'vertical_align_bottom' : 'open_in_new'}
+                </span>
+                {isChatDetached ? 'Attach Chat' : 'Detach Chat'}
+              </span>
+            </button>
           </div>
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-hidden flex">
+          {/* Split view: reader + chat when an artifact is open */}
+          {activeArtifact ? (
+            <div className="flex-1 flex overflow-hidden">
+              <div className={`${isChatDetached ? 'w-full' : 'w-[60%] border-r border-gray-700'} overflow-hidden`}>
+                <LessonReader
+                  artifact={activeArtifact}
+                  onClose={() => setActiveArtifact(null)}
+                  onDetach={handleDetachArtifact}
+                  showDetachButton
+                />
+              </div>
+              {!isChatDetached && (
+                <div className="w-[40%] overflow-hidden">
+                  <LearningChat
+                    topicId={currentTopic?.id || null}
+                    topicTitle={currentTopic?.title}
+                  />
+                </div>
+              )}
+            </div>
+          ) : (
+          <>
           {/* Main View */}
           <div className={`${showScratchpad ? 'flex-1' : 'w-full'} overflow-hidden`}>
             {currentView === 'chat' && (
-              <LearningChat
-                topicId={currentTopic?.id || null}
-                topicTitle={currentTopic?.title}
-              />
+              isChatDetached ? (
+                <div className="h-full flex items-center justify-center px-6">
+                  <div className="max-w-md bg-gray-800 border border-gray-700 rounded-xl p-6 text-center">
+                    <span className="material-icons text-3xl text-blue-400 mb-2">open_in_new</span>
+                    <h3 className="text-base font-semibold text-white mb-1">Chat is detached</h3>
+                    <p className="text-sm text-gray-400 mb-4">
+                      Continue in the floating chat window while you work on guides, sources, and your canvas.
+                    </p>
+                    <button
+                      onClick={handleAttachChat}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm transition-colors"
+                    >
+                      <span className="material-icons text-sm">vertical_align_bottom</span>
+                      Attach Chat
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <LearningChat
+                  topicId={currentTopic?.id || null}
+                  topicTitle={currentTopic?.title}
+                />
+              )
             )}
             {currentView === 'canvas' && (
               <TopicCanvas
                 topicId={currentTopic?.id || null}
+              />
+            )}
+            {currentView === 'library' && (
+              <ArtifactLibrary
+                artifacts={artifacts}
+                loading={loadingArtifacts}
+                onOpenArtifact={handleOpenArtifact}
+                onRefresh={() => currentTopic && loadArtifacts(currentTopic.id)}
               />
             )}
             {currentView === 'sources' && (
@@ -689,6 +1156,8 @@ export default function LearningSection() {
               />
             </div>
           )}
+          </>
+          )}
         </div>
       </div>
 
@@ -700,6 +1169,60 @@ export default function LearningSection() {
         focusTopicId={currentTopic?.id}
         focusTopicTitle={currentTopic?.title}
       />
+
+      <BlueprintImporter
+        isVisible={showBlueprintImporter}
+        onClose={() => setShowBlueprintImporter(false)}
+        onMaterialized={handleBlueprintMaterialized}
+        parentTopicId={currentTopic?.id || null}
+        parentTopicTitle={currentTopic?.title || null}
+        availableTopics={topics}
+        onOpenArtifact={(artifact) => {
+          handleOpenArtifact(artifact)
+          setShowBlueprintImporter(false)
+        }}
+      />
+
+      {detachedArtifact && (
+        <FloatingLearningPanel
+          id="learning-reader"
+          title={detachedArtifact.title || 'Detached Reader'}
+          subtitle={getArtifactTypeLabel(detachedArtifact.artifact_type)}
+          icon={getArtifactTypeIcon(detachedArtifact.artifact_type)}
+          initialRect={readerRect}
+          zIndex={floatingZIndex['learning-reader']}
+          onFocus={bringFloatingPanelToFront}
+          onAttach={handleAttachArtifact}
+          onClose={() => setDetachedArtifact(null)}
+          onRectChange={setReaderRect}
+        >
+          <LessonReader
+            artifact={detachedArtifact}
+            onClose={() => setDetachedArtifact(null)}
+            showHeader={false}
+          />
+        </FloatingLearningPanel>
+      )}
+
+      {isChatDetached && (
+        <FloatingLearningPanel
+          id="learning-chat"
+          title={currentTopic?.title ? `Tutor Chat: ${currentTopic.title}` : 'Tutor Chat'}
+          subtitle="Socratic tutor"
+          icon="chat"
+          initialRect={chatRect}
+          zIndex={floatingZIndex['learning-chat']}
+          onFocus={bringFloatingPanelToFront}
+          onAttach={handleAttachChat}
+          onClose={() => setIsChatDetached(false)}
+          onRectChange={setChatRect}
+        >
+          <LearningChat
+            topicId={currentTopic?.id || null}
+            topicTitle={currentTopic?.title}
+          />
+        </FloatingLearningPanel>
+      )}
     </div>
   )
 }

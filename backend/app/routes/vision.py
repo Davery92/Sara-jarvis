@@ -6,6 +6,8 @@ import base64
 import hashlib
 import logging
 import uuid
+import io
+from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
@@ -20,6 +22,7 @@ from app.db.session import get_db
 from app.models.machine import ShadowScreenshot
 from app.models.user_settings import UserSettings
 from app.core.vision_formatters import OllamaVisionFormatter
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,45 @@ class ScreenshotUploadResponse(BaseModel):
     screenshot_id: str
     analysis: Optional[str] = None
     image_hash: str
+
+
+def _store_screenshot_blob(content: bytes, object_key: str) -> tuple[str, str]:
+    """
+    Store screenshot in MinIO when available, else local uploads fallback.
+    Returns (storage_key, storage_backend).
+    """
+    # MinIO first
+    try:
+        from minio import Minio
+
+        endpoint = settings.minio_url.replace("http://", "").replace("https://", "")
+        secure = settings.minio_url.startswith("https://")
+        client = Minio(
+            endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=secure,
+        )
+        bucket = settings.minio_bucket
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
+        client.put_object(
+            bucket_name=bucket,
+            object_name=object_key,
+            data=io.BytesIO(content),
+            length=len(content),
+            content_type="image/png",
+        )
+        return object_key, "minio"
+    except Exception as e:
+        logger.warning(f"MinIO screenshot upload unavailable, falling back to local disk: {e}")
+
+    # Local filesystem fallback
+    local_root = Path("uploads")
+    local_path = local_root / object_key
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(content)
+    return f"local://{object_key}", "local"
 
 
 async def get_user_vision_settings(user_id: str, db: Session) -> dict:
@@ -227,9 +269,8 @@ async def upload_screenshot(
     # Generate unique ID
     screenshot_id = str(uuid.uuid4())
 
-    # TODO: Store in MinIO
-    # For now, we'll skip MinIO storage and just record metadata
-    minio_key = f"screenshots/{user_id}/{device_id}/{screenshot_id}.png"
+    storage_object_key = f"screenshots/{user_id}/{device_id}/{screenshot_id}.png"
+    minio_key, storage_backend = _store_screenshot_blob(content, storage_object_key)
 
     # Create database record if we have a session
     if session_id:
@@ -265,7 +306,10 @@ async def upload_screenshot(
             logger.error(f"Screenshot analysis failed: {e}")
             # Don't fail the upload if analysis fails
 
-    logger.info(f"Screenshot uploaded: {screenshot_id} from device {device_id}")
+    logger.info(
+        f"Screenshot uploaded: {screenshot_id} from device {device_id} "
+        f"(storage={storage_backend}, key={minio_key})"
+    )
 
     return ScreenshotUploadResponse(
         screenshot_id=screenshot_id,

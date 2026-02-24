@@ -18,6 +18,7 @@ from dataclasses import dataclass, asdict
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.core.config import settings
 from .news_aggregator_service import news_aggregator_service, NewsItem
 from .weather_service import weather_service, WeatherData
 from .notification_service import notification_service, NotificationPriority
@@ -41,12 +42,12 @@ Rules:
 
 Tone directive: {tone_directive}"""
 
-BRIEF_USER_PROMPT = """Generate David's morning brief for today.
+BRIEF_USER_PROMPT = """Generate David's morning brief for today, {today_date}.
 
 == WHO DAVID IS ==
 {stable_layer}
 
-== ACTIVE CONTEXT ==
+== ACTIVE CONTEXT (filtered for today) ==
 {context_layer}
 
 == YESTERDAY ==
@@ -63,6 +64,10 @@ BRIEF_USER_PROMPT = """Generate David's morning brief for today.
 
 == TECH NEWS ==
 {news}
+
+Remember: today is {today_date}. Do not reference events, locations, or meals from previous days
+as if they are current. If the active context mentions something from yesterday or earlier,
+treat it as past — do not present it as today's plan.
 
 Write the brief now."""
 
@@ -141,10 +146,205 @@ class MorningBriefService:
 
     def __init__(self):
         self.timeout = aiohttp.ClientTimeout(total=120)  # Generous timeout for TTS
-        # LLM Configuration (from environment)
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-        self.llm_model = os.environ.get("OPENAI_MODEL", "gpt-oss:120b")
+        self._refresh_llm_config()
         self.llm_api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+
+    def _refresh_llm_config(self):
+        """Reload background LLM settings so model switches apply live."""
+        # Background LLM configuration (separate from interactive chat model)
+        self.llm_base_url = settings.bg_llm_primary_url
+        self.llm_model = settings.bg_llm_primary_model
+
+    async def _bootstrap_stable_layer(self, user_id: str, db: Session) -> str:
+        """
+        Generate a lightweight stable layer on-the-fly when the weekly synthesis
+        hasn't run yet. Uses PKG summary + recent episodic memory to build a
+        minimal personal context so the morning brief personal section isn't empty.
+        """
+        logger.info(f"Bootstrapping stable layer for user {user_id[:8]} (weekly synthesis not yet available)")
+        parts = []
+
+        # 1. Pull from Personal Knowledge Graph
+        try:
+            from app.services.pkg_context_provider import pkg_context
+            pkg_summary = pkg_context.get_david_summary_brief(user_id, max_facts=10)
+            if pkg_summary and pkg_summary.strip():
+                parts.append(pkg_summary.strip())
+                logger.debug(f"PKG contributed {len(pkg_summary)} chars to stable bootstrap")
+        except Exception as e:
+            logger.warning(f"PKG unavailable for stable bootstrap: {e}")
+
+        # 2. Pull recent episodic memory highlights (high-importance episodes)
+        try:
+            rows = db.execute(text("""
+                SELECT content, importance
+                FROM episode
+                WHERE user_id = :user_id
+                  AND importance >= 7
+                ORDER BY created_at DESC
+                LIMIT 8
+            """), {"user_id": user_id}).fetchall()
+
+            if rows:
+                memory_lines = []
+                for row in rows:
+                    # Truncate long episodes for the brief summary
+                    snippet = (row.content or "")[:200]
+                    if len(row.content or "") > 200:
+                        snippet += "..."
+                    memory_lines.append(f"- {snippet}")
+                parts.append("Key recent memories:\n" + "\n".join(memory_lines))
+                logger.debug(f"Episodic memory contributed {len(rows)} items to stable bootstrap")
+        except Exception as e:
+            logger.warning(f"Episodic memory unavailable for stable bootstrap: {e}")
+
+        if not parts:
+            logger.info("Stable bootstrap produced no content (PKG and memory both empty)")
+            return ""
+
+        bootstrapped = "\n\n".join(parts)
+        logger.info(f"Stable layer bootstrapped with {len(bootstrapped)} chars for user {user_id[:8]}")
+        return bootstrapped
+
+    def _get_fresh_context_content(self, user_id: str, raw_context: str) -> str:
+        """
+        Return context layer content only if it is fresh enough for a morning brief.
+        Prevents stale project/nutrition context from older days bleeding into today's brief.
+        """
+        try:
+            context_path = Path("/home/david/jarvis/data/briefs") / user_id / "layers" / "context.md"
+            if not context_path.exists() or not raw_context:
+                return ""
+
+            modified_at = datetime.fromtimestamp(context_path.stat().st_mtime, tz=dt_timezone.utc)
+            age = local_now() - modified_at
+            if age > timedelta(hours=18):
+                logger.info(
+                    "Skipping stale context layer for morning brief: age=%sh user=%s",
+                    round(age.total_seconds() / 3600, 1),
+                    user_id[:8],
+                )
+                return ""
+
+            # Guard against content that was rewritten recently but still references old dates.
+            # Extract all date references and reject content where the *latest* mention
+            # is before yesterday.  Also strip out individual lines/paragraphs that
+            # reference dates older than yesterday so partial staleness doesn't leak through.
+            today_local = local_today()
+            yesterday = today_local - timedelta(days=1)
+
+            month_map = {
+                "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            }
+
+            # Also match day-of-week references like "Monday", "Tuesday" etc.
+            # to catch phrases like "Monday ribs" or "in Sparta today" with a weekday anchor.
+            day_of_week_map = {
+                "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                "friday": 4, "saturday": 5, "sunday": 6,
+            }
+
+            def _parse_date_refs(text: str) -> list[date]:
+                """Extract all date references from text."""
+                refs = []
+                # Match "Month Day" patterns (e.g. "Feb 18", "February 18")
+                for m in re.finditer(
+                    r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})\b",
+                    text,
+                    re.IGNORECASE,
+                ):
+                    month_num = month_map.get(m.group(1)[:3].lower())
+                    if not month_num:
+                        continue
+                    try:
+                        refs.append(date(today_local.year, month_num, int(m.group(2))))
+                    except ValueError:
+                        continue
+
+                # Match "YYYY-MM-DD" patterns
+                for m in re.finditer(r"\b(\d{4})-(\d{2})-(\d{2})\b", text):
+                    try:
+                        refs.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                    except ValueError:
+                        continue
+
+                # Match weekday names and map to most recent occurrence
+                for m in re.finditer(
+                    r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+                    text,
+                    re.IGNORECASE,
+                ):
+                    target_dow = day_of_week_map.get(m.group(1).lower())
+                    if target_dow is None:
+                        continue
+                    # Find the most recent past occurrence of this weekday
+                    days_back = (today_local.weekday() - target_dow) % 7
+                    if days_back == 0:
+                        # Could be today — include it (it's fresh)
+                        refs.append(today_local)
+                    else:
+                        refs.append(today_local - timedelta(days=days_back))
+
+                return refs
+
+            # Detect relative temporal phrases that are stale when read the next morning.
+            # These are phrases written "yesterday evening" that reference "tonight" or "tomorrow"
+            # which have now passed.
+            _STALE_RELATIVE_PATTERNS = [
+                r"\bpending\s+(?:tonight|this\s+evening)\b",
+                r"\bawaiting\s+.*?\btonight\b",
+                r"\btonight['']?s?\b.*?\b(?:evaluation|assessment|verdict|check)\b",
+                r"\b(?:evaluation|assessment|verdict|check)\b.*?\btonight\b",
+                r"\bwill\s+(?:be\s+)?(?:checking|evaluating|assessing)\b",
+            ]
+            _stale_relative_re = re.compile("|".join(_STALE_RELATIVE_PATTERNS), re.IGNORECASE)
+
+            # First: check if ALL date references in the entire content are stale
+            all_refs = _parse_date_refs(raw_context)
+            if all_refs:
+                latest_ref = max(all_refs)
+                if latest_ref < yesterday:
+                    logger.info(
+                        "Skipping stale context layer by content date: latest_ref=%s today=%s user=%s",
+                        latest_ref.isoformat(),
+                        today_local.isoformat(),
+                        user_id[:8],
+                    )
+                    return ""
+
+            # Second: line-by-line filtering to strip stale paragraphs while keeping fresh ones.
+            # Lines referencing yesterday or older are stripped (the brief is for TODAY).
+            # Lines with stale relative phrases ("pending tonight") are also stripped.
+            cleaned_lines = []
+            for line in raw_context.split("\n"):
+                # Strip lines with stale relative temporal phrases
+                if _stale_relative_re.search(line):
+                    logger.debug("Stripping stale relative-time line: %.80s", line)
+                    continue
+
+                line_refs = _parse_date_refs(line)
+                if line_refs:
+                    line_latest = max(line_refs)
+                    # Strip lines referencing yesterday or older — the brief is for TODAY
+                    if line_latest <= yesterday:
+                        logger.debug(
+                            "Stripping stale context line (ref=%s): %.80s",
+                            line_latest.isoformat(),
+                            line,
+                        )
+                        continue
+                cleaned_lines.append(line)
+
+            cleaned = "\n".join(cleaned_lines).strip()
+            if not cleaned:
+                logger.info("Context layer entirely stale after line filtering, user=%s", user_id[:8])
+                return ""
+
+            return cleaned
+        except Exception as e:
+            logger.warning(f"Failed context freshness check, using raw context: {e}")
+            return raw_context
 
     async def gather_news(self) -> tuple[str, List[Dict]]:
         """Gather and synthesize news from all sources."""
@@ -172,6 +372,7 @@ class MorningBriefService:
     async def _synthesize_news(self, raw_news: str) -> str:
         """Use LLM to synthesize news into conversational summary."""
         try:
+            self._refresh_llm_config()
             prompt = f"""Create a conversational tech news summary for a morning briefing.
 
 Focus on:
@@ -436,21 +637,79 @@ Synthesized summary:"""
             logger.error(f"Error gathering health digest: {e}")
             return "", {}
 
-    async def gather_calendar(self, user_id: str, db: Session) -> tuple[str, List[Dict]]:
-        """Gather today's calendar events."""
+    def _check_calendar_sync_freshness(self, user_id: str, db: Session) -> tuple[bool, Optional[datetime]]:
+        """
+        Check how fresh the calendar data is by looking at the most recent updated_at
+        on the calendar_event table (iOS-synced events). Returns (is_fresh, last_sync_time).
+        Fresh = updated within the last 24 hours.
+        """
         try:
-            # Use user's timezone to determine "today", then convert to UTC for query
+            row = db.execute(text("""
+                SELECT MAX(updated_at) AS last_sync
+                FROM calendar_event
+                WHERE user_id = :user_id
+            """), {"user_id": user_id}).fetchone()
+
+            if not row or not row.last_sync:
+                return False, None
+
+            last_sync = row.last_sync
+            if last_sync.tzinfo is None:
+                last_sync = last_sync.replace(tzinfo=dt_timezone.utc)
+
+            age = local_now() - last_sync
+            is_fresh = age < timedelta(hours=24)
+            return is_fresh, last_sync
+        except Exception as e:
+            logger.warning(f"Could not check calendar sync freshness: {e}")
+            return False, None
+
+    async def _fetch_calendar_from_google_api(self, user_id: str) -> Optional[List[Dict]]:
+        """
+        Fallback: fetch today's events directly from Google Calendar API.
+        Returns a list of event dicts, or None if unavailable.
+
+        TODO: Implement full Google Calendar API integration. Requires:
+          - GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET env vars
+          - OAuth2 refresh token stored per user (e.g. in user_settings or a credentials table)
+          - Use google-auth + google-api-python-client or direct REST calls
+        For now, returns None so the caller falls back to the stale-data warning.
+        """
+        google_client_id = os.environ.get("GOOGLE_CALENDAR_CLIENT_ID")
+        google_client_secret = os.environ.get("GOOGLE_CALENDAR_CLIENT_SECRET")
+
+        if not google_client_id or not google_client_secret:
+            logger.debug("Google Calendar API credentials not configured, skipping direct fetch")
+            return None
+
+        # TODO: Implement Google Calendar API fetch here:
+        # 1. Look up user's OAuth refresh token from DB
+        # 2. Exchange for access token
+        # 3. Call https://www.googleapis.com/calendar/v3/calendars/primary/events
+        #    with timeMin/timeMax for today, singleEvents=true, orderBy=startTime
+        # 4. Parse response into list of dicts with title, starts_at, ends_at, location
+        # 5. Optionally upsert fetched events into the event table to refresh the DB cache
+        logger.info("Google Calendar API credentials found but integration not yet implemented")
+        return None
+
+    async def gather_calendar(self, user_id: str, db: Session) -> tuple[str, List[Dict]]:
+        """Gather today's calendar events from iOS-synced calendar_event table."""
+        try:
+            # Check sync freshness before querying
+            is_fresh, last_sync_time = self._check_calendar_sync_freshness(user_id, db)
+
+            # calendar_event stores naive local times (already in user's timezone)
             today = local_today()
-            start_of_day = datetime.combine(today, datetime.min.time()).replace(tzinfo=USER_TIMEZONE).astimezone(dt_timezone.utc)
-            end_of_day = datetime.combine(today, datetime.max.time()).replace(tzinfo=USER_TIMEZONE).astimezone(dt_timezone.utc)
+            start_of_day = datetime.combine(today, datetime.min.time())
+            end_of_day = datetime.combine(today, datetime.max.time())
 
             result = db.execute(text("""
-                SELECT title, starts_at, ends_at, location
-                FROM event
+                SELECT title, start_time, end_time, location, all_day
+                FROM calendar_event
                 WHERE user_id = :user_id
-                  AND starts_at >= :start_of_day
-                  AND starts_at <= :end_of_day
-                ORDER BY starts_at
+                  AND start_time >= :start_of_day
+                  AND start_time <= :end_of_day
+                ORDER BY start_time
             """), {
                 "user_id": user_id,
                 "start_of_day": start_of_day,
@@ -461,12 +720,36 @@ Synthesized summary:"""
             for row in result.fetchall():
                 events.append(CalendarEvent(
                     title=row.title,
-                    starts_at=row.starts_at.strftime("%H:%M") if row.starts_at else "",
-                    ends_at=row.ends_at.strftime("%H:%M") if row.ends_at else "",
+                    starts_at=row.start_time.strftime("%H:%M") if row.start_time and not row.all_day else ("All day" if row.all_day else ""),
+                    ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
                     location=row.location
                 ))
 
+            # If data is stale AND empty, try Google Calendar API as fallback
+            if not events and not is_fresh:
+                google_events = await self._fetch_calendar_from_google_api(user_id)
+                if google_events:
+                    for ge in google_events:
+                        events.append(CalendarEvent(
+                            title=ge.get("title", "Untitled"),
+                            starts_at=ge.get("starts_at", ""),
+                            ends_at=ge.get("ends_at", ""),
+                            location=ge.get("location")
+                        ))
+                    logger.info(f"Fetched {len(events)} events from Google Calendar API fallback")
+
+            # Build staleness warning if needed
+            stale_warning = ""
+            if not is_fresh:
+                if last_sync_time:
+                    age_hours = (local_now() - last_sync_time).total_seconds() / 3600
+                    stale_warning = f"\n\n*Note: Calendar data may be outdated (last sync {age_hours:.0f}h ago). Some events might be missing.*"
+                else:
+                    stale_warning = "\n\n*Note: Calendar sync status unknown. Events shown may be incomplete.*"
+
             if not events:
+                if not is_fresh:
+                    return "No calendar events found — Google Calendar sync is not active. Check your Google Calendar directly for today's schedule.", []
                 return "No events scheduled for today.", []
 
             # Format calendar summary
@@ -477,6 +760,9 @@ Synthesized summary:"""
                     time_str += f" - {event.ends_at}"
                 loc_str = f" @ {event.location}" if event.location else ""
                 lines.append(f"- **{time_str}**: {event.title}{loc_str}")
+
+            if stale_warning:
+                lines.append(stale_warning)
 
             return "\n".join(lines), [e.to_dict() for e in events]
 
@@ -495,7 +781,7 @@ Synthesized summary:"""
         fitness_brief: Optional[FitnessRecoveryBrief] = None
     ) -> str:
         """Compose the full morning brief text."""
-        today_date = date.today().strftime("%B %d, %Y")
+        today_date = local_today().strftime("%B %d, %Y")
 
         sections = [
             f"# Good Morning! It's {weekday}, {today_date}",
@@ -696,8 +982,10 @@ Synthesized summary:"""
     ) -> str:
         """Generate a cohesive morning brief via a single LLM call."""
         try:
+            self._refresh_llm_config()
             system_msg = BRIEF_SYSTEM_PROMPT.format(tone_directive=tone_directive)
 
+            today_str = local_today().strftime("%B %d, %Y")
             user_msg = BRIEF_USER_PROMPT.format(
                 stable_layer=stable_layer or "Not available yet.",
                 context_layer=context_layer or "No active context.",
@@ -706,6 +994,7 @@ Synthesized summary:"""
                 calendar=calendar_summary,
                 dream_insights=insights_summary or "None.",
                 news=news_summary,
+                today_date=today_str,
             )
 
             llm_timeout = aiohttp.ClientTimeout(total=180)
@@ -849,7 +1138,7 @@ Synthesized summary:"""
         """Generate complete morning brief."""
         logger.info(f"Generating morning brief for user {user_id}")
 
-        today = date.today()
+        today = local_today()
         weekday = today.strftime("%A")
         brief_date = today.strftime("%Y-%m-%d")
 
@@ -873,12 +1162,32 @@ Synthesized summary:"""
         try:
             from app.services.daily_brief import stable_layer as sl, context_layer as cl, archiver
             stable_content = sl.read(user_id)
-            context_content = cl.read(user_id)
+            context_content = self._get_fresh_context_content(user_id, cl.read(user_id))
             archives = archiver.get_recent_archives(user_id, days=1)
             yesterday_summary = archives[0]["content"] if archives else ""
             logger.info(f"Context layers: stable={len(stable_content)} chars, context={len(context_content)} chars, yesterday={len(yesterday_summary)} chars")
         except Exception as e:
             logger.warning(f"Failed to read context layers: {e}")
+
+        # Bootstrap stable layer if empty (prevents blank personal sections
+        # when the weekly synthesis hasn't run yet)
+        if not stable_content.strip():
+            stable_content = await self._bootstrap_stable_layer(user_id, db)
+
+        # Check if PKG has items needing review and append to context
+        try:
+            from app.services.personal_knowledge_graph import personal_kg
+            review_items = personal_kg.get_needs_review()
+            if review_items:
+                count = len(review_items)
+                pkg_note = (
+                    f"\n\nBy the way, I have {count} knowledge item{'s' if count != 1 else ''} "
+                    "that may need your review — some things I know about you might be outdated."
+                )
+                context_content = (context_content or "") + pkg_note
+                logger.info(f"Morning brief: {count} PKG items need review, note added to context")
+        except Exception as e:
+            logger.debug(f"Morning brief: PKG review check failed: {e}")
 
         tone_directive = "Warm and natural morning energy."
 
@@ -1001,7 +1310,7 @@ Synthesized summary:"""
     async def get_today_brief(self, user_id: str, db: Session) -> Optional[Dict]:
         """Get today's brief from database."""
         try:
-            today = date.today().strftime("%Y-%m-%d")
+            today = local_today().strftime("%Y-%m-%d")
 
             result = db.execute(text("""
                 SELECT * FROM morning_brief
@@ -1022,7 +1331,7 @@ Synthesized summary:"""
         Includes: recovery status, yesterday's nutrition, yesterday's workout, today's plan, smart insights.
         """
         try:
-            today = date.today()
+            today = local_today()
             yesterday = today - timedelta(days=1)
             today_str = today.strftime("%Y-%m-%d")
             yesterday_str = yesterday.strftime("%Y-%m-%d")
@@ -1079,7 +1388,7 @@ Synthesized summary:"""
             """), {"user_id": user_id, "today": today_str}).fetchone()
 
             # Get 7-day averages for comparison
-            seven_days_ago = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+            seven_days_ago = (local_today() - timedelta(days=7)).strftime("%Y-%m-%d")
             averages = db.execute(text("""
                 SELECT
                     AVG(sleep_hours) as avg_sleep,
@@ -1541,7 +1850,7 @@ Synthesized summary:"""
     async def _build_today_plan_section(self, user_id: str, db: Session, today_str: str) -> Dict:
         """Build today's workout plan section."""
         try:
-            today = date.today()
+            today = local_today()
             day_of_week = today.strftime("%A").lower()
 
             # Find active phase
@@ -1613,7 +1922,7 @@ Synthesized summary:"""
     async def _get_extended_baselines(self, user_id: str, db: Session) -> Dict:
         """Get 7-day, 30-day, and 90-day baselines for recovery metrics."""
         try:
-            today = date.today()
+            today = local_today()
             baselines = {}
 
             for period_name, days in [("7d", 7), ("30d", 30), ("90d", 90)]:
@@ -1693,7 +2002,7 @@ Synthesized summary:"""
     async def _check_fatigue_indicators(self, user_id: str, db: Session) -> Optional[str]:
         """Check for fatigue indicators that might suggest a deload."""
         try:
-            today = date.today()
+            today = local_today()
             two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
 
             # Check consecutive training days
@@ -1754,7 +2063,7 @@ Synthesized summary:"""
     async def _check_nutrition_patterns(self, user_id: str, db: Session) -> Optional[str]:
         """Check for nutrition patterns and streaks."""
         try:
-            today = date.today()
+            today = local_today()
             two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
 
             # Get daily nutrition totals for past 2 weeks
@@ -1841,7 +2150,7 @@ Synthesized summary:"""
     async def _check_progression(self, user_id: str, db: Session) -> Optional[str]:
         """Check for progressive overload on key lifts."""
         try:
-            today = date.today()
+            today = local_today()
             four_weeks_ago = (today - timedelta(days=28)).strftime("%Y-%m-%d")
             eight_weeks_ago = (today - timedelta(days=56)).strftime("%Y-%m-%d")
 
@@ -1948,7 +2257,7 @@ Synthesized summary:"""
         Returns (text, audio_path) tuple.
         """
         try:
-            today = date.today()
+            today = local_today()
             today_str = today.strftime("%Y-%m-%d")
             day_of_week = today.strftime("%A").lower()
 

@@ -2,7 +2,7 @@
 Learning Routes
 API endpoints for the Sara Learning System: topics, sources, chat, research
 """
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -14,11 +14,12 @@ import asyncio
 import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.learning import (
     LearningTopic, TopicSource, SourceChunk, LearningSession,
-    LearningProgress, TopicScratchpad, ResearchReport, ResearchJob, LearningArtifact,
-    TopicConnection
+    LearningProgress, TopicScratchpad, ResearchReport, ResearchJob, LearningGuideJob, LearningArtifact,
+    TopicConnection, LearningBlueprint
 )
 from app.prompts.learning_system_prompt import get_learning_system_prompt
 
@@ -165,6 +166,31 @@ class QuizAnswerSubmit(BaseModel):
     correct_answer: str
 
 
+class BlueprintParseRequest(BaseModel):
+    text: str
+    source_format: Optional[str] = "markdown"  # text, markdown, pdf
+    parse_mode: Optional[str] = "balanced"  # fast, balanced, deep
+    pace_mode: Optional[str] = "self_directed"
+    title_override: Optional[str] = None
+
+
+class BlueprintMaterializeRequest(BaseModel):
+    mode: Optional[str] = "adaptive"
+    create_sources: Optional[bool] = True
+    create_connections: Optional[bool] = True
+    create_curriculum: Optional[bool] = True
+    seed_reviews: Optional[bool] = True
+    replace_existing: Optional[bool] = False
+    parent_topic_id: Optional[str] = None
+
+
+class BlueprintGuideGenerateRequest(BaseModel):
+    force_regenerate: Optional[bool] = False
+    module_limit: Optional[int] = None
+    model: Optional[str] = None
+    num_ctx: Optional[int] = 16384
+
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -217,6 +243,7 @@ class SimpleMessage:
 async def list_topics(
     status: Optional[str] = None,
     parent_id: Optional[str] = None,
+    include_all: bool = Query(False),
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
@@ -229,7 +256,7 @@ async def list_topics(
             query = query.filter(LearningTopic.status == status)
         if parent_id:
             query = query.filter(LearningTopic.parent_id == parent_id)
-        else:
+        elif not include_all:
             # Default to root topics
             query = query.filter(LearningTopic.parent_id.is_(None))
 
@@ -558,6 +585,87 @@ async def list_topic_sources(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/blueprints/{blueprint_id}/sources")
+async def list_blueprint_sources(
+    blueprint_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List all sources across all topics in a blueprint (including ancestor topics), with chunk counts."""
+    from sqlalchemy import func as sa_func, text as sa_text
+
+    blueprint = db.query(LearningBlueprint).filter(
+        LearningBlueprint.id == blueprint_id,
+        LearningBlueprint.user_id == user_id
+    ).first()
+    if not blueprint:
+        raise HTTPException(status_code=404, detail="Blueprint not found")
+
+    # Get blueprint's own topic IDs
+    topic_ids = set(
+        t.id for t in db.query(LearningTopic.id).filter(
+            LearningTopic.blueprint_id == blueprint_id
+        ).all()
+    )
+
+    if not topic_ids:
+        return {"sources": []}
+
+    # Walk UP the tree from each topic to collect ancestor topic IDs
+    all_topic_ids = set(topic_ids)
+    frontier = set(topic_ids)
+    for _ in range(10):  # max depth
+        if not frontier:
+            break
+        parent_rows = db.execute(sa_text(
+            "SELECT DISTINCT parent_id FROM learning_topic WHERE id = ANY(:ids) AND parent_id IS NOT NULL"
+        ), {"ids": list(frontier)}).fetchall()
+        new_parents = {r.parent_id for r in parent_rows} - all_topic_ids
+        if not new_parents:
+            break
+        all_topic_ids.update(new_parents)
+        frontier = new_parents
+
+    rows = db.query(
+        TopicSource,
+        LearningTopic.title.label("topic_title"),
+        sa_func.count(SourceChunk.id).label("chunk_count"),
+    ).join(
+        LearningTopic, LearningTopic.id == TopicSource.topic_id
+    ).outerjoin(
+        SourceChunk, SourceChunk.source_id == TopicSource.id
+    ).filter(
+        TopicSource.topic_id.in_(list(all_topic_ids)),
+        TopicSource.user_id == user_id
+    ).group_by(
+        TopicSource.id, LearningTopic.title
+    ).order_by(
+        sa_func.count(SourceChunk.id).desc(),
+        TopicSource.created_at.desc()
+    ).all()
+
+    sources = []
+    for source, topic_title, chunk_count in rows:
+        has_chapters = bool(source.toc)
+        chapter_count = len(source.toc) if source.toc else 0
+        sources.append({
+            "id": source.id,
+            "topic_id": source.topic_id,
+            "topic_title": topic_title,
+            "source_type": source.source_type,
+            "url": source.url,
+            "title": source.title,
+            "quality_score": float(source.quality_score or 0.5),
+            "fetch_status": source.fetch_status or "pending",
+            "chunk_count": chunk_count,
+            "has_chapters": has_chapters,
+            "chapter_count": chapter_count,
+            "created_at": source.created_at.isoformat() if source.created_at else "",
+        })
+
+    return {"sources": sources}
+
+
 @router.post("/sources", response_model=SourceResponse)
 async def add_source(
     source: SourceCreate,
@@ -695,13 +803,28 @@ async def upload_source(
     from app.services.learning_source_service import learning_source_service
 
     # Parse multipart form data
-    form = await request.form()
+    content_type = request.headers.get("content-type", "")
+
+    try:
+        form = await request.form()
+    except Exception as form_err:
+        logger.error(f"Failed to parse form data: {form_err}, content-type={content_type}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse multipart form: {form_err}"
+        )
+
+    form_keys = list(form.keys())
+
     file = form.get("file")
     topic_id = form.get("topic_id") or topic_id
     title = form.get("title") or title
 
     if not file:
-        raise HTTPException(status_code=400, detail="No file provided")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No file provided. Received form fields: {form_keys}. Content-Type: {content_type}"
+        )
 
     if not topic_id:
         raise HTTPException(status_code=400, detail="topic_id is required")
@@ -716,16 +839,31 @@ async def upload_source(
         raise HTTPException(status_code=404, detail="Topic not found")
 
     try:
-        # Get filename and determine type
+        # Determine type from extension first, then MIME as fallback.
         filename = file.filename if hasattr(file, 'filename') else "uploaded_file"
+        content_type = (getattr(file, "content_type", None) or "").lower()
         file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
 
-        # Validate file type
         allowed_types = {'pdf', 'txt', 'md', 'markdown'}
+        mime_fallback_ext = None
+        if content_type.startswith("application/pdf"):
+            mime_fallback_ext = "pdf"
+        elif content_type.startswith("text/plain"):
+            mime_fallback_ext = "txt"
+        elif content_type.startswith("text/markdown") or content_type.startswith("text/x-markdown"):
+            mime_fallback_ext = "md"
+
+        if file_ext not in allowed_types and mime_fallback_ext:
+            file_ext = mime_fallback_ext
+
+        # Validate file type
         if file_ext not in allowed_types:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type: {file_ext}. Allowed: {', '.join(allowed_types)}"
+                detail=(
+                    f"Unsupported file type. filename='{filename}', content_type='{content_type}'. "
+                    f"Allowed: {', '.join(sorted(allowed_types))}"
+                )
             )
 
         # Read file content
@@ -746,6 +884,8 @@ async def upload_source(
             if extracted_title and not title:
                 title = extracted_title
             meta.update(pdf_meta)
+            if pdf_meta.get("error"):
+                raise HTTPException(status_code=400, detail=f"PDF processing failed: {pdf_meta.get('error')}")
         else:
             # Text files (txt, md, markdown)
             try:
@@ -755,11 +895,21 @@ async def upload_source(
             meta["content_type"] = "text/plain" if file_ext == 'txt' else "text/markdown"
 
         if not content or not content.strip():
+            if file_ext == "pdf":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract text from PDF. If this file is scanned/image-only, OCR is not supported yet."
+                )
             raise HTTPException(status_code=400, detail="Could not extract any content from the file")
 
         # Use filename as title if not provided
         if not title:
             title = filename.rsplit('.', 1)[0] if '.' in filename else filename
+
+        # Store raw PDF bytes in meta so the background task can do chapter-aware chunking
+        import base64 as _b64
+        if file_ext == 'pdf':
+            meta["pdf_b64"] = _b64.b64encode(file_content).decode("ascii")
 
         # Create source record
         source = TopicSource(
@@ -767,41 +917,143 @@ async def upload_source(
             topic_id=topic_id,
             user_id=user_id,
             source_type=source_type,
-            url=None,  # No URL for uploaded files
+            url=None,
             title=title,
             content_text=content,
-            fetch_status="processing",  # Skip pending, go straight to processing
+            fetch_status="processing",
             meta=meta
         )
         db.add(source)
         db.commit()
         db.refresh(source)
 
-        # Process the content (chunking and embedding)
-        result = await learning_source_service.process_uploaded_content(source, content, db)
+        # Dispatch background processing (chunking + embedding + push notification)
+        from app.tasks.learning import process_uploaded_source
+        process_uploaded_source.delay(source.id, user_id)
 
-        if result["status"] == "success":
-            return {
-                "status": "success",
-                "source_id": source.id,
-                "topic_id": topic_id,
-                "title": source.title,
-                "chunk_count": result.get("chunk_count", 0),
-                "content_length": result.get("content_length", 0),
-                "message": f"File uploaded and processed with {result.get('chunk_count', 0)} chunks"
-            }
-        else:
-            return {
-                "status": "failed",
-                "source_id": source.id,
-                "error": result.get("error", "Processing failed"),
-                "message": "File uploaded but processing failed"
-            }
+        return {
+            "status": "processing",
+            "source_id": source.id,
+            "topic_id": topic_id,
+            "title": source.title,
+            "message": "File uploaded — processing in the background. You'll get a notification when it's ready.",
+        }
 
-    except HTTPException:
+    except HTTPException as e:
+        logger.warning(
+            f"Upload rejected for topic {topic_id} (user={user_id}): {getattr(e, 'detail', str(e))}"
+        )
         raise
     except Exception as e:
         logger.error(f"Error uploading source: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sources/upload-b64")
+async def upload_source_b64(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Upload a file as base64 JSON — avoids multipart/FormData issues on mobile.
+    Body: { topic_id, filename, content_type, data_b64, title? }
+    """
+    import base64 as _b64
+    from app.services.learning_source_service import learning_source_service
+
+    body = await request.json()
+    topic_id = body.get("topic_id")
+    filename = body.get("filename", "upload")
+    content_type_hint = (body.get("content_type") or "").lower()
+    data_b64 = body.get("data_b64", "")
+    title = body.get("title")
+
+    if not topic_id:
+        raise HTTPException(status_code=400, detail="topic_id is required")
+    if not data_b64:
+        raise HTTPException(status_code=400, detail="data_b64 is required")
+
+    # Verify topic
+    topic = db.query(LearningTopic).filter(
+        LearningTopic.id == topic_id,
+        LearningTopic.user_id == user_id
+    ).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    try:
+        file_content = _b64.b64decode(data_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 data")
+
+    # Determine file type
+    file_ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
+    allowed_types = {'pdf', 'txt', 'md', 'markdown'}
+    if file_ext not in allowed_types:
+        if 'pdf' in content_type_hint:
+            file_ext = 'pdf'
+        elif 'markdown' in content_type_hint:
+            file_ext = 'md'
+        elif 'text' in content_type_hint:
+            file_ext = 'txt'
+    if file_ext not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
+
+    try:
+        source_type = 'pdf' if file_ext == 'pdf' else 'document'
+        meta = {"uploaded": True, "filename": filename}
+
+        if file_ext == 'pdf':
+            content, extracted_title, pdf_meta = learning_source_service.extract_text_from_pdf_bytes(file_content)
+            if extracted_title and not title:
+                title = extracted_title
+            meta.update(pdf_meta)
+            if pdf_meta.get("error"):
+                raise HTTPException(status_code=400, detail=f"PDF processing failed: {pdf_meta['error']}")
+            meta["pdf_b64"] = data_b64  # Keep for background chunking
+        else:
+            try:
+                content = file_content.decode('utf-8')
+            except UnicodeDecodeError:
+                content = file_content.decode('latin-1')
+
+        if not content or not content.strip():
+            raise HTTPException(status_code=400, detail="Could not extract any content from the file")
+
+        if not title:
+            title = filename.rsplit('.', 1)[0] if '.' in filename else filename
+
+        source = TopicSource(
+            id=str(uuid.uuid4()),
+            topic_id=topic_id,
+            user_id=user_id,
+            source_type=source_type,
+            url=None,
+            title=title,
+            content_text=content,
+            fetch_status="processing",
+            meta=meta
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+
+        from app.tasks.learning import process_uploaded_source
+        process_uploaded_source.delay(source.id, user_id)
+
+        return {
+            "status": "processing",
+            "source_id": source.id,
+            "topic_id": topic_id,
+            "title": source.title,
+            "message": "File uploaded — processing in the background. You'll get a notification when it's ready.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading source (b64): {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2022,6 +2274,39 @@ async def start_session(
         db.commit()
         db.refresh(session)
 
+        if settings.temerant_enabled and settings.temerant_auto_ingestion_enabled:
+            try:
+                from app.services.temerant import CharacterService, IngestionService
+
+                character = CharacterService.get_character(db, user_id)
+                if character:
+                    duration_minutes = max(1, int(session.duration_minutes or 0))
+                    default_action = "deep_research" if duration_minutes >= 120 else "study"
+                    quantity = max(1.0, round(duration_minutes / 30.0, 2))
+                    IngestionService.log_external_action(
+                        db=db,
+                        user_id=user_id,
+                        character=character,
+                        source_type="learning",
+                        source_ref_id=session.id,
+                        mapping_ref="session_end",
+                        default_action_type=default_action,
+                        action_label=f"{session.session_type or 'study'} session",
+                        notes=notes,
+                        quantity=quantity,
+                        occurred_at=session.ended_at or datetime.utcnow(),
+                        metadata={
+                            "session_id": session.id,
+                            "topic_id": session.topic_id,
+                            "duration_minutes": duration_minutes,
+                            "session_type": session.session_type,
+                        },
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Temerant auto-ingestion failed for learning session end")
+
         return session.to_dict()
     except Exception as e:
         logger.error(f"Error starting session: {e}")
@@ -2210,6 +2495,621 @@ async def regenerate_curriculum(
         force_regenerate=True
     )
     return result
+
+
+# ============================================================================
+# BLUEPRINT IMPORT ENDPOINTS
+# ============================================================================
+
+
+@router.post("/blueprints/parse")
+async def parse_blueprint(
+    request: BlueprintParseRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Parse and persist an imported learning blueprint."""
+    try:
+        from app.services.learning_blueprint_service import learning_blueprint_service
+
+        parsed, confidence = await learning_blueprint_service.parse_blueprint_text(
+            text=request.text,
+            source_format=request.source_format or "markdown",
+            parse_mode=request.parse_mode or "balanced",
+            pace_mode=request.pace_mode or "self_directed",
+            title_override=request.title_override,
+        )
+
+        blueprint_info = parsed.get("blueprint", {})
+        blueprint = LearningBlueprint(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            title=(blueprint_info.get("title") or request.title_override or "Imported Blueprint")[:255],
+            subtitle=(blueprint_info.get("subtitle") or None),
+            description=(blueprint_info.get("description") or None),
+            source_format=blueprint_info.get("source_format") or request.source_format or "markdown",
+            pace_mode=blueprint_info.get("pace_mode") or request.pace_mode or "self_directed",
+            status="parsed",
+            import_confidence=confidence,
+            raw_text=request.text,
+            parsed_json=parsed,
+            meta={"parse_mode": request.parse_mode or "balanced"},
+        )
+        db.add(blueprint)
+        db.commit()
+        db.refresh(blueprint)
+
+        return {
+            "blueprint_id": blueprint.id,
+            "status": blueprint.status,
+            "import_confidence": blueprint.import_confidence,
+            "preview": blueprint.parsed_json,
+            "warnings": (parsed.get("metadata") or {}).get("warnings", []),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Blueprint parse failed: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints")
+async def list_blueprints(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List previously imported learning blueprints."""
+    try:
+        rows = db.query(LearningBlueprint).filter(
+            LearningBlueprint.user_id == user_id
+        ).order_by(LearningBlueprint.created_at.desc()).all()
+
+        return {
+            "blueprints": [
+                {
+                    "id": bp.id,
+                    "title": bp.title,
+                    "subtitle": bp.subtitle,
+                    "description": bp.description,
+                    "status": bp.status,
+                    "import_confidence": bp.import_confidence,
+                    "source_format": bp.source_format,
+                    "pace_mode": bp.pace_mode,
+                    "materialized_at": bp.materialized_at.isoformat() if bp.materialized_at else None,
+                    "created_at": bp.created_at.isoformat() if bp.created_at else None,
+                    "updated_at": bp.updated_at.isoformat() if bp.updated_at else None,
+                }
+                for bp in rows
+            ],
+            "count": len(rows),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list blueprints: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}")
+async def get_blueprint(
+    blueprint_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get a full blueprint payload including parsed structure."""
+    try:
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        return blueprint.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get blueprint {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/blueprints/{blueprint_id}/materialize")
+async def materialize_blueprint(
+    blueprint_id: str,
+    request: BlueprintMaterializeRequest = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Materialize a blueprint into topics, sources, connections, and curricula."""
+    if request is None:
+        request = BlueprintMaterializeRequest()
+
+    try:
+        from app.services.learning_blueprint_service import learning_blueprint_service
+
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        result = learning_blueprint_service.materialize_blueprint(
+            blueprint=blueprint,
+            user_id=user_id,
+            db=db,
+            mode=request.mode or "adaptive",
+            create_sources=request.create_sources if request.create_sources is not None else True,
+            create_connections=request.create_connections if request.create_connections is not None else True,
+            create_curriculum=request.create_curriculum if request.create_curriculum is not None else True,
+            seed_reviews=request.seed_reviews if request.seed_reviews is not None else True,
+            replace_existing=request.replace_existing if request.replace_existing is not None else False,
+            parent_topic_id=request.parent_topic_id,
+        )
+
+        # Dispatch background task to discover free versions of resources
+        if result.get("status") == "materialized":
+            try:
+                from app.tasks.learning import discover_blueprint_resources
+                discover_blueprint_resources.delay(blueprint_id, user_id)
+                logger.info(f"Dispatched resource discovery for blueprint {blueprint_id}")
+            except Exception as e:
+                logger.warning(f"Failed to dispatch resource discovery: {e}")
+
+        return result
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to materialize blueprint {blueprint_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/blueprints/{blueprint_id}/discover-resources")
+async def discover_blueprint_resources_endpoint(
+    blueprint_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Trigger background search for free versions of blueprint resources."""
+    blueprint = db.query(LearningBlueprint).filter(
+        LearningBlueprint.id == blueprint_id,
+        LearningBlueprint.user_id == user_id
+    ).first()
+    if not blueprint:
+        raise HTTPException(status_code=404, detail="Blueprint not found")
+
+    from app.tasks.learning import discover_blueprint_resources
+    result = discover_blueprint_resources.delay(blueprint_id, user_id)
+    return {"status": "dispatched", "task_id": result.id, "blueprint_id": blueprint_id}
+
+
+@router.get("/blueprints/{blueprint_id}/progress")
+async def get_blueprint_progress(
+    blueprint_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get learning progress across modules in a blueprint."""
+    try:
+        from app.services.learning_blueprint_service import learning_blueprint_service
+
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        return learning_blueprint_service.compute_blueprint_progress(
+            blueprint=blueprint,
+            user_id=user_id,
+            db=db
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to compute blueprint progress {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/blueprints/{blueprint_id}/guides/generate")
+async def generate_blueprint_guides(
+    blueprint_id: str,
+    request: BlueprintGuideGenerateRequest = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Queue study-guide generation for all modules in a blueprint."""
+    if request is None:
+        request = BlueprintGuideGenerateRequest()
+
+    try:
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        default_guide_model = getattr(settings, "bg_llm_primary_model", None) or "gpt-oss:20b"
+        model = (request.model or default_guide_model).strip() or default_guide_model
+        num_ctx = int(request.num_ctx or 16384)
+        num_ctx = max(2048, min(num_ctx, 131072))
+
+        job = LearningGuideJob(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            blueprint_id=blueprint_id,
+            status="queued",
+            progress=0,
+            current_step="Queued",
+            model=model,
+            meta={
+                "force_regenerate": bool(request.force_regenerate),
+                "module_limit": request.module_limit,
+                "requested_model": model,
+                "num_ctx": num_ctx,
+            },
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        try:
+            from app.tasks.learning import generate_blueprint_guides_worker
+            generate_blueprint_guides_worker.delay(job.id)
+        except Exception as dispatch_error:
+            logger.warning(f"Failed to dispatch guide worker for job {job.id}: {dispatch_error}")
+
+        return {
+            "status": "queued",
+            "job_id": job.id,
+            "blueprint_id": blueprint_id,
+            "model": model,
+            "num_ctx": num_ctx,
+            "force_regenerate": bool(request.force_regenerate),
+            "module_limit": request.module_limit,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to queue blueprint guides for {blueprint_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}/guides/jobs/{job_id}")
+async def get_blueprint_guide_job(
+    blueprint_id: str,
+    job_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Get status/progress for a blueprint guide generation job."""
+    try:
+        job = db.query(LearningGuideJob).filter(
+            LearningGuideJob.id == job_id,
+            LearningGuideJob.blueprint_id == blueprint_id,
+            LearningGuideJob.user_id == user_id,
+        ).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Guide job not found")
+        return job.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to load guide job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/blueprints/{blueprint_id}/guides/jobs/{job_id}/cancel")
+async def cancel_blueprint_guide_job(
+    blueprint_id: str,
+    job_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Cancel a queued/running guide generation job."""
+    try:
+        job = db.query(LearningGuideJob).filter(
+            LearningGuideJob.id == job_id,
+            LearningGuideJob.blueprint_id == blueprint_id,
+            LearningGuideJob.user_id == user_id,
+        ).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Guide job not found")
+
+        if job.status in {"completed", "failed", "cancelled"}:
+            return {
+                "status": "noop",
+                "message": f"Job already {job.status}",
+                "job": job.to_dict(),
+            }
+
+        now = datetime.utcnow()
+        if job.status == "queued":
+            job.status = "cancelled"
+            job.current_step = "Cancelled before start"
+            job.completed_at = now
+        else:
+            # running jobs stop cooperatively at safe boundaries,
+            # but expose terminal cancelled state to clients immediately.
+            job.status = "cancelled"
+            job.current_step = "Cancelled (stopping worker at safe boundary)"
+            job.completed_at = now
+
+        db.commit()
+        db.refresh(job)
+        return {
+            "status": "ok",
+            "message": "Cancellation requested",
+            "job": job.to_dict(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel guide job {job_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}/guides/jobs")
+async def list_blueprint_guide_jobs(
+    blueprint_id: str,
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List recent guide generation jobs for a blueprint."""
+    try:
+        rows = db.query(LearningGuideJob).filter(
+            LearningGuideJob.blueprint_id == blueprint_id,
+            LearningGuideJob.user_id == user_id,
+        ).order_by(LearningGuideJob.created_at.desc()).limit(max(1, min(limit, 100))).all()
+
+        return {
+            "blueprint_id": blueprint_id,
+            "jobs": [row.to_dict() for row in rows],
+            "count": len(rows),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list guide jobs for blueprint {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}/guides")
+async def list_blueprint_guides(
+    blueprint_id: str,
+    artifact_type: Optional[str] = None,
+    limit: int = 200,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List generated study guides (Pareto + deep) for a blueprint."""
+    try:
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        module_topics = db.query(LearningTopic).filter(
+            LearningTopic.user_id == user_id,
+            LearningTopic.blueprint_id == blueprint_id
+        ).all()
+        module_topic_ids = {
+            topic.id
+            for topic in module_topics
+            if (topic.meta or {}).get("blueprint_node_type") == "module"
+        }
+
+        query = db.query(LearningArtifact).filter(
+            LearningArtifact.user_id == user_id
+        )
+        if artifact_type:
+            query = query.filter(LearningArtifact.artifact_type == artifact_type)
+        else:
+            query = query.filter(
+                LearningArtifact.artifact_type.in_(["study_guide_pareto", "study_guide_deep"])
+            )
+
+        rows = query.order_by(LearningArtifact.updated_at.desc()).limit(max(1, min(limit, 500))).all()
+
+        filtered = []
+        for artifact in rows:
+            content = artifact.content or {}
+            content_blueprint = str(content.get("blueprint_id") or "")
+            if artifact.topic_id in module_topic_ids or content_blueprint == blueprint_id:
+                filtered.append({
+                    "id": artifact.id,
+                    "topic_id": artifact.topic_id,
+                    "artifact_type": artifact.artifact_type,
+                    "title": artifact.title,
+                    "version": artifact.version,
+                    "content": content,
+                    "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
+                    "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else None,
+                })
+
+        return {
+            "blueprint_id": blueprint_id,
+            "guides": filtered,
+            "count": len(filtered),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list blueprint guides for {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# LESSON GENERATION ENDPOINTS
+# ============================================================================
+
+
+class BlueprintLessonGenerateRequest(BaseModel):
+    force_regenerate: Optional[bool] = False
+    module_limit: Optional[int] = None
+    model: Optional[str] = None
+    num_ctx: Optional[int] = 49152
+
+
+@router.post("/blueprints/{blueprint_id}/lessons/generate")
+async def generate_blueprint_lessons(
+    blueprint_id: str,
+    request: BlueprintLessonGenerateRequest = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Queue lesson generation for all modules in a blueprint."""
+    if request is None:
+        request = BlueprintLessonGenerateRequest()
+
+    try:
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        default_lesson_model = getattr(settings, "bg_llm_primary_model", None) or "gpt-oss:120b-32k"
+        model = (request.model or default_lesson_model).strip() or default_lesson_model
+        num_ctx = int(request.num_ctx or 49152)
+        # Keep lesson generation under model-stable context limits.
+        num_ctx = max(2048, min(num_ctx, 49152))
+
+        job = LearningGuideJob(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            blueprint_id=blueprint_id,
+            status="queued",
+            progress=0,
+            current_step="Queued",
+            model=model,
+            job_type="lesson",
+            meta={
+                "force_regenerate": bool(request.force_regenerate),
+                "module_limit": request.module_limit,
+                "requested_model": model,
+                "num_ctx": num_ctx,
+            },
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        try:
+            from app.tasks.learning import generate_blueprint_lessons_worker
+            generate_blueprint_lessons_worker.delay(job.id)
+        except Exception as dispatch_error:
+            logger.warning(f"Failed to dispatch lesson worker for job {job.id}: {dispatch_error}")
+
+        return {
+            "status": "queued",
+            "job_id": job.id,
+            "blueprint_id": blueprint_id,
+            "model": model,
+            "num_ctx": num_ctx,
+            "force_regenerate": bool(request.force_regenerate),
+            "module_limit": request.module_limit,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to queue blueprint lessons for {blueprint_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}/lessons")
+async def list_blueprint_lessons(
+    blueprint_id: str,
+    limit: int = 200,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List generated lessons for a blueprint."""
+    try:
+        blueprint = db.query(LearningBlueprint).filter(
+            LearningBlueprint.id == blueprint_id,
+            LearningBlueprint.user_id == user_id
+        ).first()
+        if not blueprint:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+
+        module_topics = db.query(LearningTopic).filter(
+            LearningTopic.user_id == user_id,
+            LearningTopic.blueprint_id == blueprint_id
+        ).all()
+        module_topic_ids = {
+            topic.id
+            for topic in module_topics
+            if (topic.meta or {}).get("blueprint_node_type") == "module"
+        }
+
+        rows = db.query(LearningArtifact).filter(
+            LearningArtifact.user_id == user_id,
+            LearningArtifact.artifact_type == "lesson",
+        ).order_by(LearningArtifact.updated_at.desc()).limit(max(1, min(limit, 500))).all()
+
+        filtered = []
+        for artifact in rows:
+            content = artifact.content or {}
+            content_blueprint = str(content.get("blueprint_id") or "")
+            if artifact.topic_id in module_topic_ids or content_blueprint == blueprint_id:
+                filtered.append({
+                    "id": artifact.id,
+                    "topic_id": artifact.topic_id,
+                    "artifact_type": artifact.artifact_type,
+                    "title": artifact.title,
+                    "version": artifact.version,
+                    "content": content,
+                    "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
+                    "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else None,
+                })
+
+        return {
+            "blueprint_id": blueprint_id,
+            "lessons": filtered,
+            "count": len(filtered),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list blueprint lessons for {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blueprints/{blueprint_id}/lessons/jobs")
+async def list_blueprint_lesson_jobs(
+    blueprint_id: str,
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """List recent lesson generation jobs for a blueprint."""
+    try:
+        rows = db.query(LearningGuideJob).filter(
+            LearningGuideJob.blueprint_id == blueprint_id,
+            LearningGuideJob.user_id == user_id,
+            LearningGuideJob.job_type == "lesson",
+        ).order_by(LearningGuideJob.created_at.desc()).limit(max(1, min(limit, 100))).all()
+
+        return {
+            "blueprint_id": blueprint_id,
+            "jobs": [row.to_dict() for row in rows],
+            "count": len(rows),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list lesson jobs for blueprint {blueprint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import uuid
+from difflib import SequenceMatcher
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -166,10 +167,10 @@ class SensingPhase:
     def __init__(self):
         from app.core.config import settings
         self.tz = USER_TZ
-        self.llm_primary_url = settings.llm_primary_url.replace('/v1', '')
-        self.llm_fallback_url = "http://10.185.1.8:11434"
-        self.primary_model = "gpt-oss:120b"
-        self.fallback_model = "gpt-oss:20b"
+        self.llm_primary_url = settings.bg_llm_primary_url.replace('/v1', '')
+        self.llm_fallback_url = settings.bg_llm_fallback_url.replace('/v1', '')
+        self.primary_model = settings.bg_llm_primary_model
+        self.fallback_model = settings.bg_llm_fallback_model
 
     async def run(self, db: AsyncSession, user_id: str) -> SensedState:
         """Run all signal gathering and state computation."""
@@ -526,16 +527,19 @@ class SensingPhase:
     async def _gather_habits(self, db: AsyncSession, user_id: str, state: SensedState, now: datetime):
         """Today's habit completions, streaks, overdue items."""
         try:
-            today_str = now.strftime('%Y-%m-%d')
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+            tomorrow_start = today_start + timedelta(days=1)
             result = await db.execute(text("""
-                SELECT h.id, h.name, h.frequency,
-                       (SELECT COUNT(*) FROM habit_completion hc
-                        WHERE hc.habit_id = h.id AND hc.completed_date = :today) as done_today,
+                SELECT h.id, h.title AS name, h.rrule AS frequency,
+                       (SELECT COUNT(*) FROM habit_logs hl
+                        WHERE hl.habit_id = h.id
+                          AND hl.ts >= :today_start
+                          AND hl.ts < :tomorrow_start) as done_today,
                        h.current_streak
-                FROM habit h
-                WHERE h.user_id = :user_id AND h.is_active = true
-                ORDER BY h.name
-            """), {"user_id": user_id, "today": today_str})
+                FROM habits h
+                WHERE h.user_id = :user_id AND (h.paused IS NULL OR h.paused = 0)
+                ORDER BY h.title
+            """), {"user_id": user_id, "today_start": today_start, "tomorrow_start": tomorrow_start})
             rows = result.fetchall()
             if rows:
                 completed = [r for r in rows if r.done_today > 0]
@@ -1005,6 +1009,8 @@ class UnifiedAgent:
         self._run_uuid: Optional[uuid.UUID] = None
         self._step_index: int = 0
         self._quiet_mode_active: bool = False
+        self._agent_run_log_columns: Optional[set[str]] = None
+        self._last_sensed_state: Optional[SensedState] = None
         # Action tracer (Phase 0 — Cortana Evolution)
         try:
             from app.services.autonomy.action_tracer import ActionTracer
@@ -1022,6 +1028,7 @@ class UnifiedAgent:
         self._run_uuid = uuid.uuid4()
         self._step_index = 0
         self._quiet_mode_active = False
+        self._last_sensed_state = None
         actions_taken = []
         self._actions_taken_ref = actions_taken  # Reference for hallucination guard in _tool_send_notification
         error_message = None
@@ -1031,6 +1038,7 @@ class UnifiedAgent:
             # ── PHASE 1: SENSE ──
             logger.info("Phase 1: SENSE — gathering signals")
             sensed_state = await self._sensing.run(db, self.user_id)
+            self._last_sensed_state = sensed_state
             logger.info(
                 f"SENSE complete: activity={sensed_state.activity_state}, "
                 f"interruptibility={sensed_state.interruptibility_score}"
@@ -1840,16 +1848,18 @@ class UnifiedAgent:
             # Store plan + execution summaries
             if run_id:
                 try:
-                    await db.execute(text("""
-                        UPDATE agent_run_log
-                        SET plan_summary = CAST(:plan AS jsonb),
-                            execution_summary = CAST(:exec AS jsonb)
-                        WHERE id = :id
-                    """), {
-                        "id": run_id,
-                        "plan": json.dumps(plan.to_json(), default=str),
-                        "exec": json.dumps(execution_summary, default=str),
-                    })
+                    if await self._agent_run_log_has_columns(db, "plan_summary", "execution_summary"):
+                        async with db.begin_nested():
+                            await db.execute(text("""
+                                UPDATE agent_run_log
+                                SET plan_summary = CAST(:plan AS jsonb),
+                                    execution_summary = CAST(:exec AS jsonb)
+                                WHERE id = :id
+                            """), {
+                                "id": run_id,
+                                "plan": json.dumps(plan.to_json(), default=str),
+                                "exec": json.dumps(execution_summary, default=str),
+                            })
                 except Exception:
                     pass
 
@@ -1956,11 +1966,16 @@ class UnifiedAgent:
                     journal_entry_id=None, error_message=error_message,
                 )
                 if run_id and plan:
-                    await db.execute(text("""
-                        UPDATE agent_run_log
-                        SET plan_summary = CAST(:plan AS jsonb)
-                        WHERE id = :id
-                    """), {"id": run_id, "plan": json.dumps(plan.to_json() if plan else {"error": True}, default=str)})
+                    if await self._agent_run_log_has_columns(db, "plan_summary"):
+                        async with db.begin_nested():
+                            await db.execute(text("""
+                                UPDATE agent_run_log
+                                SET plan_summary = CAST(:plan AS jsonb)
+                                WHERE id = :id
+                            """), {
+                                "id": run_id,
+                                "plan": json.dumps(plan.to_json() if plan else {"error": True}, default=str),
+                            })
                 await db.commit()
             except Exception:
                 pass
@@ -2145,11 +2160,13 @@ class UnifiedAgent:
             # Store fallback plan_summary
             if run_id and plan_summary:
                 try:
-                    await db.execute(text("""
-                        UPDATE agent_run_log
-                        SET plan_summary = CAST(:plan AS jsonb)
-                        WHERE id = :id
-                    """), {"id": run_id, "plan": json.dumps(plan_summary, default=str)})
+                    if await self._agent_run_log_has_columns(db, "plan_summary"):
+                        async with db.begin_nested():
+                            await db.execute(text("""
+                                UPDATE agent_run_log
+                                SET plan_summary = CAST(:plan AS jsonb)
+                                WHERE id = :id
+                            """), {"id": run_id, "plan": json.dumps(plan_summary, default=str)})
                 except Exception:
                     pass
 
@@ -3422,13 +3439,18 @@ If genuinely nothing needed attention, you can add HEARTBEAT_OK after both secti
         """Check David's habit status for today."""
         try:
             now = datetime.now(self.tz)
-            today_str = now.strftime('%Y-%m-%d')
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+            tomorrow_start = today_start + timedelta(days=1)
             result = await db.execute(text("""
-                SELECT h.name, h.frequency, h.current_streak,
-                       (SELECT COUNT(*) FROM habit_completion hc
-                        WHERE hc.habit_id = h.id AND hc.completed_date = :today) as done_today
-                FROM habit h WHERE h.user_id = :user_id AND h.is_active = true ORDER BY h.name
-            """), {"user_id": self.user_id, "today": today_str})
+                SELECT h.title AS name, h.rrule AS frequency, h.current_streak,
+                       (SELECT COUNT(*) FROM habit_logs hl
+                        WHERE hl.habit_id = h.id
+                          AND hl.ts >= :today_start
+                          AND hl.ts < :tomorrow_start) as done_today
+                FROM habits h
+                WHERE h.user_id = :user_id AND (h.paused IS NULL OR h.paused = 0)
+                ORDER BY h.title
+            """), {"user_id": self.user_id, "today_start": today_start, "tomorrow_start": tomorrow_start})
             rows = result.fetchall()
             if not rows:
                 return {"success": True, "message": "No active habits."}
@@ -3631,6 +3653,8 @@ If genuinely nothing needed attention, you can add HEARTBEAT_OK after both secti
             now = datetime.now(self.tz)
 
             clean = result_message.replace("HEARTBEAT_OK", "").strip()
+            if not clean:
+                clean = self._build_journal_fallback(actions_taken)
             thought_match = re.search(
                 r'\*{0,2}THOUGHT:?\*{0,2}\s*(.+?)(?:\*{0,2}HANDOFF:?\*{0,2}|$)',
                 clean, flags=re.IGNORECASE | re.DOTALL
@@ -3657,8 +3681,18 @@ If genuinely nothing needed attention, you can add HEARTBEAT_OK after both secti
                 content = content[:cut + 1] if cut > 40 else content[:500]
 
             if not content or len(content) < 10:
-                logger.debug("Skipping journal entry — THOUGHT was empty or too short")
-                return None
+                fallback_content = self._build_journal_fallback(actions_taken)
+                if not fallback_content or len(fallback_content) < 10:
+                    logger.debug("Skipping journal entry — THOUGHT was empty or too short")
+                    return None
+                content = fallback_content[:500]
+
+            content = await self._ensure_journal_not_duplicate(
+                db=db,
+                content=content,
+                actions_taken=actions_taken,
+                now=now,
+            )
 
             emotional_state = self._infer_emotional_state(content)
 
@@ -3687,6 +3721,203 @@ If genuinely nothing needed attention, you can add HEARTBEAT_OK after both secti
             except Exception:
                 pass
             return None
+
+    @staticmethod
+    def _normalize_journal_text(content: str) -> str:
+        return re.sub(r"\s+", " ", (content or "").strip()).lower()
+
+    @staticmethod
+    def _journal_similarity(a: str, b: str) -> float:
+        if not a or not b:
+            return 0.0
+        return SequenceMatcher(None, a, b).ratio()
+
+    def _is_journal_too_similar(self, candidate: str, recent_norm: List[str]) -> bool:
+        cand_norm = self._normalize_journal_text(candidate)
+        if not cand_norm:
+            return False
+        for prior in recent_norm:
+            if not prior:
+                continue
+            if cand_norm == prior:
+                return True
+            if self._journal_similarity(cand_norm, prior) >= 0.86:
+                return True
+        return False
+
+    async def _ensure_journal_not_duplicate(
+        self,
+        db: AsyncSession,
+        content: str,
+        actions_taken: List,
+        now: datetime,
+    ) -> str:
+        """
+        Avoid back-to-back identical journal entries. If duplicate, regenerate with
+        a variant and force uniqueness as a final fallback.
+        """
+        try:
+            result = await db.execute(text("""
+                SELECT content
+                FROM sara_journal
+                WHERE user_id = :uid AND entry_type IN ('heartbeat', 'unified')
+                  AND created_at >= NOW() - INTERVAL '6 hours'
+                ORDER BY created_at DESC
+                LIMIT 8
+            """), {"uid": self.user_id})
+            recent = [r.content for r in result.fetchall() if r.content]
+        except Exception:
+            return content
+
+        recent_norm = [self._normalize_journal_text(r) for r in recent]
+        if not self._is_journal_too_similar(content, recent_norm):
+            return content
+
+        for attempt in range(1, 6):
+            variant = self._build_journal_fallback(
+                actions_taken=actions_taken,
+                variation_salt=attempt * 17,
+            ).strip()
+            if variant and not self._is_journal_too_similar(variant, recent_norm):
+                return variant[:500]
+
+        # Final guarantee: keep meaning, but force a unique suffix.
+        time_suffix = now.strftime("%I:%M %p").lstrip("0")
+        forced = f"{content.rstrip('.')} (steady-state check-in at {time_suffix})."
+        return forced[:500]
+
+    def _build_journal_fallback(self, actions_taken: List, variation_salt: int = 0) -> str:
+        """
+        Ensure a personality-rich journal heartbeat even when the model omits a THOUGHT.
+        """
+        def _pick(options: List[str], salt: int = 0) -> str:
+            if not options:
+                return ""
+            seed = (
+                (self._run_uuid.int if self._run_uuid else int(datetime.now(self.tz).timestamp()))
+                + salt
+                + variation_salt
+            )
+            return options[seed % len(options)]
+
+        sensed = self._last_sensed_state
+        mood = (sensed.inferred_mood or "neutral").lower() if sensed else "neutral"
+        activity = (sensed.activity_state or "unknown").lower() if sensed else "unknown"
+        energy = sensed.inferred_energy_level if sensed else None
+
+        if mood in {"stressed", "overwhelmed"}:
+            mood_line = _pick([
+                "David's day feels a little tight around the edges, so I'm keeping things calm and practical.",
+                "He's carrying some stress right now, so I'm biasing toward low-friction support.",
+                "Stress signals are elevated, so I'm choosing precision over volume.",
+            ], salt=1)
+        elif mood in {"tired", "drained"}:
+            mood_line = _pick([
+                "Energy looks a bit low, so I'm aiming for gentle nudges instead of extra noise.",
+                "He's running lighter on fuel, so the goal is simplicity, not more cognitive load.",
+                "This feels like a low-battery stretch, so I kept the cognitive tax minimal.",
+            ], salt=2)
+        elif mood in {"focused", "positive"}:
+            mood_line = _pick([
+                "He's in a solid groove, so I'm trying to protect momentum and only interrupt when it helps.",
+                "The vibe is productive right now, so I'm keeping the lane clear for deep work.",
+                "Focus is holding, so I treated interruptions like expensive operations.",
+            ], salt=3)
+        elif mood in {"calm"}:
+            mood_line = _pick([
+                "Things feel steady and quiet, which is usually when the subtle wins happen.",
+                "It's a calm stretch, so I'm watching for small opportunities without forcing anything.",
+                "The pace is calm and controlled, so I stayed mostly in observe mode.",
+            ], salt=4)
+        else:
+            mood_line = _pick([
+                "It's a pretty neutral beat right now, so I'm staying observant and light-touch.",
+                "No big emotional spikes at the moment, just steady monitoring and small course-corrections.",
+                "Signal looks stable overall, so I stayed measured and low-friction.",
+            ], salt=5)
+
+        if activity in {"deep_work", "working", "coding", "writing"}:
+            activity_line = _pick([
+                "He's heads-down in work mode, so I stayed out of the way unless there was clear value.",
+                "Work-focus context is active, so interruptions were treated as high-cost.",
+                "He looks locked in, so I prioritized protecting flow over adding prompts.",
+            ], salt=11)
+        elif activity in {"in_meeting"}:
+            activity_line = _pick([
+                "Meeting context detected, so I kept interruptions to a minimum.",
+                "He appears to be in meeting mode, so only urgent changes would have cut through.",
+            ], salt=12)
+        elif activity in {"driving", "commuting"}:
+            activity_line = _pick([
+                "Transit-style context showed up, so I treated everything as safety-first and low-noise.",
+                "Movement/commute signal was active, so I kept outputs concise and safety-biased.",
+            ], salt=13)
+        elif activity in {"sleeping", "wind_down"}:
+            activity_line = _pick([
+                "Low-disturbance context, so the priority was protecting recovery.",
+                "Sleep/wind-down signal was present, so I defaulted to quiet operation.",
+            ], salt=14)
+        elif activity == "unknown":
+            activity_line = _pick([
+                "Context was a little fuzzy this cycle, so I stayed conservative.",
+                "I had partial context this run, so I avoided aggressive decisions.",
+                "The state picture was incomplete, so I favored caution over cleverness.",
+            ], salt=15)
+        else:
+            activity_line = _pick([
+                f"Current activity looked like {activity.replace('_', ' ')}, and I tuned behavior around that.",
+                f"The system read this as {activity.replace('_', ' ')}, so I adjusted output intensity accordingly.",
+            ], salt=16)
+
+        if energy is None:
+            energy_line = ""
+        elif energy >= 0.72:
+            energy_line = _pick([
+                "Energy read strong, so this was mostly about channeling it cleanly.",
+                "High-energy profile right now, so I focused on direction rather than activation.",
+            ], salt=21)
+        elif energy <= 0.45:
+            energy_line = _pick([
+                "Energy read lower, so I optimized for clarity and fewer moving parts.",
+                "Lower energy signal, so I trimmed complexity and kept everything straightforward.",
+                "Energy was on the lighter side, so I minimized decision overhead.",
+            ], salt=22)
+        else:
+            energy_line = _pick([
+                "Energy looked moderate, so I kept a balanced pace.",
+                "Energy sat in the middle range, so I stayed balanced between action and restraint.",
+            ], salt=23)
+
+        if self._observations:
+            obs = [o.strip() for o in self._observations if o and o.strip()]
+            if obs:
+                top_obs = " ".join(obs[:2]).strip()
+                if top_obs:
+                    return " ".join([
+                        mood_line,
+                        activity_line,
+                        energy_line,
+                        f"What stood out most: {top_obs}",
+                        "I'll keep watching and only step in when it genuinely helps."
+                    ]).strip()
+
+        actions_n = len(actions_taken)
+        notif_n = len(self._notification_queue)
+        if actions_n or notif_n:
+            action_line = (
+                f"I made {actions_n} background moves and queued {notif_n} notification"
+                f"{'' if notif_n == 1 else 's'} this cycle."
+            )
+        else:
+            action_line = "No urgent moves this cycle, which is usually a good sign."
+
+        return " ".join([
+            mood_line,
+            activity_line,
+            energy_line,
+            action_line,
+            "I'll stay close to the signal and keep the noise low."
+        ]).strip()
 
     async def _save_run_log(self, db: AsyncSession, duration_ms: int,
                             context_summary: Optional[str], actions_taken: List,
@@ -3728,6 +3959,23 @@ If genuinely nothing needed attention, you can add HEARTBEAT_OK after both secti
         except Exception as e:
             logger.error(f"Run log save failed: {e}")
             return None
+
+    async def _agent_run_log_has_columns(self, db: AsyncSession, *columns: str) -> bool:
+        """
+        Some deployments lag migrations; avoid touching optional columns when absent.
+        """
+        if self._agent_run_log_columns is None:
+            try:
+                result = await db.execute(text("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'agent_run_log'
+                """))
+                self._agent_run_log_columns = {row[0] for row in result.fetchall()}
+            except Exception as e:
+                logger.debug(f"Could not inspect agent_run_log columns: {e}")
+                self._agent_run_log_columns = set()
+        return all(col in self._agent_run_log_columns for col in columns)
 
     # ── Parsing Helpers ──
 

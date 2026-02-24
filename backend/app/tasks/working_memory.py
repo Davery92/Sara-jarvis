@@ -10,10 +10,89 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
+from zoneinfo import ZoneInfo
 
 from app.celery_app import celery_app
+from app.core.config import settings
+from app.db.base import SessionLocal
+from app.models.profile import ReflectionSettings, UserProfile
 
 logger = logging.getLogger(__name__)
+
+_timezone_cache: Dict[str, Dict[str, Any]] = {}
+_timezone_cache_ttl = timedelta(minutes=10)
+
+
+def _is_valid_timezone(timezone_name: str) -> bool:
+    try:
+        ZoneInfo(timezone_name)
+        return True
+    except Exception:
+        return False
+
+
+def _extract_profile_timezone(profile_data: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(profile_data, dict):
+        return None
+
+    candidates = [
+        profile_data.get("timezone"),
+        profile_data.get("time_zone"),
+        profile_data.get("timezone_location"),
+    ]
+
+    for value in candidates:
+        if isinstance(value, dict):
+            value = value.get("value") or value.get("timezone")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
+def resolve_user_timezone(user_id: str) -> str:
+    """
+    Resolve timezone with precedence:
+    1) reflection_settings.timezone
+    2) user_profile.profile_data timezone fields
+    3) global settings.timezone
+    """
+    fallback = settings.timezone if _is_valid_timezone(settings.timezone) else "UTC"
+    if not user_id:
+        return fallback
+
+    now = datetime.utcnow()
+    cached = _timezone_cache.get(user_id)
+    if cached:
+        fetched_at = cached.get("fetched_at")
+        if isinstance(fetched_at, datetime) and (now - fetched_at) < _timezone_cache_ttl:
+            tz = cached.get("timezone")
+            if isinstance(tz, str) and _is_valid_timezone(tz):
+                return tz
+
+    timezone_name = fallback
+    db = SessionLocal()
+    try:
+        reflection_tz = db.query(ReflectionSettings.timezone).filter(
+            ReflectionSettings.user_id == user_id
+        ).scalar()
+        if isinstance(reflection_tz, str) and _is_valid_timezone(reflection_tz):
+            timezone_name = reflection_tz
+        else:
+            profile_row = db.query(UserProfile.profile_data).filter(
+                UserProfile.user_id == user_id
+            ).first()
+            if profile_row:
+                profile_timezone = _extract_profile_timezone(profile_row[0] or {})
+                if profile_timezone and _is_valid_timezone(profile_timezone):
+                    timezone_name = profile_timezone
+    except Exception as e:
+        logger.debug(f"Failed to resolve timezone for user {user_id}: {e}")
+    finally:
+        db.close()
+
+    _timezone_cache[user_id] = {"timezone": timezone_name, "fetched_at": now}
+    return timezone_name
 
 
 @celery_app.task(bind=True, name="app.tasks.working_memory.refresh_context")
@@ -179,8 +258,15 @@ def infer_user_state(r, user_id: str) -> Dict[str, Any]:
                 state["availability"] = "inactive"
                 state["confidence"] = 0.5
 
-        # Check time of day for activity inference
-        local_hour = now.hour  # TODO: Use user's timezone
+        # Check time of day for activity inference using per-user timezone.
+        try:
+            user_timezone = resolve_user_timezone(user_id)
+            local_hour = datetime.now(ZoneInfo(user_timezone)).hour
+            state["timezone"] = user_timezone
+        except Exception:
+            user_timezone = settings.timezone if _is_valid_timezone(settings.timezone) else "UTC"
+            local_hour = now.hour
+            state["timezone"] = user_timezone
 
         if 0 <= local_hour < 6:
             state["inferred_activity"] = "sleeping"

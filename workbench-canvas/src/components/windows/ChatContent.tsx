@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageSquare, Send, Loader2, StopCircle, Wrench, Trash2, Ghost, ChevronDown } from 'lucide-react'
+import { MessageSquare, Send, Loader2, StopCircle, Wrench, Trash2, Ghost, ChevronDown, Mic, MicOff } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useQuery } from '@tanstack/react-query'
-import { chatApi, workspaceApi, type ChatMessage, type StreamEvent, type ChatModel } from '../../services/api'
+import { chatApi, voiceApi, type ChatMessage, type StreamEvent, type ChatModel } from '../../services/api'
 import { useCanvasStore } from '../../store/canvasStore'
-import type { ChatWindowData, WindowType } from '../../types'
+import { executeWorkspaceCommand } from '../../services/workspaceCommands'
+import { APP_CONFIG } from '../../config'
+import type { ChatWindowData } from '../../types'
 
 interface ChatContentProps {
   data: ChatWindowData
@@ -24,12 +26,16 @@ export default function ChatContent({ data }: ChatContentProps) {
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [currentToolActivity, setCurrentToolActivity] = useState<{ tool: string; status: 'running' | 'done' }[]>([])
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b')
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:20b')
   const [isEphemeral, setIsEphemeral] = useState(false)
   const [showModelDropdown, setShowModelDropdown] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
 
   // Fetch available models
   const { data: modelsData } = useQuery({
@@ -40,7 +46,7 @@ export default function ChatContent({ data }: ChatContentProps) {
 
   // Set default model when loaded
   useEffect(() => {
-    if (modelsData?.default && selectedModel === 'gpt-oss:120b') {
+    if (modelsData?.default && selectedModel === 'gpt-oss:20b') {
       setSelectedModel(modelsData.default)
     }
   }, [modelsData])
@@ -62,214 +68,6 @@ export default function ChatContent({ data }: ChatContentProps) {
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
-  }, [])
-
-  // Handle workspace commands from Sara's tools
-  const handleWorkspaceCommand = (data: any) => {
-    if (!data) return
-    const { openWindow, closeWindow, bringToFront, windows, transform } = useCanvasStore.getState()
-    const command = data.workspace_command
-
-    console.log('[ChatContent] Workspace command:', command, data)
-
-    switch (command) {
-      case 'open_window': {
-        // Special handling for note_editor - open specific note in its own window
-        if (data.window_type === 'note_editor' && data.data?.note_id) {
-          const { openNoteWindow } = useCanvasStore.getState()
-          openNoteWindow(data.data.note_id, data.data.title || data.title || 'Note', data.data.content || '')
-          break
-        }
-
-        // Map window_type to our WindowType
-        const typeMap: Record<string, WindowType> = {
-          notes: 'note',
-          chat: 'chat',
-          fitness: 'fitness',
-          calendar: 'note', // Use note window for now
-          tasks: 'note', // Use note window for now
-          intelligence: 'note', // Use note window for now
-          settings: 'settings',
-        }
-        const windowType = typeMap[data.window_type] || 'note'
-        openWindow(windowType, data.data || {}, { title: data.title })
-        break
-      }
-
-      case 'close_window': {
-        // Find window by ID or title
-        if (data.window_id) {
-          closeWindow(data.window_id)
-        } else if (data.window_title) {
-          const targetWindow = windows.find(w =>
-            w.title.toLowerCase().includes(data.window_title.toLowerCase())
-          )
-          if (targetWindow) {
-            closeWindow(targetWindow.id)
-          }
-        }
-        break
-      }
-
-      case 'focus_window': {
-        // Find window by ID or title
-        if (data.window_id) {
-          bringToFront(data.window_id)
-        } else if (data.window_title) {
-          const targetWindow = windows.find(w =>
-            w.title.toLowerCase().includes(data.window_title.toLowerCase())
-          )
-          if (targetWindow) {
-            bringToFront(targetWindow.id)
-          }
-        }
-        break
-      }
-
-      case 'save_state': {
-        // Save current workspace state to server
-        const stateData = {
-          transform,
-          windows: windows.map(w => ({
-            id: w.id,
-            type: w.type,
-            title: w.title,
-            position: w.position,
-            size: w.size,
-            zIndex: w.zIndex,
-            data: w.data,
-          })),
-        }
-        workspaceApi.saveState(stateData).then(() => {
-          console.log('[ChatContent] Workspace state saved')
-        }).catch(err => {
-          console.error('[ChatContent] Failed to save workspace state:', err)
-        })
-        break
-      }
-
-      case 'arrange_windows': {
-        // Window arrangement (tile, cascade, stack, center)
-        // TODO: Implement arrangement logic in canvasStore
-        console.log('[ChatContent] Arrange windows:', data.arrangement)
-        break
-      }
-
-      case 'show_map': {
-        // Show a map on the canvas
-        const { addMap, updateMap, maps } = useCanvasStore.getState()
-        const mapData = data.map
-        if (!mapData) {
-          console.warn('[ChatContent] show_map: No map data provided')
-          break
-        }
-
-        // Check if map already exists on canvas
-        const existingMap = maps.find(m => m.id === mapData.id)
-        if (existingMap) {
-          // Update existing map and uncollapse it
-          updateMap(mapData.id, {
-            mapData: mapData.map_data,
-            collapsed: false,
-          })
-        } else {
-          // Add new map to canvas
-          const newMap = {
-            id: mapData.id,
-            name: mapData.name,
-            description: mapData.description,
-            mapData: mapData.map_data,
-            isReadonly: mapData.is_readonly || false,
-            canvasPosition: data.position || { x: 200, y: 200 },
-            collapsed: data.collapsed || false,
-          }
-          addMap(newMap)
-        }
-        console.log('[ChatContent] Map shown:', mapData.name)
-        break
-      }
-
-      case 'update_map': {
-        // Update an existing map on the canvas
-        const { updateMap: updateMapStore, maps: currentMaps, addMap: addMapStore } = useCanvasStore.getState()
-        const updatedMapData = data.map
-        console.log('[ChatContent] update_map received:', {
-          mapId: updatedMapData?.id,
-          mapName: updatedMapData?.name,
-          hasMapData: !!updatedMapData?.map_data,
-          currentMapsCount: currentMaps.length,
-          currentMapIds: currentMaps.map(m => m.id)
-        })
-
-        if (!updatedMapData) {
-          console.warn('[ChatContent] update_map: No map data provided')
-          break
-        }
-
-        const mapToUpdate = currentMaps.find(m => m.id === updatedMapData.id)
-        if (mapToUpdate) {
-          updateMapStore(updatedMapData.id, {
-            mapData: updatedMapData.map_data,
-          })
-          console.log('[ChatContent] Map updated successfully:', updatedMapData.name)
-        } else {
-          // Map not on canvas - add it
-          console.log('[ChatContent] Map not on canvas, adding it:', updatedMapData.id)
-          const newMap = {
-            id: updatedMapData.id,
-            name: updatedMapData.name,
-            description: updatedMapData.description,
-            mapData: updatedMapData.map_data,
-            isReadonly: updatedMapData.is_readonly || false,
-            canvasPosition: { x: 200, y: 200 },
-            collapsed: false,
-          }
-          addMapStore(newMap)
-          console.log('[ChatContent] Map added to canvas:', updatedMapData.name)
-        }
-        break
-      }
-
-      case 'hide_map':
-      case 'collapse_map': {
-        // Hide or collapse a map
-        const { removeMap, collapseMap } = useCanvasStore.getState()
-        if (command === 'hide_map') {
-          removeMap(data.map_id)
-        } else {
-          collapseMap(data.map_id, true)
-        }
-        break
-      }
-
-      default:
-        console.warn('[ChatContent] Unknown workspace command:', command)
-    }
-  }
-
-  // Poll for pending workspace commands from voice/non-SSE sources
-  useEffect(() => {
-    const pollPendingCommands = async () => {
-      try {
-        const result = await workspaceApi.getPendingCommands()
-        if (result.commands && result.commands.length > 0) {
-          console.log('[ChatContent] Received pending workspace commands:', result.commands)
-          for (const cmd of result.commands) {
-            handleWorkspaceCommand(cmd)
-          }
-        }
-      } catch (error) {
-        // Silently ignore errors - this is just polling
-      }
-    }
-
-    // Poll every 2 seconds
-    const interval = setInterval(pollPendingCommands, 2000)
-
-    // Initial poll
-    pollPendingCommands()
-
-    return () => clearInterval(interval)
   }, [])
 
   const handleSend = async () => {
@@ -305,6 +103,14 @@ export default function ChatContent({ data }: ChatContentProps) {
     ])
 
     try {
+      // Build workspace context for Sara
+      const storeState = useCanvasStore.getState()
+      const workspaceContext = {
+        open_windows: storeState.windows.map(w => ({ type: w.type, title: w.title })),
+        active_scene: storeState.scenes?.find(s => s.id === storeState.activeSceneId)?.name || null,
+        window_count: storeState.windows.length,
+      }
+
       console.log('[ChatContent] Calling chatApi.sendMessage with', apiMessages.length, 'messages')
       await chatApi.sendMessage(
         apiMessages,
@@ -363,12 +169,12 @@ export default function ChatContent({ data }: ChatContentProps) {
 
             case 'workspace_command':
               // Handle workspace commands from Sara's tools
-              handleWorkspaceCommand(event.data)
+              executeWorkspaceCommand(event.data, 'chat_sse')
               break
           }
         },
         abortControllerRef.current.signal,
-        { model: selectedModel, ephemeral: isEphemeral }
+        { model: selectedModel, ephemeral: isEphemeral, workspace_context: workspaceContext }
       )
     } catch (err: any) {
       console.error('[ChatContent] Error in sendMessage:', err)
@@ -404,6 +210,57 @@ export default function ChatContent({ data }: ChatContentProps) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
+    }
+  }
+
+  const handleMicToggle = async () => {
+    if (isRecording) {
+      // Stop recording
+      mediaRecorderRef.current?.stop()
+      return
+    }
+
+    // Start recording
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : 'audio/webm',
+      })
+      audioChunksRef.current = []
+      mediaRecorderRef.current = mediaRecorder
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+      }
+
+      mediaRecorder.onstop = async () => {
+        // Stop all tracks to release the microphone
+        stream.getTracks().forEach((t) => t.stop())
+        setIsRecording(false)
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+        if (audioBlob.size < 100) return // too small, probably empty
+
+        setIsTranscribing(true)
+        try {
+          const result = await voiceApi.transcribe(audioBlob)
+          if (result.transcription && !result.filtered) {
+            setInput((prev) => (prev ? prev + ' ' + result.transcription : result.transcription))
+            inputRef.current?.focus()
+          }
+        } catch (err) {
+          console.error('Transcription failed:', err)
+        } finally {
+          setIsTranscribing(false)
+        }
+      }
+
+      mediaRecorder.start()
+      setIsRecording(true)
+    } catch (err) {
+      console.error('Microphone access denied:', err)
     }
   }
 
@@ -529,11 +386,34 @@ export default function ChatContent({ data }: ChatContentProps) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Sara..."
+            placeholder={isRecording ? 'Listening...' : isTranscribing ? 'Transcribing...' : 'Message Sara...'}
             rows={1}
-            className="flex-1 px-4 py-2.5 bg-canvas-surface rounded-lg border border-canvas-border text-white placeholder-canvas-muted resize-none focus:outline-none focus:border-teal-500"
-            disabled={isStreaming}
+            className={`flex-1 px-4 py-2.5 bg-canvas-surface rounded-lg border text-white placeholder-canvas-muted resize-none focus:outline-none focus:border-teal-500 ${
+              isRecording ? 'border-red-500/60' : 'border-canvas-border'
+            }`}
+            disabled={isStreaming || isRecording}
           />
+          {/* Mic button */}
+          <button
+            onClick={handleMicToggle}
+            disabled={isStreaming || isTranscribing}
+            className={`px-3 py-2 rounded-lg transition-colors ${
+              isRecording
+                ? 'bg-red-500 hover:bg-red-600 animate-pulse'
+                : isTranscribing
+                  ? 'bg-canvas-surface text-canvas-muted cursor-wait'
+                  : 'bg-canvas-surface hover:bg-canvas-elevated text-canvas-muted hover:text-white'
+            }`}
+            title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Press to talk'}
+          >
+            {isTranscribing ? (
+              <Loader2 size={20} className="text-teal-400 animate-spin" />
+            ) : isRecording ? (
+              <MicOff size={20} className="text-white" />
+            ) : (
+              <Mic size={20} />
+            )}
+          </button>
           {isStreaming ? (
             <button
               onClick={handleStop}
@@ -577,7 +457,49 @@ function MessageBubble({ message }: { message: Message }) {
           <p className="whitespace-pre-wrap">{message.content}</p>
         ) : (
           <div className="markdown-content prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                a: ({ href, children }) => {
+                  if (href && (href.startsWith('/email/') || href.startsWith('/api/'))) {
+                    const handleDownload = async (e: React.MouseEvent) => {
+                      e.preventDefault()
+                      try {
+                        const res = await fetch(`${APP_CONFIG.apiUrl}${href}`, { credentials: 'include' })
+                        if (!res.ok) return
+                        const blob = await res.blob()
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        const disposition = res.headers.get('Content-Disposition')
+                        const nameMatch = disposition?.match(/filename="?([^"]+)"?/)
+                        a.download = nameMatch?.[1] || href.split('/').pop() || 'download'
+                        document.body.appendChild(a)
+                        a.click()
+                        document.body.removeChild(a)
+                        URL.revokeObjectURL(url)
+                      } catch (err) {
+                        console.error('Download failed:', err)
+                      }
+                    }
+                    return (
+                      <a
+                        href={href}
+                        onClick={handleDownload}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-blue-500/20 border border-blue-400/30 rounded text-blue-400 hover:bg-blue-500/30 cursor-pointer no-underline"
+                      >
+                        📎 {children}
+                      </a>
+                    )
+                  }
+                  return (
+                    <a href={href} className="text-teal-400 hover:text-teal-300 underline" target="_blank" rel="noopener noreferrer">
+                      {children}
+                    </a>
+                  )
+                },
+              }}
+            >
               {message.content || '...'}
             </ReactMarkdown>
           </div>
