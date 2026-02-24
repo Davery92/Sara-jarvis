@@ -30,6 +30,8 @@ VOICE_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("VOICE_HEARTBEAT_INTERVAL_SECON
 
 asr_model = None
 ASR_BACKEND = "mock"
+ASR_RUNTIME_DEVICE = ASR_DEVICE
+ASR_RUNTIME_COMPUTE_TYPE = ASR_COMPUTE_TYPE
 heartbeat_task: Optional[asyncio.Task] = None
 
 
@@ -68,25 +70,64 @@ class TranscribeResponse(BaseModel):
 @app.on_event("startup")
 async def startup() -> None:
     global asr_model, ASR_BACKEND, heartbeat_task
+    global ASR_RUNTIME_DEVICE, ASR_RUNTIME_COMPUTE_TYPE
     try:
         from faster_whisper import WhisperModel
 
-        logger.info(
-            "Loading faster-whisper model=%s device=%s compute=%s",
-            ASR_MODEL_NAME,
-            ASR_DEVICE,
-            ASR_COMPUTE_TYPE,
-        )
-        asr_model = WhisperModel(
-            ASR_MODEL_NAME,
-            device=ASR_DEVICE,
-            compute_type=ASR_COMPUTE_TYPE,
-        )
-        ASR_BACKEND = "faster-whisper"
-        logger.info("ASR model loaded")
+        tried: List[str] = []
+        candidates: List[tuple[str, str]] = []
+
+        def _add_candidate(device: str, compute: str) -> None:
+            item = (device, compute)
+            if item not in candidates:
+                candidates.append(item)
+
+        _add_candidate(ASR_DEVICE, ASR_COMPUTE_TYPE)
+        if ASR_DEVICE == "cuda":
+            for compute_type in ["int8_float16", "int8", "float32", "float16"]:
+                _add_candidate("cuda", compute_type)
+            for compute_type in ["int8", "float32"]:
+                _add_candidate("cpu", compute_type)
+        else:
+            for compute_type in ["int8", "float32"]:
+                _add_candidate(ASR_DEVICE, compute_type)
+            _add_candidate("cpu", "int8")
+            _add_candidate("cpu", "float32")
+
+        last_exc: Optional[Exception] = None
+        for device, compute_type in candidates:
+            try:
+                logger.info(
+                    "Loading faster-whisper model=%s device=%s compute=%s",
+                    ASR_MODEL_NAME,
+                    device,
+                    compute_type,
+                )
+                asr_model = WhisperModel(
+                    ASR_MODEL_NAME,
+                    device=device,
+                    compute_type=compute_type,
+                )
+                ASR_BACKEND = "faster-whisper"
+                ASR_RUNTIME_DEVICE = device
+                ASR_RUNTIME_COMPUTE_TYPE = compute_type
+                logger.info(
+                    "ASR model loaded with device=%s compute=%s",
+                    device,
+                    compute_type,
+                )
+                break
+            except Exception as exc:
+                tried.append(f"{device}/{compute_type}: {exc}")
+                last_exc = exc
+
+        if asr_model is None:
+            raise last_exc or RuntimeError("Unknown ASR initialization error")
     except Exception as exc:
         ASR_BACKEND = "mock"
         asr_model = None
+        ASR_RUNTIME_DEVICE = ASR_DEVICE
+        ASR_RUNTIME_COMPUTE_TYPE = ASR_COMPUTE_TYPE
         logger.warning("ASR backend unavailable, using mock mode: %s", exc)
 
     if VOICE_CONTROL_URL and VOICE_CONTROL_INTERNAL_TOKEN:
@@ -122,12 +163,15 @@ async def _heartbeat_loop() -> None:
                         "version": "asr-service-v0.1.0",
                         "latency_ms": 0.0,
                         "details": {
-                            "backend": ASR_BACKEND,
-                            "model": ASR_MODEL_NAME,
-                            "device": ASR_DEVICE,
-                        },
+                        "backend": ASR_BACKEND,
+                        "model": ASR_MODEL_NAME,
+                        "device": ASR_RUNTIME_DEVICE,
+                        "compute_type": ASR_RUNTIME_COMPUTE_TYPE,
+                        "requested_device": ASR_DEVICE,
+                        "requested_compute_type": ASR_COMPUTE_TYPE,
                     },
-                    headers=headers,
+                },
+                headers=headers,
                 )
                 response.raise_for_status()
             except Exception as exc:
@@ -141,7 +185,10 @@ async def health() -> Dict[str, Any]:
         "status": "healthy" if ASR_BACKEND != "mock" else "degraded",
         "backend": ASR_BACKEND,
         "model": ASR_MODEL_NAME,
-        "device": ASR_DEVICE,
+        "device": ASR_RUNTIME_DEVICE,
+        "compute_type": ASR_RUNTIME_COMPUTE_TYPE,
+        "requested_device": ASR_DEVICE,
+        "requested_compute_type": ASR_COMPUTE_TYPE,
     }
 
 
