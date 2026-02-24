@@ -66,10 +66,12 @@ interface VoiceJob {
   job_id: string
   job_type: string
   status: string
+  claimed_by?: string | null
   created_at?: string
   updated_at?: string
   notes?: string | null
   error?: string | null
+  result?: Record<string, unknown> | null
 }
 
 interface VoiceEvent {
@@ -552,6 +554,15 @@ const SensoryControlPlane: React.FC = () => {
                     <span className={`text-xs ${statusClass(job.status)}`}>{job.status}</span>
                   </div>
                   <div className="text-[11px] text-gray-500">{job.job_id}</div>
+                  {job.claimed_by && (
+                    <div className="text-[11px] text-cyan-400">claimed by: {job.claimed_by}</div>
+                  )}
+                  {job.notes && <div className="text-[11px] text-gray-400">{job.notes}</div>}
+                  {job.result && (
+                    <div className="text-[11px] text-gray-500">
+                      result: {String(job.result.version || 'n/a')} ({String(job.result.model_family || 'model')})
+                    </div>
+                  )}
                   {job.error && <div className="text-[11px] text-red-400">{job.error}</div>}
                 </div>
               ))}
