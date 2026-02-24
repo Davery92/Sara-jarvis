@@ -154,10 +154,13 @@ SPEAKER_MIN_SEGMENT_SECONDS=0.8
 # optional event publishing from audio-worker to voice-control
 VOICE_CONTROL_URL=http://10.185.1.180:8000
 VOICE_CONTROL_INTERNAL_TOKEN=change-me-voice-internal-token
+VOICE_HEARTBEAT_INTERVAL_SECONDS=15
 
 # Redis (for audio queue)
 REDIS_URL=redis://audio-redis:6379/0
 ```
+
+If `VOICE_CONTROL_URL`/`VOICE_CONTROL_INTERNAL_TOKEN` are not set, the Sensory pipeline table will show services as `offline` because heartbeats are disabled.
 
 ### GPU Allocation
 

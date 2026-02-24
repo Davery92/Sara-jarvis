@@ -13,9 +13,9 @@ RUN pip install --no-cache-dir \
     fastapi==0.115.2 \
     uvicorn[standard]==0.30.6 \
     pydantic==2.9.2 \
+    httpx==0.27.2 \
     faster-whisper==1.1.0
 
 COPY asr_service.py /app/
 
 CMD ["python", "asr_service.py"]
-

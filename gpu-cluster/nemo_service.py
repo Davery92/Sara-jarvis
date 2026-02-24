@@ -11,6 +11,7 @@ Uses SpeechBrain as primary (easier install) with NeMo as optional.
 """
 
 import os
+import asyncio
 import logging
 import tempfile
 import json
@@ -22,6 +23,7 @@ import torch
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.responses import JSONResponse
+import httpx
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +38,10 @@ SPEAKER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Try SpeechBrain first (easier to install), then NeMo
 BACKEND = None
+VOICE_CONTROL_URL = os.getenv("VOICE_CONTROL_URL", "").rstrip("/")
+VOICE_CONTROL_INTERNAL_TOKEN = os.getenv("VOICE_CONTROL_INTERNAL_TOKEN", "").strip()
+VOICE_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("VOICE_HEARTBEAT_INTERVAL_SECONDS", "15"))
+heartbeat_task: Optional[asyncio.Task] = None
 
 try:
     from speechbrain.inference.speaker import EncoderClassifier
@@ -92,7 +98,7 @@ class EnrollmentRequest(BaseModel):
 @app.on_event("startup")
 async def load_models():
     """Load speaker models on startup."""
-    global speaker_model
+    global speaker_model, heartbeat_task
 
     if BACKEND == "speechbrain":
         try:
@@ -121,6 +127,51 @@ async def load_models():
             logger.info("NeMo model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load NeMo model: {e}")
+
+    if VOICE_CONTROL_URL and VOICE_CONTROL_INTERNAL_TOKEN:
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    global heartbeat_task
+    if heartbeat_task:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        heartbeat_task = None
+
+
+async def _heartbeat_loop() -> None:
+    url = f"{VOICE_CONTROL_URL}/api/voice-control/services/speaker-diarization/heartbeat"
+    headers = {
+        "X-Internal-Service": "speaker-diarization",
+        "X-Internal-Token": VOICE_CONTROL_INTERNAL_TOKEN,
+    }
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        while True:
+            try:
+                status = "healthy" if speaker_model is not None or BACKEND == "mock" else "degraded"
+                response = await client.post(
+                    url,
+                    json={
+                        "status": status,
+                        "version": f"nemo-service-{BACKEND or 'unknown'}-v1.0.0",
+                        "latency_ms": 0.0,
+                        "details": {
+                            "backend": BACKEND,
+                            "model_loaded": speaker_model is not None,
+                            "gpu_available": torch.cuda.is_available(),
+                        },
+                    },
+                    headers=headers,
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.debug("NeMo heartbeat failed: %s", exc)
+            await asyncio.sleep(VOICE_HEARTBEAT_INTERVAL_SECONDS)
 
 
 @app.get("/health")

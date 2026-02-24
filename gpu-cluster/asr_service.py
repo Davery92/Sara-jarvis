@@ -6,12 +6,14 @@ Provides REST speech-to-text for the modular voice pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+import httpx
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
@@ -22,9 +24,13 @@ app = FastAPI(title="ASR Service", version="0.1.0")
 ASR_MODEL_NAME = os.getenv("ASR_MODEL_NAME", "distil-large-v3")
 ASR_DEVICE = os.getenv("ASR_DEVICE", "cuda")
 ASR_COMPUTE_TYPE = os.getenv("ASR_COMPUTE_TYPE", "float16")
+VOICE_CONTROL_URL = os.getenv("VOICE_CONTROL_URL", "").rstrip("/")
+VOICE_CONTROL_INTERNAL_TOKEN = os.getenv("VOICE_CONTROL_INTERNAL_TOKEN", "").strip()
+VOICE_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("VOICE_HEARTBEAT_INTERVAL_SECONDS", "15"))
 
 asr_model = None
 ASR_BACKEND = "mock"
+heartbeat_task: Optional[asyncio.Task] = None
 
 
 class TranscribeRequest(BaseModel):
@@ -61,7 +67,7 @@ class TranscribeResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup() -> None:
-    global asr_model, ASR_BACKEND
+    global asr_model, ASR_BACKEND, heartbeat_task
     try:
         from faster_whisper import WhisperModel
 
@@ -82,6 +88,51 @@ async def startup() -> None:
         ASR_BACKEND = "mock"
         asr_model = None
         logger.warning("ASR backend unavailable, using mock mode: %s", exc)
+
+    if VOICE_CONTROL_URL and VOICE_CONTROL_INTERNAL_TOKEN:
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    global heartbeat_task
+    if heartbeat_task:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        heartbeat_task = None
+
+
+async def _heartbeat_loop() -> None:
+    url = f"{VOICE_CONTROL_URL}/api/voice-control/services/speech-asr/heartbeat"
+    headers = {
+        "X-Internal-Service": "speech-asr",
+        "X-Internal-Token": VOICE_CONTROL_INTERNAL_TOKEN,
+    }
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        while True:
+            try:
+                status = "healthy" if ASR_BACKEND != "mock" else "degraded"
+                response = await client.post(
+                    url,
+                    json={
+                        "status": status,
+                        "version": "asr-service-v0.1.0",
+                        "latency_ms": 0.0,
+                        "details": {
+                            "backend": ASR_BACKEND,
+                            "model": ASR_MODEL_NAME,
+                            "device": ASR_DEVICE,
+                        },
+                    },
+                    headers=headers,
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.debug("ASR heartbeat failed: %s", exc)
+            await asyncio.sleep(VOICE_HEARTBEAT_INTERVAL_SECONDS)
 
 
 @app.get("/health")
@@ -162,4 +213,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8585)
-
