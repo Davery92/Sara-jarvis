@@ -63,3 +63,5 @@ backend/static/downloads/*.zip
 # Data files
 data/
 
+# Celery Beat runtime state (generated)
+backend/celerybeat-schedule*
