@@ -21,6 +21,7 @@ class WakeSensorConfig:
     log_level: str
 
     keyword: str
+    wake_model_version: str
     wake_threshold: float
     vad_threshold: float
     silence_ms: int
@@ -45,6 +46,7 @@ class WakeSensorConfig:
             simulate=_as_bool(os.getenv("WAKE_SENSOR_SIMULATE", "true"), True),
             log_level=os.getenv("WAKE_SENSOR_LOG_LEVEL", "INFO"),
             keyword=os.getenv("WAKE_SENSOR_KEYWORD", "hey sara"),
+            wake_model_version=os.getenv("WAKE_SENSOR_MODEL_VERSION", "hey_sara_v1"),
             wake_threshold=float(os.getenv("WAKE_SENSOR_WAKE_THRESHOLD", "0.58")),
             vad_threshold=float(os.getenv("WAKE_SENSOR_VAD_THRESHOLD", "0.50")),
             silence_ms=int(os.getenv("WAKE_SENSOR_SILENCE_MS", "650")),

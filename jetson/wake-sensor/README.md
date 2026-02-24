@@ -16,6 +16,7 @@ Current status:
 - Training-job worker hooks complete (`train_wake_word`)
 - Internal config sync complete (`/api/voice-control/config/internal`)
 - Ambient threshold auto-adjust loop scaffolded (simulation)
+- Wake-model version metadata included in heartbeat + `wake.detected` events
 
 ## Runtime Modes
 

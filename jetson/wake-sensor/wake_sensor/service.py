@@ -28,6 +28,7 @@ class WakeSensorService:
         self._runtime_wake_threshold = config.wake_threshold
         self._runtime_vad_threshold = config.vad_threshold
         self._runtime_keyword = config.keyword
+        self._active_wake_model_version = config.wake_model_version
         self._ambient_noise_floor_db = -52.0
         self._ambient_reference_noise_floor_db = -52.0
         self._ambient_auto_adjust_wake = True
@@ -78,6 +79,7 @@ class WakeSensorService:
         wake_threshold = wake.get("threshold")
         vad_threshold = vad.get("speech_threshold")
         wake_keyword = wake.get("keyword")
+        wake_model_version = wake.get("model_version")
         ambient_noise_floor = ambient.get("noise_floor_db")
 
         if isinstance(wake_threshold, (int, float)):
@@ -85,6 +87,8 @@ class WakeSensorService:
             self._runtime_wake_threshold = float(wake_threshold)
         if isinstance(wake_keyword, str) and wake_keyword.strip():
             self._runtime_keyword = wake_keyword.strip().lower()
+        if isinstance(wake_model_version, str) and wake_model_version.strip():
+            self._active_wake_model_version = wake_model_version.strip()
         if isinstance(vad_threshold, (int, float)):
             self._base_vad_threshold = float(vad_threshold)
             self._runtime_vad_threshold = float(vad_threshold)
@@ -115,6 +119,7 @@ class WakeSensorService:
                     details={
                         "simulate": self.config.simulate,
                         "keyword": self._runtime_keyword,
+                        "wake_model_version": self._active_wake_model_version,
                         "wake_threshold": self._runtime_wake_threshold,
                         "vad_threshold": self._runtime_vad_threshold,
                         "base_wake_threshold": self._base_wake_threshold,
@@ -366,6 +371,7 @@ class WakeSensorService:
                 trace_id=context.trace_id,
                 payload={
                     "keyword": self._runtime_keyword,
+                    "model_version": self._active_wake_model_version,
                     "confidence": round(random.uniform(0.82, 0.97), 3),
                     "threshold": self._runtime_wake_threshold,
                 },

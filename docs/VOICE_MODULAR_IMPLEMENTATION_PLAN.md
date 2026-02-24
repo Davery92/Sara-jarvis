@@ -62,7 +62,7 @@ Trace contract:
 - [ ] Integrate `openWakeWord` model management hooks
 - [x] Add adaptive ambient profiler and VAD threshold policy (simulation scaffold)
 - [ ] Emit canonical events (`wake.detected`, `utterance.*`)
-- [ ] Add model version metadata in events and heartbeats
+- [x] Add model version metadata in events and heartbeats
 
 ### Phase 2: GPU Speech Stack
 
