@@ -52,7 +52,7 @@ Trace contract:
 - [x] Add Sensory UI control-plane tabs and controls
 - [x] Add SSE/WebSocket stream endpoint for live voice events (instead of polling)
 - [x] Add auth policy hardening for service-to-service endpoints
-- [ ] Add OpenAPI examples for each contract event
+- [x] Add OpenAPI examples for contract payloads/events
 
 ### Phase 1: Jetson Wake Sensor
 

@@ -104,6 +104,21 @@ class ServiceHeartbeatInput(BaseModel):
     latency_ms: Optional[float] = None
     details: Dict[str, Any] = Field(default_factory=dict)
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "status": "healthy",
+                "version": "wake-sensor-v2.1.0",
+                "latency_ms": 32.4,
+                "details": {
+                    "simulate": False,
+                    "wake_threshold": 0.58,
+                    "vad_threshold": 0.5,
+                },
+            }
+        }
+    }
+
 
 class VoiceConfigPatchInput(BaseModel):
     wake_word: Optional[Dict[str, Any]] = None
@@ -117,15 +132,41 @@ class WakeWordTrainInput(BaseModel):
     dataset_id: Optional[str] = None
     notes: Optional[str] = None
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "target_phrase": "hey sara",
+                "dataset_id": "office_mic_v2_2026_02",
+                "notes": "Retrain for new Orin office microphone array",
+            }
+        }
+    }
+
 
 class SpeakerTrainInput(BaseModel):
     speaker_ids: List[str] = Field(default_factory=list)
     dataset_id: Optional[str] = None
     notes: Optional[str] = None
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "speaker_ids": ["david", "sara"],
+                "dataset_id": "office_speakers_2026_02",
+                "notes": "Re-enroll speakers after mic hardware change",
+            }
+        }
+    }
+
 
 class ActivateModelInput(BaseModel):
     version: str
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"version": "hey_sara_v20260224"}
+        }
+    }
 
 
 class RegisterModelVersionInput(BaseModel):
@@ -134,9 +175,34 @@ class RegisterModelVersionInput(BaseModel):
     metrics: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "version": "speaker_profiles_v20260224",
+                "status": "candidate",
+                "metrics": {
+                    "simulated": False,
+                    "speaker_count": 2,
+                    "total_samples": 14,
+                },
+                "metadata": {
+                    "job_id": "f1234567-89ab-4cde-b123-0123456789ab",
+                    "dataset_id": "office_speakers_2026_02",
+                    "mode": "enrollment",
+                },
+            }
+        }
+    }
+
 
 class ClaimJobInput(BaseModel):
     job_types: List[str] = Field(default_factory=list)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"job_types": ["train_wake_word", "train_speakers"]}
+        }
+    }
 
 
 class JobStatusInput(BaseModel):
@@ -145,12 +211,40 @@ class JobStatusInput(BaseModel):
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "status": "completed",
+                "notes": "Training finished successfully",
+                "result": {
+                    "model_family": "wake_word",
+                    "version": "hey_sara_v20260224",
+                    "metrics": {"far": 0.01, "miss_rate": 0.03},
+                },
+            }
+        }
+    }
+
 
 class PublishVoiceEventInput(BaseModel):
     event_type: str
     source: str
     payload: Dict[str, Any] = Field(default_factory=dict)
     trace_id: Optional[str] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "event_type": "asr.final",
+                "source": "speech-asr",
+                "trace_id": "2d5f7cf3-09b4-4da3-a3eb-b2be667198d8",
+                "payload": {
+                    "text": "Hey Sara, what's on my calendar this afternoon?",
+                    "confidence": 0.93,
+                },
+            }
+        }
+    }
 
 
 class DemoSimulationInput(BaseModel):
