@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { APP_CONFIG } from '../config';
+import SensoryControlPlane from './sensory/SensoryControlPlane';
 
 interface AudioEvent {
   id: string;
@@ -338,6 +339,9 @@ export const SensoryMonitor: React.FC = () => {
           </span>
         </div>
       </div>
+
+      {/* New modular voice rollout control plane */}
+      <SensoryControlPlane />
 
       {/* Status Cards */}
       <div className="grid grid-cols-4 gap-3 mb-4">

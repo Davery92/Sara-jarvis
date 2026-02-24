@@ -32,10 +32,16 @@ import os
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Service endpoints
-JETSON_IP = "10.185.1.155"
-GPU_CLUSTER_IP = "10.185.1.8"
-NEMO_URL = f"http://{GPU_CLUSTER_IP}:8002"
-WHISPER_URL = f"http://{GPU_CLUSTER_IP}:8585"
+JETSON_IP = os.getenv("JETSON_IP", "10.185.1.155")
+JETSON_SSH_USER = os.getenv("JETSON_SSH_USER", "david")
+JETSON_SSH_TARGET = f"{JETSON_SSH_USER}@{JETSON_IP}"
+
+GPU_CLUSTER_IP = os.getenv("GPU_CLUSTER_IP", "10.185.1.8")
+GPU_CLUSTER_SSH_USER = os.getenv("GPU_CLUSTER_SSH_USER", "david")
+GPU_CLUSTER_SSH_TARGET = f"{GPU_CLUSTER_SSH_USER}@{GPU_CLUSTER_IP}"
+
+NEMO_URL = os.getenv("NEMO_URL", f"http://{GPU_CLUSTER_IP}:8002")
+WHISPER_URL = os.getenv("WHISPER_URL", f"http://{GPU_CLUSTER_IP}:8585")
 
 
 class SensoryStatus(BaseModel):
@@ -82,7 +88,7 @@ async def get_sensory_status(current_user=Depends(get_current_user)):
         try:
             # Check if process is running via SSH (quick check)
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=2", f"david@{JETSON_IP}",
+                ["ssh", "-o", "ConnectTimeout=2", JETSON_SSH_TARGET,
                  "pgrep -f sara_voice_agent.py"],
                 capture_output=True,
                 timeout=5
@@ -177,7 +183,7 @@ async def tail_jetson_logs(queue: asyncio.Queue):
     """Tail the voice agent logs on Jetson and push to queue."""
     try:
         process = await asyncio.create_subprocess_exec(
-            "ssh", "-o", "ConnectTimeout=5", f"david@{JETSON_IP}",
+            "ssh", "-o", "ConnectTimeout=5", JETSON_SSH_TARGET,
             "tail", "-f", "/tmp/voice_agent.log",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -345,7 +351,7 @@ async def get_jetson_logs(
     try:
         result = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
-             f"david@{JETSON_IP}", f"tail -{lines} /tmp/voice_agent.log"],
+             JETSON_SSH_TARGET, f"tail -{lines} /tmp/voice_agent.log"],
             capture_output=True,
             timeout=10,
             text=True
@@ -510,7 +516,7 @@ async def record_on_jetson(speaker_id: str, duration: int, redis_client):
         output_file = f"/tmp/enrollment_{speaker_id}_{sample_num}.wav"
 
         process = await asyncio.create_subprocess_exec(
-            "ssh", "-o", "ConnectTimeout=5", f"david@{JETSON_IP}",
+            "ssh", "-o", "ConnectTimeout=5", JETSON_SSH_TARGET,
             f"arecord -d {duration} -f cd -t wav {output_file}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -534,7 +540,7 @@ async def record_on_jetson(speaker_id: str, duration: int, redis_client):
 
         local_file = f"{sample_dir}/sample_{sample_num}.wav"
         scp_process = await asyncio.create_subprocess_exec(
-            "scp", f"david@{JETSON_IP}:{output_file}", local_file,
+            "scp", f"{JETSON_SSH_TARGET}:{output_file}", local_file,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -542,7 +548,7 @@ async def record_on_jetson(speaker_id: str, duration: int, redis_client):
 
         # Clean up on Jetson
         await asyncio.create_subprocess_exec(
-            "ssh", f"david@{JETSON_IP}", f"rm -f {output_file}"
+            "ssh", JETSON_SSH_TARGET, f"rm -f {output_file}"
         )
 
         # Update final state
@@ -592,7 +598,7 @@ async def enroll_speaker(
 
         # Create directory on GPU cluster
         mkdir_result = subprocess.run(
-            ["ssh", f"david@{GPU_CLUSTER_IP}", f"mkdir -p {gpu_sample_dir}"],
+            ["ssh", GPU_CLUSTER_SSH_TARGET, f"mkdir -p {gpu_sample_dir}"],
             capture_output=True,
             timeout=10
         )
@@ -604,7 +610,7 @@ async def enroll_speaker(
             remote_path = f"{gpu_sample_dir}/{sample}"
 
             scp_result = subprocess.run(
-                ["scp", local_path, f"david@{GPU_CLUSTER_IP}:{remote_path}"],
+                ["scp", local_path, f"{GPU_CLUSTER_SSH_TARGET}:{remote_path}"],
                 capture_output=True,
                 timeout=30
             )
@@ -667,7 +673,7 @@ async def delete_speaker(
 
                 # Clean up on GPU cluster
                 subprocess.run(
-                    ["ssh", f"david@{GPU_CLUSTER_IP}",
+                    ["ssh", GPU_CLUSTER_SSH_TARGET,
                      f"rm -rf /home/david/data/speakers/{speaker_id}_samples /home/david/data/speakers/{speaker_id}.json"],
                     capture_output=True,
                     timeout=10

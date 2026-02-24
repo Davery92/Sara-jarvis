@@ -5890,6 +5890,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Sensory monitor routes failed to load: {e}")
 
+# Include Voice Control Plane routes (modular voice stack orchestration)
+try:
+    from app.routes.voice_control import router as voice_control_router
+    app.include_router(voice_control_router, tags=["Voice Control"])
+    logger.info("✅ Voice control routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Voice control routes failed to load: {e}")
+
 # Include Emotion routes (Phase 2)
 try:
     from app.routes.emotions import router as emotions_router
