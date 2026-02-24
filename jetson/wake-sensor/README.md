@@ -14,6 +14,8 @@ Current status:
 - Simulation mode complete (no hardware required)
 - Live audio capture integration pending
 - Training-job worker hooks complete (`train_wake_word`)
+- Internal config sync complete (`/api/voice-control/config/internal`)
+- Ambient threshold auto-adjust loop scaffolded (simulation)
 
 ## Runtime Modes
 
@@ -48,6 +50,7 @@ python -m wake_sensor
 ## Required Backend Endpoints
 
 - `POST /api/voice-control/services/{service_id}/heartbeat`
+- `GET /api/voice-control/config/internal`
 - `POST /api/voice-control/events/publish-internal`
 - `POST /api/voice-control/jobs/claim`
 - `POST /api/voice-control/jobs/{job_id}/status`

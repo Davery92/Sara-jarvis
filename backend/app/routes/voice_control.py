@@ -206,6 +206,19 @@ async def get_voice_control_config(current_user=Depends(get_current_user)):
     return get_voice_config()
 
 
+@router.get("/config/internal")
+async def get_voice_control_config_internal(
+    x_internal_service: Optional[str] = Header(None, alias="X-Internal-Service"),
+    x_internal_token: Optional[str] = Header(None, alias="X-Internal-Token"),
+):
+    """Get voice pipeline config for internal services."""
+    service_name = _authorize_internal_request(
+        service_name=x_internal_service,
+        token=x_internal_token,
+    )
+    return {"service": service_name, "config": get_voice_config()}
+
+
 @router.put("/config")
 async def update_voice_control_config(
     patch: VoiceConfigPatchInput,

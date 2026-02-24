@@ -50,6 +50,15 @@ class VoiceControlClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_config(self) -> Dict[str, Any]:
+        assert self._client is not None, "Client not started"
+        url = f"{self.config.backend_url}/api/voice-control/config/internal"
+        response = await self._client.get(url, headers=self._headers)
+        response.raise_for_status()
+        payload = response.json()
+        config = payload.get("config")
+        return config if isinstance(config, dict) else {}
+
     async def publish_event(self, event: VoiceEvent) -> Dict[str, Any]:
         assert self._client is not None, "Client not started"
         url = f"{self.config.backend_url}/api/voice-control/events/publish-internal"

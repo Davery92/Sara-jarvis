@@ -20,11 +20,20 @@ class WakeSensorService:
         self.client = VoiceControlClient(config)
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._base_wake_threshold = config.wake_threshold
+        self._base_vad_threshold = config.vad_threshold
+        self._runtime_wake_threshold = config.wake_threshold
+        self._runtime_vad_threshold = config.vad_threshold
+        self._ambient_noise_floor_db = -52.0
+        self._ambient_reference_noise_floor_db = -52.0
+        self._ambient_auto_adjust_wake = True
+        self._ambient_auto_adjust_vad = True
 
     async def start(self) -> None:
         self._running = True
         await self.client.start()
         logger.info("wake-sensor starting (simulate=%s)", self.config.simulate)
+        self._tasks.append(asyncio.create_task(self._config_sync_loop()))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._ambient_loop()))
         if self.config.training_enabled:
@@ -43,6 +52,52 @@ class WakeSensorService:
             task.cancel()
         await self.client.stop()
 
+    @staticmethod
+    def _clamp(value: float, minimum: float, maximum: float) -> float:
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _coerce_bool(value: object, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return default
+
+    def _apply_control_config(self, control_config: dict) -> None:
+        wake = control_config.get("wake_word") if isinstance(control_config.get("wake_word"), dict) else {}
+        vad = control_config.get("vad") if isinstance(control_config.get("vad"), dict) else {}
+        ambient = control_config.get("ambient") if isinstance(control_config.get("ambient"), dict) else {}
+
+        wake_threshold = wake.get("threshold")
+        vad_threshold = vad.get("speech_threshold")
+        ambient_noise_floor = ambient.get("noise_floor_db")
+
+        if isinstance(wake_threshold, (int, float)):
+            self._base_wake_threshold = float(wake_threshold)
+            self._runtime_wake_threshold = float(wake_threshold)
+        if isinstance(vad_threshold, (int, float)):
+            self._base_vad_threshold = float(vad_threshold)
+            self._runtime_vad_threshold = float(vad_threshold)
+        if isinstance(ambient_noise_floor, (int, float)):
+            self._ambient_reference_noise_floor_db = float(ambient_noise_floor)
+        self._ambient_auto_adjust_wake = self._coerce_bool(
+            ambient.get("auto_adjust_wake_threshold"),
+            True,
+        )
+        self._ambient_auto_adjust_vad = self._coerce_bool(ambient.get("auto_adjust_vad"), True)
+
+    async def _config_sync_loop(self) -> None:
+        while self._running:
+            try:
+                control_config = await self.client.get_config()
+                self._apply_control_config(control_config)
+            except Exception as exc:
+                logger.warning("config sync failed: %s", exc)
+            await asyncio.sleep(self.config.config_sync_interval_seconds)
+
     async def _heartbeat_loop(self) -> None:
         while self._running:
             start = time.perf_counter()
@@ -52,8 +107,14 @@ class WakeSensorService:
                     latency_ms=round((time.perf_counter() - start) * 1000.0, 2),
                     details={
                         "simulate": self.config.simulate,
-                        "wake_threshold": self.config.wake_threshold,
-                        "vad_threshold": self.config.vad_threshold,
+                        "wake_threshold": self._runtime_wake_threshold,
+                        "vad_threshold": self._runtime_vad_threshold,
+                        "base_wake_threshold": self._base_wake_threshold,
+                        "base_vad_threshold": self._base_vad_threshold,
+                        "ambient_noise_floor_db": self._ambient_noise_floor_db,
+                        "ambient_reference_noise_floor_db": self._ambient_reference_noise_floor_db,
+                        "ambient_auto_adjust_wake": self._ambient_auto_adjust_wake,
+                        "ambient_auto_adjust_vad": self._ambient_auto_adjust_vad,
                         "training_enabled": self.config.training_enabled,
                     },
                 )
@@ -64,7 +125,19 @@ class WakeSensorService:
     async def _ambient_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self.config.ambient_sample_interval_seconds)
-            simulated_noise_floor = -52.0 + random.uniform(-4.0, 4.0)
+            simulated_noise_floor = self._ambient_reference_noise_floor_db + random.uniform(-4.0, 4.0)
+            noise_delta = simulated_noise_floor - self._ambient_reference_noise_floor_db
+
+            wake_threshold = self._base_wake_threshold
+            vad_threshold = self._base_vad_threshold
+            if self._ambient_auto_adjust_wake:
+                wake_threshold = self._clamp(self._base_wake_threshold + (noise_delta * 0.006), 0.35, 0.9)
+            if self._ambient_auto_adjust_vad:
+                vad_threshold = self._clamp(self._base_vad_threshold + (noise_delta * 0.007), 0.2, 0.9)
+
+            self._ambient_noise_floor_db = round(simulated_noise_floor, 2)
+            self._runtime_wake_threshold = round(wake_threshold, 3)
+            self._runtime_vad_threshold = round(vad_threshold, 3)
             try:
                 await self.client.publish_event(
                     VoiceEvent(
@@ -72,8 +145,14 @@ class WakeSensorService:
                         source=self.config.internal_service,
                         payload={
                             "state": "ambient_profile",
-                            "noise_floor_db": round(simulated_noise_floor, 2),
-                            "auto_adjust_enabled": True,
+                            "noise_floor_db": self._ambient_noise_floor_db,
+                            "noise_delta_db": round(noise_delta, 2),
+                            "base_wake_threshold": self._base_wake_threshold,
+                            "base_vad_threshold": self._base_vad_threshold,
+                            "wake_threshold": self._runtime_wake_threshold,
+                            "vad_threshold": self._runtime_vad_threshold,
+                            "auto_adjust_wake": self._ambient_auto_adjust_wake,
+                            "auto_adjust_vad": self._ambient_auto_adjust_vad,
                         },
                     )
                 )
@@ -125,6 +204,8 @@ class WakeSensorService:
             metrics = {
                 "simulated": True,
                 "target_phrase": target_phrase,
+                "wake_threshold": self._runtime_wake_threshold,
+                "vad_threshold": self._runtime_vad_threshold,
                 "false_accept_rate": round(random.uniform(0.004, 0.018), 4),
                 "miss_rate": round(random.uniform(0.015, 0.045), 4),
                 "eval_samples": random.randint(180, 420),
@@ -173,7 +254,7 @@ class WakeSensorService:
                 payload={
                     "keyword": self.config.keyword,
                     "confidence": round(random.uniform(0.82, 0.97), 3),
-                    "threshold": self.config.wake_threshold,
+                    "threshold": self._runtime_wake_threshold,
                 },
             )
         )

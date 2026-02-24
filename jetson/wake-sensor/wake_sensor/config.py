@@ -28,6 +28,7 @@ class WakeSensorConfig:
     heartbeat_interval_seconds: int
     simulation_interval_seconds: int
     ambient_sample_interval_seconds: int
+    config_sync_interval_seconds: int
     training_enabled: bool
     training_poll_interval_seconds: int
     auto_activate_trained_model: bool
@@ -47,6 +48,7 @@ class WakeSensorConfig:
             heartbeat_interval_seconds=int(os.getenv("WAKE_SENSOR_HEARTBEAT_INTERVAL_SECONDS", "15")),
             simulation_interval_seconds=int(os.getenv("WAKE_SENSOR_SIMULATION_INTERVAL_SECONDS", "20")),
             ambient_sample_interval_seconds=int(os.getenv("WAKE_SENSOR_AMBIENT_SAMPLE_INTERVAL_SECONDS", "120")),
+            config_sync_interval_seconds=int(os.getenv("WAKE_SENSOR_CONFIG_SYNC_INTERVAL_SECONDS", "30")),
             training_enabled=_as_bool(os.getenv("WAKE_SENSOR_TRAINING_ENABLED", "true"), True),
             training_poll_interval_seconds=int(os.getenv("WAKE_SENSOR_TRAINING_POLL_INTERVAL_SECONDS", "6")),
             auto_activate_trained_model=_as_bool(

@@ -59,7 +59,7 @@ Trace contract:
 - [x] Create dedicated `wake-sensor` service scaffold (`jetson/wake-sensor`)
 - [x] Add wake-word training job worker hooks (claim -> run -> register model version)
 - [ ] Integrate `openWakeWord` model management hooks
-- [ ] Add adaptive ambient profiler and VAD threshold policy
+- [x] Add adaptive ambient profiler and VAD threshold policy (simulation scaffold)
 - [ ] Emit canonical events (`wake.detected`, `utterance.*`)
 - [ ] Add model version metadata in events and heartbeats
 
@@ -107,6 +107,6 @@ Trace contract:
 ## Immediate Next Actions
 
 1. Replace simulated wake-word/speaker training with real training pipelines (`openWakeWord`, speaker embeddings).
-2. Add adaptive ambient profiler loop and dynamic VAD/wake-threshold policy updates.
+2. Replace simulated ambient profiling with real mic-noise calibration snapshots on Jetson hardware.
 3. Add canonical `trace_id` propagation from wake sensor through GPU services into Sara handoff.
 4. Replace remaining legacy sensory SSH actions with control-plane-backed job execution.
