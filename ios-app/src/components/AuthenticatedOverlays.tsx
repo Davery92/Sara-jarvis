@@ -84,6 +84,12 @@ export const AuthenticatedOverlays: React.FC = () => {
             });
           });
 
+          // Set up task chat inject handler - task result was persisted, reload conversation
+          pushNotificationService.setOnTaskChatInject((taskId, conversationId, noteId) => {
+            console.log('[AuthenticatedOverlays] Task chat inject, reloading conversation:', taskId);
+            navigateToChat({ taskInject: { taskId, conversationId, noteId } });
+          });
+
           // Mark callbacks as ready - this will process any pending notification that launched the app
           pushNotificationService.markCallbacksReady();
         } else {
@@ -141,6 +147,22 @@ export const AuthenticatedOverlays: React.FC = () => {
       } catch {}
     };
 
+    // Heartbeat — reports current screen every 30s for smart delivery routing
+    const clientId = `ios_${Math.random().toString(36).slice(2, 10)}`;
+    let currentScreen = 'sara'; // default tab
+    const sendHeartbeat = async () => {
+      try {
+        await apiClient.post('/api/presence/heartbeat', {
+          platform: 'ios',
+          client_id: clientId,
+          current_view: currentScreen,
+          visible: true,
+        });
+      } catch {}
+    };
+    sendHeartbeat();
+    const heartbeatInterval = setInterval(sendHeartbeat, 30_000);
+
     // Check backend health on startup
     const checkHealth = async () => {
       try {
@@ -159,17 +181,24 @@ export const AuthenticatedOverlays: React.FC = () => {
     logPresence('app_open');
     checkHealth();
 
-    // Log presence on app resume
+    // Log presence on app resume + pause heartbeat when backgrounded
     const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
         logPresence('app_resume');
+        sendHeartbeat();
+        // Clear badge count when app comes to foreground
+        pushNotificationService.setBadgeCount(0);
       }
     });
+
+    // Clear badge on initial open too
+    pushNotificationService.setBadgeCount(0);
 
     // Cleanup on unmount
     return () => {
       pushNotificationService.cleanup();
       appStateSubscription.remove();
+      clearInterval(heartbeatInterval);
     };
   }, [isAuthenticated]);
 

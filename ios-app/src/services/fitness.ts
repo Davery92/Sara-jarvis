@@ -347,6 +347,10 @@ class FitnessService {
 
     const foodLogs: FoodLog[] = [];
     mealLogs.forEach((meal) => {
+      // Parse food_items if backend returned it as a JSON string
+      if (typeof meal.food_items === 'string') {
+        try { meal.food_items = JSON.parse(meal.food_items); } catch { meal.food_items = []; }
+      }
       if (meal.food_items && Array.isArray(meal.food_items)) {
         // Check if this is a recipe - all detailed_items have source='recipe' with same recipe ID prefix
         const isRecipe = meal.detailed_items &&
@@ -360,7 +364,7 @@ class FitnessService {
           const firstDetailedItem = meal.detailed_items[0];
           const recipeIdParts = firstDetailedItem.id?.split('-') || [];
           // Try to find recipe name, fallback to combined ingredient names
-          const ingredientNames = meal.food_items.map((i: any) => i.name).join(', ');
+          const ingredientNames = meal.food_items.map((i: any) => typeof i === 'string' ? i : (i.name || 'Unknown')).join(', ');
           const displayName = `Recipe: ${ingredientNames.substring(0, 30)}${ingredientNames.length > 30 ? '...' : ''}`;
 
           foodLogs.push({
@@ -380,14 +384,20 @@ class FitnessService {
           });
         } else {
           // Regular food items - show each separately
-          meal.food_items.forEach((item: any, index: number) => {
+          // Parse food_items if it came back as a string
+          const items = typeof meal.food_items === 'string'
+            ? (() => { try { return JSON.parse(meal.food_items); } catch { return meal.food_items; } })()
+            : meal.food_items;
+
+          (Array.isArray(items) ? items : []).forEach((item: any, index: number) => {
+            const itemName = typeof item === 'string' ? item : String(item.name || item.food_name || 'Unknown food');
             foodLogs.push({
               id: `${meal.log_id}-${index}`,
               meal_log_id: meal.log_id,
               user_id: meal.user_id,
               logged_at: meal.logged_at,
               meal_type: meal.meal_type,
-              food_name: item.name,
+              food_name: itemName,
               quantity: item.quantity,
               unit: item.unit,
               // If single item, use full calories; if multiple non-recipe items, distribute
@@ -415,6 +425,10 @@ class FitnessService {
 
   async createFoodLog(params: CreateFoodLogParams): Promise<FoodLog> {
     return await apiClient.post<FoodLog>('/api/fitness/food-log', params);
+  }
+
+  async updateFoodLogMealType(id: string, mealType: string): Promise<void> {
+    await apiClient.patch(`/api/fitness/food-log/${id}`, { meal_type: mealType });
   }
 
   async deleteFoodLog(id: string): Promise<void> {

@@ -250,9 +250,12 @@ async def sync_ios_calendar_events(
 
     synced = 0
     errors = 0
+    deleted = 0
     processed_keys = set()
+    payload_event_ids = set()
 
     for event_data in sync_request.events:
+        payload_event_ids.add(event_data.ios_event_id)
         try:
             # Parse UTC times and convert to local timezone for storage
             # (DB columns are naive DateTime, so we store local times)
@@ -309,6 +312,43 @@ async def sync_ios_calendar_events(
             db.rollback()
             errors += 1
 
+    # Reconcile deletions: any iOS-sourced events inside the sync window from
+    # the synced calendars that are NOT in the payload were deleted on iOS.
+    if sync_request.window_start and sync_request.window_end:
+        try:
+            window_start = _to_naive_local(
+                datetime.fromisoformat(sync_request.window_start.replace('Z', '+00:00')),
+                local_tz,
+            )
+            window_end = _to_naive_local(
+                datetime.fromisoformat(sync_request.window_end.replace('Z', '+00:00')),
+                local_tz,
+            )
+
+            stale_query = db.query(CalendarEvent).filter(
+                CalendarEvent.user_id == current_user.id,
+                CalendarEvent.source == "ios_calendar",
+                CalendarEvent.start_time >= window_start,
+                CalendarEvent.start_time <= window_end,
+            )
+            if sync_request.calendar_ids:
+                stale_query = stale_query.filter(
+                    CalendarEvent.ios_calendar_id.in_(sync_request.calendar_ids)
+                )
+            if payload_event_ids:
+                stale_query = stale_query.filter(
+                    ~CalendarEvent.ios_event_id.in_(payload_event_ids)
+                )
+
+            stale_events = stale_query.all()
+            for stale in stale_events:
+                db.delete(stale)
+            deleted = len(stale_events)
+        except Exception as e:
+            logger.error(f"Error reconciling iOS calendar deletions: {e}")
+            db.rollback()
+            deleted = 0
+
     try:
         db.commit()
     except Exception as e:
@@ -316,8 +356,9 @@ async def sync_ios_calendar_events(
         db.rollback()
         errors += synced
         synced = 0
+        deleted = 0
 
-    return IOSCalendarSyncResponse(synced=synced, errors=errors)
+    return IOSCalendarSyncResponse(synced=synced, errors=errors, deleted=deleted)
 
 
 @router.delete("/ios-sync")

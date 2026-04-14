@@ -15,6 +15,8 @@ from datetime import datetime, time, date, timedelta
 from typing import List, Dict, Any, Optional
 import httpx
 
+from app.core.timezone import now as local_now
+
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -112,7 +114,7 @@ class MorningProactiveService:
         for pattern in patterns:
             # Check if pattern can be suggested now
             can_suggest, reason = await behavioral_pattern_service.can_suggest_pattern(
-                db, pattern, datetime.now()
+                db, pattern, local_now()
             )
 
             if not can_suggest:
@@ -178,7 +180,7 @@ class MorningProactiveService:
             # Get current weather
             weather = await weather_service.get_weather()
 
-            now = datetime.now()
+            now = local_now()
             current_day = now.strftime("%a")  # Mon, Tue, etc.
 
             context = TriggerContext(

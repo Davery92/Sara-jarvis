@@ -6,14 +6,11 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { APP_CONFIG } from './config'
 import { AppView, pathForView, resolveViewAlias, viewForPath } from './navigation/views'
-import Notes from './components/Notes'
+import NotesPage from './pages/Notes'
 import CalendarView from './components/CalendarView'
+import TasksView from './components/TasksView'
+import DashboardTasks from './components/DashboardTasks'
 import Settings from './pages/Settings'
-import TemerantPage from './pages/TemerantPage'
-import TemerantRpgPage from './pages/TemerantRpgPage'
-import HabitToday from './components/HabitToday'
-import HabitCreate from './components/HabitCreate'
-import HabitInsights from './components/HabitInsights'
 import ChatInterface from './components/ChatInterface'
 import FitnessSection from './components/fitness/FitnessSection'
 import RecipesSection from './components/fitness/RecipesSection'
@@ -22,10 +19,13 @@ import ProjectSection from './components/projects/ProjectSection'
 // Moved GTKY into Settings; reflection features removed from UI
 import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
+import { useTaskEventStream } from './hooks/useTaskEventStream'
 import { getCalmMode } from './utils/prefs'
 import { CommandPalette } from './components/CommandPalette'
 import MorningBrief from './components/MorningBrief'
 import OrchestratorLab from './components/OrchestratorLab'
+import SystemStatus from './pages/SystemStatus'
+import ACSPage from './pages/ACSPage'
 import NotificationBanner from './components/NotificationBanner'
 import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
 import AutomationTasksIndicator from './components/AutomationTasksIndicator'
@@ -35,11 +35,12 @@ import SensoryMonitor from './components/SensoryMonitor'
 import EmailPage from './components/EmailPage'
 import ContentInbox from './components/ContentInbox'
 import AttentionInbox from './components/AttentionInbox'
-import MissionPanel from './components/MissionPanel'
+import ACSStatusCard from './components/ACSStatusCard'
 import MissionControlBoard from './components/MissionControlBoard'
 import SaraInnerLife from './components/SaraInnerLife'
 import PersonalKnowledge from './components/PersonalKnowledge'
 import IntelligenceFeed from './components/IntelligenceFeed'
+import AutomationsView from './components/AutomationsView'
 import ConfirmDialog from './components/ConfirmDialog'
 
 // LiveTimer component that updates every second without causing parent re-renders
@@ -112,17 +113,11 @@ function App() {
   const [timerTick, setTimerTick] = useState(0) // Force re-render for timer displays
   const [documents, setDocuments] = useState([])
   
-  // Habit-related state
-  const [habitView, setHabitView] = useState('today') // today, insights, create
-  const [showHabitCreate, setShowHabitCreate] = useState(false)
   const [selectedFile, setSelectedFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [analytics, setAnalytics] = useState(null)
   const [editingDocumentId, setEditingDocumentId] = useState(null)
   const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
-  const [temerantEnabled, setTemerantEnabled] = useState(true)
-  const [temerantRpgEnabled, setTemerantRpgEnabled] = useState(true)
-
   // Dashboard state
   const [morningBrief, setMorningBrief] = useState<any>(null)
   const [morningBriefLoading, setMorningBriefLoading] = useState(false)
@@ -137,7 +132,7 @@ function App() {
   const [attentionItems, setAttentionItems] = useState<any[]>([])
   const [missions, setMissions] = useState<any[]>([])
   const [contentInboxStats, setContentInboxStats] = useState<any>({ unread: 0, read: 0, kept: 0, total: 0 })
-  const [inboxTab, setInboxTab] = useState<'attention' | 'missions' | 'content'>('attention')
+  const [inboxTab, setInboxTab] = useState<'attention' | 'content'>('content')
   const [briefAudioPlaying, setBriefAudioPlaying] = useState(false)
   const briefAudioRef = useRef<HTMLAudioElement>(null)
   const briefAudioUrlRef = useRef<string | null>(null)
@@ -241,6 +236,67 @@ function App() {
   })
 
 
+  // --- Presence heartbeat: reports current view every 30s ---
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    const clientId = (() => {
+      let id = sessionStorage.getItem('sara_client_id')
+      if (!id) {
+        id = `web_${Math.random().toString(36).slice(2, 10)}`
+        sessionStorage.setItem('sara_client_id', id)
+      }
+      return id
+    })()
+
+    const sendHeartbeat = () => {
+      fetch(`${APP_CONFIG.apiUrl}/api/presence/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          platform: 'web',
+          client_id: clientId,
+          current_view: view,
+          visible: !document.hidden,
+        }),
+      }).catch(() => {})
+    }
+
+    // Send immediately, then every 30s
+    sendHeartbeat()
+    const interval = setInterval(sendHeartbeat, 30_000)
+
+    // Also send on tab visibility change
+    const onVisibility = () => sendHeartbeat()
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [isAuthenticated, view])
+
+  // --- Task event SSE: smart delivery of background worker results ---
+  useTaskEventStream({
+    enabled: isAuthenticated,
+    onInjectChatMessage: (data) => {
+      if (view === 'chat') {
+        setChatMessages(prev => [...prev, {
+          role: 'assistant',
+          content: data.content,
+          timestamp: new Date(),
+        }])
+      } else {
+        // User navigated away since backend decided — downgrade to toast
+        showToast(data.content.slice(0, 120) + (data.content.length > 120 ? '...' : ''), 'success', true)
+      }
+    },
+    onShowNotification: (data) => {
+      showToast(`${data.title}: ${data.message}`, 'success', true)
+    },
+  })
+
   // Check authentication on load
   useEffect(() => {
     checkAuth()
@@ -250,17 +306,6 @@ function App() {
     if (!isAuthenticated) return
     loadRuntimeFlags()
   }, [isAuthenticated])
-
-  useEffect(() => {
-    if (!temerantEnabled && view === 'temerant') {
-      setView('dashboard')
-      navigate(pathForView('dashboard'), { replace: true })
-    }
-    if (!temerantRpgEnabled && view === 'temerant-rpg') {
-      setView('dashboard')
-      navigate(pathForView('dashboard'), { replace: true })
-    }
-  }, [temerantEnabled, temerantRpgEnabled, view, navigate])
 
   // Update current time only when day changes, but check timers every second
   useEffect(() => {
@@ -564,12 +609,6 @@ function App() {
       })
       if (!response.ok) return
       const flags = await response.json()
-      if (typeof flags?.temerant_enabled === 'boolean') {
-        setTemerantEnabled(flags.temerant_enabled)
-      }
-      if (typeof flags?.temerant_rpg_enabled === 'boolean') {
-        setTemerantRpgEnabled(flags.temerant_rpg_enabled)
-      }
     } catch {
       // Keep defaults if settings endpoint is unavailable.
     }
@@ -1402,33 +1441,20 @@ function App() {
   const inboxUnreadCount = attentionUnreadCount + Number(contentInboxStats?.unread || 0)
   const missionAwaitingCount = missions.filter((mission) => mission.state === 'awaiting_confirm').length
   const runningMissionCount = missions.filter((mission) => mission.state === 'running').length
-  const nextCalendarEvent = [...calendarEvents]
-    .map((event) => ({
-      ...event,
-      _start: new Date(event.start_time || event.start || event.dtstart),
-    }))
-    .filter((event: any) => !Number.isNaN(event._start.getTime()) && event._start.getTime() >= Date.now())
-    .sort((a: any, b: any) => a._start.getTime() - b._start.getTime())[0]
-
   const getNavBadgeCount = (navView: AppView): number => {
     if (navView === 'inbox') return inboxUnreadCount
     if (navView === 'dashboard') return awaitingDecisionCount
     return 0
   }
 
-  const handleChatQuickAction = (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => {
+  const handleChatQuickAction = (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => {
     if (actionId === 'inbox_attention') {
       setInboxTab('attention')
       navigateToView('inbox')
       return
     }
     if (actionId === 'missions') {
-      setInboxTab('missions')
-      navigateToView('inbox')
-      return
-    }
-    if (actionId === 'calendar') {
-      navigateToView('calendar')
+      navigateToView('dashboard')
       return
     }
     if (actionId === 'standing_orders') {
@@ -1441,21 +1467,21 @@ function App() {
     { view: 'chat', label: 'Chat', icon: 'chat' },
     { view: 'notes', label: 'Notes', icon: 'notes' },
     { view: 'workspace', label: 'Canvas', icon: 'dashboard_customize' },
-    { view: 'habits', label: 'Habits', icon: 'track_changes' },
     { view: 'documents', label: 'Documents', icon: 'description' },
+    { view: 'tasks', label: 'Tasks', icon: 'check_circle' },
     { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
     { view: 'email', label: 'Email', icon: 'email' },
     { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
     { view: 'learn', label: 'Learn', icon: 'school' },
     { view: 'projects', label: 'Projects', icon: 'work' },
     { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
-    ...(temerantEnabled ? [{ view: 'temerant' as AppView, label: 'Temerant', icon: 'auto_stories' }] : []),
-    ...(temerantRpgEnabled ? [{ view: 'temerant-rpg' as AppView, label: 'Temerant RPG', icon: 'theater_comedy' }] : []),
     { view: 'briefings', label: 'Morning Brief', icon: 'wb_sunny' },
     { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
     { view: 'saras-mind', label: "Sara's Mind", icon: 'self_improvement' },
+    { view: 'acs', label: 'ACS', icon: 'smart_toy' },
     { view: 'knowledge', label: 'Knowledge', icon: 'psychology' },
     { view: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { view: 'automations', label: 'Automations', icon: 'bolt' },
     { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
 
@@ -1463,6 +1489,7 @@ function App() {
     { view: 'dashboard', label: 'Home', icon: 'home' },
     { view: 'chat', label: 'Chat', icon: 'chat' },
     { view: 'inbox', label: 'Inbox', icon: 'inbox' },
+    { view: 'tasks', label: 'Tasks', icon: 'check_circle' },
     { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
     { view: 'email', label: 'Email', icon: 'email' },
     { view: 'workspace', label: 'Canvas', icon: 'dashboard_customize' },
@@ -1474,14 +1501,13 @@ function App() {
     { view: 'learn', label: 'Learn', icon: 'school' },
     { view: 'projects', label: 'Projects', icon: 'work' },
     { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
-    ...(temerantEnabled ? [{ view: 'temerant' as AppView, label: 'Temerant', icon: 'auto_stories' }] : []),
-    ...(temerantRpgEnabled ? [{ view: 'temerant-rpg' as AppView, label: 'Temerant RPG', icon: 'theater_comedy' }] : []),
     { view: 'briefings', label: 'Brief', icon: 'wb_sunny' },
     { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
     { view: 'saras-mind', label: "Sara's Mind", icon: 'self_improvement' },
+    { view: 'acs', label: 'ACS', icon: 'smart_toy' },
     { view: 'knowledge', label: 'Knowledge', icon: 'psychology' },
-    { view: 'habits', label: 'Habits', icon: 'track_changes' },
     { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
+    { view: 'automations', label: 'Automations', icon: 'bolt' },
     { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
 
@@ -1832,6 +1858,9 @@ function App() {
                   )}
                 </div>
 
+                {/* Daily Tasks */}
+                <DashboardTasks onNavigate={navigateToView} />
+
                 {/* Sara's Journal */}
                 <div className="bg-card border border-card rounded-xl p-5">
                   <div className="flex items-center justify-between mb-4">
@@ -1895,6 +1924,9 @@ function App() {
 
               {/* ===== RIGHT COLUMN (1/3) ===== */}
               <div className="lg:col-span-1 space-y-4 md:space-y-6">
+
+                {/* Sara's Mind — ACS Status */}
+                <ACSStatusCard />
 
                 {/* Activity & Devices */}
                 <div className="bg-card border border-card rounded-xl p-5">
@@ -2017,6 +2049,7 @@ function App() {
           )}
 
           {view === 'chat' && (
+            <div className="flex-1 min-h-0 flex flex-col">
             <div className="flex-1 min-h-0">
             <ChatInterface
               messages={chatMessages}
@@ -2033,26 +2066,16 @@ function App() {
                 missionAwaitingCount,
                 runningMissionCount,
                 standingOrdersCount: standingOrders.length,
-                nextCalendarEventTitle: nextCalendarEvent?.title || nextCalendarEvent?.summary || null,
-                nextCalendarEventStart: nextCalendarEvent?.start_time || nextCalendarEvent?.start || nextCalendarEvent?.dtstart || null,
               }}
               onQuickAction={handleChatQuickAction}
             />
             </div>
+            </div>
           )}
 
           {view === 'notes' && (
-            <div className="flex-1 min-h-0">
-            <Notes
-              notes={notes}
-              setNotes={setNotes}
-              editingNote={editingNote}
-              setEditingNote={setEditingNote}
-              editNoteContent={editNoteContent}
-              setEditNoteContent={setEditNoteContent}
-              editNoteTitle={editNoteTitle}
-              setEditNoteTitle={setEditNoteTitle}
-            />
+            <div className="flex-1 min-h-0 overflow-y-auto">
+            <NotesPage />
             </div>
           )}
 
@@ -2254,74 +2277,15 @@ function App() {
             </div>
           )}
 
-          {view === 'calendar' && (
+          {view === 'tasks' && (
             <div className="flex-1 overflow-y-auto min-h-0">
-            <CalendarView />
+              <TasksView />
             </div>
           )}
 
-          {view === 'habits' && (
-            <div className="flex-1 overflow-y-auto min-h-0 space-y-6">
-              {/* Habit Sub-Navigation */}
-              <div className="bg-card border border-card rounded-xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex space-x-4">
-                    <button
-                      onClick={() => setHabitView('today')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        habitView === 'today'
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-                      }`}
-                    >
-                      Today
-                    </button>
-                    <button
-                      onClick={() => setHabitView('insights')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        habitView === 'insights'
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-                      }`}
-                    >
-                      Insights
-                    </button>
-                  </div>
-                  
-                  <button
-                    onClick={() => setShowHabitCreate(true)}
-                    className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                  >
-                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                    Create Habit
-                  </button>
-                </div>
-              </div>
-
-              {/* Habit Content */}
-              {habitView === 'today' && (
-                <HabitToday />
-              )}
-              
-              {habitView === 'insights' && (
-                <HabitInsights />
-              )}
-
-              {/* Create Habit Modal */}
-              <HabitCreate
-                isOpen={showHabitCreate}
-                onClose={() => setShowHabitCreate(false)}
-                onCreated={() => {
-                  setShowHabitCreate(false);
-                  showToast('Habit created successfully!', 'success');
-                  // Refresh today view if that's active
-                  if (habitView === 'today') {
-                    // HabitToday component will automatically refresh
-                  }
-                }}
-              />
+          {view === 'calendar' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+            <CalendarView />
             </div>
           )}
 
@@ -2349,14 +2313,6 @@ function App() {
             </div>
           )}
 
-          {view === 'temerant' && (
-            <TemerantPage />
-          )}
-
-          {view === 'temerant-rpg' && (
-            <TemerantRpgPage />
-          )}
-
           {/* GTKY now managed within Settings; reflection views removed */}
 
           {view === 'privacy-dashboard' && (
@@ -2376,9 +2332,27 @@ function App() {
             </div>
           )}
 
+          {view === 'automations' && (
+            <div className="flex-1 min-h-0">
+              <AutomationsView />
+            </div>
+          )}
+
           {view === 'orchestrator-lab' && (
             <div className="flex-1 overflow-y-auto min-h-0">
             <OrchestratorLab onBack={() => setView('settings')} />
+            </div>
+          )}
+
+          {view === 'system-status' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+            <SystemStatus />
+            </div>
+          )}
+
+          {view === 'acs' && (
+            <div className="flex-1 overflow-y-auto min-h-0">
+            <ACSPage />
             </div>
           )}
 
@@ -2427,26 +2401,6 @@ function App() {
                 </div>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => setInboxTab('attention')}
-                    className={`px-3 py-1.5 rounded-md text-sm ${
-                      inboxTab === 'attention'
-                        ? 'bg-teal-500/20 text-teal-400'
-                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                    }`}
-                  >
-                    Attention {attentionUnreadCount > 0 ? `(${attentionUnreadCount})` : ''}
-                  </button>
-                  <button
-                    onClick={() => setInboxTab('missions')}
-                    className={`px-3 py-1.5 rounded-md text-sm ${
-                      inboxTab === 'missions'
-                        ? 'bg-teal-500/20 text-teal-400'
-                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                    }`}
-                  >
-                    Missions
-                  </button>
-                  <button
                     onClick={() => setInboxTab('content')}
                     className={`px-3 py-1.5 rounded-md text-sm ${
                       inboxTab === 'content'
@@ -2456,18 +2410,20 @@ function App() {
                   >
                     Content {contentInboxStats?.unread ? `(${contentInboxStats.unread})` : ''}
                   </button>
+                  <button
+                    onClick={() => setInboxTab('attention')}
+                    className={`px-3 py-1.5 rounded-md text-sm ${
+                      inboxTab === 'attention'
+                        ? 'bg-teal-500/20 text-teal-400'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`}
+                  >
+                    Attention {attentionUnreadCount > 0 ? `(${attentionUnreadCount})` : ''}
+                  </button>
                 </div>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto">
-                {inboxTab === 'attention' && (
-                  <AttentionInbox />
-                )}
-
-                {inboxTab === 'missions' && (
-                  <MissionPanel />
-                )}
-
                 {inboxTab === 'content' && (
                   <ContentInbox
                     onNavigateToChat={(inboxItemId, title) => {
@@ -2475,6 +2431,15 @@ function App() {
                       setChatMessages([])
                       setView('chat')
                       ;(window as any).__inboxItemId = inboxItemId
+                    }}
+                  />
+                )}
+
+                {inboxTab === 'attention' && (
+                  <AttentionInbox
+                    onStartChat={(prompt) => {
+                      setMessage(prompt)
+                      setView('chat')
                     }}
                   />
                 )}

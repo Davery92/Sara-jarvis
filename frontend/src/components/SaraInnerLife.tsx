@@ -26,7 +26,6 @@ interface WorkingMemory {
   next_event_title?: string
   next_event_minutes_away?: number
   notifications_sent_today?: number
-  today_habit_status?: string
   recent_notes_summary?: string
   home_occupied?: boolean
   temperature_inside?: number

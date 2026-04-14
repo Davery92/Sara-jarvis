@@ -24,5 +24,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Expose port
 EXPOSE 8000
 
-# Run with auto-reload for development
-CMD ["uvicorn", "app.main_simple:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Run without auto-reload — restart container to pick up changes
+# (--reload causes hangs during shutdown when background tasks are active)
+CMD ["uvicorn", "app.main_simple:app", "--host", "0.0.0.0", "--port", "8000"]

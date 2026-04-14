@@ -7,10 +7,10 @@ import {
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
-  Alert,
   Platform,
 } from 'react-native';
 import { MainTabScreenProps } from '../../types/navigation';
+import { useToast } from '../../context/ToastContext';
 import { colors, fontSizes, spacing } from '../../styles/theme';
 import healthKitService, { HealthData } from '../../services/healthKit';
 import apiClient from '../../services/api';
@@ -18,6 +18,7 @@ import apiClient from '../../services/api';
 type Props = MainTabScreenProps<'Health'>;
 
 export default function HealthDataScreen({ navigation }: Props) {
+  const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -35,11 +36,7 @@ export default function HealthDataScreen({ navigation }: Props) {
     setLoading(true);
     try {
       if (Platform.OS !== 'ios') {
-        Alert.alert(
-          'Not Available',
-          'Apple Health is only available on iOS devices.',
-          [{ text: 'OK' }]
-        );
+        showToast('warning', 'Apple Health is only available on iOS devices.');
         setLoading(false);
         return;
       }
@@ -50,15 +47,11 @@ export default function HealthDataScreen({ navigation }: Props) {
       if (available) {
         await loadHealthData();
       } else {
-        Alert.alert(
-          'HealthKit Not Available',
-          'Please enable HealthKit permissions in Settings to use this feature.',
-          [{ text: 'OK' }]
-        );
+        showToast('warning', 'Please enable HealthKit permissions in Settings to use this feature.');
       }
     } catch (error) {
       console.error('Error initializing HealthKit:', error);
-      Alert.alert('Error', 'Failed to initialize HealthKit');
+      showToast('error', 'Failed to initialize HealthKit');
     } finally {
       setLoading(false);
     }
@@ -88,7 +81,7 @@ export default function HealthDataScreen({ navigation }: Props) {
 
   const syncToBackend = async () => {
     if (!healthKitAvailable) {
-      Alert.alert('Error', 'HealthKit is not available');
+      showToast('error', 'HealthKit is not available');
       return;
     }
 
@@ -118,10 +111,10 @@ export default function HealthDataScreen({ navigation }: Props) {
       await apiClient.post('/api/health/sync', healthPayload);
 
       setLastSyncTime(new Date().toLocaleTimeString());
-      Alert.alert('Success', 'Health data synced successfully!');
+      showToast('success', 'Health data synced successfully!');
     } catch (error) {
       console.error('Error syncing health data:', error);
-      Alert.alert('Error', 'Failed to sync health data to server');
+      showToast('error', 'Failed to sync health data to server');
     } finally {
       setSyncing(false);
     }

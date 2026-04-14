@@ -138,10 +138,8 @@ interface ChatInterfaceProps {
     missionAwaitingCount: number
     runningMissionCount: number
     standingOrdersCount: number
-    nextCalendarEventTitle?: string | null
-    nextCalendarEventStart?: string | null
   }
-  onQuickAction?: (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => void
+  onQuickAction?: (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => void
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({
@@ -522,21 +520,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setAttachedImages(prev => prev.filter((_, i) => i !== index))
   }
 
-  const formatQuickActionTime = (value?: string | null): string => {
-    if (!value) return 'time unknown'
-    const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return 'time unknown'
-    const now = Date.now()
-    const diff = date.getTime() - now
-    const mins = Math.round(Math.abs(diff) / 60000)
-    if (mins < 60) return diff >= 0 ? `in ${mins}m` : `${mins}m ago`
-    const hours = Math.round(mins / 60)
-    if (hours < 24) return diff >= 0 ? `in ${hours}h` : `${hours}h ago`
-    const days = Math.round(hours / 24)
-    return diff >= 0 ? `in ${days}d` : `${days}d ago`
-  }
-
-  const handleQuickAction = (actionId: 'inbox_attention' | 'missions' | 'calendar' | 'standing_orders') => {
+  const handleQuickAction = (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => {
     if (actionId === 'standing_orders') {
       setMessage('Review my active standing orders and tell me what is scheduled next.')
     }
@@ -1017,7 +1001,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 <h3 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">Quick Actions</h3>
                 <p className="text-xs text-gray-500 mt-1">Context-aware shortcuts based on your current queue.</p>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <button
                   onClick={() => handleQuickAction('inbox_attention')}
                   className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
@@ -1034,17 +1018,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   <p className="text-sm text-white">Open Missions</p>
                   <p className="text-xs text-gray-400 mt-1">
                     {quickActionContext?.missionAwaitingCount || 0} awaiting decisions, {quickActionContext?.runningMissionCount || 0} running
-                  </p>
-                </button>
-                <button
-                  onClick={() => handleQuickAction('calendar')}
-                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
-                >
-                  <p className="text-sm text-white">Check Calendar</p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {quickActionContext?.nextCalendarEventTitle
-                      ? `Next: ${quickActionContext.nextCalendarEventTitle} (${formatQuickActionTime(quickActionContext?.nextCalendarEventStart)})`
-                      : 'No upcoming events loaded'}
                   </p>
                 </button>
                 <button

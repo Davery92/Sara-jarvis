@@ -97,12 +97,22 @@ class EventType(str, Enum):
 
     # Agent task events
     AGENT_TASK_PROGRESS = "agent_task.progress"
+    AGENT_TASK_COMPLETED = "agent_task.completed"
 
     # Vision / Sensory events (Jetson)
     FACE_DETECTED = "vision.face_detected"
     DESK_PRESENCE_CHANGED = "vision.desk_presence_changed"
     VOICE_CONVERSATION_STARTED = "voice.conversation_started"
     VOICE_CONVERSATION_ENDED = "voice.conversation_ended"
+
+    # ACS (Autonomous Cognition System) events
+    ACS_STATE_CHANGED = "acs.state_changed"
+    ACS_SESSION_STARTED = "acs.session_started"
+    ACS_SESSION_ENDED = "acs.session_ended"
+    ACS_MODE_SELECTED = "acs.mode_selected"
+    ACS_INTEREST_CREATED = "acs.interest_created"
+    ACS_INTEREST_CONNECTED = "acs.interest_connected"
+    ACS_SELF_MODEL_UPDATED = "acs.self_model_updated"
 
     # System events
     SYSTEM_STARTED = "system.started"

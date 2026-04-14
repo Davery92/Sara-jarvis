@@ -273,13 +273,6 @@ async def rate_episode(
             average_rating=result["average_rating"],
         )
 
-        # Dispatch karma recording asynchronously via Celery
-        try:
-            from app.tasks.karma import record_rating_to_karma
-            record_rating_to_karma.delay(episode_id, rating, str(current_user.id))
-        except Exception as karma_err:
-            logger.warning(f"Failed to dispatch karma task for rating: {karma_err}")
-
         return {"success": True, "message": "Episode rated successfully", "rating": result}
 
     except ValueError as e:

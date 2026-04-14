@@ -14,9 +14,19 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 
+
+def _run_async(coro):
+    """Run an async coroutine from a sync Celery task.
+
+    Always uses asyncio.run() to get a fresh event loop, avoiding the
+    'Event loop is closed' / 'Future attached to a different loop' errors
+    that plague get_event_loop().run_until_complete() in forked workers.
+    """
+    return asyncio.run(coro)
+
 from app.celery_app import celery_app
 from sqlalchemy import text
-from app.core.timezone import USER_TIMEZONE
+from app.core.timezone import USER_TIMEZONE, now as local_now
 
 logger = logging.getLogger(__name__)
 
@@ -24,115 +34,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
 
-@celery_app.task(
-    name="app.tasks.autonomy.unified_heartbeat",
-    bind=True,
-    queue="cognitive",
-    max_retries=0
-)
-def unified_heartbeat(self):
-    """
-    DEPRECATED: The heartbeat/unified-agent system has been replaced by:
-    - derived-signal-refresh (5 min) — working memory updates
-    - salience-triggered deliberation (on-demand) — event-driven
-    - periodic-deliberation-fallback (30 min) — safety net
-    - afternoon/evening consolidation (2 PM, 9 PM) — deep reflection
 
-    This task is a no-op. Remove after confirming new system is stable.
-    """
-    logger.info("unified_heartbeat called (DEPRECATED no-op)")
-    return {"status": "deprecated_noop"}
+# unified_heartbeat and unified_agent tasks removed — replaced by event-driven
+# deliberation system (salience subscriber + periodic deliberation fallback)
 
-
-@celery_app.task(
-    name="app.tasks.autonomy.unified_agent",
-    bind=True,
-    queue="cognitive",
-    max_retries=2
-)
-def unified_agent(self):
-    """
-    Unified agent — Sara's consolidated autonomous mind.
-
-    4-phase cycle every 15 minutes:
-      Phase 1: SENSE — gather signals, compute state (no LLM)
-      Phase 2: THINK — LLM agent loop with fresh data
-      Phase 3: ACT — interruptibility-aware notifications
-      Phase 4: RECORD — journal, run log, PKG extraction
-
-    Replaces both subconscious worker (systemd) and unified heartbeat (Celery).
-    """
-    logger.info("Starting unified agent")
-
-    try:
-        result = asyncio.get_event_loop().run_until_complete(
-            _unified_agent_async()
-        )
-        logger.info(f"Unified agent complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_unified_agent_async())
-        logger.info(f"Unified agent complete: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Unified agent failed: {e}")
-        raise self.retry(countdown=60, exc=e)
-
-
-async def _unified_agent_async():
-    """Async implementation of unified agent."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
-    import os
-
-    from app.services.unified_agent import run_unified_agent
-    from app.services.autonomy.coordination import get_coordinator
-
-    coordinator = get_coordinator()
-    if not await coordinator.acquire_exclusive("unified-agent", "heavy_llm"):
-        return {"skipped": "exclusive_group_busy"}
-
-    try:
-        database_url = os.getenv("DATABASE_URL", "")
-
-        if database_url.startswith("postgresql://"):
-            async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-        elif database_url.startswith("postgresql+psycopg://"):
-            async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-        else:
-            async_url = database_url
-
-        engine = create_async_engine(async_url, echo=False)
-        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-        try:
-            async with async_session() as db:
-                min_gap_seconds = int(os.getenv("UNIFIED_AGENT_MIN_GAP_SECONDS", "480"))
-                if min_gap_seconds > 0:
-                    last_run = await db.execute(
-                        text("""
-                            SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) AS seconds_since
-                            FROM agent_run_log
-                            WHERE user_id = :uid AND source = 'unified_agent'
-                            ORDER BY created_at DESC
-                            LIMIT 1
-                        """),
-                        {"uid": DEFAULT_USER_ID},
-                    )
-                    row = last_run.fetchone()
-                    if row and row.seconds_since is not None and float(row.seconds_since) < min_gap_seconds:
-                        return {
-                            "skipped": "recent_run_guard",
-                            "seconds_since_last_run": round(float(row.seconds_since), 1),
-                            "min_gap_seconds": min_gap_seconds,
-                        }
-
-                result = await run_unified_agent(db, DEFAULT_USER_ID)
-                return result
-        finally:
-            await engine.dispose()
-    finally:
-        await coordinator.release_exclusive("heavy_llm", "unified-agent")
 
 
 # ─── Standing Order Time Check ─────────────────────────────────────
@@ -151,12 +56,10 @@ def standing_order_time_check(self):
     running even when unified_agent is not scheduled.
     """
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _standing_order_time_check_async()
         )
         return result
-    except RuntimeError:
-        return asyncio.run(_standing_order_time_check_async())
     except Exception as e:
         logger.error(f"Standing order time check failed: {e}")
         raise self.retry(countdown=30, exc=e)
@@ -178,6 +81,33 @@ async def _standing_order_time_check_async():
         }
     finally:
         sync_db.close()
+
+
+# ─── Proxmox Container Cleanup ──────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.autonomy.cleanup_stale_containers",
+    bind=True,
+    queue="maintenance",
+    max_retries=1,
+)
+def cleanup_stale_containers(self):
+    """Destroy ephemeral Proxmox containers idle for >24 hours."""
+    try:
+        result = _run_async(
+            _cleanup_stale_containers_async()
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Container cleanup failed: {e}")
+        raise self.retry(countdown=60, exc=e)
+
+
+async def _cleanup_stale_containers_async():
+    from app.services.container_provisioner import ContainerProvisioner
+    provisioner = ContainerProvisioner()
+    destroyed = await provisioner.cleanup_stale(max_idle_hours=24)
+    return {"status": "ok", "destroyed": destroyed}
 
 
 # ─── Mission Worker (Phase 2 — Cortana Evolution) ───────────────────
@@ -202,14 +132,9 @@ def mission_worker(self):
         return {"skipped": "config_unavailable"}
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _mission_worker_async()
         )
-        if result.get("advanced", 0) > 0:
-            logger.info(f"Mission worker: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_mission_worker_async())
         if result.get("advanced", 0) > 0:
             logger.info(f"Mission worker: {result}")
         return result
@@ -273,13 +198,9 @@ def morning_anticipation(self):
     logger.info("Starting morning anticipation")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _anticipation_async("morning")
         )
-        logger.info(f"Morning anticipation complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_anticipation_async("morning"))
         logger.info(f"Morning anticipation complete: {result}")
         return result
     except Exception as e:
@@ -301,13 +222,9 @@ def evening_anticipation(self):
     logger.info("Starting evening anticipation")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _anticipation_async("evening")
         )
-        logger.info(f"Evening anticipation complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_anticipation_async("evening"))
         logger.info(f"Evening anticipation complete: {result}")
         return result
     except Exception as e:
@@ -392,7 +309,7 @@ async def _anticipation_async(time_of_day: str):
                     pass
 
                 return {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": local_now().isoformat(),
                     "time_of_day": time_of_day,
                     "preparations": len(preparations),
                     "prep_types": prep_types,
@@ -417,13 +334,9 @@ def nightly_memory_consolidation(self):
     logger.info("Starting nightly memory consolidation")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _memory_consolidation_async()
         )
-        logger.info(f"Memory consolidation complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_memory_consolidation_async())
         logger.info(f"Memory consolidation complete: {result}")
         return result
     except Exception as e:
@@ -460,7 +373,7 @@ async def _memory_consolidation_async():
 
         try:
             async with async_session() as db:
-                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+                today_start = local_now().replace(hour=0, minute=0, second=0)
 
                 # Count today's episodes
                 episode_result = await db.execute(
@@ -497,7 +410,7 @@ async def _memory_consolidation_async():
                 await db.commit()
 
                 return {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": local_now().isoformat(),
                     "episodes_today": episode_count,
                     "episodes_decayed": decayed,
                     "actions_cleaned": cleaned,
@@ -522,13 +435,9 @@ def weekly_learning_digest(self):
     logger.info("Starting weekly learning digest")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _learning_digest_async()
         )
-        logger.info(f"Learning digest complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_learning_digest_async())
         logger.info(f"Learning digest complete: {result}")
         return result
     except Exception as e:
@@ -548,7 +457,6 @@ async def _learning_digest_async():
     from sqlalchemy import text
     import os
 
-    from app.services.karma import get_karma_service
     from app.services.autonomy.sara_invocation import get_sara_invocation_service
 
     database_url = os.getenv("DATABASE_URL", "")
@@ -565,11 +473,7 @@ async def _learning_digest_async():
 
     try:
         async with async_session() as db:
-            week_start = datetime.utcnow() - timedelta(days=7)
-
-            # Get karma dashboard
-            karma_service = await get_karma_service(db)
-            karma_dashboard = await karma_service.get_karma_dashboard()
+            week_start = local_now() - timedelta(days=7)
 
             # Count interactions
             interaction_result = await db.execute(
@@ -607,12 +511,8 @@ async def _learning_digest_async():
 
             # Build data summary
             raw_data = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "week_start": week_start.isoformat(),
-                "karma": {
-                    "agents": karma_dashboard.get("agents", []),
-                    "alerts": karma_dashboard.get("alerts", []),
-                },
                 "interactions": interaction_count,
                 "action_outcomes": action_stats,
                 "proposals": proposal_stats,
@@ -624,8 +524,6 @@ async def _learning_digest_async():
 
                 context_summary = f"""This week's data:
 - Total interactions with David: {interaction_count}
-- Karma: {karma_dashboard.get('agents', [])}
-- Karma alerts: {karma_dashboard.get('alerts', [])}
 - Actions taken: {action_stats}
 - Proposals: {proposal_stats}"""
 
@@ -637,7 +535,6 @@ Include:
 2. Areas where you struggled or could improve
 3. Notable interactions or learnings
 4. Intentions for next week
-5. Any karma-related observations (where you excelled or need work)
 
 Write in first person as Sara. Be genuine and reflective.""",
                     max_tokens=800
@@ -650,7 +547,7 @@ Write in first person as Sara. Be genuine and reflective.""",
                 return {
                     "digest": digest_content,
                     "raw_data": raw_data,
-                    "generated_at": datetime.utcnow().isoformat(),
+                    "generated_at": local_now().isoformat(),
                     "invocation_id": generation_result.invocation_id
                 }
 
@@ -678,13 +575,9 @@ def pkg_deep_extract(self, user_id: str = None, since_hours: int = 6):
     logger.info(f"Starting PKG deep extraction (last {since_hours}h)")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _pkg_deep_extract_async(user_id, since_hours)
         )
-        logger.info(f"PKG deep extraction complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_pkg_deep_extract_async(user_id, since_hours))
         logger.info(f"PKG deep extraction complete: {result}")
         return result
     except Exception as e:
@@ -715,7 +608,7 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
 
     try:
         async with async_session() as db:
-            since = datetime.utcnow() - timedelta(hours=since_hours)
+            since = local_now() - timedelta(hours=since_hours)
 
             # Load recent episodes (regular chat)
             result = await db.execute(text("""
@@ -748,7 +641,7 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
             if total_user_messages < 3:
                 logger.info(f"PKG: Skipping extraction — only {total_user_messages} user messages in window")
                 return {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": local_now().isoformat(),
                     "skipped": True,
                     "reason": f"only {total_user_messages} user messages",
                 }
@@ -779,7 +672,7 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
             )
 
             return {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "since_hours": since_hours,
                 "episodes_processed": len(rows) + len(learning_rows),
                 "user_messages": total_user_messages,
@@ -808,13 +701,9 @@ def learning_pkg_sync(self, user_id: str, topic_id: str):
     logger.info(f"Starting learning PKG sync for topic {topic_id}")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _learning_pkg_sync_async(user_id, topic_id)
         )
-        logger.info(f"Learning PKG sync complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_learning_pkg_sync_async(user_id, topic_id))
         logger.info(f"Learning PKG sync complete: {result}")
         return result
     except Exception as e:
@@ -998,12 +887,9 @@ def idle_processing(self):
     logger.info("Starting idle processing")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _idle_processing_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_idle_processing_async())
         return result
     except Exception as e:
         logger.error(f"Idle processing failed: {e}")
@@ -1051,10 +937,7 @@ async def _idle_processing_async():
             if cleanup_result.rowcount:
                 tasks_done.append(f"Cleaned {cleanup_result.rowcount} old discards")
 
-            # Task 2: Update karma trends
-            # (Could add more sophisticated trend calculation here)
-
-            # Task 3: Prune expired raw buffer stats
+            # Task 2: Prune expired raw buffer stats
             stats_result = await db.execute(
                 text("""
                     DELETE FROM raw_buffer_stats
@@ -1067,7 +950,7 @@ async def _idle_processing_async():
             await db.commit()
 
             return {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "tasks_done": tasks_done,
             }
     finally:
@@ -1087,12 +970,9 @@ def weather_context_refresh(self):
     Runs every 30 minutes. Reuses existing WeatherService (OpenWeatherMap).
     """
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _weather_refresh_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_weather_refresh_async())
         return result
     except Exception as e:
         logger.warning(f"Weather refresh failed: {e}")
@@ -1136,12 +1016,9 @@ def home_state_hourly_summary(self):
     Runs 5 minutes past each hour.
     """
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _home_state_summary_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_home_state_summary_async())
         return result
     except Exception as e:
         logger.warning(f"Home state summary failed: {e}")
@@ -1168,13 +1045,13 @@ async def _home_state_summary_async():
 
     try:
         from app.services.event_bus import event_bus
-        now = datetime.utcnow()
+        now = local_now()
         hour_bucket = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
 
         # Replay events from the last hour
         events = await event_bus.replay_events(
-            since=hour_bucket,
-            until=hour_bucket + timedelta(hours=1),
+            start_time=hour_bucket,
+            end_time=hour_bucket + timedelta(hours=1),
         )
 
         rooms_active = set()
@@ -1253,12 +1130,9 @@ def daily_autonomy_digest(self):
     """
     logger.info("Starting daily autonomy digest")
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _daily_digest_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_daily_digest_async())
         return result
     except Exception as e:
         logger.error(f"Daily digest failed: {e}")
@@ -1287,7 +1161,7 @@ async def _daily_digest_async():
         async with async_session() as db:
             from sqlalchemy import text
             user_id = DEFAULT_USER_ID
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = local_now().strftime("%Y-%m-%d")
 
             # Count runs
             run_result = await db.execute(text("""
@@ -1364,13 +1238,9 @@ def autonomy_retention_cleanup(self):
     """
     logger.info("Running autonomy retention cleanup...")
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _autonomy_retention_async()
         )
-        logger.info(f"Retention cleanup complete: {result}")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_autonomy_retention_async())
         logger.info(f"Retention cleanup complete: {result}")
         return result
     except Exception as e:
@@ -1477,12 +1347,9 @@ async def _autonomy_retention_async():
 def derived_signal_refresh(self):
     """Refresh DB-dependent working memory signals every 5 minutes."""
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _derived_signal_refresh_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_derived_signal_refresh_async())
         return result
     except Exception as e:
         logger.error(f"Derived signal refresh failed: {e}")
@@ -1509,12 +1376,9 @@ def trigger_deliberation(self, user_id: str = None):
     """
     uid = user_id or DEFAULT_USER_ID
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _deliberation_async(uid)
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_deliberation_async(uid))
         return result
     except Exception as e:
         logger.error(f"Deliberation failed: {e}")
@@ -1563,12 +1427,9 @@ def periodic_deliberation_fallback(self):
     Also prunes old observations.
     """
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _deliberation_fallback_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_deliberation_fallback_async())
         return result
     except Exception as e:
         logger.error(f"Deliberation fallback failed: {e}")
@@ -1623,12 +1484,9 @@ def run_consolidation(self):
     Scheduled 2x daily: 2 PM and 9 PM.
     """
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _consolidation_async()
         )
-        return result
-    except RuntimeError:
-        result = asyncio.run(_consolidation_async())
         return result
     except Exception as e:
         logger.error(f"Consolidation failed: {e}")

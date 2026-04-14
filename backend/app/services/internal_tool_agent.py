@@ -119,10 +119,18 @@ CRITICAL RULES:
 3. After gathering information, call report_complete with your findings.
 4. You MUST finish by calling report_complete. Never stop without it.
 
-TOOLS:
+CAPABILITIES:
+- You have full shell access via run_command, and can read/write files.
+- Use these for any task requiring code execution, file manipulation, or system commands.
 - Use email_search, email_read, etc. to access Sara's databases.
-- Do NOT try to access files or run shell commands.
+- Use web_search and open_page for research tasks.
 - If a search returns no results, try different search terms.
+
+SHELL USAGE:
+- run_command executes bash in your working directory. Use it to run scripts, install packages, compile code, etc.
+- write_file creates files in your working directory. Use for scripts, configs, output.
+- read_file reads any file on the server.
+- For code tasks: write the code with write_file, then run it with run_command.
 
 EFFICIENCY — avoid redundant calls:
 - Call email_search ONCE with broad terms, then email_read each result. Do NOT search repeatedly.
@@ -157,8 +165,9 @@ class InternalToolAgent:
         self.task_id = task_id
         self.mission_id = mission_id
         self.user_id = user_id
-        self.llm_url = "http://100.104.68.115:11434/v1"
-        self.model = "gpt-oss:120b-32k"
+        from app.core.llm_config import llm_config
+        self.llm_url = llm_config.primary_url
+        self.model = llm_config.primary_model
         self.max_iterations = 25
         self._step_counter = 0
         self._should_pause = False
@@ -171,6 +180,10 @@ class InternalToolAgent:
         # Use classifier-provided categories if available, else fall back to all
         # Note: empty list [] also falls back (classifier returned no categories)
         active_categories = categories if categories else ALL_INTERNAL_CATEGORIES
+        # Always include shell + web so the agent can execute commands and research
+        for required_cat in ("shell", "web"):
+            if required_cat not in active_categories:
+                active_categories.append(required_cat)
         logger.info(f"[internal-agent] Loading tools for categories: {active_categories}")
 
         # Load tool schemas from registry
@@ -398,7 +411,10 @@ class InternalToolAgent:
         self._add_mission_step(step_index, name, step_desc, "running")
 
         try:
-            result = await tool_registry.execute_tool(name, self.user_id, args)
+            result = await tool_registry.execute_tool(
+                name, self.user_id, args,
+                context={"task_id": self.task_id},
+            )
 
             self._update_step_status(
                 step_index,

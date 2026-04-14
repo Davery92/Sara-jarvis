@@ -14,7 +14,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .scratchpad import ReflectionScratchpad, ObservationType
-from app.services.karma import get_karma_service, KarmaEvent
 
 logger = logging.getLogger(__name__)
 
@@ -232,28 +231,6 @@ class ConsolidationAuditor:
             },
             confidence=0.9,
         )
-
-        # Update consolidation karma based on audit
-        karma_service = await get_karma_service(self.db)
-
-        if audit_result.missed_items:
-            # Missed items are bad
-            await karma_service.record_event(KarmaEvent(
-                agent_id="consolidation",
-                dimension_name="accuracy",
-                delta=-len(audit_result.missed_items) * 2.0,
-                reason=f"Audit found {len(audit_result.missed_items)} missed important items",
-                evidence_type="reflection_audit",
-            ))
-        elif audit_result.total_kept > 0:
-            # No misses is good
-            await karma_service.record_event(KarmaEvent(
-                agent_id="consolidation",
-                dimension_name="accuracy",
-                delta=1.0,
-                reason="Consolidation audit found no missed items",
-                evidence_type="reflection_audit",
-            ))
 
         logger.info(
             f"Consolidation audit complete: {audit_result.total_raw} raw, "

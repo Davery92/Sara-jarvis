@@ -35,14 +35,23 @@ OBS_DETAIL_KEY = "sara:observation_details:{user_id}"
 OBS_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 _redis_pool: Optional[aioredis.Redis] = None
+_redis_loop_id: Optional[int] = None
 
 
 async def _get_redis() -> aioredis.Redis:
-    global _redis_pool
-    if _redis_pool is None:
+    global _redis_pool, _redis_loop_id
+    import asyncio
+    cur_loop = id(asyncio.get_running_loop())
+    if _redis_pool is None or cur_loop != _redis_loop_id:
+        if _redis_pool is not None:
+            try:
+                await _redis_pool.aclose()
+            except Exception:
+                pass
         _redis_pool = await aioredis.from_url(
             REDIS_URL, decode_responses=True, max_connections=10
         )
+        _redis_loop_id = cur_loop
     return _redis_pool
 
 

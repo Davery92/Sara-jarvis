@@ -7,7 +7,6 @@ to invoke Sara for making decisions rather than relying on hard-coded rules.
 Key responsibilities:
 - Invoke Sara for decisions (should_act, what action, why)
 - Invoke Sara for content generation (weekly digest, morning brief, etc.)
-- Include karma context in all invocations
 - Respect rate limits and notification budgets
 - Log all autonomous decisions for reflection auditing
 """
@@ -18,6 +17,7 @@ import json
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from app.core.timezone import now as local_now
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -88,9 +88,10 @@ class SaraInvocationService:
             await notification_service.notify_david(decision.action, ...)
     """
 
-    # LLM endpoint configuration
-    DEFAULT_LLM_ENDPOINT = "http://100.104.68.115:11434/v1"
-    DEFAULT_MODEL = "gpt-oss:20b"
+    # LLM endpoint configuration — centralized
+    from app.core.llm_config import llm_config as _llm_cfg
+    DEFAULT_LLM_ENDPOINT = _llm_cfg.bg_primary_url
+    DEFAULT_MODEL = _llm_cfg.bg_primary_model
 
     # Rate limiting
     MAX_INVOCATIONS_PER_HOUR = 50
@@ -100,7 +101,7 @@ class SaraInvocationService:
         """Initialize the service."""
         self.db = db
         self._invocation_count = 0
-        self._last_reset = datetime.utcnow()
+        self._last_reset = local_now()
         self._refresh_llm_config()
 
     def _refresh_llm_config(self):
@@ -117,7 +118,7 @@ class SaraInvocationService:
 
     def _check_rate_limit(self) -> bool:
         """Check if we're within rate limits."""
-        now = datetime.utcnow()
+        now = local_now()
         if (now - self._last_reset).total_seconds() > 3600:
             self._invocation_count = 0
             self._last_reset = now
@@ -127,16 +128,6 @@ class SaraInvocationService:
     def _increment_rate_limit(self):
         """Increment rate limit counter."""
         self._invocation_count += 1
-
-    async def _get_karma_context(self, agent_id: str = "sara") -> str:
-        """Get karma context for prompt injection."""
-        try:
-            from app.services.karma.service import get_karma_service
-            karma_service = await get_karma_service(self.db)
-            return await karma_service.format_karma_context(agent_id)
-        except Exception as e:
-            logger.warning(f"Failed to get karma context: {e}")
-            return ""
 
     async def _get_working_memory_context(self, user_id: str = None) -> str:
         """Get working memory context for prompt injection."""
@@ -182,7 +173,6 @@ class SaraInvocationService:
         question: str,
         decision_type: DecisionType = DecisionType.SHOULD_ACT,
         max_tokens: int = 500,
-        include_karma: bool = True,
         include_working_memory: bool = True
     ) -> SaraDecision:
         """
@@ -193,7 +183,6 @@ class SaraInvocationService:
             question: The specific question to answer
             decision_type: Type of decision being made
             max_tokens: Maximum tokens for response
-            include_karma: Whether to include karma context
             include_working_memory: Whether to include working memory
 
         Returns:
@@ -210,20 +199,15 @@ class SaraInvocationService:
                 priority=0.0,
                 confidence=0.0,
                 context_used={},
-                timestamp=datetime.utcnow(),
+                timestamp=local_now(),
                 invocation_id=str(uuid.uuid4())
             )
 
         invocation_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow()
+        timestamp = local_now()
 
         # Build context
         context_parts = [f"<context>{context}</context>"]
-
-        if include_karma:
-            karma_context = await self._get_karma_context()
-            if karma_context:
-                context_parts.append(karma_context)
 
         if include_working_memory:
             wm_context = await self._get_working_memory_context()
@@ -241,7 +225,6 @@ Guidelines:
 - Only take action when it would genuinely help David
 - Consider timing and context - don't interrupt unnecessarily
 - Be conservative with notifications - quality over quantity
-- Consider your karma scores when deciding
 - Explain your reasoning clearly
 
 Respond with a JSON object:
@@ -284,7 +267,7 @@ Respond with a JSON object:
                 reasoning=decision_data.get("reasoning", ""),
                 priority=float(decision_data.get("priority", 0.5)),
                 confidence=float(decision_data.get("confidence", 0.5)),
-                context_used={"karma": include_karma, "working_memory": include_working_memory},
+                context_used={"working_memory": include_working_memory},
                 timestamp=timestamp,
                 invocation_id=invocation_id
             )
@@ -315,7 +298,6 @@ Respond with a JSON object:
         context: str,
         prompt: str,
         max_tokens: int = 1000,
-        include_karma: bool = True
     ) -> GenerationResult:
         """
         Ask Sara to generate content (weekly digest, brief, etc.).
@@ -324,7 +306,6 @@ Respond with a JSON object:
             context: Context data for generation
             prompt: What to generate
             max_tokens: Maximum tokens for response
-            include_karma: Whether to include karma context
 
         Returns:
             GenerationResult with generated content
@@ -337,26 +318,16 @@ Respond with a JSON object:
                 content="[Generation deferred due to rate limiting]",
                 token_count=0,
                 model_used=self.model,
-                timestamp=datetime.utcnow(),
+                timestamp=local_now(),
                 invocation_id=str(uuid.uuid4())
             )
 
         invocation_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow()
-
-        # Build context
-        context_parts = [f"<context>{context}</context>"]
-
-        if include_karma:
-            karma_context = await self._get_karma_context()
-            if karma_context:
-                context_parts.append(karma_context)
-
-        full_context = "\n\n".join(context_parts)
+        timestamp = local_now()
 
         system_prompt = f"""You are Sara generating thoughtful content.
 
-{full_context}
+<context>{context}</context>
 
 Guidelines:
 - Write naturally and authentically
@@ -504,7 +475,7 @@ Respond with JSON:
             log_entry = {
                 "type": invocation_type,
                 "invocation_id": invocation_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "data": json.dumps(data)
             }
 

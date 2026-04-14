@@ -2,7 +2,7 @@
 Implicit Feedback Detector for Sara Learning System.
 
 Detects positive/negative signals from user messages without explicit ratings.
-Used to trigger lesson extraction and karma adjustments.
+Used to trigger lesson extraction.
 """
 
 import re

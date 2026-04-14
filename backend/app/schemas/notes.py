@@ -7,6 +7,8 @@ class NoteCreate(BaseModel):
     title: str = ""
     content: str
     folder_id: Optional[str] = None
+    tags: Optional[List[str]] = None
+    starred: Optional[bool] = None
 
 
 class NoteResponse(BaseModel):
@@ -14,6 +16,8 @@ class NoteResponse(BaseModel):
     title: str
     content: str
     folder_id: Optional[str] = None
+    tags: List[str] = []
+    starred: bool = False
     user_id: Optional[str] = None
     created_at: str
     updated_at: str

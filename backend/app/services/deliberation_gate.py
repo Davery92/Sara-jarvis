@@ -18,6 +18,7 @@ import uuid
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from typing import Optional
+from app.core.timezone import now as local_now
 
 from app.services.deliberation import DeliberationResult, NotificationProposal, HomeActionProposal, TaskProposal
 
@@ -174,14 +175,30 @@ async def process_deliberation_result(
     }
 
     # 1. Process notification proposals
-    for proposal in result.notification_proposals[:2]:  # cap at 2
+    total_proposed = len(result.notification_proposals)
+    capped_proposals = result.notification_proposals[:2]
+    if total_proposed > 2:
+        logger.info(
+            f"[DeliberationGate] Notification cap: {total_proposed} proposed, "
+            f"processing first 2"
+        )
+    for i, proposal in enumerate(capped_proposals):
         ban_reason = _is_banned_notification(proposal)
         if ban_reason:
-            logger.info(f"[DeliberationGate] Notification blocked: {ban_reason}")
+            logger.info(
+                f"[DeliberationGate] Notification [{i+1}/{len(capped_proposals)}] BLOCKED: "
+                f"category={proposal.category}, title='{proposal.title[:60]}', "
+                f"reason={ban_reason}"
+            )
             summary["notifications_blocked"] += 1
             continue
 
         try:
+            logger.info(
+                f"[DeliberationGate] Notification [{i+1}/{len(capped_proposals)}] DELIVERING: "
+                f"category={proposal.category}, priority={proposal.priority}, "
+                f"title='{proposal.title[:60]}'"
+            )
             await _deliver_notification(user_id, proposal)
             summary["notifications_sent"] += 1
         except Exception as e:
@@ -304,26 +321,14 @@ async def _process_task_proposals(
 
 async def _check_daily_research_cap(user_id: str) -> bool:
     """Check if we've already dispatched an auto-research today. Returns True if at cap."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text as sa_text
     from datetime import date
-
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
 
     try:
-        async with async_session_maker() as db:
-            today_start = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
+            today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
             row = await db.execute(sa_text("""
                 SELECT COUNT(*)::int AS cnt
                 FROM agent_run_log
@@ -336,8 +341,6 @@ async def _check_daily_research_cap(user_id: str) -> bool:
     except Exception as e:
         logger.warning(f"[DeliberationGate] Daily research cap check failed: {e}")
         return False  # Allow if we can't check
-    finally:
-        await engine.dispose()
 
 
 async def _process_research_proposals(
@@ -408,24 +411,12 @@ async def _write_research_dispatch_log(
     source: str,
 ) -> None:
     """Write a research dispatch record to agent_run_log."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text as sa_text
-
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
 
     try:
-        async with async_session_maker() as db:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
             await db.execute(sa_text("""
                 INSERT INTO agent_run_log
                 (user_id, source, run_at, run_duration_ms, context_summary,
@@ -445,8 +436,6 @@ async def _write_research_dispatch_log(
             await db.commit()
     except Exception as e:
         logger.error(f"[DeliberationGate] Research dispatch log write failed: {e}")
-    finally:
-        await engine.dispose()
 
 
 async def _write_research_journal(
@@ -455,24 +444,12 @@ async def _write_research_journal(
     source: str,
 ) -> None:
     """Write a journal entry about a self-directed research dispatch."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text as sa_text
-
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
 
     try:
-        async with async_session_maker() as db:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
             await db.execute(sa_text("""
                 INSERT INTO sara_journal (
                     id, user_id, entry_type, content, observations, interpretation,
@@ -494,8 +471,6 @@ async def _write_research_journal(
             await db.commit()
     except Exception as e:
         logger.error(f"[DeliberationGate] Research journal write failed: {e}")
-    finally:
-        await engine.dispose()
 
 
 async def _dispatch_from_deliberation(user_id: str, proposal: TaskProposal) -> None:
@@ -567,21 +542,8 @@ async def _write_task_dispatch_log(
     auto_executed: bool,
 ) -> None:
     """Write a task dispatch record to agent_run_log for observability."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
-
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
 
     action = "auto_dispatched" if auto_executed else "proposed_to_user"
     thought = (
@@ -590,7 +552,8 @@ async def _write_task_dispatch_log(
     )
 
     try:
-        async with async_session_maker() as db:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
             await db.execute(text("""
                 INSERT INTO agent_run_log
                 (user_id, source, run_at, run_duration_ms, context_summary,
@@ -611,17 +574,13 @@ async def _write_task_dispatch_log(
             await db.commit()
     except Exception as e:
         logger.error(f"[DeliberationGate] Task dispatch log write failed: {e}")
-    finally:
-        await engine.dispose()
 
 
 async def _deliver_notification(user_id: str, proposal: NotificationProposal) -> None:
     """Deliver a notification through the existing pipeline WITH dedup."""
     import hashlib
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from app.services.unified_notification import send_notification
+    from app.db.session import get_async_session_factory
 
     priority_map = {
         "normal": "normal",
@@ -634,37 +593,23 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
     content_hash = hashlib.md5(f"{proposal.title}:{proposal.message[:100]}".encode()).hexdigest()[:12]
     effective_topic = f"{proposal.category}:{content_hash}"
 
-    # Create a DB session so dedup and logging actually work
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    try:
-        async with async_session_maker() as db:
-            result = await send_notification(
-                user_id=user_id,
-                title=proposal.title,
-                message=proposal.message,
-                topic=effective_topic,
-                category=proposal.category,
-                priority=ntfy_priority,
-                source="deliberation",
-                db=db,
-            )
-            await db.commit()
-            if result.get("sent"):
-                logger.info(f"[DeliberationGate] Sent notification: {proposal.title}")
-            else:
-                logger.info(f"[DeliberationGate] Notification blocked by pipeline: {result.get('reason')} — {proposal.title}")
-    finally:
-        await engine.dispose()
+    AsyncSession = get_async_session_factory()
+    async with AsyncSession() as db:
+        result = await send_notification(
+            user_id=user_id,
+            title=proposal.title,
+            message=proposal.message,
+            topic=effective_topic,
+            category=proposal.category,
+            priority=ntfy_priority,
+            source="deliberation",
+            db=db,
+        )
+        await db.commit()
+        if result.get("sent"):
+            logger.info(f"[DeliberationGate] Sent notification: {proposal.title}")
+        else:
+            logger.info(f"[DeliberationGate] Notification blocked by pipeline: {result.get('reason')} — {proposal.title}")
 
 
 async def _execute_home_action(user_id: str, action: HomeActionProposal) -> None:
@@ -692,10 +637,8 @@ async def _execute_home_action(user_id: str, action: HomeActionProposal) -> None
 
 async def _write_journal(user_id: str, result: DeliberationResult) -> None:
     """Write deliberation thought as journal entry."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
+    from app.db.session import get_async_session_factory
 
     content = result.thought
     if result.notification_proposals:
@@ -715,19 +658,9 @@ async def _write_journal(user_id: str, result: DeliberationResult) -> None:
         action_items += [f"task({tp.category}): {tp.description[:60]}" for tp in result.task_proposals]
         actions_str = "; ".join(action_items)
 
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
     try:
-        async with async_session_maker() as db:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
             # Suppress repetitive journal loops when thought content is effectively unchanged.
             recent_rows = await db.execute(text("""
                 SELECT content
@@ -766,30 +699,16 @@ async def _write_journal(user_id: str, result: DeliberationResult) -> None:
             await db.commit()
     except Exception as e:
         logger.error(f"[DeliberationGate] Journal write SQL failed: {e}")
-    finally:
-        await engine.dispose()
 
 
 async def _write_run_log(user_id: str, result: DeliberationResult, summary: dict) -> None:
     """Write to agent_run_log for observability."""
-    import os
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
-
-    database_url = os.getenv("DATABASE_URL", "")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
 
     try:
-        async with async_session_maker() as db:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
             await db.execute(text("""
                 INSERT INTO agent_run_log
                 (user_id, source, run_at, run_duration_ms, context_summary,
@@ -807,5 +726,3 @@ async def _write_run_log(user_id: str, result: DeliberationResult, summary: dict
             await db.commit()
     except Exception as e:
         logger.error(f"[DeliberationGate] agent_run_log write failed: {e}")
-    finally:
-        await engine.dispose()

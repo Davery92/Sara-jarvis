@@ -113,7 +113,7 @@ async def _handle_presence_room_changed(event: Event):
 
 
 async def _handle_chat_message(event: Event):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(USER_TZ)
     topic = event.payload.get("topic")
     fields = {
         "last_chat_at": now.isoformat(),
@@ -364,7 +364,7 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
                     await update_memory(
                         user_id,
                         source="derived_refresh",
-                        last_chat_at=last_chat.isoformat(),
+                        last_chat_at=last_chat_local.isoformat(),
                         hours_since_last_chat=round(delta_hours, 1),
                         has_chatted_today=(last_chat_local.date() == now_tz.date()),
                     )
@@ -426,23 +426,8 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
         except Exception as e:
             logger.warning(f"[DerivedRefresh] Habits failed: {e}")
 
-        # 6. Learning reviews due
-        try:
-            async with async_session() as db:
-                result = await db.execute(text("""
-                    SELECT COUNT(*) FROM learning_progress lp
-                    JOIN learning_topic lt ON lp.topic_id = lt.id
-                    WHERE lt.user_id = :uid AND lp.next_review_at <= :now
-                """), {"uid": user_id, "now": datetime.utcnow()})
-                count = result.scalar() or 0
-                await update_memory(
-                    user_id,
-                    source="derived_refresh",
-                    learning_reviews_due=count,
-                )
-                updated["learning_reviews"] = count
-        except Exception as e:
-            logger.warning(f"[DerivedRefresh] Learning reviews failed: {e}")
+        # 6. Learning reviews due — disabled (not actively used)
+        # Kept the field in working memory but no longer counted/surfaced.
 
         # 7. Calendar lookahead
         try:
@@ -559,6 +544,39 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
         except Exception:
             pass
 
+        # 11. Emotional state decay — naturally decay Sara's emotions toward attentive baseline
+        try:
+            from app.services.working_memory import read_memory
+            from app.services.emotional_state import decay_emotional_state, BASELINE_TONE
+
+            memory = await read_memory(user_id)
+            current_tone = memory.sara_emotional_tone
+            current_intensity = memory.sara_emotional_intensity if memory.sara_emotional_intensity else 0.3
+
+            if current_tone and current_tone != BASELINE_TONE and current_intensity > 0.35:
+                # Calculate hours since last deliberation
+                hours_since = 0.083  # default ~5 min (one refresh cycle)
+                if memory.sara_last_deliberation_at:
+                    try:
+                        last_dt = datetime.fromisoformat(memory.sara_last_deliberation_at)
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    except Exception:
+                        pass
+
+                decayed = decay_emotional_state(current_tone, current_intensity, hours_since)
+                if decayed.intensity != current_intensity or decayed.tone != current_tone:
+                    await update_memory(
+                        user_id,
+                        source="derived_refresh",
+                        sara_emotional_tone=decayed.tone,
+                        sara_emotional_intensity=decayed.intensity,
+                    )
+                    updated["emotional_decay"] = f"{current_tone}({current_intensity:.2f}) -> {decayed.tone}({decayed.intensity:.2f})"
+        except Exception as e:
+            logger.warning(f"[DerivedRefresh] Emotional decay failed: {e}")
+
         await engine.dispose()
 
     except Exception as e:
@@ -566,3 +584,52 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
 
     logger.info(f"[DerivedRefresh] Updated: {list(updated.keys())}")
     return updated
+
+
+class MemoryAccessSubscriber(EventSubscriber):
+    """
+    Boosts rating_boost and recall_relevance_ema for episodes injected into chat context.
+    Creates a positive feedback loop: frequently-useful memories surface more often.
+    """
+
+    BOOST_INCREMENT = 0.05  # Per citation
+    EMA_ALPHA = 0.15  # EMA smoothing factor (higher = more responsive)
+
+    def __init__(self):
+        super().__init__("memory_access_boost")
+        self.subscribe_to(EventType.MEMORY_ACCESSED)
+
+    async def handle_event(self, event: Event) -> None:
+        episode_ids = event.payload.get("episode_ids", [])
+        if not episode_ids:
+            return
+
+        try:
+            import os
+            from sqlalchemy import create_engine, text
+            from sqlalchemy.orm import sessionmaker, Session
+
+            db_url = os.getenv("DATABASE_URL", "")
+            if "+asyncpg" in db_url:
+                db_url = db_url.replace("+asyncpg", "+psycopg")
+            elif "+psycopg" not in db_url and "postgresql://" in db_url:
+                db_url = db_url.replace("postgresql://", "postgresql+psycopg://")
+
+            engine = create_engine(db_url, echo=False)
+            _Session = sessionmaker(engine, class_=Session, expire_on_commit=False)
+            db = _Session()
+            try:
+                # Boost rating_boost and nudge recall_relevance_ema toward 1.0 (positive signal)
+                db.execute(text("""
+                    UPDATE episode
+                    SET rating_boost = LEAST(COALESCE(rating_boost, 0) + :boost, 1.0),
+                        recall_relevance_ema = COALESCE(recall_relevance_ema, 0.5) * (1 - :alpha) + 1.0 * :alpha
+                    WHERE id = ANY(:ids)
+                """), {"boost": self.BOOST_INCREMENT, "alpha": self.EMA_ALPHA, "ids": episode_ids})
+                db.commit()
+                logger.info(f"[MemoryAccess] Boosted {len(episode_ids)} cited episodes (rating +{self.BOOST_INCREMENT}, EMA → 1.0)")
+            finally:
+                db.close()
+                engine.dispose()
+        except Exception as e:
+            logger.warning(f"[MemoryAccess] Rating boost failed: {e}")

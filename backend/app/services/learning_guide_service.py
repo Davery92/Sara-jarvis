@@ -26,7 +26,7 @@ from app.services.learning_source_service import learning_source_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GUIDE_MODEL = "gpt-oss:20b"
+DEFAULT_GUIDE_MODEL = "Qwen3.5-35B-A3B"
 
 
 class JobCancelledError(Exception):

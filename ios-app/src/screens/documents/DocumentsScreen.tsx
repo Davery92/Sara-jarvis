@@ -17,11 +17,13 @@ import { Document, documentsService } from '../../services/documents';
 import DocumentListItem from '../../components/documents/DocumentListItem';
 import DocumentViewer from '../../components/documents/DocumentViewer';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { useToast } from '../../context/ToastContext';
 import * as DocumentPicker from 'expo-document-picker';
 
 type Props = MainTabScreenProps<'Documents'>;
 
 export default function DocumentsScreen({ navigation }: Props) {
+  const { showToast } = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [filteredDocuments, setFilteredDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,7 +47,7 @@ export default function DocumentsScreen({ navigation }: Props) {
       setDocuments(docsData);
     } catch (error) {
       console.error('Failed to load documents:', error);
-      Alert.alert('Error', 'Failed to load documents');
+      showToast('error', 'Failed to load documents');
     } finally {
       setLoading(false);
     }
@@ -111,11 +113,11 @@ export default function DocumentsScreen({ navigation }: Props) {
                   filename: file.name,
                 });
 
-                Alert.alert('Success', 'Document uploaded successfully');
+                showToast('success', 'Document uploaded successfully');
                 await loadData();
               } catch (error) {
                 console.error('Upload error:', error);
-                Alert.alert('Error', 'Failed to upload document');
+                showToast('error', 'Failed to upload document');
               } finally {
                 setLoading(false);
               }
@@ -125,7 +127,7 @@ export default function DocumentsScreen({ navigation }: Props) {
       );
     } catch (error) {
       console.error('Document picker error:', error);
-      Alert.alert('Error', 'Failed to select document');
+      showToast('error', 'Failed to select document');
     }
   };
 
@@ -152,7 +154,7 @@ export default function DocumentsScreen({ navigation }: Props) {
               await documentsService.deleteDocument(document.id);
               await loadData();
             } catch (error) {
-              Alert.alert('Error', 'Failed to delete document');
+              showToast('error', 'Failed to delete document');
             }
           },
         },
@@ -170,16 +172,16 @@ export default function DocumentsScreen({ navigation }: Props) {
           text: 'Save',
           onPress: async (newTitle) => {
             if (!newTitle?.trim()) {
-              Alert.alert('Error', 'Document name cannot be empty');
+              showToast('error', 'Document name cannot be empty');
               return;
             }
             try {
               await documentsService.updateDocument(document.id, { title: newTitle.trim() });
               await loadData();
-              Alert.alert('Success', 'Document renamed successfully');
+              showToast('success', 'Document renamed successfully');
             } catch (error) {
               console.error('Rename error:', error);
-              Alert.alert('Error', 'Failed to rename document');
+              showToast('error', 'Failed to rename document');
             }
           },
         },

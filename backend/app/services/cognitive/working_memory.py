@@ -17,7 +17,10 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
+
+from app.core.timezone import now as local_now
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -221,7 +224,7 @@ class WorkingMemoryService:
             # Store
             context_data = {
                 "segments": [asdict(s) for s in sorted_segments],
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": local_now().isoformat()
             }
 
             self.redis.setex(
@@ -338,7 +341,7 @@ class WorkingMemoryService:
 
         try:
             self.redis.hset(key, "status", status.value)
-            self.redis.hset(key, "last_updated", datetime.utcnow().isoformat())
+            self.redis.hset(key, "last_updated", local_now().isoformat())
             return True
         except Exception as e:
             logger.error(f"Error updating thread status: {e}")
@@ -456,7 +459,7 @@ class WorkingMemoryService:
                     availability=UserAvailability.UNKNOWN,
                     location="unknown",
                     last_interaction=None,
-                    inferred_at=datetime.utcnow().isoformat()
+                    inferred_at=datetime.now(ZoneInfo("America/New_York")).isoformat()
                 )
 
             state_data = json.loads(data)
@@ -477,7 +480,7 @@ class WorkingMemoryService:
                 availability=UserAvailability.UNKNOWN,
                 location="unknown",
                 last_interaction=None,
-                inferred_at=datetime.utcnow().isoformat()
+                inferred_at=local_now().isoformat()
             )
 
     async def update_user_state(
@@ -508,7 +511,7 @@ class WorkingMemoryService:
         key = f"user:{user_id}:last_interaction"
 
         try:
-            self.redis.set(key, datetime.utcnow().isoformat())
+            self.redis.set(key, local_now().isoformat())
             return True
         except Exception as e:
             logger.error(f"Error recording interaction: {e}")
@@ -529,7 +532,7 @@ class WorkingMemoryService:
                     last_consolidation=None,
                     buffer_health="unknown",
                     overall_health="unknown",
-                    updated_at=datetime.utcnow().isoformat()
+                    updated_at=local_now().isoformat()
                 )
 
             state_data = json.loads(data)
@@ -547,7 +550,7 @@ class WorkingMemoryService:
                 last_consolidation=None,
                 buffer_health="unknown",
                 overall_health="unknown",
-                updated_at=datetime.utcnow().isoformat()
+                updated_at=local_now().isoformat()
             )
 
     async def update_system_state(
@@ -592,7 +595,7 @@ class WorkingMemoryService:
             pending_actions=actions,
             user_state=user_state,
             system_state=system_state,
-            snapshot_at=datetime.utcnow().isoformat()
+            snapshot_at=local_now().isoformat()
         )
 
     def format_for_prompt(self, snapshot: WorkingMemorySnapshot) -> str:

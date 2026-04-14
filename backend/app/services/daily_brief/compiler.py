@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from app.core.timezone import now as local_now
+
 from .prompts import BRIEF_HEADER
 
 logger = logging.getLogger(__name__)
@@ -160,7 +162,7 @@ class BriefCompiler:
         }
 
         metadata = {
-            "compiled_at": datetime.utcnow().isoformat(),
+            "compiled_at": local_now().isoformat(),
             "layer_hashes": layer_hashes,
             "token_count": self._estimate_tokens(compiled),
             "version": 1

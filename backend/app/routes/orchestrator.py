@@ -160,12 +160,12 @@ async def orchestrator_status():
         "status": "available",
         "config": {
             "orchestrator": {
-                "url": "http://100.104.68.115:11434",
-                "model": "gpt-oss:20b"
+                "url": "http://100.104.68.115:8080",
+                "model": "Qwen3.5-35B-A3B"
             },
             "worker": {
-                "url": "http://100.104.68.115:11434",
-                "model": "gpt-oss:20b"
+                "url": "http://100.104.68.115:8080",
+                "model": "Qwen3.5-35B-A3B"
             }
         }
     }

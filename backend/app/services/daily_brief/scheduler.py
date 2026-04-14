@@ -194,7 +194,7 @@ class DailyBriefScheduler:
                             if content:
                                 await archiver.archive_day_layer(user_id, content)
                                 # Reset day layer for new day
-                                day_layer._write_layer(user_id, "")
+                                day_layer.clear(user_id)
                         except Exception as e:
                             logger.error(f"Archive failed for {user_id[:8]}: {e}")
 

@@ -12,21 +12,29 @@ Endpoints:
 - POST /api/agents/skills/candidates/{id}/review — accept/reject/test
 """
 
+import asyncio
+import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.core.deps import get_current_user
+from app.core.auth import verify_token
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 router = APIRouter(prefix="/api/agents", tags=["Agent Orchestration"])
 
@@ -35,7 +43,7 @@ router = APIRouter(prefix="/api/agents", tags=["Agent Orchestration"])
 
 class DispatchRequest(BaseModel):
     task_description: str
-    mode: str = "auto"  # auto | dispatch | internal | self_orchestrate
+    mode: str = "auto"  # auto | dispatch | sandbox | internal | self_orchestrate
     working_directory: Optional[str] = None
     timeout: int = 600
 
@@ -111,6 +119,25 @@ async def retry_task(
     return result
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Cancel a running or pending agent task."""
+    from app.services.agent_dispatch import agent_dispatch_service
+
+    result = await agent_dispatch_service.cancel_task(
+        db=db,
+        task_id=task_id,
+        user_id=str(current_user.id),
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
 @router.get("/tasks")
 async def list_agent_tasks(
     limit: int = 20,
@@ -145,6 +172,86 @@ async def get_agent_task(
     if not detail:
         raise HTTPException(status_code=404, detail="Task not found")
     return detail
+
+
+@router.get("/tasks/{task_id}/stream")
+async def stream_task_execution(
+    task_id: str,
+    request: Request,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """SSE stream of real-time task execution events.
+    Accepts auth via cookie, Authorization header, or ?token= query param.
+    """
+    user = None
+    try:
+        user = await get_current_user(request, request.cookies.get("access_token"), db)
+    except Exception:
+        pass
+
+    if not user and token:
+        payload = verify_token(token)
+        if payload and payload.get("sub"):
+            user = db.query(User).filter(User.id == payload["sub"]).first()
+
+    if not user:
+        raise HTTPException(401, "Could not validate credentials")
+
+    async def event_generator():
+        r = None
+        pubsub = None
+        channel = f"sara:dispatch:live:{task_id}"
+        try:
+            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+            pubsub = r.pubsub()
+            await pubsub.subscribe(channel)
+            logger.info(f"Dispatch live SSE connected: task={task_id}")
+
+            yield f"data: {json.dumps({'type': 'connected', 'task_id': task_id})}\n\n"
+
+            keepalive = 0
+            while True:
+                if await request.is_disconnected():
+                    break
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=0.1
+                )
+                if message and message["type"] == "message":
+                    yield f"data: {message['data']}\n\n"
+                    keepalive = 0
+                else:
+                    await asyncio.sleep(0.4)
+                    keepalive += 1
+                    if keepalive >= 30:  # ~15s
+                        yield f": keepalive\n\n"
+                        keepalive = 0
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Dispatch live SSE error: {e}")
+        finally:
+            try:
+                if pubsub:
+                    await pubsub.unsubscribe(channel)
+                    await pubsub.close()
+            except Exception:
+                pass
+            try:
+                if r:
+                    await r.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/vm/test")

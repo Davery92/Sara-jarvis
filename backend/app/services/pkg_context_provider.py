@@ -26,23 +26,27 @@ class PKGContextProvider:
         """
         Get PKG facts relevant to the current message, formatted as natural text.
 
-        Returns empty string if no relevant facts found or PKG unavailable.
+        Tries semantic (embedding) search first for better recall (catches
+        "espresso" when query is "coffee"), falls back to text CONTAINS matching.
         """
         try:
-            # Extract topics/entities from the message
-            topics = self._extract_topics(message)
+            # Try semantic search first (pgvector)
+            facts = []
+            try:
+                facts = await personal_kg.query_semantic(message, limit=8, min_similarity=0.35)
+            except Exception as e:
+                logger.debug(f"PKG semantic search failed, falling back to text: {e}")
 
-            if not topics:
-                # Fall back to summary if no specific topics
-                return self._get_brief_summary(max_facts=5)
-
-            # Query PKG for matching nodes
-            facts = personal_kg.query_relevant(topics, limit=8)
+            # Fall back to text-based search if semantic returned nothing
+            if not facts:
+                topics = self._extract_topics(message)
+                if not topics:
+                    return self._get_brief_summary(max_facts=5)
+                facts = personal_kg.query_relevant(topics, limit=8)
 
             if not facts:
                 return ""
 
-            # Format as natural language
             return self._format_facts_natural(facts)
 
         except Exception as e:

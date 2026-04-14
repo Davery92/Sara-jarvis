@@ -3,7 +3,6 @@ export type AppView =
   | 'dashboard'
   | 'chat'
   | 'notes'
-  | 'habits'
   | 'documents'
   | 'calendar'
   | 'email'
@@ -11,18 +10,20 @@ export type AppView =
   | 'learn'
   | 'projects'
   | 'recipes'
-  | 'temerant'
-  | 'temerant-rpg'
   | 'briefings'
   | 'sensory-monitor'
   | 'saras-mind'
   | 'inbox'
   | 'workspace'
+  | 'tasks'
   | 'settings'
   | 'knowledge'
   | 'intelligence'
   | 'privacy-dashboard'
+  | 'automations'
   | 'orchestrator-lab'
+  | 'acs'
+  | 'system-status'
 
 interface AppViewConfig {
   view: AppView
@@ -38,16 +39,14 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'dashboard', path: '/', title: 'Home', icon: '🏠', keywords: ['home', 'dashboard'] },
   { view: 'chat', path: '/chat', title: 'Chat', icon: '💬', keywords: ['chat', 'talk', 'conversation'] },
   { view: 'notes', path: '/notes', title: 'Notes', icon: '📝', keywords: ['notes', 'knowledge', 'write'] },
-  { view: 'habits', path: '/habits', title: 'Habits', icon: '🎯', keywords: ['habits', 'tracking', 'goals'] },
   { view: 'documents', path: '/documents', title: 'Documents', icon: '📄', keywords: ['documents', 'files', 'uploads'] },
+  { view: 'tasks', path: '/tasks', title: 'Tasks', icon: '✅', keywords: ['tasks', 'todo', 'daily', 'checklist'] },
   { view: 'calendar', path: '/calendar', title: 'Calendar', icon: '📅', keywords: ['calendar', 'events', 'schedule'] },
   { view: 'email', path: '/email', title: 'Email', icon: '📧', keywords: ['email', 'mail', 'inbox', 'messages'] },
   { view: 'fitness', path: '/fitness', title: 'Fitness', icon: '💪', keywords: ['fitness', 'health', 'workout'] },
   { view: 'learn', path: '/learn', title: 'Learn', icon: '🎓', keywords: ['learn', 'study', 'education'] },
   { view: 'projects', path: '/projects', title: 'Projects', icon: '📁', keywords: ['projects', 'work', 'planning'] },
   { view: 'recipes', path: '/recipes', title: 'Recipes', icon: '👨‍🍳', keywords: ['recipes', 'cooking', 'food'] },
-  { view: 'temerant', path: '/temerant', title: 'Temerant', icon: '🗝️', keywords: ['temerant', 'rpg', 'oracle', 'university', 'habit'] },
-  { view: 'temerant-rpg', path: '/temerant-rpg', title: 'Temerant RPG', icon: '🎭', keywords: ['temerant', 'rpg', 'scene', 'daveth', 'university'] },
   { view: 'briefings', path: '/briefings', title: 'Morning Brief', icon: '🌅', keywords: ['brief', 'briefings', 'morning'] },
   { view: 'sensory-monitor', path: '/sensory-monitor', title: 'Sensory', icon: '📡', keywords: ['sensory', 'monitor'] },
   { view: 'saras-mind', path: '/saras-mind', title: "Sara's Mind", icon: '🧠', keywords: ['mind', 'thoughts', 'deliberation', 'inner', 'autonomy', 'observations'] },
@@ -55,9 +54,12 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'knowledge', path: '/knowledge', title: 'Knowledge', icon: '🧬', keywords: ['knowledge', 'pkg', 'personal', 'facts', 'preferences', 'people'] },
   { view: 'intelligence', path: '/intelligence', title: 'Intelligence', icon: '📡', keywords: ['intelligence', 'news', 'tech', 'ai', 'research', 'feed'] },
   { view: 'workspace', path: '/workspace', title: 'Canvas', icon: '🧩', keywords: ['canvas', 'workspace', 'workbench'] },
+  { view: 'automations', path: '/automations', title: 'Automations', icon: '⚡', keywords: ['automations', 'agent', 'background', 'dispatch', 'missions'] },
   { view: 'settings', path: '/settings', title: 'Settings', icon: '⚙️', keywords: ['settings', 'preferences', 'config'] },
   { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: '🔒', keywords: ['privacy', 'security'], includeInPalette: false },
   { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: '🧠', keywords: ['orchestrator', 'automation', 'lab'] },
+  { view: 'acs', path: '/acs', title: 'ACS', icon: '🤖', keywords: ['acs', 'autonomous', 'cognition', 'session', 'interest', 'curiosity', 'directive'] },
+  { view: 'system-status', path: '/system-status', title: 'System Status', icon: '📊', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {

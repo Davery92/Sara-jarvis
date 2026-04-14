@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 from pathlib import Path
 
+from app.core.timezone import now as local_now
+
 logger = logging.getLogger(__name__)
 
 # Base directory for brief files
@@ -178,7 +180,7 @@ class MomentLayer:
                 depth = f"extended session ({turn_count} exchanges)"
 
             # Get current time context
-            now = datetime.now()
+            now = local_now()
             hour = now.hour
             if 5 <= hour < 12:
                 time_of_day = "morning"

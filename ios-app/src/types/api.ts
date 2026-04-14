@@ -80,6 +80,9 @@ export interface Folder {
   id: number;
   name: string;
   parent_id?: number;
+  notes_count?: number;
+  subfolders_count?: number;
+  updated_at?: string;
 }
 
 export interface Habit {

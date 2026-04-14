@@ -167,6 +167,8 @@ class ActivityStateMachine:
             self._handle_face(signal)
         elif signal.signal_type == "desk_presence":
             self._handle_desk_presence(signal)
+        elif signal.signal_type == "desktop":
+            self._handle_desktop(signal)
 
         return self.current
 
@@ -469,6 +471,56 @@ class ActivityStateMachine:
             current = self._current.state
             if current == ActivityState.AWAY:
                 self._transition(ActivityState.ACTIVE, 0.7, "returned to desk")
+
+    # Desktop app → activity state mapping
+    _APP_STATE_MAP = {
+        # Meeting apps
+        "zoom": ActivityState.IN_MEETING,
+        "teams": ActivityState.IN_MEETING,
+        "google meet": ActivityState.IN_MEETING,
+        "webex": ActivityState.IN_MEETING,
+        "slack huddle": ActivityState.IN_MEETING,
+        # Focused work apps
+        "vscode": ActivityState.FOCUSED_WORK,
+        "code": ActivityState.FOCUSED_WORK,
+        "visual studio": ActivityState.FOCUSED_WORK,
+        "intellij": ActivityState.FOCUSED_WORK,
+        "pycharm": ActivityState.FOCUSED_WORK,
+        "terminal": ActivityState.FOCUSED_WORK,
+        "iterm": ActivityState.FOCUSED_WORK,
+        "sublime": ActivityState.FOCUSED_WORK,
+        "vim": ActivityState.FOCUSED_WORK,
+        "neovim": ActivityState.FOCUSED_WORK,
+    }
+
+    def _handle_desktop(self, signal: ActivitySignal):
+        """Handle desktop active window changes — infer activity from app."""
+        app = (signal.value or "").lower()
+        idle_seconds = signal.metadata.get("idle_seconds", 0)
+
+        # Store for context injection
+        self._desktop_app = signal.value
+        self._desktop_window = signal.metadata.get("window_title", "")
+        self._desktop_idle = idle_seconds
+
+        # If idle for > 10 min, don't infer activity
+        if idle_seconds > 600:
+            return
+
+        # Map app to activity state
+        for app_key, state in self._APP_STATE_MAP.items():
+            if app_key in app:
+                current = self._current.state
+                # Only transition if confidence is reasonable
+                if current != state:
+                    self._transition(state, 0.65, f"desktop: {signal.value}")
+                else:
+                    self._current.confidence = min(self._current.confidence + 0.05, 1.0)
+                return
+
+        # Unknown app — if at desk, keep as ACTIVE
+        if self._current.state == ActivityState.UNKNOWN:
+            self._transition(ActivityState.ACTIVE, 0.4, f"desktop active: {signal.value}")
 
     # --- Internal helpers ---
 

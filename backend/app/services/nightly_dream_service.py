@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 import pytz
 import redis.asyncio as aioredis
 
+from app.core.timezone import now as local_now
+
 from app.db.session import SessionLocal
 from app.models.user import User
 from app.models.episode import Episode
@@ -485,12 +487,12 @@ class NightlyDreamService:
             )
             
             # Store as special summary content
-            summary_id = f"{user_id}_daily_summary_{datetime.now().strftime('%Y%m%d')}"
+            summary_id = f"{user_id}_daily_summary_{local_now().strftime('%Y%m%d')}"
             
             # Process summary through intelligence pipeline
             content_type, chunks = content_intelligence.process_content(
                 summary_content, 
-                f"Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
+                f"Daily Summary - {local_now().strftime('%Y-%m-%d')}"
             )
             
             metadata = metadata_extractor.extract_metadata(
@@ -518,7 +520,7 @@ class NightlyDreamService:
                 enhanced_neo4j.store_intelligent_content,
                 content_id=summary_id,
                 user_id=user_id,
-                title=f"Daily Summary - {datetime.now().strftime('%Y-%m-%d')}",
+                title=f"Daily Summary - {local_now().strftime('%Y-%m-%d')}",
                 content=summary_content,
                 content_type=content_type,
                 chunks=chunks,
@@ -613,7 +615,7 @@ class NightlyDreamService:
         """Format all daily insights into a comprehensive summary"""
         summary_parts = []
         
-        summary_parts.append(f"# Daily Summary - {datetime.now().strftime('%Y-%m-%d')}")
+        summary_parts.append(f"# Daily Summary - {local_now().strftime('%Y-%m-%d')}")
         summary_parts.append("")
         
         if themes:
@@ -813,6 +815,7 @@ class NightlyDreamService:
                             role="system",
                             content=summary,
                             importance=0.6,
+                            base_importance=0.6,
                         )
 
                         # Generate embedding for the episode

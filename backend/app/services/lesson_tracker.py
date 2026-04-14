@@ -12,8 +12,6 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from app.services.karma.feedback import record_lesson_outcome
-
 logger = logging.getLogger(__name__)
 
 
@@ -62,17 +60,6 @@ class LessonTracker:
             context_snippet=context_snippet
         )
 
-        # Record karma event
-        try:
-            await record_lesson_outcome(
-                db=db,
-                lesson_id=lesson_id,
-                was_successful=True,
-                feedback_signal=feedback_signal
-            )
-        except Exception as e:
-            logger.warning(f"Failed to record lesson karma: {e}")
-
     async def record_failure(
         self,
         db: Session,
@@ -99,17 +86,6 @@ class LessonTracker:
             feedback_signal=feedback_signal,
             context_snippet=context_snippet
         )
-
-        # Record karma event
-        try:
-            await record_lesson_outcome(
-                db=db,
-                lesson_id=lesson_id,
-                was_successful=False,
-                feedback_signal=feedback_signal
-            )
-        except Exception as e:
-            logger.warning(f"Failed to record lesson karma: {e}")
 
     async def _record_outcome(
         self,

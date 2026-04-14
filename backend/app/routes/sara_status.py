@@ -15,6 +15,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from zoneinfo import ZoneInfo
 
+from app.core.timezone import now as local_now
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -162,29 +164,43 @@ async def get_sara_status(
             else:
                 result["last_action"] = None
 
-        # Get pending observations (unread journal entries of type heartbeat/periodic in last 4 hours)
-        four_hours_ago = now - timedelta(hours=4)
-        obs_count = db.execute(text("""
-            SELECT COUNT(*) as cnt
-            FROM sara_journal
-            WHERE user_id = :uid
-            AND entry_type IN ('heartbeat', 'periodic', 'unified', 'deliberation', 'consolidation')
-            AND created_at >= :since
-        """), {"uid": user_id, "since": four_hours_ago}).fetchone()
+        # Get pending observations from Redis (matching what debug_notifications uses)
+        try:
+            import redis as sync_redis
+            r = sync_redis.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            obs_key = f"sara:observations:{user_id}"
+            result["pending_observations"] = r.zcard(obs_key) or 0
+            r.close()
+        except Exception:
+            # Fall back to journal count if Redis unavailable
+            four_hours_ago = now - timedelta(hours=4)
+            obs_count = db.execute(text("""
+                SELECT COUNT(*) as cnt
+                FROM sara_journal
+                WHERE user_id = :uid
+                AND entry_type IN ('heartbeat', 'periodic', 'unified', 'deliberation', 'consolidation')
+                AND created_at >= :since
+            """), {"uid": user_id, "since": four_hours_ago}).fetchone()
+            if obs_count:
+                result["pending_observations"] = obs_count.cnt
 
-        if obs_count:
-            result["pending_observations"] = obs_count.cnt
-
-        # Get subconscious state for David's energy/mood and hours since last chat
-        subconscious = db.execute(text("""
-            SELECT inferred_energy_level, inferred_mood, hours_since_presence,
-                   updated_at
-            FROM subconscious_state
-            WHERE user_id = :uid
+        # Get hours since last chat from episode table (actual chat messages)
+        last_chat = db.execute(text("""
+            SELECT MAX(created_at) as last_at
+            FROM episode
+            WHERE user_id = :uid AND role = 'user'
         """), {"uid": user_id}).fetchone()
 
-        if subconscious:
-            result["hours_since_last_chat"] = subconscious.hours_since_presence
+        if last_chat and last_chat.last_at:
+            last_at = last_chat.last_at
+            if last_at.tzinfo is None:
+                from datetime import timezone as tz
+                last_at = last_at.replace(tzinfo=tz.utc)
+            delta_hours = (now - last_at).total_seconds() / 3600
+            result["hours_since_last_chat"] = round(delta_hours, 1)
 
         # Get PKG facts count
         try:
@@ -237,7 +253,7 @@ def _summarize_actions(actions: list) -> Optional[str]:
 
 def _get_time_period() -> str:
     """Return current time period: morning, afternoon, evening, night."""
-    hour = datetime.now().hour
+    hour = local_now().hour
     if 6 <= hour < 12:
         return "morning"
     elif 12 <= hour < 18:

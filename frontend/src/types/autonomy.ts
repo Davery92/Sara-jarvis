@@ -44,13 +44,14 @@ export interface AttentionItem {
   category: string
   priority: 'low' | 'normal' | 'high' | 'urgent' | 'critical'
   source: string
-  status: 'new' | 'sent' | 'read' | 'archived' | 'dropped'
+  status: 'new' | 'sent' | 'read' | 'archived' | 'dropped' | 'completed'
   dedupe_key: string | null
   payload: Record<string, any> | null
   created_at: string
   updated_at: string
   read_at: string | null
   archived_at: string | null
+  completed_at: string | null
 }
 
 export interface Mission {

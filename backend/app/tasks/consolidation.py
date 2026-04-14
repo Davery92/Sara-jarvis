@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 from uuid import uuid4
 
 from app.celery_app import celery_app
+from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def check_consolidation_trigger(self) -> Dict[str, Any]:
         )
 
         result = {
-            "checked_at": datetime.utcnow().isoformat(),
+            "checked_at": local_now().isoformat(),
             "last_activity_ms": last_activity_ms,
             "last_consolidation_ms": last_consolidation_ms,
             "quiet_duration_seconds": round(quiet_duration_seconds, 1),
@@ -140,7 +141,7 @@ def run_consolidation(self) -> Dict[str, Any]:
     solo_user_id = os.getenv("SOLO_USER_ID", "")
 
     run_id = str(uuid4())
-    run_start = datetime.utcnow()
+    run_start = local_now()
 
     result = {
         "run_id": run_id,
@@ -192,7 +193,7 @@ def run_consolidation(self) -> Dict[str, Any]:
         if not all_entries:
             # Nothing to process
             result["status"] = "completed"
-            result["completed_at"] = datetime.utcnow().isoformat()
+            result["completed_at"] = local_now().isoformat()
             mark_consolidation_run(r, run_start)
             return result
 
@@ -241,7 +242,7 @@ def run_consolidation(self) -> Dict[str, Any]:
             log_discards(r, run_id, discarded_entries)
 
         result["status"] = "completed"
-        result["completed_at"] = datetime.utcnow().isoformat()
+        result["completed_at"] = local_now().isoformat()
 
         # Mark last successful run
         mark_consolidation_run(r, run_start)
@@ -397,7 +398,7 @@ def create_context_segment(entry: Dict, relevance: float) -> Dict:
     """Create a context segment from a raw entry."""
     return {
         "type": entry.get("stream_type", "unknown"),
-        "timestamp": entry.get("timestamp", datetime.utcnow()).isoformat()
+        "timestamp": entry.get("timestamp", local_now()).isoformat()
                      if isinstance(entry.get("timestamp"), datetime) else entry.get("timestamp"),
         "content": entry.get("content", ""),
         "relevance_score": relevance,
@@ -433,7 +434,7 @@ def update_working_memory_context(r, user_id: str, segments: List[Dict]):
             reverse=True
         )[:max_segments]
 
-    context["updated_at"] = datetime.utcnow().isoformat()
+    context["updated_at"] = local_now().isoformat()
 
     # Store with 1 hour TTL
     r.setex(context_key, 3600, json.dumps(context))

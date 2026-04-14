@@ -9,6 +9,33 @@ services:
       - /data/redis:/data
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  embeddings:
+    build:
+      context: ./embedding-service
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      - embedding_model_cache:/root/.cache
+    environment:
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   frontend:
     build:
@@ -62,17 +89,17 @@ services:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
       - REDIS_URL=redis://redis:6379/0
-      # AI Provider - defaults to local gpt-oss, can be overridden via settings
+      # AI Provider - defaults to local Qwen via llama-server
       - AI_PROVIDER=${AI_PROVIDER-openai}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b-32k}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-Qwen3.5-122B-A10B}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
-      - FAST_MODEL_URL=${FAST_MODEL_URL-http://100.104.68.115:11434/v1}
-      - FAST_MODEL=${FAST_MODEL-gpt-oss:20b}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
       - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
@@ -100,6 +127,8 @@ services:
       - MSGRAPH_CLIENT_ID=${MSGRAPH_CLIENT_ID}
       - MSGRAPH_CLIENT_SECRET=${MSGRAPH_CLIENT_SECRET}
       - MSGRAPH_TENANT_ID=${MSGRAPH_TENANT_ID}
+      # Proxmox container provisioning
+      - PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET-}
       # Sentry error tracking
       - SENTRY_DSN=${SENTRY_DSN-}
       - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
@@ -117,11 +146,25 @@ services:
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     depends_on:
       db:
-        condition: service_started
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
       minio:
         condition: service_started
+      embeddings:
+        condition: service_healthy
 
   db:
     image: pgvector/pgvector:pg16
@@ -134,6 +177,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sara -d sara_hub"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   minio:
     image: quay.io/minio/minio
@@ -147,10 +196,15 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local --insecure 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   neo4j:
     image: neo4j:5.15-community
-    profiles: ["graph-neo4j"]
     restart: unless-stopped
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
@@ -183,17 +237,27 @@ services:
       dockerfile: Dockerfile.dev
     restart: unless-stopped
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b-32k}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-Qwen3.5-122B-A10B}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
-      - FAST_MODEL_URL=${FAST_MODEL_URL-http://100.104.68.115:11434/v1}
-      - FAST_MODEL=${FAST_MODEL-gpt-oss:20b}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
       - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
@@ -203,13 +267,127 @@ services:
       - SENTRY_DSN=${SENTRY_DSN-}
       - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
       - CELERY_WORKER_QUEUES=cognitive,health,input,maintenance,low_priority,reflection
+      # Note: 'critical' is handled exclusively by celery-critical worker
+      # Note: 'acs' is handled exclusively by celery-acs worker
     volumes:
       - ./backend:/app
       - /app/__pycache__
       - /app/app/__pycache__
+      - /home/david/.ssh:/root/.ssh:ro
+      # Shared with backend so generated artifacts (morning brief audio,
+      # briefing TTS, etc.) are visible to the API that serves them.
+      - ./data:/home/david/jarvis/data
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+  # Celery ACS Worker - dedicated to long-running autonomous cognition sessions
+  # Isolated from critical queue so multi-hour sessions don't starve standing orders
+  celery-acs:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q acs -n acs@%h
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d acs@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-Qwen3.5-122B-A10B}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/root/.ssh:ro
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+  # Celery Critical Worker - dedicated to fast, must-run tasks (standing orders, lifecycle, automation)
+  # Prevents long-running LLM tasks from starving time-sensitive checks
+  celery-critical:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q critical -n critical@%h
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d critical@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-Qwen3.5-122B-A10B}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/root/.ssh:ro
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
   # Celery Beat - schedules periodic tasks
   celery-beat:
@@ -217,7 +395,17 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     restart: unless-stopped
-    command: celery -A app.celery_app beat --loglevel=info
+    command: celery -A app.celery_app beat --loglevel=info -s /tmp/celerybeat-schedule
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule && test $$(( $$(date +%s) - $$(stat -c %Y /tmp/celerybeat-schedule) )) -lt 300"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
@@ -239,3 +427,4 @@ volumes:
   neo4j_logs:
   neo4j_import:
   neo4j_plugins:
+  embedding_model_cache:

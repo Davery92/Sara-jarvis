@@ -7,12 +7,12 @@ import {
   FlatList,
   RefreshControl,
   Linking,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import apiClient from '../../services/api';
+import { useToast } from '../../context/ToastContext';
 
 interface IntelligenceItem {
   id: string;
@@ -76,6 +76,7 @@ function scoreColor(score: number): string {
 }
 
 export default function IntelligenceScreen() {
+  const { showToast } = useToast();
   const [items, setItems] = useState<IntelligenceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -119,9 +120,9 @@ export default function IntelligenceScreen() {
   const handleDigDeeper = async (itemId: string) => {
     try {
       await apiClient.post(`/api/intelligence/${itemId}/dig-deeper`);
-      Alert.alert('Research Dispatched', 'A deep research agent has been dispatched to investigate this topic.');
+      showToast('success', 'A deep research agent has been dispatched to investigate this topic.');
     } catch (err) {
-      Alert.alert('Error', 'Failed to dispatch research agent.');
+      showToast('error', 'Failed to dispatch research agent.');
     }
   };
 

@@ -575,6 +575,80 @@ class PKGExtractor:
         logger.info(f"PKG Behavioral: Extracted {len(results)} facts from behavioral patterns")
         return {"extracted": results, "stats": stats}
 
+    async def extract_from_acs_note(
+        self,
+        content: str,
+        title: str,
+        user_id: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Extract David-relevant facts from an ACS-authored note.
+
+        Uses a lightweight prompt that only targets facts about David's life,
+        not Sara's own observations or intellectual interests.
+        """
+        self._ensure_llm()
+
+        if not content or len(content.strip()) < 50:
+            return {"extracted": [], "stats": {"total": 0}}
+
+        # Truncate long notes
+        if len(content) > 5000:
+            content = content[:5000] + "\n...(truncated)"
+
+        prompt = (
+            f"Sara (an AI assistant) wrote this note during autonomous exploration:\n\n"
+            f"Title: {title}\n\n{content}\n\n"
+            f"Extract ONLY facts about David (Sara's human) from this note. "
+            f"Ignore Sara's own reflections, intellectual observations, or research summaries "
+            f"that don't reveal something about David's life, preferences, routines, or goals.\n\n"
+            f"Types: Person, Preference, Routine, Goal, Interest, Health, Place, Fact\n"
+            f"Return a JSON array. If nothing about David is mentioned, return []."
+        )
+
+        try:
+            response = await self.llm_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "Extract personal facts about David only. Return valid JSON arrays. Return [] if nothing qualifies."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=1500,
+            )
+
+            resp_content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            facts = self._parse_json_response(resp_content)
+
+            if not facts:
+                return {"extracted": [], "stats": {"total": 0}}
+
+            results = []
+            for fact in facts:
+                if not isinstance(fact, dict):
+                    continue
+                confidence = min(max(fact.get("confidence", 0.5), 0.1), 0.99)
+                if confidence < 0.6:
+                    continue
+
+                fact_type = fact.get("type", "Fact")
+                properties = fact.get("properties", {})
+
+                pkg_id = personal_kg.upsert_fact(
+                    fact_type=fact_type,
+                    properties=properties,
+                    confidence=confidence,
+                    source="acs_note_extraction",
+                )
+                if pkg_id:
+                    results.append({"pkg_id": pkg_id, "type": fact_type, "confidence": confidence})
+
+            logger.info(f"PKG ACS note extraction: {len(results)} facts from '{title}'")
+            return {"extracted": results, "stats": {"total": len(results)}}
+
+        except Exception as e:
+            logger.error(f"PKG ACS note extraction failed: {e}")
+            return {"extracted": [], "stats": {"total": 0, "error": str(e)}}
+
     def _parse_json_response(self, content: str) -> List[Dict]:
         """Parse LLM response as JSON array, handling common formatting issues"""
         if not content:

@@ -7,6 +7,7 @@ import json
 import uuid
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Any
+from app.core.timezone import now as local_now
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
 from app.models.profile import DailyReflection, ReflectionSettings, UserActivityLog
@@ -159,7 +160,7 @@ class ReflectionService:
         responses = reflection.responses.copy()
         responses[question_id] = {
             "value": response,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": local_now().isoformat(),
             "question": current_question["question"]
         }
         reflection.responses = responses
@@ -334,7 +335,7 @@ class ReflectionService:
         if "reminder_channels" in settings_data:
             settings.reminder_channels = settings_data["reminder_channels"]
         
-        settings.updated_at = datetime.utcnow()
+        settings.updated_at = local_now()
         self.db.commit()
         
         return {

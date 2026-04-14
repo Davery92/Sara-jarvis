@@ -742,6 +742,28 @@ const markdownStyles = {
     fontWeight: 'bold' as const,
     color: colors.text,
   },
+  code_inline: {
+    color: colors.primary,
+    backgroundColor: 'transparent',
+    fontSize: fontSizes.md - 1,
+    fontFamily: undefined,
+  },
+  code_block: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    padding: spacing.sm,
+    fontSize: fontSizes.md - 2,
+  },
+  fence: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    padding: spacing.sm,
+    fontSize: fontSizes.md - 2,
+  },
   hr: {
     backgroundColor: colors.border,
     height: 1,

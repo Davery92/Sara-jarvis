@@ -9,13 +9,17 @@ import HealthDataScreen from '../screens/health/HealthDataScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import ProjectsScreen from '../screens/projects/ProjectsScreen';
 import InboxScreen from '../screens/inbox/InboxScreen';
-import SaraActivityScreen from '../screens/sara/SaraActivityScreen';
 import KnowledgeScreen from '../screens/knowledge/KnowledgeScreen';
 import IntelligenceScreen from '../screens/intelligence/IntelligenceScreen';
 import NotesListScreen from '../screens/notes/NotesListScreen';
 import AgentTasksScreen from '../screens/agents/AgentTasksScreen';
-import TemerantScreen from '../screens/temerant/TemerantScreen';
-import TemerantRpgScreen from '../screens/temerant/TemerantRpgScreen';
+import DailyTasksScreen from '../screens/tasks/DailyTasksScreen';
+import AutomationsScreen from '../screens/automations/AutomationsScreen';
+import EmailListScreen from '../screens/email/EmailListScreen';
+import EmailDetailScreen from '../screens/email/EmailDetailScreen';
+import LearningScreen from '../screens/learning/LearningScreen';
+import NotificationsScreen from '../screens/notifications/NotificationsScreen';
+import ACSScreen from '../screens/acs/ACSScreen';
 import { colors, fontSizes } from '../styles/theme';
 
 export type AppStackParamList = {
@@ -28,13 +32,17 @@ export type AppStackParamList = {
   Health: undefined;
   Settings: undefined;
   Projects: undefined;
-  Inbox: undefined;
-  SaraActivity: undefined;
+  Inbox: { tab?: 'content' | 'attention' } | undefined;
   Knowledge: undefined;
   Intelligence: undefined;
   AgentTasks: undefined;
-  Temerant: undefined;
-  TemerantRpg: undefined;
+  DailyTasks: undefined;
+  Automations: undefined;
+  Email: undefined;
+  EmailDetail: { emailId: string };
+  Learning: undefined;
+  Notifications: { notificationId?: number } | undefined;
+  ACS: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -104,11 +112,6 @@ export default function AppNavigator() {
         options={{ title: 'Inbox' }}
       />
       <Stack.Screen
-        name="SaraActivity"
-        component={SaraActivityScreen}
-        options={{ title: "Sara's Mind" }}
-      />
-      <Stack.Screen
         name="Knowledge"
         component={KnowledgeScreen}
         options={{ title: 'Knowledge' }}
@@ -124,14 +127,39 @@ export default function AppNavigator() {
         options={{ title: 'Agent Tasks' }}
       />
       <Stack.Screen
-        name="Temerant"
-        component={TemerantScreen}
-        options={{ title: 'Temerant' }}
+        name="DailyTasks"
+        component={DailyTasksScreen}
+        options={{ title: 'Daily Tasks' }}
       />
       <Stack.Screen
-        name="TemerantRpg"
-        component={TemerantRpgScreen}
-        options={{ title: 'Temerant RPG' }}
+        name="Automations"
+        component={AutomationsScreen}
+        options={{ title: 'Automations' }}
+      />
+      <Stack.Screen
+        name="Email"
+        component={EmailListScreen}
+        options={{ title: 'Email' }}
+      />
+      <Stack.Screen
+        name="EmailDetail"
+        component={EmailDetailScreen}
+        options={{ title: 'Email' }}
+      />
+      <Stack.Screen
+        name="Learning"
+        component={LearningScreen}
+        options={{ title: 'Learning' }}
+      />
+      <Stack.Screen
+        name="Notifications"
+        component={NotificationsScreen}
+        options={{ title: 'Notifications' }}
+      />
+      <Stack.Screen
+        name="ACS"
+        component={ACSScreen}
+        options={{ title: 'Autonomous Cognition' }}
       />
     </Stack.Navigator>
   );

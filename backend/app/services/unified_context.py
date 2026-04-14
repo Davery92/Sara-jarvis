@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, get_args, get_origin, Union
+from app.core.timezone import now as local_now
 
 import redis.asyncio as aioredis
 
@@ -88,6 +89,7 @@ class UnifiedContextSnapshot:
     # ── Sara Internal State ──
     sara_focus: Optional[str] = None  # what Sara is paying attention to
     sara_emotional_tone: Optional[str] = None  # curious/concerned/playful/proud/etc
+    sara_emotional_intensity: float = 0.3  # 0.0-1.0, how strongly Sara feels the current tone
     sara_curiosities: Optional[List[str]] = None  # things Sara wants to explore (max 5)
     sara_last_deliberation_at: Optional[str] = None  # ISO timestamp
     sara_deliberation_count_today: int = 0
@@ -113,6 +115,11 @@ class UnifiedContextSnapshot:
     # ── PKG Growth ──
     pkg_validation_report: Optional[str] = None  # JSON: {confirmed, contradictions_count, stale, ...}
     pkg_knowledge_gaps: Optional[str] = None  # JSON: [{"topic": ..., "mentions": N, "suggested_type": ...}]
+
+    # ── ACS (Autonomous Cognition System) ──
+    acs_state: Optional[str] = None  # autonomous|pausing|conversational|cooldown
+    acs_active_session_id: Optional[str] = None
+    acs_model_id: Optional[str] = None
 
     # ── Meta ──
     version: int = 0
@@ -172,18 +179,28 @@ class UnifiedContextSnapshot:
         return cls(**kwargs)
 
 
-# ── Redis Connection Pool (module-level singleton) ──
+# ── Redis Connection Pool (per-event-loop singleton) ──
 
 _redis_pool: Optional[aioredis.Redis] = None
+_redis_loop_id: Optional[int] = None  # track which event loop owns the pool
 
 
 async def _get_redis() -> aioredis.Redis:
-    """Lazy-init shared Redis connection."""
-    global _redis_pool
-    if _redis_pool is None:
+    """Lazy-init shared Redis connection, recreated when event loop changes."""
+    global _redis_pool, _redis_loop_id
+    import asyncio
+    cur_loop = id(asyncio.get_running_loop())
+    if _redis_pool is None or cur_loop != _redis_loop_id:
+        # Close stale pool (best-effort)
+        if _redis_pool is not None:
+            try:
+                await _redis_pool.aclose()
+            except Exception:
+                pass
         _redis_pool = await aioredis.from_url(
             REDIS_URL, decode_responses=True, max_connections=10
         )
+        _redis_loop_id = cur_loop
     return _redis_pool
 
 
@@ -207,7 +224,7 @@ async def write_snapshot(user_id: str, snapshot: UnifiedContextSnapshot) -> None
         r = await _get_redis()
         key = SNAPSHOT_KEY.format(user_id=user_id)
         snapshot.version += 1
-        snapshot.updated_at = datetime.utcnow().isoformat()
+        snapshot.updated_at = local_now().isoformat()
         await r.hset(key, mapping=snapshot.to_dict())
     except Exception as e:
         logger.warning(f"Failed to write snapshot to Redis: {e}")

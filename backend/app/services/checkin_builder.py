@@ -57,7 +57,7 @@ def build_checkin(
     has_changes = bool(changes)
     has_upcoming = bool(snapshot.next_event_title and snapshot.next_event_minutes_away is not None
                         and snapshot.next_event_minutes_away <= 60)
-    has_reviews = snapshot.learning_reviews_due > 0
+    has_reviews = False  # learning reviews disabled
 
     # Nothing to say — skip
     if not has_changes and not has_upcoming and not has_reviews:

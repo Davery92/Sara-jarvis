@@ -1,12 +1,13 @@
 """Authentication routes."""
 import logging
+from typing import Optional
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.auth import UserCreate, UserLogin, UserResponse
+from app.schemas.auth import UserCreate, UserLogin, UserResponse, UserUpdate
 from app.core.auth import create_access_token, get_cookie_domain
 from app.core.deps import get_current_user
 from app.core.security import rate_limiter
@@ -28,6 +29,46 @@ async def check_auth_rate_limit(request: Request):
             detail=f"Too many attempts. Retry after {retry_after} seconds.",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def _get_username(db: Session, user_id: str) -> Optional[str]:
+    """Fetch display username from user_settings.preferences if available."""
+    try:
+        from app.models.user_settings import UserSettings as UserSettingsModel
+
+        settings = db.query(UserSettingsModel).filter(
+            UserSettingsModel.user_id == user_id
+        ).first()
+        if not settings:
+            return None
+        prefs = settings.preferences or {}
+        username = prefs.get("username")
+        if isinstance(username, str) and username.strip():
+            return username.strip()
+        return None
+    except Exception:
+        # Keep auth endpoints resilient if user_settings table is unavailable.
+        return None
+
+
+def _set_username(db: Session, user_id: str, username: Optional[str]) -> None:
+    """Persist display username to user_settings.preferences."""
+    from app.models.user_settings import UserSettings as UserSettingsModel
+
+    settings = db.query(UserSettingsModel).filter(
+        UserSettingsModel.user_id == user_id
+    ).first()
+
+    if not settings:
+        settings = UserSettingsModel(user_id=user_id, preferences={})
+        db.add(settings)
+
+    prefs = dict(settings.preferences or {})
+    if username and username.strip():
+        prefs["username"] = username.strip()
+    else:
+        prefs.pop("username", None)
+    settings.preferences = prefs
 
 
 @router.post("/signup", response_model=UserResponse)
@@ -75,7 +116,8 @@ async def signup(
     return UserResponse(
         id=user.id,
         email=user.email,
-        created_at=user.created_at.isoformat()
+        created_at=user.created_at.isoformat(),
+        username=_get_username(db, user.id),
     )
 
 
@@ -136,6 +178,7 @@ async def login(
         id=user.id,
         email=user.email,
         created_at=user.created_at.isoformat(),
+        username=_get_username(db, user.id),
         access_token=access_token
     )
 
@@ -152,12 +195,62 @@ async def logout(request: Request, response: Response):
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+async def get_me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Get the current authenticated user's information."""
+    username = _get_username(db, current_user.id)
+
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
-        created_at=current_user.created_at.isoformat()
+        created_at=current_user.created_at.isoformat(),
+        username=username,
+    )
+
+
+@router.put("/me", response_model=UserResponse)
+async def update_me(
+    payload: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update current user profile fields used by clients."""
+    changed = False
+
+    if payload.email is not None and payload.email != current_user.email:
+        existing = db.query(User).filter(
+            User.email == payload.email,
+            User.id != current_user.id,
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        current_user.email = payload.email
+        changed = True
+
+    if payload.username is not None:
+        try:
+            _set_username(db, current_user.id, payload.username)
+            changed = True
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to update username: {exc}")
+
+    if changed:
+        try:
+            db.commit()
+            db.refresh(current_user)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to update user: {exc}")
+
+    username = _get_username(db, current_user.id)
+    return UserResponse(
+        id=current_user.id,
+        email=current_user.email,
+        created_at=current_user.created_at.isoformat(),
+        username=username,
     )
 
 

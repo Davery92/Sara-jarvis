@@ -7,9 +7,12 @@ import {
   TouchableOpacity,
   Text,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import apiClient from '../../services/api';
+import { navigateToChat } from '../../services/navigation';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import SimpleMarkdown from '../../components/chat/SimpleMarkdown';
 
@@ -54,6 +57,16 @@ interface ObservationEntry {
   description: string;
   salience: number;
   category: string;
+}
+
+interface AttentionAction {
+  id: string;
+  label: string;
+  kind: string;
+  target?: string;
+  prompt?: string;
+  url?: string;
+  default_minutes?: number;
 }
 
 const ACTIVITY_ICONS: Record<string, string> = {
@@ -138,6 +151,7 @@ function salienceColor(salience: number): string {
 }
 
 export default function SaraActivityScreen() {
+  const navigation = useNavigation<any>();
   const [tab, setTab] = useState<TabType>('mind');
   const [activities, setActivities] = useState<any[]>([]);
   const [attentionItems, setAttentionItems] = useState<any[]>([]);
@@ -153,6 +167,7 @@ export default function SaraActivityScreen() {
   const [observations, setObservations] = useState<ObservationEntry[]>([]);
   const [accumulatedSalience, setAccumulatedSalience] = useState(0);
   const [expandedThoughtIdx, setExpandedThoughtIdx] = useState<number | null>(null);
+  const [attentionActionBusy, setAttentionActionBusy] = useState<string | null>(null);
 
   const loadMindData = useCallback(async () => {
     try {
@@ -226,18 +241,135 @@ export default function SaraActivityScreen() {
 
   const markAttentionRead = async (id: string) => {
     try {
-      await apiClient.post(`/autonomy/attention/${id}/read`);
+      await apiClient.markAttentionRead(id);
       loadAttention();
+      loadAttentionCount();
+    } catch { /* best-effort */ }
+  };
+
+  const markAttentionEngaged = async (id: string) => {
+    try {
+      await apiClient.engageAttentionItem(id);
       loadAttentionCount();
     } catch { /* best-effort */ }
   };
 
   const archiveAttention = async (id: string) => {
     try {
-      await apiClient.post(`/autonomy/attention/${id}/archive`);
+      await apiClient.archiveAttentionItem(id);
       loadAttention();
       loadAttentionCount();
     } catch { /* best-effort */ }
+  };
+
+  const getAttentionActions = (item: any): AttentionAction[] => {
+    const actions = item?.payload?.actions;
+    if (!Array.isArray(actions)) return [];
+    return actions.filter((action): action is AttentionAction =>
+      !!action &&
+      typeof action.id === 'string' &&
+      typeof action.label === 'string' &&
+      typeof action.kind === 'string'
+    );
+  };
+
+  const handleAttentionDirective = (directive?: { type?: string; target?: string; prompt?: string; url?: string }) => {
+    if (!directive?.type) return;
+    if (directive.type === 'navigate') {
+      const target = (directive.target || '').toLowerCase();
+      if (target === 'calendar') {
+        navigation.navigate('Calendar');
+      } else if (target === 'inbox') {
+        navigation.navigate('Inbox');
+      } else {
+        navigation.navigate('Inbox', { tab: 'attention' });
+      }
+      return;
+    }
+
+    if (directive.type === 'open_url' && directive.url) {
+      const { Linking } = require('react-native');
+      Linking.openURL(directive.url).catch(() => {
+        Alert.alert('Error', 'Failed to open URL');
+      });
+      return;
+    }
+
+    if (directive.type === 'chat') {
+      navigateToChat({
+        heartbeat: {
+          title: 'Attention item',
+          message: directive.prompt || 'Help me handle this.',
+          priority: 'normal',
+        },
+      });
+    }
+  };
+
+  const runAttentionAction = async (itemId: string, action: AttentionAction, params?: Record<string, any>) => {
+    const busyKey = `${itemId}:${action.id}`;
+    setAttentionActionBusy(busyKey);
+    try {
+      const result = await apiClient.runAttentionAction(itemId, action.id, params);
+      handleAttentionDirective(result?.directive);
+      if (result?.reminder?.title && result?.reminder?.reminder_time) {
+        const when = new Date(result.reminder.reminder_time).toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+        });
+        Alert.alert('Reminder set', `${result.reminder.title} at ${when}`);
+      }
+      if (result?.calendar_event) {
+        const when = new Date(result.calendar_event.start_time).toLocaleString('en-US', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        });
+        Alert.alert('Event created', `${result.calendar_event.title} at ${when}`);
+      }
+      if (result?.status === 'completed') {
+        Alert.alert('Done', 'Item marked as completed.');
+      }
+      await loadAttention();
+      await loadAttentionCount();
+    } catch {
+      Alert.alert('Action failed', 'Could not run that attention action.');
+    } finally {
+      setAttentionActionBusy(null);
+    }
+  };
+
+  const showTimePicker = (itemId: string, action: AttentionAction) => {
+    const hoursFromNow = (h: number) => new Date(Date.now() + h * 3600_000).toISOString();
+    const tomorrow9am = () => {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      d.setHours(9, 0, 0, 0);
+      return d.toISOString();
+    };
+
+    if (action.kind === 'add_reminder') {
+      Alert.alert('Remind me', 'When should I remind you?', [
+        { text: '1 hour', onPress: () => runAttentionAction(itemId, action, { reminder_time: hoursFromNow(1) }) },
+        { text: '3 hours', onPress: () => runAttentionAction(itemId, action, { reminder_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(itemId, action, { reminder_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    } else if (action.kind === 'add_calendar') {
+      Alert.alert('Add to calendar', 'When should this event be?', [
+        { text: 'In 1 hour', onPress: () => runAttentionAction(itemId, action, { start_time: hoursFromNow(1) }) },
+        { text: 'In 3 hours', onPress: () => runAttentionAction(itemId, action, { start_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(itemId, action, { start_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    }
+  };
+
+  const handleAttentionActionPress = (itemId: string, action: AttentionAction) => {
+    if (action.kind === 'add_reminder' || action.kind === 'add_calendar') {
+      showTimePicker(itemId, action);
+    } else {
+      runAttentionAction(itemId, action);
+    }
   };
 
   const filteredActivities = filter === 'all'
@@ -305,19 +437,51 @@ export default function SaraActivityScreen() {
   ];
 
   const renderAttentionItem = ({ item }: { item: any }) => {
+    const isCompleted = item.status === 'completed';
     const priorityColor = item.priority === 'critical' ? '#ef4444'
       : item.priority === 'urgent' ? '#f97316'
       : item.priority === 'high' ? '#eab308'
       : colors.textMuted;
+    const actions = getAttentionActions(item);
     return (
-      <View style={styles.activityItem}>
+      <TouchableOpacity
+        style={[styles.activityItem, isCompleted && { opacity: 0.6, borderLeftWidth: 3, borderLeftColor: colors.success }]}
+        activeOpacity={0.85}
+        onPress={() => {
+          if (item.status === 'new' || item.status === 'sent') {
+            markAttentionEngaged(item.id);
+          }
+        }}
+      >
         <View style={styles.itemRow}>
           <View style={[styles.typeBadge, { backgroundColor: priorityColor + '20' }]}>
             <Text style={[styles.typeBadgeText, { color: priorityColor }]}>{item.priority}</Text>
           </View>
           <View style={styles.itemContent}>
-            <Text style={styles.itemSummary} numberOfLines={2}>{item.title}</Text>
+            <Text style={[styles.itemSummary, isCompleted && { textDecorationLine: 'line-through', color: colors.textMuted }]} numberOfLines={2}>
+              {isCompleted ? '\u2705 ' : ''}{item.title}
+            </Text>
             {item.body && <Text style={styles.detailText} numberOfLines={2}>{item.body}</Text>}
+            {!isCompleted && actions.length > 0 && (
+              <View style={styles.attentionActionsRow}>
+                {actions.map((action) => {
+                  const busy = attentionActionBusy === `${item.id}:${action.id}`;
+                  const isComplete = action.kind === 'complete';
+                  return (
+                    <TouchableOpacity
+                      key={action.id}
+                      style={[styles.attentionActionChip, isComplete && { borderColor: colors.success + '66', backgroundColor: colors.success + '14' }]}
+                      disabled={busy}
+                      onPress={() => handleAttentionActionPress(item.id, action)}
+                    >
+                      <Text style={[styles.attentionActionText, isComplete && { color: colors.success }]}>
+                        {busy ? 'Working...' : action.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
           </View>
           <View style={{ flexDirection: 'row', gap: 8 }}>
             {item.status === 'new' && (
@@ -325,12 +489,14 @@ export default function SaraActivityScreen() {
                 <Text style={{ color: colors.primary, fontSize: fontSizes.xs }}>Read</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity onPress={() => archiveAttention(item.id)}>
-              <Text style={{ color: colors.textMuted, fontSize: fontSizes.xs }}>Archive</Text>
-            </TouchableOpacity>
+            {!isCompleted && (
+              <TouchableOpacity onPress={() => archiveAttention(item.id)}>
+                <Text style={{ color: colors.textMuted, fontSize: fontSizes.xs }}>Archive</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -728,6 +894,25 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: fontSizes.sm,
     lineHeight: 20,
+  },
+  attentionActionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: spacing.sm,
+  },
+  attentionActionChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.primary + '66',
+    backgroundColor: colors.primary + '14',
+  },
+  attentionActionText: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
   },
   detailActions: {
     color: colors.primary,

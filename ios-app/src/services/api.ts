@@ -41,12 +41,54 @@ export interface CodexOAuthStatus {
   error?: string | null;
 }
 
-export interface AutonomyFlags {
-  temerant_enabled: boolean;
-  temerant_rpg_enabled?: boolean;
-  temerant_oracle_enabled?: boolean;
-  temerant_narrative_enabled?: boolean;
-  temerant_auto_ingestion_enabled?: boolean;
+export interface AutonomyFlags {}
+
+export interface ScheduledJob {
+  key: string;
+  display_name: string;
+  description: string | null;
+  category: string;
+  task_name: string;
+  schedule_kind: 'cron' | 'interval';
+  cron_expr: string | null;
+  interval_seconds: number | null;
+  timezone: string;
+  args: unknown[];
+  kwargs: Record<string, unknown>;
+  queue: string | null;
+  expires_seconds: number | null;
+  enabled: boolean;
+  editable: boolean;
+  source: string;
+  visibility: 'user' | 'system';
+  last_run_at: string | null;
+  last_status: string | null;
+  last_error: string | null;
+  last_run_duration_ms: number | null;
+  human_readable: string;
+}
+
+export interface SchedulePatch {
+  schedule_kind?: 'cron' | 'interval';
+  cron_expr?: string | null;
+  interval_seconds?: number | null;
+  timezone?: string;
+  enabled?: boolean;
+  kwargs?: Record<string, unknown>;
+}
+
+export interface TunableSetting {
+  key: string;
+  display_name: string;
+  description: string | null;
+  category: string;
+  value_type: 'int' | 'float' | 'string' | 'bool' | 'json';
+  value: any;
+  default_value: any;
+  min_value: any;
+  max_value: any;
+  unit: string | null;
+  editable: boolean;
 }
 
 class ApiClient {
@@ -587,6 +629,50 @@ class ApiClient {
     return response.data;
   }
 
+  // ==================== SCHEDULED JOBS (DB-backed Celery beat) ====================
+
+  async listSchedules(): Promise<ScheduledJob[]> {
+    const response = await this.client.get('/api/settings/schedules');
+    return response.data;
+  }
+
+  async updateSchedule(key: string, patch: SchedulePatch): Promise<ScheduledJob> {
+    const response = await this.client.patch(
+      `/api/settings/schedules/${encodeURIComponent(key)}`,
+      patch,
+    );
+    return response.data;
+  }
+
+  async runScheduleNow(key: string): Promise<{ ok: boolean; task_id: string; task_name: string }> {
+    const response = await this.client.post(
+      `/api/settings/schedules/${encodeURIComponent(key)}/run-now`,
+    );
+    return response.data;
+  }
+
+  // ==================== TUNABLES ====================
+
+  async listTunables(): Promise<TunableSetting[]> {
+    const response = await this.client.get('/api/settings/tunables');
+    return response.data;
+  }
+
+  async updateTunable(key: string, value: unknown): Promise<TunableSetting> {
+    const response = await this.client.patch(
+      `/api/settings/tunables/${encodeURIComponent(key)}`,
+      { value },
+    );
+    return response.data;
+  }
+
+  async resetTunable(key: string): Promise<TunableSetting> {
+    const response = await this.client.post(
+      `/api/settings/tunables/${encodeURIComponent(key)}/reset`,
+    );
+    return response.data;
+  }
+
   // ==================== CONTENT INBOX ====================
 
   async getInboxItems(status?: string, limit: number = 50): Promise<any[]> {
@@ -662,8 +748,28 @@ class ApiClient {
     await this.client.post(`/autonomy/attention/${id}/read`);
   }
 
+  async engageAttentionItem(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/engage`);
+  }
+
   async archiveAttentionItem(id: string): Promise<void> {
     await this.client.post(`/autonomy/attention/${id}/archive`);
+  }
+
+  async runAttentionAction(id: string, actionId: string, params?: Record<string, any>): Promise<any> {
+    const response = await this.client.post(
+      `/autonomy/attention/${id}/actions/${actionId}`,
+      params || undefined,
+    );
+    return response.data;
+  }
+
+  async replyToAttentionItem(id: string, message: string): Promise<any> {
+    const response = await this.client.post(
+      `/autonomy/attention/${id}/reply`,
+      { message },
+    );
+    return response.data;
   }
 
   async sendNotificationFeedback(
@@ -724,6 +830,37 @@ class ApiClient {
 
   async rejectPolicyCandidate(id: string): Promise<any> {
     const response = await this.client.post(`/autonomy/policy-candidates/${id}/reject`);
+    return response.data;
+  }
+  // ── Daily Tasks ──────────────────────────────────────
+
+  async getDailyTasks(date?: string): Promise<any[]> {
+    const params = date ? `?date_str=${date}` : '';
+    const response = await this.client.get(`/api/daily-tasks${params}`);
+    return response.data;
+  }
+
+  async createDailyTask(data: { title: string; description?: string; priority?: string; task_date?: string }): Promise<any> {
+    const response = await this.client.post('/api/daily-tasks', data);
+    return response.data;
+  }
+
+  async updateDailyTask(id: string, data: { title?: string; description?: string; priority?: string; is_completed?: boolean }): Promise<any> {
+    const response = await this.client.patch(`/api/daily-tasks/${id}`, data);
+    return response.data;
+  }
+
+  async deleteDailyTask(id: string): Promise<void> {
+    await this.client.delete(`/api/daily-tasks/${id}`);
+  }
+
+  async toggleDailyTask(id: string): Promise<any> {
+    const response = await this.client.patch(`/api/daily-tasks/${id}/toggle`);
+    return response.data;
+  }
+
+  async carryOverTasks(): Promise<any[]> {
+    const response = await this.client.post('/api/daily-tasks/carry-over');
     return response.data;
   }
 }

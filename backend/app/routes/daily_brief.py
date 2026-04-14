@@ -22,7 +22,7 @@ def _get_daily_brief_service():
     if not _service_attempted:
         _service_attempted = True
         try:
-            from app.services.morning_brief_service import daily_brief_service
+            from app.services.daily_brief.brief_service import daily_brief_service
             _daily_brief_service = daily_brief_service
         except (ImportError, Exception) as e:
             logger.warning(f"Daily Brief service not available: {e}")
@@ -112,3 +112,19 @@ async def get_brief_layer(
     except Exception as e:
         logger.error(f"Failed to get layer {layer_name}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve layer")
+
+
+@router.get("/api/daily-brief/debug/report")
+async def get_daily_brief_debug_report(
+    current_user: User = Depends(get_current_user)
+):
+    """Get operational debug report for day/stable layer pipelines."""
+    service = _get_daily_brief_service()
+    if not service:
+        raise HTTPException(status_code=503, detail="Daily Brief service not available")
+
+    try:
+        return service.get_debug_report(current_user.id)
+    except Exception as e:
+        logger.error(f"Failed to get daily brief debug report: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve debug report")

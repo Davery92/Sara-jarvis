@@ -47,25 +47,11 @@ class MemoryScorer:
 
     def _refresh_llm_config(self):
         """Reload background LLM settings so model switches apply live."""
-        try:
-            from app.core.config import settings
-            self.llm_primary_url = getattr(
-                settings,
-                "bg_llm_primary_url",
-                "http://100.104.68.115:11434/v1",
-            ).replace('/v1', '')
-            self.llm_fallback_url = getattr(
-                settings,
-                "bg_llm_fallback_url",
-                "http://10.185.1.8:11434/v1",
-            ).replace('/v1', '')
-            self.primary_model = getattr(settings, "bg_llm_primary_model", "gpt-oss:20b")
-            self.fallback_model = getattr(settings, "bg_llm_fallback_model", "gpt-oss:20b")
-        except Exception:
-            self.llm_primary_url = 'http://100.104.68.115:11434'
-            self.llm_fallback_url = "http://10.185.1.8:11434"
-            self.primary_model = "gpt-oss:20b"
-            self.fallback_model = "gpt-oss:20b"
+        from app.core.llm_config import llm_config
+        self.llm_primary_url = llm_config.bg_primary_url.replace('/v1', '')
+        self.llm_fallback_url = llm_config.bg_fallback_url.replace('/v1', '')
+        self.primary_model = llm_config.bg_primary_model
+        self.fallback_model = llm_config.bg_fallback_model
 
     async def _get_active_llm(self) -> tuple[Optional[str], Optional[str]]:
         """Get active LLM endpoint with failover"""

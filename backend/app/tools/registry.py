@@ -1,8 +1,12 @@
 from typing import Dict, List, Any
 from app.tools.base import BaseTool, ToolResult
 from app.tools.memory import MemorySearchTool
-from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool
+from app.tools.notes import (
+    NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool,
+    NotesFindSimilarTool, NotesMergeTool,
+)
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
+from app.tools.daily_tasks import DailyTaskCreateTool, DailyTaskListTool, DailyTaskCompleteTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool, CalendarSetRecurringTool
 from app.tools.knowledge_graph import (
@@ -102,6 +106,7 @@ from app.tools.morning_brief import MorningBriefTool, WeatherTool
 from app.tools.projects import PROJECT_TOOLS
 from app.tools.home import HOME_TOOLS
 from app.tools.agents import HandoffToAgentsTool, GetBackgroundTasksTool
+from app.tools.research_plan import CreateResearchPlanTool, ResearchPlanStatusTool
 from app.tools.health import HEALTH_TOOLS
 from app.tools.canvas import (
     CanvasOpenTool,
@@ -113,7 +118,6 @@ from app.tools.canvas import (
 from app.tools.patterns import PATTERN_TOOLS
 from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
-from app.tools.temerant import TEMERANT_TOOLS
 from app.tools.maps import MAP_TOOLS
 from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
 from app.tools.email import EMAIL_TOOLS
@@ -124,6 +128,10 @@ from app.tools.personal_knowledge import PKG_TOOLS
 from app.tools.standing_orders import STANDING_ORDER_TOOLS
 from app.tools.content_inbox import CONTENT_INBOX_TOOLS
 from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
+from app.tools.shell import SHELL_TOOLS
+from app.tools.acs_research import ACS_RESEARCH_TOOLS
+from app.tools.acs_activity import ACS_ACTIVITY_TOOLS
+from app.tools.acs_directive import ACS_DIRECTIVE_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -158,11 +166,14 @@ class ToolRegistry:
             ]
         },
         'time': {
-            'description': 'Manage reminders, timers, and calendar events',
+            'description': 'Manage reminders, timers, calendar events, and daily tasks',
             'tools': [
                 'reminders_create',
                 'reminders_list',
                 'reminders_cancel',
+                'daily_task_create',
+                'daily_task_list',
+                'daily_task_complete',
                 'timers_start',
                 'timers_status',
                 'timers_cancel',
@@ -278,13 +289,6 @@ class ToolRegistry:
                 'workspace_focus_window', 'workspace_find_and_open', 'workspace_open_from_last_results'
             ]
         },
-        'temerant': {
-            'description': 'Manage the Temerant habit RPG state - check character status, log actions, and roll oracle events.',
-            'tools': [
-                'temerant_status', 'temerant_log_action', 'temerant_roll_oracle',
-                'temerant_list_events', 'temerant_resolve_event'
-            ]
-        },
         'maps': {
             'description': 'Create and control mindmaps/flowcharts on the workspace canvas - create maps, add/edit/delete nodes, connect nodes, import from JSON or Mermaid, explode/expand maps',
             'tools': [
@@ -309,11 +313,9 @@ class ToolRegistry:
             ]
         },
         'heartbeat': {
-            'description': "Manage Sara's heartbeat checklist - dynamic monitors, time-bound reminders, conditional triggers, and the HEARTBEAT.md natural language rules file.",
+            'description': "View Sara's heartbeat checklist — active monitors and the HEARTBEAT.md natural language rules file.",
             'tools': [
-                'add_heartbeat_item', 'list_heartbeat_items',
-                'remove_heartbeat_item', 'update_heartbeat_item',
-                'read_heartbeat_file', 'update_heartbeat_file'
+                'list_heartbeat_items', 'read_heartbeat_file'
             ]
         },
         'behavior': {
@@ -342,6 +344,14 @@ class ToolRegistry:
                 'get_agent_status', 'resume_agent_session',
                 'submit_candidate_skill'
             ]
+        },
+        'shell': {
+            'description': 'Execute shell commands, read and write files on the server. Use for code execution, scripting, system administration, file manipulation.',
+            'tools': ['run_command', 'read_file', 'write_file']
+        },
+        'acs': {
+            'description': "Sara's autonomous cognition — queue research topics, send directives, review own activity/sessions/notes/interests",
+            'tools': ['queue_research_topic', 'get_my_activity', 'send_acs_directive']
         }
     }
 
@@ -361,11 +371,18 @@ class ToolRegistry:
             NotesEditTool(),
             NotesDeleteTool(),
             NotesListTool(),
+            NotesFindSimilarTool(),
+            NotesMergeTool(),
             
             # Reminders
             RemindersCreateTool(),
             RemindersListTool(),
             RemindersCancelTool(),
+
+            # Daily Tasks
+            DailyTaskCreateTool(),
+            DailyTaskListTool(),
+            DailyTaskCompleteTool(),
             
             # Timers
             TimersStartTool(),
@@ -511,9 +528,6 @@ class ToolRegistry:
             # Workspace Control Tools (for workbench-canvas)
             *WORKSPACE_TOOLS,
 
-            # Temerant RPG Tools
-            *TEMERANT_TOOLS,
-
             # Map Control Tools (mindmaps/flowcharts on canvas)
             *MAP_TOOLS,
 
@@ -543,6 +557,18 @@ class ToolRegistry:
 
             # VM Agent Dispatch Tools (sandbox VM agent orchestration)
             *AGENT_DISPATCH_TOOLS,
+
+            # Shell Tools (local command execution, file I/O)
+            *SHELL_TOOLS,
+
+            # ACS Tools (queue topics, review activity, send directives)
+            *ACS_RESEARCH_TOOLS,
+            *ACS_ACTIVITY_TOOLS,
+            *ACS_DIRECTIVE_TOOLS,
+
+            # Research Plan Tools (delegate research to dedicated agent)
+            CreateResearchPlanTool(),
+            ResearchPlanStatusTool(),
         ]
 
         for tool in tools:
@@ -649,9 +675,14 @@ class ToolRegistry:
         return schemas
 
     async def execute_tool(
-        self, name: str, user_id: str, parameters: Dict[str, Any]
+        self, name: str, user_id: str, parameters: Dict[str, Any],
+        context: Dict[str, Any] = None,
     ) -> ToolResult:
-        """Execute a tool by name"""
+        """Execute a tool by name.
+
+        Args:
+            context: Optional execution context (e.g. {"task_id": "..."} for shell tools).
+        """
         # Handle special meta-tool for loading categories
         if name == "load_tool_categories":
             categories = parameters.get("categories", [])
@@ -668,6 +699,10 @@ class ToolRegistry:
                 success=False,
                 message=f"Tool '{name}' not found"
             )
+
+        # Inject context into parameters for tools that need it (e.g. shell tools)
+        if context and context.get("task_id"):
+            parameters = {**parameters, "_task_id": context["task_id"]}
 
         try:
             result = await tool.execute(user_id, **parameters)

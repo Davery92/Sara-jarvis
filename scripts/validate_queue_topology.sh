@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Validate that all Celery queues used in routing/scheduling are covered
-# by the worker's -Q subscription in docker-compose.dev.yml.
+# by at least one worker's -Q subscription in docker-compose.dev.yml.
 #
-# Usage: ./scripts/validate_queue_topology.sh
+# Understands multiple workers (celery-worker, celery-acs, celery-critical, etc.)
+#
+# Usage: ./scripts/validate_queue_topology.sh [compose-file]
 # Exit code 0 = all queues covered, 1 = drift detected
 
 set -euo pipefail
@@ -11,15 +13,24 @@ COMPOSE_FILE="${1:-docker-compose.dev.yml}"
 
 echo "Checking queue topology against $COMPOSE_FILE..."
 
-# Extract -Q queues from celery worker command
-WORKER_QUEUES=$(grep -oP '(?<=-Q\s)[^\s"]+' "$COMPOSE_FILE" | head -1 | tr ',' '\n' | sort -u)
-if [ -z "$WORKER_QUEUES" ]; then
-    echo "ERROR: Could not parse -Q flag from $COMPOSE_FILE"
+# Extract ALL -Q queue lists from every celery worker command in the compose file
+ALL_WORKER_QUEUES=$(grep -oP '(?<=-Q\s)[^\s"]+' "$COMPOSE_FILE" | tr ',' '\n' | sort -u)
+if [ -z "$ALL_WORKER_QUEUES" ]; then
+    echo "ERROR: Could not parse any -Q flags from $COMPOSE_FILE"
     exit 1
 fi
 
-echo "Worker subscribes to:"
-echo "$WORKER_QUEUES" | sed 's/^/  /'
+echo "Worker queue subscriptions (all workers combined):"
+echo "$ALL_WORKER_QUEUES" | sed 's/^/  /'
+
+# Show per-worker breakdown
+echo ""
+echo "Per-worker breakdown:"
+grep -P 'celery .* worker .* -Q' "$COMPOSE_FILE" | while read -r line; do
+    QUEUES=$(echo "$line" | grep -oP '(?<=-Q\s)[^\s"]+')
+    NAME=$(echo "$line" | grep -oP '(?<=-n\s)\S+' || echo "(default)")
+    echo "  $NAME: $QUEUES"
+done
 
 # Extract queue names from celery_app.py beat_schedule and task_routes
 CELERY_FILE="backend/app/celery_app.py"
@@ -54,23 +65,23 @@ echo ""
 echo "All queues referenced (beat_schedule + task_routes + task files):"
 echo "$ALL_QUEUES" | sed 's/^/  /'
 
-# Find queues not covered by worker subscription
+# Find queues not covered by ANY worker subscription
 MISSING=""
 for q in $ALL_QUEUES; do
-    if ! echo "$WORKER_QUEUES" | grep -qx "$q"; then
+    if ! echo "$ALL_WORKER_QUEUES" | grep -qx "$q"; then
         MISSING="$MISSING $q"
     fi
 done
 
 if [ -n "$MISSING" ]; then
     echo ""
-    echo "ERROR: The following queues are not in the worker's -Q subscription:"
+    echo "ERROR: The following queues are not covered by any worker's -Q subscription:"
     for q in $MISSING; do
         echo "  - $q"
     done
     exit 1
 else
     echo ""
-    echo "OK: All queues covered by worker subscription."
+    echo "OK: All queues covered by at least one worker."
     exit 0
 fi

@@ -195,7 +195,7 @@ async def get_emotion_distribution(
             SELECT
                 emotion_metadata->>'primary_emotion' as emotion,
                 COUNT(*) as count
-            FROM episodes
+            FROM episode
             WHERE user_id = :user_id
             AND emotion_metadata IS NOT NULL
             AND created_at >= :start_date

@@ -1,5 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, JSON, String, Text, text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -16,6 +15,8 @@ class Note(Base):
     folder_id = Column(String, ForeignKey("folder.id", ondelete="CASCADE"), nullable=True)
     title = Column(String, default="")
     content = Column(Text, nullable=False)
+    tags = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    starred = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     embedding = Column(Vector(settings.embedding_dim))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

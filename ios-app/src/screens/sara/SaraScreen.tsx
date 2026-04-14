@@ -1,10 +1,8 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { View, StyleSheet } from 'react-native';
+import React, { useRef, useState, useEffect } from 'react';
+import { View, StyleSheet, Keyboard, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { SuggestedAction } from '../../types/cards';
 import { colors } from '../../styles/theme';
-import IntelligentBrief from '../../components/sara/IntelligentBrief';
-import ActionChips from '../../components/sara/ActionChips';
+import ACSStatusCard from '../../components/sara/ACSStatusCard';
 import ChatScreen from '../chat/ChatScreen';
 
 interface SaraScreenProps {
@@ -13,38 +11,23 @@ interface SaraScreenProps {
 }
 
 export default function SaraScreen(props: SaraScreenProps) {
-  const [briefCollapsed, setBriefCollapsed] = useState(false);
   const chatRef = useRef<any>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
-  const handleAction = useCallback((action: SuggestedAction) => {
-    if (action.action === 'navigate' && action.target && props.navigation) {
-      props.navigation.navigate(action.target);
-    } else if (action.message) {
-      // Send message to embedded chat
-      if (chatRef.current?.sendMessage) {
-        chatRef.current.sendMessage(action.message);
-      }
-    }
-  }, [props.navigation]);
-
-  const handleBriefToggle = useCallback(() => {
-    setBriefCollapsed(c => !c);
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => { showSub.remove(); hideSub.remove(); };
   }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Collapsible Brief Header */}
-      <IntelligentBrief
-        collapsed={briefCollapsed}
-        onToggleCollapse={handleBriefToggle}
-        onAction={handleAction}
-      />
-
-      {/* Embedded Chat - takes remaining space */}
+      {!keyboardVisible && <ACSStatusCard />}
       <View style={styles.chatContainer}>
         <ChatScreen
           isEmbedded
-          onBriefCollapse={() => setBriefCollapsed(true)}
           ref={chatRef}
           navigation={props.navigation}
           route={props.route}

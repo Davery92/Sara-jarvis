@@ -6,11 +6,13 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 from .compiler import BriefCompiler, BRIEFS_DIR
+from .model_resolver import resolve_qwen_122_model_label
 from .moment_layer import MomentLayer
 from .prompts import BOOTSTRAP_STABLE_LAYER
+from .status_tracker import brief_status_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +27,6 @@ class DailyBriefService:
         self.briefs_dir = BRIEFS_DIR
         self.compiler = BriefCompiler()
         self.moment_layer = MomentLayer()
-
-        # LLM settings - use LOCAL_LLM_URL for heavy synthesis, falls back to local Ollama
-        self.fast_model = "qwen3-coder-next"
-        self.full_model = "qwen3-coder-next"
-        # Use dedicated local LLM for synthesis (not the configured OPENAI_BASE_URL which may be Gemini)
-        self.llm_base_url = os.environ.get("LOCAL_LLM_URL", "http://100.104.68.115:11434/v1")
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's complete directory structure exists."""
@@ -58,29 +54,24 @@ class DailyBriefService:
         path.write_text(content)
         logger.debug(f"📝 Wrote {layer_name} layer for user {user_id[:8]}")
 
-    async def _call_llm(self, prompt: str, model: str = None) -> str:
-        """Call LLM for text generation."""
-        import httpx
-
-        model = model or self.fast_model
-        url = f"{self.llm_base_url}/chat/completions"
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are Sara, a personal AI assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 2000,
-            "temperature": 0.7
-        }
+    async def _call_llm(self, prompt: str) -> str:
+        """Call background LLM for stable-layer synthesis tasks."""
+        from app.core.llm import get_background_llm_client
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
+            bg_client = get_background_llm_client()
+            preferred_model = bg_client.get_status().get("primary_model")
+            resolved_model = resolve_qwen_122_model_label(preferred_model)
+            response = await bg_client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are Sara, a personal AI assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2000,
+                temperature=0.7,
+                model=resolved_model,
+            )
+            return response["choices"][0]["message"]["content"]
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             raise
@@ -91,13 +82,42 @@ class DailyBriefService:
         This is the main entry point for chat endpoints.
         """
         self._ensure_user_dir(user_id)
+        from .stable_layer import stable_layer
 
         # Check if we need to bootstrap (no stable layer)
-        stable_path = self._get_layer_path(user_id, "stable")
-        if not stable_path.exists():
+        if not stable_layer.exists(user_id):
             logger.info(f"No stable layer found for user {user_id[:8]}, attempting bootstrap")
-            # We'll do lazy bootstrap during first request
-            # For now, return minimal brief
+            # Guard: skip if recently attempted (check Redis flag with 1h TTL)
+            should_bootstrap = True
+            try:
+                import redis as _redis
+                r = _redis.from_url(
+                    os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+                    decode_responses=True,
+                )
+                flag_key = f"brief:bootstrap_attempted:{user_id}"
+                if r.get(flag_key):
+                    should_bootstrap = False
+                else:
+                    r.setex(flag_key, 3600, "1")  # 1h cooldown
+            except Exception:
+                pass  # Redis unavailable — allow bootstrap
+
+            if should_bootstrap:
+                try:
+                    from app.db.session import get_db
+                    db_gen = get_db()
+                    db = next(db_gen)
+                    try:
+                        success = await self.bootstrap_stable_layer(user_id, db)
+                        if success and stable_layer.exists(user_id):
+                            return self.compiler.compile(user_id)
+                    finally:
+                        db.close()
+                except Exception as e:
+                    logger.warning(f"Bootstrap failed for {user_id[:8]}: {e}")
+
+            # Fallback: return moment text or empty
             moment = self._read_layer(user_id, "moment")
             if moment:
                 return f"---\n## My Understanding of David\n---\n\n{moment}"
@@ -194,11 +214,13 @@ class DailyBriefService:
                 hypotheses=hypotheses_str or "No confirmed hypotheses yet."
             )
 
-            # Call 120B model for synthesis
-            stable_content = await self._call_llm(prompt, model=self.full_model)
+            # Call background synthesis model (Qwen 3.5 122 label resolver)
+            stable_content = await self._call_llm(prompt)
 
-            # Write stable layer
-            self._write_layer(user_id, "stable", stable_content)
+            # Canonical stable write path
+            from .stable_layer import stable_layer
+            stable_layer.write(user_id, stable_content)
+            brief_status_tracker.record_event(user_id, "stable_bootstrap")
 
             logger.info(f"✅ Successfully bootstrapped stable layer for user {user_id[:8]}")
             return True
@@ -217,54 +239,84 @@ class DailyBriefService:
         Append a conversation summary to the day layer.
         Called after conversation gaps or explicitly.
         """
-        timestamp = timestamp or datetime.now()
-        time_str = timestamp.strftime("%H:%M")
-
-        current_day = self._read_layer(user_id, "day")
-
-        # Get current date header
-        date_header = f"## Today ({timestamp.strftime('%A, %B %d')})\n\n"
-
-        if not current_day:
-            # Start fresh day layer
-            new_content = f"{date_header}**{time_str}**\n{summary}\n"
-        else:
-            # Check if we need a new date header (day rollover)
-            if date_header not in current_day:
-                # New day - archive old and start fresh
-                await self._archive_day_layer(user_id)
-                new_content = f"{date_header}**{time_str}**\n{summary}\n"
-            else:
-                # Append to existing day
-                new_content = f"{current_day}\n**{time_str}**\n{summary}\n"
-
-        self._write_layer(user_id, "day", new_content)
-
-    async def _archive_day_layer(self, user_id: str):
-        """Archive the current day layer before starting a new day."""
-        current_day = self._read_layer(user_id, "day")
-        if not current_day:
-            return
-
-        # Determine archive date from content or use yesterday
-        archive_date = datetime.now() - timedelta(days=1)
-
-        # Create archive path
-        archive_dir = self.briefs_dir / user_id / "archive" / archive_date.strftime("%Y/%m/%d")
-        archive_dir.mkdir(parents=True, exist_ok=True)
-
-        archive_path = archive_dir / "day.md"
-        archive_path.write_text(current_day)
-
-        logger.info(f"📦 Archived day layer for user {user_id[:8]} to {archive_date.date()}")
+        from .day_layer import day_layer
+        await day_layer.append_session_summary(user_id, summary, timestamp)
 
     def get_brief_stats(self, user_id: str) -> Dict:
         """Get statistics about the user's brief system."""
         return self.compiler.get_stats(user_id)
 
+    @staticmethod
+    def _mtime_iso(path: Optional[Path]) -> Optional[str]:
+        """Convert file mtime to UTC ISO timestamp."""
+        if not path or not path.exists():
+            return None
+        return datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
+
+    def _latest_archive_day_path(self, user_id: str) -> Optional[Path]:
+        """Return the newest archived day file by mtime."""
+        archive_root = self.briefs_dir / user_id / "archive"
+        if not archive_root.exists():
+            return None
+
+        latest_path = None
+        latest_mtime = -1.0
+        for day_path in archive_root.rglob("day.md"):
+            try:
+                mtime = day_path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > latest_mtime:
+                latest_path = day_path
+                latest_mtime = mtime
+        return latest_path
+
+    def get_debug_report(self, user_id: str) -> Dict:
+        """Operational debug report for day/stable layers and background model resolution."""
+        self._ensure_user_dir(user_id)
+        user_dir = self.briefs_dir / user_id
+        layers_dir = user_dir / "layers"
+
+        status = brief_status_tracker.read_status(user_id)
+        events = status.get("events", {}) if isinstance(status.get("events"), dict) else {}
+
+        day_path = layers_dir / "day.md"
+        stable_path = layers_dir / "stable.md"
+        archive_day_path = self._latest_archive_day_path(user_id)
+        status_path = brief_status_tracker.get_status_path(user_id)
+
+        from app.core.llm import get_background_llm_client
+        bg_client = get_background_llm_client()
+        bg_status = bg_client.get_status()
+        resolved_model = resolve_qwen_122_model_label(bg_status.get("primary_model"))
+
+        return {
+            "user_id": user_id,
+            "events": {
+                "last_day_append_at": events.get("day_append") or self._mtime_iso(day_path),
+                "last_archive_at": events.get("day_archive") or self._mtime_iso(archive_day_path),
+                "last_stable_synthesis_at": events.get("stable_synthesis") or self._mtime_iso(stable_path),
+                "last_stable_bootstrap_at": events.get("stable_bootstrap"),
+                "last_stable_milestone_update_at": events.get("stable_milestone_update"),
+            },
+            "models": {
+                "resolved_qwen_122_label": resolved_model,
+                "bg_primary_model": bg_status.get("primary_model"),
+                "bg_fallback_model": bg_status.get("fallback_model"),
+            },
+            "paths": {
+                "day_layer": str(day_path),
+                "stable_layer": str(stable_path),
+                "latest_archive_day": str(archive_day_path) if archive_day_path else None,
+                "status_file": str(status_path),
+            },
+            "status": status,
+        }
+
     def has_stable_layer(self, user_id: str) -> bool:
         """Check if user has a stable layer (is bootstrapped)."""
-        return self._get_layer_path(user_id, "stable").exists()
+        from .stable_layer import stable_layer
+        return stable_layer.exists(user_id)
 
     async def ensure_initialized(self, user_id: str, db) -> bool:
         """

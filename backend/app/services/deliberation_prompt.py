@@ -155,8 +155,7 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot) -> str:
     # Habits & learning
     if memory.today_habit_status:
         lines.append(f"\n## Habits\n{memory.today_habit_status}")
-    if memory.learning_reviews_due:
-        lines.append(f"Learning reviews due: {memory.learning_reviews_due}")
+    # learning reviews disabled — no longer surfaced
     if memory.recent_notes_summary:
         lines.append(f"Recent notes: {memory.recent_notes_summary}")
 

@@ -195,6 +195,8 @@ class PersonalKnowledgeGraph:
 
                     logger.debug(f"PKG: Confirmed {label} (dedup={dedup_key[:30]}, "
                                f"confidence {existing['confidence']:.2f} -> {new_confidence:.2f})")
+                    # Update embedding in background
+                    self._schedule_embedding(existing["pkg_id"], fact_type, properties, new_confidence)
                     return existing["pkg_id"]
                 else:
                     # New fact: create node
@@ -218,6 +220,8 @@ class PersonalKnowledgeGraph:
                     """, all_props)
 
                     logger.debug(f"PKG: Created {label} (dedup={dedup_key[:30]}, confidence={confidence:.2f})")
+                    # Store embedding in background
+                    self._schedule_embedding(pkg_id, fact_type, properties, confidence)
                     return pkg_id
 
         except Exception as e:
@@ -1415,6 +1419,288 @@ class PersonalKnowledgeGraph:
         except Exception as e:
             logger.error(f"PKG: promote_high_confidence failed: {e}")
             return 0
+
+    def _schedule_embedding(
+        self, pkg_id: str, fact_type: str, properties: Dict, confidence: float
+    ):
+        """Fire-and-forget embedding generation for a PKG node."""
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.store_embedding_async(pkg_id, fact_type, properties, confidence))
+        except RuntimeError:
+            # No running event loop — skip embedding (will be backfilled later)
+            logger.debug(f"PKG: No event loop for embedding of {pkg_id}, will backfill later")
+
+    # --- Semantic search via pgvector shadow table ---
+
+    def _node_to_text(self, fact_type: str, properties: Dict) -> str:
+        """Convert PKG node to a text string for embedding generation."""
+        if fact_type == "Person":
+            name = properties.get("name", "")
+            rel = properties.get("relationship_to_david", "")
+            notes = properties.get("notes", "")
+            parts = [f"Person: {name}"]
+            if rel:
+                parts.append(f"relationship: {rel}")
+            if notes:
+                parts.append(notes)
+            return ". ".join(parts)
+        elif fact_type == "Preference":
+            domain = properties.get("domain", "")
+            key = properties.get("key", "")
+            value = properties.get("value", "")
+            strength = properties.get("strength", "likes")
+            return f"David {strength} {value}. Domain: {domain}, key: {key}"
+        elif fact_type == "Routine":
+            activity = properties.get("activity", "")
+            day = properties.get("day_of_week", "")
+            time = properties.get("typical_time", "")
+            freq = properties.get("frequency", "")
+            parts = [f"Routine: David {activity}"]
+            if day:
+                parts.append(f"on {day}")
+            if time:
+                parts.append(f"at {time}")
+            if freq:
+                parts.append(f"({freq})")
+            return " ".join(parts)
+        elif fact_type == "Goal":
+            desc = properties.get("description", "")
+            status = properties.get("status", "active")
+            return f"Goal: {desc}. Status: {status}"
+        elif fact_type == "Interest":
+            topic = properties.get("topic", "")
+            depth = properties.get("depth", "")
+            return f"Interest: {topic}" + (f" (depth: {depth})" if depth else "")
+        elif fact_type == "Health":
+            metric = properties.get("metric", "")
+            value = properties.get("current_value", "")
+            trend = properties.get("trend", "")
+            return f"Health metric: {metric} = {value}" + (f", trending {trend}" if trend else "")
+        elif fact_type == "Place":
+            name = properties.get("name", "")
+            ptype = properties.get("type", "")
+            sig = properties.get("significance", "")
+            return f"Place: {name} ({ptype})" + (f". {sig}" if sig else "")
+        elif fact_type == "Fact":
+            subj = properties.get("subject", "David")
+            pred = properties.get("predicate", "")
+            obj = properties.get("object", "")
+            return f"{subj} {pred} {obj}"
+        return str(properties)
+
+    async def store_embedding_async(
+        self, pkg_id: str, fact_type: str, properties: Dict, confidence: float = 0.7
+    ) -> bool:
+        """Generate embedding for a PKG node and store in pgvector shadow table."""
+        try:
+            content_text = self._node_to_text(fact_type, properties)
+            if not content_text or len(content_text) < 5:
+                return False
+
+            from app.services.embedding_service import EmbeddingService
+            svc = EmbeddingService()
+            embedding = await svc.generate_embedding(content_text)
+            if not embedding:
+                logger.warning(f"PKG: Failed to generate embedding for {pkg_id}")
+                return False
+
+            from sqlalchemy import text as sa_text
+            database_url = os.getenv("DATABASE_URL", "")
+            if "asyncpg" in database_url:
+                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+            elif "psycopg" in database_url:
+                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker as sync_sm
+            engine = create_engine(database_url, echo=False)
+            Session = sync_sm(bind=engine)
+            session = Session()
+            try:
+                # Upsert: insert or update
+                session.execute(sa_text("""
+                    INSERT INTO pkg_embedding (pkg_id, node_type, content_text, embedding, confidence, updated_at)
+                    VALUES (:pkg_id, :node_type, :content_text, :embedding, :confidence, NOW())
+                    ON CONFLICT (pkg_id)
+                    DO UPDATE SET
+                        content_text = EXCLUDED.content_text,
+                        embedding = EXCLUDED.embedding,
+                        confidence = EXCLUDED.confidence,
+                        updated_at = NOW()
+                """), {
+                    "pkg_id": pkg_id,
+                    "node_type": fact_type,
+                    "content_text": content_text,
+                    "embedding": str(embedding),
+                    "confidence": confidence,
+                })
+                session.commit()
+                logger.debug(f"PKG: Stored embedding for {pkg_id} ({fact_type})")
+                return True
+            finally:
+                session.close()
+                engine.dispose()
+        except Exception as e:
+            logger.warning(f"PKG: store_embedding_async failed for {pkg_id}: {e}")
+            return False
+
+    async def query_semantic(
+        self, query_text: str, limit: int = 10, min_similarity: float = 0.3
+    ) -> List[Dict]:
+        """
+        Semantic search over PKG nodes using pgvector cosine similarity.
+
+        Returns list of dicts with pkg_id, node_type, content_text, similarity.
+        Then fetches full node data from Neo4j.
+        """
+        try:
+            from app.services.embedding_service import EmbeddingService
+            svc = EmbeddingService()
+            query_embedding = await svc.generate_embedding(query_text)
+            if not query_embedding:
+                return []
+
+            from sqlalchemy import text as sa_text
+            database_url = os.getenv("DATABASE_URL", "")
+            if "asyncpg" in database_url:
+                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+            elif "psycopg" in database_url:
+                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker as sync_sm
+            engine = create_engine(database_url, echo=False)
+            Session = sync_sm(bind=engine)
+            session = Session()
+            try:
+                rows = session.execute(sa_text("""
+                    SELECT pkg_id, node_type, content_text,
+                           1 - (embedding <=> :query_embedding::vector) as similarity
+                    FROM pkg_embedding
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> :query_embedding::vector
+                    LIMIT :limit
+                """), {
+                    "query_embedding": str(query_embedding),
+                    "limit": limit,
+                }).fetchall()
+
+                # Filter by min similarity
+                matches = [
+                    {"pkg_id": r.pkg_id, "node_type": r.node_type,
+                     "content_text": r.content_text, "similarity": r.similarity}
+                    for r in rows if r.similarity >= min_similarity
+                ]
+            finally:
+                session.close()
+                engine.dispose()
+
+            if not matches:
+                return []
+
+            # Fetch full node data from Neo4j
+            if not self._ensure_driver():
+                return matches  # return partial data without Neo4j props
+
+            pkg_ids = [m["pkg_id"] for m in matches]
+            try:
+                with self.driver.session() as neo_session:
+                    result = neo_session.run(f"""
+                        MATCH (n)
+                        WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                        AND n.pkg_id IN $pkg_ids
+                        AND n.superseded_by IS NULL
+                        RETURN n.pkg_id as pkg_id, labels(n) as labels, properties(n) as props
+                    """, {"pkg_ids": pkg_ids})
+
+                    neo4j_data = {}
+                    for record in result:
+                        neo4j_data[record["pkg_id"]] = {
+                            "type": self._extract_pkg_label(record["labels"]),
+                            **{k: v for k, v in record["props"].items()
+                               if k not in ("dedup_key",)}
+                        }
+            except Exception as e:
+                logger.warning(f"PKG: Neo4j fetch for semantic results failed: {e}")
+                neo4j_data = {}
+
+            # Merge: prefer Neo4j data, fall back to content_text
+            results = []
+            for m in matches:
+                if m["pkg_id"] in neo4j_data:
+                    entry = neo4j_data[m["pkg_id"]]
+                    entry["similarity"] = m["similarity"]
+                    results.append(entry)
+                else:
+                    # Node may have been superseded since embedding was stored
+                    results.append({
+                        "type": m["node_type"],
+                        "content_text": m["content_text"],
+                        "similarity": m["similarity"],
+                    })
+
+            return results
+        except Exception as e:
+            logger.warning(f"PKG: query_semantic failed: {e}")
+            return []
+
+    async def backfill_embeddings(self) -> int:
+        """Backfill embeddings for all active PKG nodes that don't have one yet."""
+        if not self._ensure_driver():
+            return 0
+
+        try:
+            # Get all active nodes
+            with self.driver.session() as session:
+                result = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    RETURN labels(n) as labels, properties(n) as props
+                """)
+                nodes = [
+                    {"type": self._extract_pkg_label(r["labels"]), "props": dict(r["props"])}
+                    for r in result
+                ]
+        except Exception as e:
+            logger.error(f"PKG: backfill_embeddings — Neo4j query failed: {e}")
+            return 0
+
+        # Check which pkg_ids already have embeddings
+        from sqlalchemy import text as sa_text
+        database_url = os.getenv("DATABASE_URL", "")
+        if "asyncpg" in database_url:
+            database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        elif "psycopg" in database_url:
+            database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker as sync_sm
+        engine = create_engine(database_url, echo=False)
+        Session = sync_sm(bind=engine)
+        session = Session()
+        try:
+            existing = set()
+            rows = session.execute(sa_text("SELECT pkg_id FROM pkg_embedding")).fetchall()
+            existing = {r.pkg_id for r in rows}
+        finally:
+            session.close()
+            engine.dispose()
+
+        count = 0
+        for node in nodes:
+            pkg_id = node["props"].get("pkg_id")
+            if not pkg_id or pkg_id in existing:
+                continue
+            confidence = node["props"].get("confidence", 0.7)
+            ok = await self.store_embedding_async(pkg_id, node["type"], node["props"], confidence)
+            if ok:
+                count += 1
+
+        logger.info(f"PKG: Backfilled {count} embeddings (of {len(nodes)} total nodes)")
+        return count
 
     def close(self):
         """Close Neo4j driver"""

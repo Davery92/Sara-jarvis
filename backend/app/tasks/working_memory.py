@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from app.celery_app import celery_app
 from app.core.config import settings
+from app.core.timezone import now as local_now
 from app.db.base import SessionLocal
 from app.models.profile import ReflectionSettings, UserProfile
 
@@ -61,7 +62,7 @@ def resolve_user_timezone(user_id: str) -> str:
     if not user_id:
         return fallback
 
-    now = datetime.utcnow()
+    now = local_now()
     cached = _timezone_cache.get(user_id)
     if cached:
         fetched_at = cached.get("fetched_at")
@@ -108,7 +109,7 @@ def refresh_context(self) -> Dict[str, Any]:
     solo_user_id = os.getenv("SOLO_USER_ID", "")
 
     result = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": local_now().isoformat(),
         "status": "running",
         "context_segments": 0,
         "user_state_updated": False
@@ -160,7 +161,7 @@ def cleanup_expired(self) -> Dict[str, Any]:
     r = redis.from_url(redis_url)
 
     result = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": local_now().isoformat(),
         "streams_trimmed": {},
         "total_entries_removed": 0
     }
@@ -168,7 +169,7 @@ def cleanup_expired(self) -> Dict[str, Any]:
     try:
         # Trim raw buffer streams (keep 48 hours)
         max_age_ms = 48 * 60 * 60 * 1000  # 48 hours in milliseconds
-        cutoff_ms = int((datetime.utcnow().timestamp() * 1000) - max_age_ms)
+        cutoff_ms = int((local_now().timestamp() * 1000) - max_age_ms)
 
         streams = ["raw_buffer:text", "raw_buffer:screen", "raw_buffer:notification",
                    "raw_buffer:calendar", "raw_buffer:environmental"]
@@ -201,7 +202,7 @@ def cleanup_expired(self) -> Dict[str, Any]:
         # Trim consolidation discard log (keep 7 days worth)
         try:
             max_discard_age_ms = 7 * 24 * 60 * 60 * 1000
-            discard_cutoff_ms = int((datetime.utcnow().timestamp() * 1000) - max_discard_age_ms)
+            discard_cutoff_ms = int((local_now().timestamp() * 1000) - max_discard_age_ms)
             r.xtrim("consolidation:discard_log", minid=f"{discard_cutoff_ms}-0")
         except redis.exceptions.ResponseError:
             pass
@@ -221,7 +222,8 @@ def infer_user_state(r, user_id: str) -> Dict[str, Any]:
     """
     Infer the user's current state from available signals.
     """
-    now = datetime.utcnow()
+    from app.core.timezone import now as local_now
+    now = local_now()
 
     # Default state
     state = {
@@ -309,7 +311,7 @@ def get_system_state(r) -> Dict[str, Any]:
         "last_consolidation": None,
         "buffer_health": "unknown",
         "active_workers": [],
-        "updated_at": datetime.utcnow().isoformat()
+        "updated_at": local_now().isoformat()
     }
 
     try:
@@ -320,7 +322,7 @@ def get_system_state(r) -> Dict[str, Any]:
 
             # Check if consolidation is keeping up
             last_time = datetime.fromisoformat(last_run.decode())
-            age = datetime.utcnow() - last_time
+            age = local_now() - last_time
 
             if age < timedelta(minutes=2):
                 state["buffer_health"] = "healthy"

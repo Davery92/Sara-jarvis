@@ -26,7 +26,6 @@ const WINDOW_DEFAULTS: Record<WindowType, { width: number; height: number; title
   automation: { width: 900, height: 700, title: 'Automation' },
   pkg: { width: 900, height: 700, title: 'Personal Knowledge Graph' },
   intelligence: { width: 900, height: 700, title: 'Intelligence Feed' },
-  temerant: { width: 900, height: 720, title: 'Temerant' },
 }
 
 interface WindowOptions {

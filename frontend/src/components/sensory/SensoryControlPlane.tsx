@@ -84,6 +84,23 @@ interface VoiceEvent {
   payload?: Record<string, unknown>
 }
 
+interface DatasetSample {
+  filename: string
+  size_bytes: number
+  created: string
+}
+
+interface DatasetRecordingStatus {
+  status: string
+  dataset_id?: string
+  family?: string
+  speaker_id?: string
+  duration_seconds?: number
+  progress?: number
+  sample_count?: number
+  message?: string
+}
+
 const tabs: Array<{ id: ControlTab; label: string }> = [
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'wake-word', label: 'Wake Word Lab' },
@@ -131,6 +148,12 @@ const SensoryControlPlane: React.FC = () => {
   const [wakeThreshold, setWakeThreshold] = useState<number>(0.58)
   const [vadThreshold, setVadThreshold] = useState<number>(0.5)
   const [ambientInterval, setAmbientInterval] = useState<number>(120)
+  const [wakeRecordDuration, setWakeRecordDuration] = useState<number>(5)
+  const [speakerRecordDuration, setSpeakerRecordDuration] = useState<number>(8)
+  const [speakerRecordId, setSpeakerRecordId] = useState<string>('david')
+  const [wakeSamples, setWakeSamples] = useState<DatasetSample[]>([])
+  const [speakerSamples, setSpeakerSamples] = useState<DatasetSample[]>([])
+  const [datasetRecordingStatus, setDatasetRecordingStatus] = useState<DatasetRecordingStatus | null>(null)
 
   const request = useCallback(async (path: string, init?: RequestInit) => {
     const response = await fetch(`${APP_CONFIG.apiUrl}${path}`, {
@@ -145,13 +168,75 @@ const SensoryControlPlane: React.FC = () => {
     return response.json()
   }, [])
 
+  const normalizeIdentifier = useCallback((value: string) => {
+    return value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '')
+  }, [])
+
+  const formatBytes = useCallback((bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  }, [])
+
+  const loadDatasetRecordingStatus = useCallback(async () => {
+    try {
+      const state = await request('/api/sensory/datasets/recording-status')
+      setDatasetRecordingStatus(state)
+    } catch (error) {
+      console.warn('Failed to load dataset recording status', error)
+    }
+  }, [request])
+
+  const loadWakeSamples = useCallback(async (datasetIdRaw: string) => {
+    const datasetId = normalizeIdentifier(datasetIdRaw)
+    if (!datasetId) {
+      setWakeSamples([])
+      return
+    }
+    try {
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/samples`)
+      setWakeSamples(Array.isArray(data.samples) ? data.samples : [])
+    } catch (error) {
+      console.warn('Failed to load wake dataset samples', error)
+      setWakeSamples([])
+    }
+  }, [normalizeIdentifier, request])
+
+  const loadSpeakerSamples = useCallback(async (datasetIdRaw: string, speakerIdRaw: string) => {
+    const datasetId = normalizeIdentifier(datasetIdRaw)
+    const speakerId = normalizeIdentifier(speakerIdRaw)
+    if (!datasetId || !speakerId) {
+      setSpeakerSamples([])
+      return
+    }
+    try {
+      const data = await request(
+        `/api/sensory/datasets/${encodeURIComponent(datasetId)}/speakers/${encodeURIComponent(speakerId)}/samples`,
+      )
+      setSpeakerSamples(Array.isArray(data.samples) ? data.samples : [])
+    } catch (error) {
+      console.warn('Failed to load speaker dataset samples', error)
+      setSpeakerSamples([])
+    }
+  }, [normalizeIdentifier, request])
+
+  const refreshDatasetViews = useCallback(async () => {
+    await Promise.all([
+      loadDatasetRecordingStatus(),
+      loadWakeSamples(wakeDatasetId),
+      loadSpeakerSamples(speakerDatasetId, speakerRecordId),
+    ])
+  }, [loadDatasetRecordingStatus, loadSpeakerSamples, loadWakeSamples, speakerDatasetId, speakerRecordId, wakeDatasetId])
+
   const load = useCallback(async () => {
     try {
-      const [pipelineData, configData, modelData, jobsData] = await Promise.all([
+      const [pipelineData, configData, modelData, jobsData, datasetStateData] = await Promise.all([
         request('/api/voice-control/pipeline/status'),
         request('/api/voice-control/config'),
         request('/api/voice-control/models'),
         request('/api/voice-control/jobs?limit=25'),
+        request('/api/sensory/datasets/recording-status'),
       ])
 
       let eventsData: { events?: VoiceEvent[] } = {}
@@ -166,6 +251,7 @@ const SensoryControlPlane: React.FC = () => {
       setModels(modelData)
       setJobs(jobsData.jobs || [])
       setRecentEvents(eventsData.events || [])
+      setDatasetRecordingStatus(datasetStateData || { status: 'idle' })
 
       if (configData?.wake_word?.keyword) setWakePhrase(configData.wake_word.keyword)
       if (typeof configData?.wake_word?.threshold === 'number') setWakeThreshold(configData.wake_word.threshold)
@@ -211,6 +297,25 @@ const SensoryControlPlane: React.FC = () => {
       setStreamConnected(false)
     }
   }, [])
+
+  useEffect(() => {
+    loadWakeSamples(wakeDatasetId)
+  }, [loadWakeSamples, wakeDatasetId])
+
+  useEffect(() => {
+    loadSpeakerSamples(speakerDatasetId, speakerRecordId)
+  }, [loadSpeakerSamples, speakerDatasetId, speakerRecordId])
+
+  useEffect(() => {
+    const status = (datasetRecordingStatus?.status || '').toLowerCase()
+    if (status !== 'recording' && status !== 'processing') {
+      return undefined
+    }
+    const interval = setInterval(() => {
+      refreshDatasetViews()
+    }, 1500)
+    return () => clearInterval(interval)
+  }, [datasetRecordingStatus?.status, refreshDatasetViews])
 
   const queueWakeWordTraining = useCallback(async () => {
     setBusy(true)
@@ -260,6 +365,127 @@ const SensoryControlPlane: React.FC = () => {
       setBusy(false)
     }
   }, [load, request, speakerDatasetId, speakerIds])
+
+  const startWakeDatasetRecording = useCallback(async () => {
+    const datasetId = normalizeIdentifier(wakeDatasetId)
+    if (!datasetId) {
+      setMessage('Wake dataset ID is required to record clips')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      setWakeDatasetId(datasetId)
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/start-recording`, {
+        method: 'POST',
+        body: JSON.stringify({
+          duration_seconds: wakeRecordDuration,
+          prompt: wakePhrase,
+        }),
+      })
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to start wake dataset recording'))
+      }
+      setMessage(`Wake clip recording started (${wakeRecordDuration}s)`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to start wake dataset recording')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, wakeDatasetId, wakePhrase, wakeRecordDuration])
+
+  const startSpeakerDatasetRecording = useCallback(async () => {
+    const datasetId = normalizeIdentifier(speakerDatasetId)
+    const speakerId = normalizeIdentifier(speakerRecordId)
+    if (!datasetId) {
+      setMessage('Speaker dataset ID is required to record clips')
+      return
+    }
+    if (!speakerId) {
+      setMessage('Speaker ID is required to record clips')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      setSpeakerDatasetId(datasetId)
+      setSpeakerRecordId(speakerId)
+      const data = await request(
+        `/api/sensory/datasets/${encodeURIComponent(datasetId)}/speakers/${encodeURIComponent(speakerId)}/start-recording`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            duration_seconds: speakerRecordDuration,
+            prompt: `speaker ${speakerId}`,
+          }),
+        },
+      )
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to start speaker dataset recording'))
+      }
+      setMessage(`Speaker clip recording started for "${speakerId}" (${speakerRecordDuration}s)`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to start speaker dataset recording')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, speakerDatasetId, speakerRecordDuration, speakerRecordId])
+
+  const clearWakeDatasetSamples = useCallback(async () => {
+    const datasetId = normalizeIdentifier(wakeDatasetId)
+    if (!datasetId) {
+      setMessage('Wake dataset ID is required')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/samples`, {
+        method: 'DELETE',
+      })
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to clear wake dataset'))
+      }
+      setMessage(`Cleared ${String(data.deleted_count || 0)} wake samples`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to clear wake dataset')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, wakeDatasetId])
+
+  const clearSpeakerDatasetSamples = useCallback(async () => {
+    const datasetId = normalizeIdentifier(speakerDatasetId)
+    const speakerId = normalizeIdentifier(speakerRecordId)
+    if (!datasetId || !speakerId) {
+      setMessage('Speaker dataset ID and speaker ID are required')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      const data = await request(
+        `/api/sensory/datasets/${encodeURIComponent(datasetId)}/speakers/${encodeURIComponent(speakerId)}/samples`,
+        { method: 'DELETE' },
+      )
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to clear speaker dataset'))
+      }
+      setMessage(`Cleared ${String(data.deleted_count || 0)} samples for "${speakerId}"`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to clear speaker dataset')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, speakerDatasetId, speakerRecordId])
 
   const saveThresholds = useCallback(async () => {
     setBusy(true)
@@ -328,6 +554,18 @@ const SensoryControlPlane: React.FC = () => {
     () => jobs.filter((job) => job.job_type.includes('train')),
     [jobs],
   )
+
+  const normalizedWakeDatasetId = normalizeIdentifier(wakeDatasetId)
+  const normalizedSpeakerDatasetId = normalizeIdentifier(speakerDatasetId)
+  const normalizedSpeakerRecordId = normalizeIdentifier(speakerRecordId)
+  const recordingFamily = datasetRecordingStatus?.family || ''
+  const wakeRecordingMatches =
+    recordingFamily === 'wake_word' &&
+    datasetRecordingStatus?.dataset_id === normalizedWakeDatasetId
+  const speakerRecordingMatches =
+    recordingFamily === 'speakers' &&
+    datasetRecordingStatus?.dataset_id === normalizedSpeakerDatasetId &&
+    datasetRecordingStatus?.speaker_id === normalizedSpeakerRecordId
 
   return (
     <div className="mb-4 rounded-xl border border-cyan-500/30 bg-gradient-to-r from-cyan-900/20 via-gray-900 to-teal-900/20 p-3">
@@ -439,21 +677,76 @@ const SensoryControlPlane: React.FC = () => {
             />
             <input
               value={wakeDatasetId}
-              onChange={(e) => setWakeDatasetId(e.target.value)}
+              onChange={(e) => setWakeDatasetId(normalizeIdentifier(e.target.value))}
               className="rounded bg-gray-900 px-2 py-1 text-sm text-white"
-              placeholder="Dataset ID (optional)"
+              placeholder="Dataset ID (required for recording/training)"
             />
+            <label className="text-xs text-gray-400">
+              Recording duration (seconds)
+              <input
+                type="number"
+                min={2}
+                max={60}
+                value={wakeRecordDuration}
+                onChange={(e) => setWakeRecordDuration(Math.min(60, Math.max(2, Number(e.target.value) || 5)))}
+                className="mt-1 w-full rounded bg-gray-900 px-2 py-1 text-sm text-white"
+              />
+            </label>
             <div className="text-xs text-gray-400">
               Active model: {models?.wake_word?.active_version || 'unknown'}
             </div>
           </div>
-          <button
-            onClick={queueWakeWordTraining}
-            disabled={busy}
-            className="rounded bg-cyan-600 px-3 py-1 text-sm text-white hover:bg-cyan-500 disabled:opacity-50"
-          >
-            Queue Wake-Word Training
-          </button>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <button
+              onClick={startWakeDatasetRecording}
+              disabled={busy || !normalizedWakeDatasetId}
+              className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              Record Wake Clip
+            </button>
+            <button
+              onClick={clearWakeDatasetSamples}
+              disabled={busy || !normalizedWakeDatasetId}
+              className="rounded bg-gray-700 px-3 py-1 text-sm text-white hover:bg-gray-600 disabled:opacity-50"
+            >
+              Clear Wake Dataset
+            </button>
+            <button
+              onClick={queueWakeWordTraining}
+              disabled={busy}
+              className="rounded bg-cyan-600 px-3 py-1 text-sm text-white hover:bg-cyan-500 disabled:opacity-50"
+            >
+              Queue Wake-Word Training
+            </button>
+          </div>
+          {wakeRecordingMatches && (
+            <div className="mb-2 rounded bg-gray-900 px-2 py-2 text-xs text-gray-300">
+              <div className="font-medium text-cyan-300">
+                Wake recording: {datasetRecordingStatus?.status || 'unknown'}
+              </div>
+              <div>
+                {datasetRecordingStatus?.message || 'Processing dataset recording task...'}
+              </div>
+              {typeof datasetRecordingStatus?.progress === 'number' && (
+                <div className="mt-1 text-[11px] text-gray-500">
+                  Progress: {datasetRecordingStatus.progress}%
+                </div>
+              )}
+            </div>
+          )}
+          <div className="text-xs text-gray-400">
+            Wake dataset clips: {wakeSamples.length}
+          </div>
+          {wakeSamples.length > 0 && (
+            <div className="mt-1 max-h-28 space-y-1 overflow-y-auto rounded bg-gray-900 p-2">
+              {wakeSamples.map((sample) => (
+                <div key={sample.filename} className="flex items-center justify-between text-[11px] text-gray-300">
+                  <span>{sample.filename}</span>
+                  <span className="text-gray-500">{formatBytes(sample.size_bytes)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -469,17 +762,80 @@ const SensoryControlPlane: React.FC = () => {
           />
           <input
             value={speakerDatasetId}
-            onChange={(e) => setSpeakerDatasetId(e.target.value)}
+            onChange={(e) => setSpeakerDatasetId(normalizeIdentifier(e.target.value))}
             className="mb-2 w-full rounded bg-gray-900 px-2 py-1 text-sm text-white"
-            placeholder="Dataset ID (optional)"
+            placeholder="Dataset ID (required for recording/training)"
           />
-          <button
-            onClick={queueSpeakerTraining}
-            disabled={busy}
-            className="rounded bg-teal-600 px-3 py-1 text-sm text-white hover:bg-teal-500 disabled:opacity-50"
-          >
-            Queue Speaker Training
-          </button>
+          <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+            <input
+              value={speakerRecordId}
+              onChange={(e) => setSpeakerRecordId(normalizeIdentifier(e.target.value))}
+              className="rounded bg-gray-900 px-2 py-1 text-sm text-white"
+              placeholder="Speaker ID to record"
+            />
+            <label className="text-xs text-gray-400">
+              Recording duration (seconds)
+              <input
+                type="number"
+                min={2}
+                max={60}
+                value={speakerRecordDuration}
+                onChange={(e) => setSpeakerRecordDuration(Math.min(60, Math.max(2, Number(e.target.value) || 8)))}
+                className="mt-1 w-full rounded bg-gray-900 px-2 py-1 text-sm text-white"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={startSpeakerDatasetRecording}
+              disabled={busy || !normalizedSpeakerDatasetId || !normalizedSpeakerRecordId}
+              className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              Record Speaker Clip
+            </button>
+            <button
+              onClick={clearSpeakerDatasetSamples}
+              disabled={busy || !normalizedSpeakerDatasetId || !normalizedSpeakerRecordId}
+              className="rounded bg-gray-700 px-3 py-1 text-sm text-white hover:bg-gray-600 disabled:opacity-50"
+            >
+              Clear Speaker Clips
+            </button>
+            <button
+              onClick={queueSpeakerTraining}
+              disabled={busy}
+              className="rounded bg-teal-600 px-3 py-1 text-sm text-white hover:bg-teal-500 disabled:opacity-50"
+            >
+              Queue Speaker Training
+            </button>
+          </div>
+          {speakerRecordingMatches && (
+            <div className="mt-2 rounded bg-gray-900 px-2 py-2 text-xs text-gray-300">
+              <div className="font-medium text-cyan-300">
+                Speaker recording: {datasetRecordingStatus?.status || 'unknown'}
+              </div>
+              <div>
+                {datasetRecordingStatus?.message || 'Processing dataset recording task...'}
+              </div>
+              {typeof datasetRecordingStatus?.progress === 'number' && (
+                <div className="mt-1 text-[11px] text-gray-500">
+                  Progress: {datasetRecordingStatus.progress}%
+                </div>
+              )}
+            </div>
+          )}
+          <div className="mt-2 text-xs text-gray-400">
+            Speaker clips ({normalizedSpeakerRecordId || 'speaker'}): {speakerSamples.length}
+          </div>
+          {speakerSamples.length > 0 && (
+            <div className="mt-1 max-h-28 space-y-1 overflow-y-auto rounded bg-gray-900 p-2">
+              {speakerSamples.map((sample) => (
+                <div key={sample.filename} className="flex items-center justify-between text-[11px] text-gray-300">
+                  <span>{sample.filename}</span>
+                  <span className="text-gray-500">{formatBytes(sample.size_bytes)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

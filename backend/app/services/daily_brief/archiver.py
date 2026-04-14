@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 
+from app.core.timezone import now as local_now
+
+from .status_tracker import brief_status_tracker
+
 logger = logging.getLogger(__name__)
 
 # Base directory for brief files
@@ -42,7 +46,7 @@ class Archiver:
         Archive a day layer to the archive directory.
         Called when day rolls over or manually.
         """
-        archive_date = archive_date or (datetime.now() - timedelta(days=1))
+        archive_date = archive_date or (local_now() - timedelta(days=1))
         archive_dir = self._get_archive_dir(user_id, archive_date)
 
         # Write day layer content
@@ -51,13 +55,18 @@ class Archiver:
 
         # Write metadata
         metadata = {
-            "archived_at": datetime.now().isoformat(),
+            "archived_at": local_now().isoformat(),
             "archive_date": archive_date.strftime("%Y-%m-%d"),
             "content_length": len(content),
             "type": "day_layer"
         }
         metadata_path = archive_dir / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, indent=2))
+        brief_status_tracker.record_event(
+            user_id,
+            "day_archive",
+            details={"archive_date": archive_date.strftime("%Y-%m-%d")},
+        )
 
         logger.info(f"📦 Archived day layer for {user_id[:8]} to {archive_date.date()}")
 
@@ -71,7 +80,7 @@ class Archiver:
         Archive the compiled brief for a specific date.
         Called during nightly processing.
         """
-        archive_date = archive_date or datetime.now()
+        archive_date = archive_date or local_now()
         archive_dir = self._get_archive_dir(user_id, archive_date)
 
         compiled_path = archive_dir / "compiled.md"
@@ -96,7 +105,7 @@ class Archiver:
 
         # Check each of the past N days
         for i in range(days):
-            check_date = datetime.now() - timedelta(days=i + 1)
+            check_date = local_now() - timedelta(days=i + 1)
             archive_dir = (
                 user_archive_dir /
                 check_date.strftime("%Y") /
@@ -127,6 +136,84 @@ class Archiver:
         summary_parts = []
         for archive in reversed(archives):  # Chronological order
             summary_parts.append(f"### {archive['day_of_week']}, {archive['date']}\n{archive['content']}")
+
+        return "\n\n".join(summary_parts)
+
+    def _extract_entities(self, text: str) -> List[str]:
+        """
+        Extract entity-like mentions from text.
+        Looks for capitalized multi-word phrases and City, ST patterns.
+        """
+        import re
+        entities = set()
+
+        # City, State patterns (e.g. "Sparta, NJ" or "New York, NY")
+        for m in re.finditer(r'[A-Z][a-z]+(?:\s[A-Z][a-z]+)*,\s*[A-Z]{2}\b', text):
+            entities.add(m.group())
+
+        # Capitalized multi-word phrases (2-4 words, not starting a sentence after ". ")
+        # Filter common false positives
+        skip = {
+            "David", "Sara", "Monday", "Tuesday", "Wednesday", "Thursday",
+            "Friday", "Saturday", "Sunday", "January", "February", "March",
+            "April", "May", "June", "July", "August", "September", "October",
+            "November", "December", "Today", "Yesterday", "This", "The",
+            "Active", "Open", "No", "BAD", "GOOD",
+        }
+        for m in re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', text):
+            phrase = m.group()
+            first_word = phrase.split()[0]
+            if first_word not in skip and len(phrase) > 4:
+                entities.add(phrase)
+
+        # Also catch things like "Risk Ninja", "Marvel IT" — word + uppercase word
+        for m in re.finditer(r'\b([A-Z][a-z]+\s+[A-Z]{2,}[a-z]*(?:\s+[A-Z][a-z]+)*)\b', text):
+            entities.add(m.group())
+
+        return list(entities)
+
+    def get_weekly_summary_content_annotated(self, user_id: str) -> str:
+        """
+        Get formatted weekly content with entity frequency annotations.
+        Helps the stable layer synthesis identify one-time vs recurring topics.
+        """
+        archives = self.get_recent_archives(user_id, days=7)
+
+        if not archives:
+            return "No archived content from the past week."
+
+        # Build per-day content and track entity frequency across days
+        entity_days: Dict[str, set] = {}  # entity -> set of dates it appeared
+
+        summary_parts = []
+        for archive in reversed(archives):  # Chronological order
+            content = archive['content']
+            summary_parts.append(
+                f"### {archive['day_of_week']}, {archive['date']}\n{content}"
+            )
+
+            # Extract entities from this day's content
+            day_entities = self._extract_entities(content)
+            for entity in day_entities:
+                if entity not in entity_days:
+                    entity_days[entity] = set()
+                entity_days[entity].add(archive['date'])
+
+        # Build frequency annotation block
+        if entity_days:
+            freq_lines = []
+            for entity, days in sorted(entity_days.items(), key=lambda x: -len(x[1])):
+                count = len(days)
+                if count >= 3:
+                    label = "RECURRING"
+                elif count == 2:
+                    label = "SEEN TWICE"
+                else:
+                    label = "ONE-TIME — exclude from stable layer"
+                freq_lines.append(f"- {entity}: {count} day{'s' if count != 1 else ''} ({label})")
+
+            annotation = "TOPIC FREQUENCY (days mentioned this week):\n" + "\n".join(freq_lines)
+            return annotation + "\n\n" + "\n\n".join(summary_parts)
 
         return "\n\n".join(summary_parts)
 

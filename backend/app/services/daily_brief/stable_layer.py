@@ -4,12 +4,12 @@ Updates weekly with 120B model synthesis.
 Contains enduring patterns, preferences, and relationship notes.
 """
 import logging
-import os
-from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import List
 
+from .model_resolver import resolve_qwen_122_model_label
 from .prompts import STABLE_LAYER_SYNTHESIS
+from .status_tracker import brief_status_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ class StableLayer:
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR
-        # Background LLM settings are now managed by BackgroundLLMClient
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's brief directory structure exists."""
@@ -56,6 +55,8 @@ class StableLayer:
 
         try:
             bg_client = get_background_llm_client()
+            preferred_model = bg_client.get_status().get("primary_model")
+            resolved_model = resolve_qwen_122_model_label(preferred_model)
             response = await bg_client.chat_completion(
                 messages=[
                     {"role": "system", "content": "You are Sara, synthesizing your deep understanding of David."},
@@ -63,7 +64,7 @@ class StableLayer:
                 ],
                 max_tokens=1500,
                 temperature=0.7,
-                model="qwen3-coder-next"
+                model=resolved_model
             )
             return response["choices"][0]["message"]["content"]
         except Exception as e:
@@ -84,7 +85,7 @@ class StableLayer:
 
         # Get weekly archives
         from .archiver import archiver
-        weekly_archives = archiver.get_weekly_summary_content(user_id)
+        weekly_archives = archiver.get_weekly_summary_content_annotated(user_id)
 
         # Get reflections from cognitive models
         reflections_str = ""
@@ -115,16 +116,19 @@ class StableLayer:
             logger.warning(f"Could not load cognitive models: {e}")
 
         # Build synthesis prompt
+        from app.core.timezone import today as local_today
         prompt = STABLE_LAYER_SYNTHESIS.format(
             current_stable=current_stable or "No existing stable layer.",
             weekly_archives=weekly_archives or "No archived content from this week.",
             reflections=reflections_str or "No recent reflections.",
-            hypotheses=hypotheses_str or "No confirmed hypotheses."
+            hypotheses=hypotheses_str or "No confirmed hypotheses.",
+            today_date=local_today().strftime("%B %d, %Y"),
         )
 
         try:
             new_stable = await self._call_llm(prompt)
             self._write_layer(user_id, new_stable)
+            brief_status_tracker.record_event(user_id, "stable_synthesis")
             logger.info(f"✅ Completed weekly stable layer synthesis for user {user_id[:8]}")
             return True
         except Exception as e:
@@ -172,6 +176,11 @@ Write in first person, as private notes. Keep the existing structure but update 
         try:
             updated_stable = await self._call_llm(prompt)
             self._write_layer(user_id, updated_stable)
+            brief_status_tracker.record_event(
+                user_id,
+                "stable_milestone_update",
+                details={"milestone_type": milestone_type},
+            )
             logger.info(f"✅ Updated stable layer for milestone: {milestone_type}")
             return True
         except Exception as e:
@@ -181,6 +190,10 @@ Write in first person, as private notes. Keep the existing structure but update 
     def read(self, user_id: str) -> str:
         """Read current stable layer content."""
         return self._read_layer(user_id)
+
+    def write(self, user_id: str, content: str):
+        """Write stable layer content."""
+        self._write_layer(user_id, content)
 
     def exists(self, user_id: str) -> bool:
         """Check if stable layer exists for user."""

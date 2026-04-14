@@ -1,4 +1,9 @@
-"""Human-like memory trace models."""
+"""DEPRECATED: Legacy memory trace models.
+
+These models are superseded by the Episode model for all new memory operations.
+Tables are kept for historical data but no new rows should be written.
+All consolidation now runs through NightlyDreamService (Episode-based).
+"""
 from sqlalchemy import Column, String, Text, DateTime, Float
 from sqlalchemy.sql import func
 from app.db.base import Base

@@ -10,22 +10,55 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useToast } from '../../context/ToastContext';
+import { SkeletonList } from '../../components/SkeletonLoader';
 import { MainTabScreenProps } from '../../types/navigation';
 import { Note, Folder } from '../../types/api';
 import { notesService } from '../../services/notes';
 import NoteListItem from '../../components/notes/NoteListItem';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
+function timeAgo(dateStr: string | undefined): string {
+  if (!dateStr) return '';
+  const now = new Date();
+  const date = new Date(dateStr);
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 30) return `${diffDays}d ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 type Props = MainTabScreenProps<'Notes'>;
 
 export default function NotesListScreen({ navigation }: Props) {
+  const { showToast } = useToast();
   const [notes, setNotes] = useState<Note[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
-  const [selectedFolder, setSelectedFolder] = useState<number | null>(null);
+  const [folderStack, setFolderStack] = useState<Folder[]>([]); // Navigation stack for back button
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [folderNoteCounts, setFolderNoteCounts] = useState<Record<number, number>>({});
+
+  const selectedFolder = folderStack.length > 0 ? folderStack[folderStack.length - 1].id : null;
+
+  // Update header title and back button behavior when navigating folders
+  useEffect(() => {
+    const currentFolder = folderStack.length > 0 ? folderStack[folderStack.length - 1] : null;
+    navigation.setOptions({
+      title: currentFolder ? currentFolder.name : 'Notes',
+      headerLeft: currentFolder ? () => (
+        <TouchableOpacity onPress={handleBackOneLevel} style={{ paddingRight: spacing.md }}>
+          <Text style={{ color: colors.primary, fontSize: fontSizes.md }}>← Back</Text>
+        </TouchableOpacity>
+      ) : undefined,
+    });
+  }, [folderStack, navigation]);
 
   useEffect(() => {
     loadData();
@@ -54,7 +87,7 @@ export default function NotesListScreen({ navigation }: Props) {
       setFolderNoteCounts(counts);
     } catch (error) {
       console.error('Failed to load notes:', error);
-      Alert.alert('Error', 'Failed to load notes');
+      showToast('error', 'Failed to load notes');
     } finally {
       setLoading(false);
     }
@@ -101,7 +134,7 @@ export default function NotesListScreen({ navigation }: Props) {
             await notesService.createFolder(name.trim(), selectedFolder || undefined);
             loadData();
           } catch (error) {
-            Alert.alert('Error', 'Failed to create folder');
+            showToast('error', 'Failed to create folder');
           }
         }
       }
@@ -129,7 +162,7 @@ export default function NotesListScreen({ navigation }: Props) {
               await notesService.deleteNote(note.id);
               loadData();
             } catch (error) {
-              Alert.alert('Error', 'Failed to delete note');
+              showToast('error', 'Failed to delete note');
             }
           },
         },
@@ -138,31 +171,21 @@ export default function NotesListScreen({ navigation }: Props) {
   };
 
   const handleFolderPress = (folder: Folder) => {
-    setSelectedFolder(folder.id);
+    setFolderStack(prev => [...prev, folder]);
     setSearchQuery('');
   };
 
   const handleBackToRoot = () => {
-    setSelectedFolder(null);
+    setFolderStack([]);
+    setSearchQuery('');
+  };
+
+  const handleBackOneLevel = () => {
+    setFolderStack(prev => prev.slice(0, -1));
     setSearchQuery('');
   };
 
   const filteredNotes = notes;
-
-  const renderFolder = ({ item }: { item: Folder }) => {
-    const count = folderNoteCounts[item.id] || 0;
-    return (
-      <TouchableOpacity
-        style={styles.folderItem}
-        onPress={() => handleFolderPress(item)}
-      >
-        <Text style={styles.folderIcon}>📁</Text>
-        <Text style={styles.folderName}>{item.name}</Text>
-        {count > 0 && <Text style={styles.folderCount}>({count})</Text>}
-        <Text style={styles.chevron}>›</Text>
-      </TouchableOpacity>
-    );
-  };
 
   const renderNote = ({ item }: { item: Note }) => (
     <NoteListItem
@@ -174,9 +197,9 @@ export default function NotesListScreen({ navigation }: Props) {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
-      </View>
+      <SafeAreaView style={styles.container} edges={['bottom']}>
+        <SkeletonList count={8} />
+      </SafeAreaView>
     );
   }
 
@@ -184,7 +207,7 @@ export default function NotesListScreen({ navigation }: Props) {
   const foldersToShow = selectedFolder
     ? folders.filter((f) => f.parent_id === selectedFolder) // Sub-folders when inside a folder
     : folders.filter((f) => !f.parent_id); // Root folders when at root
-  const currentFolder = folders.find((f) => f.id === selectedFolder);
+  const currentFolder = folderStack.length > 0 ? folderStack[folderStack.length - 1] : null;
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
@@ -199,15 +222,15 @@ export default function NotesListScreen({ navigation }: Props) {
         />
       </View>
 
-      {/* Folder Navigation */}
-      {selectedFolder && (
+      {/* Breadcrumb trail when deep in folder hierarchy */}
+      {folderStack.length > 1 && (
         <View style={styles.breadcrumb}>
           <TouchableOpacity onPress={handleBackToRoot}>
-            <Text style={styles.breadcrumbText}>← All Notes</Text>
+            <Text style={styles.breadcrumbText}>All Notes</Text>
           </TouchableOpacity>
-          {currentFolder && (
-            <Text style={styles.breadcrumbCurrent}> / {currentFolder.name}</Text>
-          )}
+          {folderStack.slice(0, -1).map((f) => (
+            <Text key={f.id} style={styles.breadcrumbCurrent}> / {f.name}</Text>
+          ))}
         </View>
       )}
 
@@ -224,41 +247,57 @@ export default function NotesListScreen({ navigation }: Props) {
         </TouchableOpacity>
       </View>
 
-      {/* Folders (show root folders at root, sub-folders when inside a folder) */}
-      {foldersToShow.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Folders</Text>
-          <FlatList
-            data={foldersToShow}
-            renderItem={renderFolder}
-            keyExtractor={(item) => `folder-${item.id}`}
-            scrollEnabled={false}
-          />
-        </View>
-      )}
-
-      {/* Notes List */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>
-          Notes ({filteredNotes.length})
-        </Text>
-        <FlatList
-          data={filteredNotes}
-          renderItem={renderNote}
-          keyExtractor={(item) => `note-${item.id}`}
-          onRefresh={handleRefresh}
-          refreshing={refreshing}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>
-                {searchQuery
-                  ? 'No notes found'
-                  : 'No notes yet. Create your first note!'}
+      {/* Single FlatList with folders as header */}
+      <FlatList
+        data={filteredNotes}
+        renderItem={renderNote}
+        keyExtractor={(item) => `note-${item.id}`}
+        onRefresh={handleRefresh}
+        refreshing={refreshing}
+        ListHeaderComponent={
+          foldersToShow.length > 0 ? (
+            <View style={styles.foldersSection}>
+              <Text style={styles.sectionTitle}>Folders</Text>
+              {foldersToShow.map((folder) => (
+                <TouchableOpacity
+                  key={`folder-${folder.id}`}
+                  style={styles.folderItem}
+                  onPress={() => handleFolderPress(folder)}
+                >
+                  <Text style={styles.folderIcon}>📁</Text>
+                  <View style={styles.folderInfo}>
+                    <Text style={styles.folderName}>{folder.name}</Text>
+                    {folder.updated_at && (
+                      <Text style={styles.folderDate}>{timeAgo(folder.updated_at)}</Text>
+                    )}
+                  </View>
+                  {(folderNoteCounts[folder.id] || 0) > 0 && (
+                    <Text style={styles.folderCount}>({folderNoteCounts[folder.id]})</Text>
+                  )}
+                  <Text style={styles.chevron}>›</Text>
+                </TouchableOpacity>
+              ))}
+              <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>
+                Notes ({filteredNotes.length})
               </Text>
             </View>
-          }
-        />
-      </View>
+          ) : (
+            <Text style={styles.sectionTitle}>
+              Notes ({filteredNotes.length})
+            </Text>
+          )
+        }
+        ListEmptyComponent={
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>
+              {searchQuery
+                ? 'No notes found'
+                : 'No notes yet. Create your first note!'}
+            </Text>
+          </View>
+        }
+        contentContainerStyle={styles.listContent}
+      />
 
     </SafeAreaView>
   );
@@ -325,8 +364,11 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },
-  section: {
-    flex: 1,
+  foldersSection: {
+    marginBottom: spacing.sm,
+  },
+  listContent: {
+    paddingBottom: spacing.xl,
   },
   sectionTitle: {
     color: colors.textSecondary,
@@ -349,11 +391,18 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.lg,
     marginRight: spacing.sm,
   },
-  folderName: {
+  folderInfo: {
     flex: 1,
+  },
+  folderName: {
     color: colors.text,
     fontSize: fontSizes.md,
     fontWeight: '500',
+  },
+  folderDate: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
   },
   folderCount: {
     color: colors.textMuted,

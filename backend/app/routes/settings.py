@@ -61,24 +61,9 @@ class AutonomyFlagsResponse(BaseModel):
     autonomy_attention_enabled: bool
     autonomy_missions_enabled: bool
     autonomy_policy_candidates_enabled: bool
-    temerant_enabled: bool
-    temerant_oracle_enabled: bool
-    temerant_narrative_enabled: bool
-    temerant_auto_ingestion_enabled: bool
-    temerant_rpg_enabled: bool
-    temerant_rpg_narrative_enabled: bool
     automation_admin_configured: bool
     automation_admin_email_count: int
     automation_admin_role_count: int
-
-
-class TemerantRpgModelResponse(BaseModel):
-    model: str
-    updated_at: Optional[str] = None
-
-
-class TemerantRpgModelUpdate(BaseModel):
-    model: str
 
 
 def get_or_create_settings(db: Session, user_id: str) -> UserSettings:
@@ -163,80 +148,11 @@ async def get_autonomy_flags(
         autonomy_attention_enabled=app_settings.autonomy_attention_enabled,
         autonomy_missions_enabled=app_settings.autonomy_missions_enabled,
         autonomy_policy_candidates_enabled=app_settings.autonomy_policy_candidates_enabled,
-        temerant_enabled=app_settings.temerant_enabled,
-        temerant_oracle_enabled=app_settings.temerant_oracle_enabled,
-        temerant_narrative_enabled=app_settings.temerant_narrative_enabled,
-        temerant_auto_ingestion_enabled=app_settings.temerant_auto_ingestion_enabled,
-        temerant_rpg_enabled=app_settings.temerant_rpg_enabled,
-        temerant_rpg_narrative_enabled=app_settings.temerant_rpg_narrative_enabled,
         automation_admin_configured=len(admin_emails) > 0 or admin_role_count > 0,
         automation_admin_email_count=len(admin_emails),
         automation_admin_role_count=admin_role_count,
     )
 
-
-@router.get("/temerant-rpg-model", response_model=TemerantRpgModelResponse)
-async def get_temerant_rpg_model(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    _ = current_user
-    try:
-        row = db.execute(text("""
-            SELECT value, updated_at
-            FROM app_settings
-            WHERE key = 'temerant_rpg_model'
-        """)).fetchone()
-    except Exception:
-        row = None
-    if not row:
-        return TemerantRpgModelResponse(model=app_settings.temerant_rpg_model, updated_at=None)
-    return TemerantRpgModelResponse(
-        model=str(row.value or app_settings.temerant_rpg_model),
-        updated_at=(row.updated_at.isoformat() if row.updated_at else None),
-    )
-
-
-@router.put("/temerant-rpg-model", response_model=TemerantRpgModelResponse)
-async def update_temerant_rpg_model(
-    payload: TemerantRpgModelUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    model = (payload.model or "").strip()
-    if not model:
-        raise HTTPException(status_code=422, detail="model is required")
-
-    try:
-        db.execute(text("""
-            INSERT INTO app_settings (key, value, updated_at, updated_by)
-            VALUES ('temerant_rpg_model', :value, NOW(), :updated_by)
-            ON CONFLICT (key)
-            DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by
-        """), {
-            "value": model,
-            "updated_by": current_user.email or "system",
-        })
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to persist model setting: {exc}")
-
-    # Apply runtime override immediately for this process.
-    app_settings.temerant_rpg_model = model
-
-    try:
-        row = db.execute(text("""
-            SELECT value, updated_at
-            FROM app_settings
-            WHERE key = 'temerant_rpg_model'
-        """)).fetchone()
-    except Exception:
-        row = None
-    return TemerantRpgModelResponse(
-        model=str((row.value if row else model) or model),
-        updated_at=(row.updated_at.isoformat() if row and row.updated_at else None),
-    )
 
 
 @router.get("/vision")

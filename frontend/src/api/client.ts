@@ -59,9 +59,11 @@ export interface Note {
   id: string
   title: string
   content: string
+  folder_id?: string | null
   tags: string[]
-  created_at: Date
-  updated_at: Date
+  starred: boolean
+  created_at: string
+  updated_at: string
 }
 
 export interface Document {
@@ -151,11 +153,6 @@ export interface CodexOAuthStatus {
   error?: string | null
 }
 
-export interface TemerantRpgModelSetting {
-  model: string
-  updated_at?: string | null
-}
-
 export interface TokenStats {
   total_prompt_tokens: number
   total_completion_tokens: number
@@ -216,12 +213,6 @@ export interface AutonomyFlags {
   autonomy_attention_enabled: boolean
   autonomy_missions_enabled: boolean
   autonomy_policy_candidates_enabled: boolean
-  temerant_enabled: boolean
-  temerant_oracle_enabled: boolean
-  temerant_narrative_enabled: boolean
-  temerant_auto_ingestion_enabled: boolean
-  temerant_rpg_enabled: boolean
-  temerant_rpg_narrative_enabled: boolean
   automation_admin_configured: boolean
   automation_admin_email_count: number
   automation_admin_role_count: number
@@ -303,282 +294,60 @@ export interface AutonomyRolloutSummary {
   rollback_recommendations: Array<{ flag: string; reasons: string[] }>
 }
 
-export type TemerantAttribute = 'body' | 'mind' | 'craft' | 'coin' | 'name'
 
-export interface TemerantCharacterCreateRequest {
-  character_name?: string
-  backstory?: string
-  origin?: string
-  starter_profile?: string
+// ACS (Autonomous Cognition System) types
+export interface ACSStatus {
+  state: string  // idle|autonomous|pausing|conversational|cooldown
+  active_session_id: string | null
+  cooldown_until: string | null
+  model_id: string
+  cooldown_minutes: number
+  max_duration_minutes: number
 }
 
-export interface TemerantCharacterUpdateRequest {
-  character_name?: string
-  backstory?: string
-  origin?: string
-  specialization_track?: string
-}
-
-export interface TemerantCharacterResponse {
+export interface ACSSession {
   id: string
-  user_id: string
-  character_name: string
-  backstory?: string | null
-  origin?: string | null
-  current_rank: 'elir' | 'relar' | 'elthe'
-  coin_balance: number
-  alar_strength: number
-  naming_affinity: number
-  specialization_track?: string | null
-  created_at?: string | null
-  updated_at?: string | null
+  model_id: string
+  state: string
+  started_at: string | null
+  ended_at: string | null
+  end_reason: string | null
+  turns_completed: number
+  notes_created: number
+  curiosities_explored: number
+  duration_minutes: number | null
+  duration_seconds?: number | null
+  cognitive_mode?: string | null
+  engagement_score?: number | null
+  outcome_type?: string | null
+  artifact_summary?: string | null
+  outbound_messages?: number
+  suppressed_messages?: number
 }
 
-export interface TemerantAttributeStateResponse {
-  attribute: TemerantAttribute
-  xp_total: number
-  xp_term: number
-  level: number
-  xp_today: number
-}
-
-export interface TemerantOracleEventResponse {
-  id: string
-  local_date: string
-  tier: 'notable' | 'major'
-  category: 'academic' | 'social' | 'discovery' | 'financial' | 'challenge' | 'mystery'
-  title: string
-  hook: string
-  stakes?: string | null
-  options?: string[] | null
-  resolution?: string | null
-  status: 'open' | 'resolved' | 'dismissed'
-  created_at?: string | null
-  resolved_at?: string | null
-}
-
-export interface TemerantDailyStateResponse {
-  local_date: string
-  categories_completed: number
-  body_xp: number
-  mind_xp: number
-  craft_xp: number
-  coin_xp: number
-  name_xp: number
-  oracle_roll_raw?: number | null
-  oracle_roll_modified?: number | null
-  term_month: string
-}
-
-export interface TemerantDashboardResponse {
-  date: string
-  character: TemerantCharacterResponse
-  attributes: Record<TemerantAttribute, TemerantAttributeStateResponse>
-  daily: TemerantDailyStateResponse
-  oracle_event?: TemerantOracleEventResponse | null
-  rank_progress: {
-    next_rank?: string | null
-    requirements: Record<string, number>
-  }
-}
-
-export interface TemerantManualLogRequest {
-  action_type: string
-  action_label?: string
-  notes?: string
-  quantity?: number
-  source_ref_id?: string
-  occurred_at?: string
-  metadata?: Record<string, any>
-}
-
-export interface TemerantManualLogResponse {
-  ledger_entry_id: string
-  local_date: string
-  attribute: TemerantAttribute
-  xp_delta: number
-  coin_delta: number
-  rank_after: 'elir' | 'relar' | 'elthe'
-  duplicate: boolean
-}
-
-export interface TemerantLedgerEntryResponse {
-  id: string
-  source_type: string
-  source_ref_id?: string | null
-  occurred_at: string
-  local_date: string
-  attribute: TemerantAttribute
-  subdomain?: string | null
-  xp_delta: number
-  coin_delta: number
-  name_delta: number
-  meta: Record<string, any>
-}
-
-export interface TemerantTermResponse {
-  id: string
-  term_month: string
-  completion_pct: number
-  admissions_result: 'excellent' | 'good' | 'poor' | 'terrible'
-  tuition_talents: number
-  xp_multiplier: number
-  coin_delta: number
-  review_markdown?: string | null
-  locked_at?: string | null
-}
-
-export interface TemerantJournalEntryResponse {
-  id: string
-  local_date: string
-  summary_structured: Record<string, any>
-  summary_markdown: string
-  source_event_count: number
-  generated_by: string
-  model?: string | null
-  created_at?: string | null
-  updated_at?: string | null
-}
-
-export interface TemerantMappingRuleResponse {
-  id: string
-  source_kind: string
-  source_ref?: string | null
-  target_attribute: TemerantAttribute
-  target_subdomain?: string | null
-  xp_base: number
-  bonus_rules: Record<string, any>
-  daily_cap?: number | null
-  enabled: boolean
-  created_at?: string | null
-  updated_at?: string | null
-}
-
-export interface TemerantMappingRuleUpdateRequest {
-  source_kind?: string
-  source_ref?: string
-  target_attribute?: TemerantAttribute
-  target_subdomain?: string
-  xp_base?: number
-  bonus_rules?: Record<string, any>
-  daily_cap?: number
-  enabled?: boolean
-}
-
-export interface TemerantStarterProfileResponse {
-  id: string
-  name: string
-  description: string
-  character_name: string
-  origin?: string | null
-  backstory: string
-  current_rank: 'elir' | 'relar' | 'elthe'
-  coin_balance: number
-  alar_strength: number
-  naming_affinity: number
-  attribute_xp: Record<TemerantAttribute, number>
-  inventory: string[]
-  patron?: string | null
-  personality?: string | null
-  flaw?: string | null
-  key_npcs: string[]
-}
-
-export interface TemerantRpgCharacterCreateRequest {
-  character_name?: string
-  origin?: string
-  backstory?: string
-}
-
-export interface TemerantRpgCharacterResponse {
-  id: string
-  user_id: string
-  character_name: string
-  origin?: string | null
-  backstory?: string | null
-  body: number
-  mind: number
-  craft: number
-  voice: number
-  luck: number
-  coin_talents: number
-  rank: string
-  conditions: Record<string, any>
-  skills: Record<string, number>
-  inventory: string[]
-  term_index: number
-  current_scene_id?: string | null
-}
-
-export interface TemerantRpgSceneResponse {
-  id: string
-  scene_number: number
-  local_date: string
-  day_slot: string
-  location: string
-  title: string
-  opening_text: string
-  status: string
-  summary?: string | null
-  consequences: Array<Record<string, any>>
-  opened_at?: string | null
-  closed_at?: string | null
-}
-
-export interface TemerantRpgRelationshipResponse {
-  npc_key: string
-  display_name: string
-  disposition: string
-  trust: string
-  respect: string
-  debt_balance: number
-  notes?: string | null
-}
-
-export interface TemerantRpgStateResponse {
-  character: TemerantRpgCharacterResponse
-  world: {
-    local_date: string
-    day_slot: string
-    weather: string
-    location_hint: string
-    ambient_events: string[]
-    pending_consequences: Array<Record<string, any>>
-    last_advance_summary?: string | null
-  }
-  open_scene?: TemerantRpgSceneResponse | null
-  relationships: TemerantRpgRelationshipResponse[]
-}
-
-export interface TemerantRpgTurnResponse {
-  scene_id: string
-  turn_index: number
-  outcome: 'triumph' | 'success' | 'partial' | 'failure' | 'disaster'
+export interface ACSSessionsResponse {
+  sessions: ACSSession[]
   total: number
-  difficulty: number
-  margin: number
-  response_text: string
-  consequence?: Record<string, any> | null
 }
 
-export interface TemerantRpgJournalEntryResponse {
+export interface ACSCuriosity {
   id: string
-  local_date: string
-  summary_markdown: string
-  scene_ids: string[]
-  created_at?: string | null
-  updated_at?: string | null
+  topic: string
+  source: string
+  priority: number
+  status: string
+  exploration_notes: string | null
+  created_at: string | null
 }
 
-export interface TemerantRpgTermResponse {
+export interface ACSShowDavidItem {
   id: string
-  term_index: number
-  month: string
-  admissions_result: string
-  tuition_talents: number
-  summary: string
-  created_at?: string | null
-  updated_at?: string | null
+  title: string
+  content: string
+  category: string
+  priority: number
+  shown: boolean
+  created_at: string | null
 }
 
 class ApiClient {
@@ -1152,174 +921,160 @@ class ApiClient {
     return response.data
   }
 
-  async getTemerantRpgModelSetting(): Promise<TemerantRpgModelSetting> {
-    const response = await this.client.get('/api/settings/temerant-rpg-model')
+  // ── ACS (Autonomous Cognition System) ──
+
+  async getACSStatus(): Promise<ACSStatus> {
+    const response = await this.client.get('/api/acs/status')
     return response.data
   }
 
-  async updateTemerantRpgModelSetting(model: string): Promise<TemerantRpgModelSetting> {
-    const response = await this.client.put('/api/settings/temerant-rpg-model', { model })
+  async startACS(modelId?: string): Promise<{ session_id: string; state: string }> {
+    const response = await this.client.post('/api/acs/start', { model_id: modelId })
     return response.data
   }
 
-  // Temerant endpoints
-  async createTemerantCharacter(payload: TemerantCharacterCreateRequest): Promise<TemerantCharacterResponse> {
-    const response = await this.client.post('/api/temerant/character', payload)
+  async pauseACS(): Promise<{ state: string }> {
+    const response = await this.client.post('/api/acs/pause')
     return response.data
   }
 
-  async getTemerantStarterProfiles(): Promise<TemerantStarterProfileResponse[]> {
-    const response = await this.client.get('/api/temerant/starter-profiles')
+  async resumeACS(): Promise<{ session_id: string; state: string }> {
+    const response = await this.client.post('/api/acs/resume')
     return response.data
   }
 
-  async getTemerantCharacter(): Promise<TemerantCharacterResponse> {
-    const response = await this.client.get('/api/temerant/character')
+  async getACSSessions(limit: number = 20, offset: number = 0): Promise<ACSSessionsResponse> {
+    const response = await this.client.get('/api/acs/sessions', { params: { limit, offset } })
     return response.data
   }
 
-  async updateTemerantCharacter(payload: TemerantCharacterUpdateRequest): Promise<TemerantCharacterResponse> {
-    const response = await this.client.patch('/api/temerant/character', payload)
+  async getACSSessionDetail(sessionId: string): Promise<ACSSession> {
+    const response = await this.client.get(`/api/acs/sessions/${sessionId}`)
     return response.data
   }
 
-  async getTemerantDashboard(date?: string): Promise<TemerantDashboardResponse> {
-    const response = await this.client.get('/api/temerant/dashboard', {
-      params: date ? { date } : undefined,
-    })
+  async getACSCuriosities(status?: string): Promise<{ items: ACSCuriosity[]; count: number }> {
+    const response = await this.client.get('/api/acs/curiosity', { params: { status } })
     return response.data
   }
 
-  async listTemerantLedger(params?: { from?: string; to?: string; limit?: number }): Promise<TemerantLedgerEntryResponse[]> {
-    const response = await this.client.get('/api/temerant/ledger', { params })
+  async addACSCuriosity(topic: string, priority: number = 0.5): Promise<ACSCuriosity> {
+    const response = await this.client.post('/api/acs/curiosity', { topic, priority })
     return response.data
   }
 
-  async createTemerantManualLog(payload: TemerantManualLogRequest): Promise<TemerantManualLogResponse> {
-    const response = await this.client.post('/api/temerant/logs/manual', payload)
+  async deleteACSCuriosity(id: string): Promise<void> {
+    await this.client.delete(`/api/acs/curiosity/${id}`)
+  }
+
+  async getACSShowDavid(unshownOnly: boolean = true): Promise<{ items: ACSShowDavidItem[]; count: number }> {
+    const response = await this.client.get('/api/acs/show-david', { params: { unshown_only: unshownOnly } })
     return response.data
   }
 
-  async rollTemerantOracle(date?: string): Promise<TemerantOracleEventResponse | null> {
-    const response = await this.client.post('/api/temerant/oracle/roll', null, {
-      params: date ? { date } : undefined,
-    })
+  async markACSShowDavidShown(id: string): Promise<void> {
+    await this.client.post(`/api/acs/show-david/${id}/shown`)
+  }
+
+  async updateACSSettings(settings: { model_id?: string; cooldown_minutes?: number; max_duration_minutes?: number }): Promise<ACSStatus> {
+    const response = await this.client.put('/api/acs/settings', settings)
     return response.data
   }
 
-  async listTemerantOracleEvents(status?: string, limit: number = 50): Promise<TemerantOracleEventResponse[]> {
-    const response = await this.client.get('/api/temerant/oracle/events', {
-      params: { status, limit },
-    })
+  // ── Settings → Schedules (DB-backed Celery beat) ─────────────────
+  async listSchedules(): Promise<ScheduledJob[]> {
+    const response = await this.client.get('/api/settings/schedules')
     return response.data
   }
 
-  async resolveTemerantOracleEvent(
-    eventId: string,
-    payload: { status?: 'resolved' | 'dismissed'; resolution?: string }
-  ): Promise<TemerantOracleEventResponse> {
-    const response = await this.client.post(`/api/temerant/oracle/events/${eventId}/resolve`, payload)
+  async getSchedule(key: string): Promise<ScheduledJob> {
+    const response = await this.client.get(`/api/settings/schedules/${encodeURIComponent(key)}`)
     return response.data
   }
 
-  async getTemerantCurrentTerm(): Promise<TemerantTermResponse> {
-    const response = await this.client.get('/api/temerant/terms/current')
+  async updateSchedule(key: string, patch: SchedulePatch): Promise<ScheduledJob> {
+    const response = await this.client.patch(
+      `/api/settings/schedules/${encodeURIComponent(key)}`,
+      patch,
+    )
     return response.data
   }
 
-  async listTemerantTermHistory(limit: number = 12): Promise<TemerantTermResponse[]> {
-    const response = await this.client.get('/api/temerant/terms/history', {
-      params: { limit },
-    })
+  async runScheduleNow(key: string): Promise<{ ok: boolean; task_id: string; task_name: string }> {
+    const response = await this.client.post(
+      `/api/settings/schedules/${encodeURIComponent(key)}/run-now`,
+    )
     return response.data
   }
 
-  async closeTemerantTerm(payload: { term_month?: string; review_markdown?: string }): Promise<TemerantTermResponse> {
-    const response = await this.client.post('/api/temerant/terms/close', payload)
+  // ── Settings → Tunables (cooldowns, ACS thresholds, brief tone) ──
+  async listTunables(): Promise<TunableSetting[]> {
+    const response = await this.client.get('/api/settings/tunables')
     return response.data
   }
 
-  async listTemerantJournal(params?: { from?: string; to?: string; limit?: number }): Promise<TemerantJournalEntryResponse[]> {
-    const response = await this.client.get('/api/temerant/journal', { params })
+  async updateTunable(key: string, value: unknown): Promise<TunableSetting> {
+    const response = await this.client.patch(
+      `/api/settings/tunables/${encodeURIComponent(key)}`,
+      { value },
+    )
     return response.data
   }
 
-  async generateTemerantJournal(journalDate: string): Promise<TemerantJournalEntryResponse> {
-    const response = await this.client.post(`/api/temerant/journal/${journalDate}`)
+  async resetTunable(key: string): Promise<TunableSetting> {
+    const response = await this.client.post(
+      `/api/settings/tunables/${encodeURIComponent(key)}/reset`,
+    )
     return response.data
   }
+}
 
-  async listTemerantMappings(): Promise<TemerantMappingRuleResponse[]> {
-    const response = await this.client.get('/api/temerant/mappings')
-    return response.data
-  }
+export interface TunableSetting {
+  key: string
+  display_name: string
+  description: string | null
+  category: string
+  value_type: 'int' | 'float' | 'string' | 'bool' | 'json'
+  value: any
+  default_value: any
+  min_value: any
+  max_value: any
+  unit: string | null
+  editable: boolean
+}
 
-  async updateTemerantMapping(
-    ruleId: string,
-    payload: TemerantMappingRuleUpdateRequest
-  ): Promise<TemerantMappingRuleResponse> {
-    const response = await this.client.put(`/api/temerant/mappings/${ruleId}`, payload)
-    return response.data
-  }
+export interface ScheduledJob {
+  key: string
+  display_name: string
+  description: string | null
+  category: string
+  task_name: string
+  schedule_kind: 'cron' | 'interval'
+  cron_expr: string | null
+  interval_seconds: number | null
+  timezone: string
+  args: unknown[]
+  kwargs: Record<string, unknown>
+  queue: string | null
+  expires_seconds: number | null
+  enabled: boolean
+  editable: boolean
+  source: string
+  visibility: 'user' | 'system'
+  last_run_at: string | null
+  last_status: string | null
+  last_error: string | null
+  last_run_duration_ms: number | null
+  human_readable: string
+}
 
-  // Separate scene-based Temerant RPG endpoints
-  async createTemerantRpgCharacter(payload: TemerantRpgCharacterCreateRequest): Promise<TemerantRpgCharacterResponse> {
-    const response = await this.client.post('/api/temerant-rpg/characters', payload)
-    return response.data
-  }
-
-  async getTemerantRpgState(): Promise<TemerantRpgStateResponse> {
-    const response = await this.client.get('/api/temerant-rpg/state')
-    return response.data
-  }
-
-  async openTemerantRpgScene(payload?: { title?: string; location?: string; opening_prompt?: string }): Promise<TemerantRpgSceneResponse> {
-    const response = await this.client.post('/api/temerant-rpg/scenes/open', payload || {})
-    return response.data
-  }
-
-  async actTemerantRpgScene(
-    sceneId: string,
-    payload: { action: string; attribute?: string; skill?: string; difficulty?: number; circumstance_mod?: number }
-  ): Promise<TemerantRpgTurnResponse> {
-    const response = await this.client.post(`/api/temerant-rpg/scenes/${sceneId}/act`, payload)
-    return response.data
-  }
-
-  async closeTemerantRpgScene(sceneId: string, summary?: string): Promise<TemerantRpgSceneResponse> {
-    const response = await this.client.post(`/api/temerant-rpg/scenes/${sceneId}/close`, { summary })
-    return response.data
-  }
-
-  async advanceTemerantRpgTime(slots: number = 1): Promise<{ local_date: string; day_slot: string; summary: string }> {
-    const response = await this.client.post('/api/temerant-rpg/time/advance', { slots })
-    return response.data
-  }
-
-  async listTemerantRpgJournal(limit: number = 20): Promise<TemerantRpgJournalEntryResponse[]> {
-    const response = await this.client.get('/api/temerant-rpg/journal', { params: { limit } })
-    return response.data
-  }
-
-  async generateTemerantRpgJournal(localDate?: string): Promise<TemerantRpgJournalEntryResponse> {
-    const response = await this.client.post('/api/temerant-rpg/journal/generate', {
-      local_date: localDate,
-      regenerate: true,
-    })
-    return response.data
-  }
-
-  async runTemerantRpgAdmissions(termIndex?: number): Promise<TemerantRpgTermResponse> {
-    const response = await this.client.post('/api/temerant-rpg/admissions/run', {
-      term_index: termIndex,
-    })
-    return response.data
-  }
-
-  async listTemerantRpgTerms(limit: number = 12): Promise<TemerantRpgTermResponse[]> {
-    const response = await this.client.get('/api/temerant-rpg/terms', { params: { limit } })
-    return response.data
-  }
+export interface SchedulePatch {
+  schedule_kind?: 'cron' | 'interval'
+  cron_expr?: string | null
+  interval_seconds?: number | null
+  timezone?: string
+  enabled?: boolean
+  kwargs?: Record<string, unknown>
 }
 
 // Create and export a singleton instance

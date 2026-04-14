@@ -1,6 +1,6 @@
 """
 Push Notification Service
-Sends push notifications via Expo Push for iOS/Android devices.
+Sends push notifications to iOS/Android devices.
 """
 import asyncio
 import logging
@@ -24,11 +24,11 @@ class NotificationPriority(Enum):
 
 
 class NotificationService:
-    """Service for sending push notifications via Expo"""
+    """Service for sending mobile push notifications."""
 
     def __init__(self):
         self.enabled = True
-        logger.info("📱 NotificationService initialized (Expo Push)")
+        logger.info("📱 NotificationService initialized")
 
     async def _get_push_tokens(self, user_id: str) -> List[str]:
         """Get active push tokens for a user from the database"""
@@ -50,7 +50,7 @@ class NotificationService:
         finally:
             db.close()
 
-    async def _send_expo_push(
+    async def _send_push(
         self,
         tokens: List[str],
         title: str,
@@ -58,7 +58,7 @@ class NotificationService:
         data: Optional[Dict[str, Any]] = None,
         priority: str = "default"
     ) -> bool:
-        """Send push notification via Expo Push API"""
+        """Send push notification to the supplied device tokens."""
         if not tokens:
             logger.warning("No push tokens provided")
             return False
@@ -85,13 +85,13 @@ class NotificationService:
                     }
                 )
                 if response.status_code == 200:
-                    logger.info(f"📱 Expo push sent: {title}")
+                    logger.info(f"📱 Push sent: {title}")
                     return True
                 else:
-                    logger.error(f"Expo push failed: {response.status_code} - {response.text}")
+                    logger.error(f"Push failed: {response.status_code} - {response.text}")
                     return False
         except Exception as e:
-            logger.error(f"Expo push error: {e}")
+            logger.error(f"Push error: {e}")
             return False
 
     async def send_notification(
@@ -188,7 +188,7 @@ class NotificationService:
         url: Optional[str] = None
     ) -> bool:
         """
-        Send a notification to David via Expo Push.
+        Send a push notification to David.
 
         Args:
             title: Notification title
@@ -349,23 +349,6 @@ class NotificationService:
             body=f"{question}\n\nContext: {context}...",
             priority="high",
             category="uncertainty"
-        )
-
-    async def notify_karma_alert(
-        self,
-        agent_id: str,
-        dimension: str,
-        score: float,
-        level: str
-    ) -> bool:
-        """Notify David of a karma score alert."""
-        priority = "urgent" if level == "critical" else "high"
-
-        return await self.notify_david(
-            title=f"Karma Alert: {agent_id}",
-            body=f"The '{dimension}' dimension is {level} ({score:.1f}/100)",
-            priority=priority,
-            category="karma"
         )
 
     async def notify_proactive_action(

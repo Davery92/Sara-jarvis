@@ -2,7 +2,7 @@
 Unified Notification Pipeline
 
 Single entry point for all notifications with topic-based deduplication.
-Replaces scattered Expo push implementations across heartbeat, subconscious,
+Replaces scattered push implementations across heartbeat, subconscious,
 proactive, and anticipation services.
 """
 
@@ -21,21 +21,52 @@ logger = logging.getLogger(__name__)
 # Default user ID
 DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
-# Default cooldowns by category (hours)
+# Hardcoded fallbacks for category cooldowns (hours). The values for `checkin`,
+# `general`, `calendar`, `email`, and `health` are overridden at runtime by
+# `tunable_setting` rows via `_cooldown_for()` below — edit them in the
+# Settings UI, not here.
 DEFAULT_COOLDOWNS = {
     "calendar": 24.0,
     "weather": 8.0,
-    "checkin": 4.0,
+    "checkin": 2.0,
     "email": 4.0,
     "security": 0.25,
     "home": 2.0,
     "reminder": 1.0,
     "timer": 0.5,
-    "general": 4.0,
+    "general": 2.0,
+    "acs_discovery": 4.0,
     "health": 24.0,
     "fitness": 24.0,
     "wellness": 24.0,
+    "system_health": 0.5,
+    "calendar_prep": 2.0,
 }
+
+# Mapping from category → tunable key. Categories not in this map fall through
+# to the hardcoded DEFAULT_COOLDOWNS value.
+_TUNABLE_COOLDOWN_KEYS = {
+    "checkin": "notification.cooldown.checkin_hours",
+    "general": "notification.cooldown.general_hours",
+    "calendar": "notification.cooldown.calendar_hours",
+    "email": "notification.cooldown.email_hours",
+    "health": "notification.cooldown.health_hours",
+    "fitness": "notification.cooldown.health_hours",  # share the health knob
+    "wellness": "notification.cooldown.health_hours",
+}
+
+
+def _cooldown_for(category: str) -> float:
+    """Return effective cooldown (hours) for a category, honoring tunables."""
+    fallback = _cooldown_for(category)
+    tunable_key = _TUNABLE_COOLDOWN_KEYS.get(category)
+    if not tunable_key:
+        return fallback
+    try:
+        from app.services.tunables import get_tunable_float
+        return get_tunable_float(tunable_key, fallback)
+    except Exception:
+        return fallback
 
 # Even when category cooldown is 0, block identical duplicates for a short period.
 MIN_EXACT_DEDUP_HOURS = 0.25
@@ -144,7 +175,7 @@ async def send_notification(
         user_id: Target user ID
         title: Notification title
         message: Notification body
-        priority: "low", "normal", or "high"
+        priority: "low", "normal", "important", "high", "urgent", or "critical"
         topic: Dedup key, e.g. "calendar:gymnastics_7pm_20260205"
         category: Notification category for cooldown lookup
         source: Which system sent this
@@ -157,6 +188,42 @@ async def send_notification(
     Returns:
         Dict with {sent: bool, reason: str, ...}
     """
+    priority = _normalize_priority(priority)
+
+    # ── Engagement-based priority adjustment ──
+    # If David consistently ignores a category, lower priority; if he engages, boost
+    if db and category not in ("system_health", "security"):
+        try:
+            eng_result = await db.execute(text("""
+                SELECT count(*) FILTER (WHERE sent = true) as sent,
+                       count(*) FILTER (WHERE engaged = true) as engaged
+                FROM notification_log
+                WHERE user_id = :uid AND category = :cat
+                  AND sent_at > NOW() - INTERVAL '14 days'
+            """), {"uid": user_id, "cat": category})
+            eng_row = eng_result.fetchone()
+            if eng_row and eng_row[0] >= 5:  # Only adjust after 5+ sends
+                eng_rate = eng_row[1] / eng_row[0]
+                if eng_rate < 0.10 and priority in ("normal", "low"):
+                    priority = "low"  # Demote rarely-engaged categories
+                    logger.debug(f"Notification priority demoted for {category} (engagement={eng_rate:.0%})")
+                elif eng_rate > 0.60 and priority == "low":
+                    priority = "normal"  # Promote highly-engaged categories
+        except Exception:
+            pass  # Don't block notifications on analytics failure
+
+    # ── Notification tuner check: suppress categories with very low engagement ──
+    try:
+        from app.services.notification_tuner import get_tuning_for_category
+        tuning_action = get_tuning_for_category(user_id, category)
+        if tuning_action == "suppress" and priority not in ("urgent", "critical"):
+            logger.info(f"Notification suppressed by tuner: {category} | title={title[:60]}")
+            return {"sent": False, "reason": "tuner_suppressed", "category": category}
+        elif tuning_action == "double_cooldown":
+            cooldown_hours = (cooldown_hours or _cooldown_for(category)) * 2
+    except Exception:
+        pass
+
     # ── Ban check: reject health/fitness/banned notifications before any delivery ──
     ban_reason = await _check_notification_ban(user_id, title, message, category, db)
     if ban_reason:
@@ -182,7 +249,7 @@ async def send_notification(
         except Exception as e:
             logger.debug(f"Attention queue routing failed, falling through: {e}")
 
-    effective_cooldown = cooldown_hours if cooldown_hours is not None else DEFAULT_COOLDOWNS.get(category, 4.0)
+    effective_cooldown = cooldown_hours if cooldown_hours is not None else _cooldown_for(category)
     effective_topic = topic or f"{category}:{_hash_topic(title, message)}"
 
     # Dedup check:
@@ -248,14 +315,15 @@ async def send_notification(
             attention_item_id=_attention_item_id,
         )
 
-    # Send via Expo push only if desktop delivery failed or wasn't available
+    # Send via mobile push only if desktop delivery failed or wasn't available
     success = desktop_sent
     if tokens and not desktop_sent:
-        expo_success = await _send_expo_push(
+        push_success = await _send_push(
             tokens, title, message, priority, source,
             notification_id=notification_id,
+            category=category,
         )
-        success = success or expo_success
+        success = success or push_success
 
     if not success:
         # Mark log as unsent if push failed
@@ -266,7 +334,7 @@ async def send_notification(
                 """), {"id": notification_id})
             except Exception:
                 pass
-        return {"sent": False, "reason": "expo_failed"}
+        return {"sent": False, "reason": "push_failed"}
 
     logger.info(f"Notification sent: topic={effective_topic} title={title[:50]}")
     return {
@@ -339,6 +407,7 @@ async def send_consolidated_notification(
     for notif in notifications:
         topic = notif.get("topic") or f"{notif.get('category', 'general')}:{_hash_topic(notif['title'], notif['message'])}"
         category = notif.get("category", "general")
+        normalized_priority = _normalize_priority(notif.get("priority", "normal"))
 
         # Ban check for each individual notification
         ban_reason = await _check_notification_ban(user_id, notif["title"], notif["message"], category, db)
@@ -349,7 +418,7 @@ async def send_consolidated_notification(
 
         configured_cooldown = notif.get("cooldown_hours")
         if configured_cooldown is None:
-            configured_cooldown = DEFAULT_COOLDOWNS.get(category, 4.0)
+            configured_cooldown = _cooldown_for(category)
         dedup_window = configured_cooldown if configured_cooldown > 0 else MIN_EXACT_DEDUP_HOURS
         include_category_limits = configured_cooldown > 0
 
@@ -360,13 +429,19 @@ async def send_consolidated_notification(
             if is_dup:
                 await _log_notification(
                     db, user_id, topic, category, notif["title"], notif["message"],
-                    notif.get("priority", "normal"), source, agent_run_id, dedup_window,
+                    normalized_priority, source, agent_run_id, dedup_window,
                     sent=False, dedup_blocked=True
                 )
                 results.append({"topic": topic, "sent": False, "reason": "dedup"})
                 continue
 
-        to_send.append({**notif, "topic": topic, "category": category, "cooldown": dedup_window})
+        to_send.append({
+            **notif,
+            "topic": topic,
+            "category": category,
+            "cooldown": dedup_window,
+            "priority": normalized_priority,
+        })
 
     if not to_send:
         return {"sent": False, "reason": "all_deduped", "details": results}
@@ -384,14 +459,17 @@ async def send_consolidated_notification(
             m = n["message"][:100]
             body_parts.append(f"- {t}: {m}")
         body = "\n".join(body_parts)
-        final_priority = "high" if any(n.get("priority") == "high" for n in to_send) else "normal"
+        final_priority = "high" if any(
+            n.get("priority") in ("high", "urgent", "critical")
+            for n in to_send
+        ) else "normal"
 
     # Send
     tokens = await _get_push_tokens(db, user_id) if db else await _get_push_tokens_sync(user_id)
     if not tokens:
         return {"sent": False, "reason": "no_tokens"}
 
-    success = await _send_expo_push(tokens, title, body, final_priority, source)
+    success = await _send_push(tokens, title, body, final_priority, source, category=category)
 
     # Log each notification
     if db:
@@ -595,7 +673,7 @@ async def route_through_attention_queue(
     Route a notification through the attention queue (Phase 2 — Cortana Evolution).
 
     Priority normal/low → create attention item only.
-    Priority high/urgent/critical → create item AND send push.
+    Priority important/high/urgent/critical → create item AND send push.
 
     Behind AUTONOMY_ATTENTION_ENABLED flag — when off, sends directly.
     """
@@ -604,6 +682,8 @@ async def route_through_attention_queue(
         attention_enabled = getattr(settings, 'autonomy_attention_enabled', False)
     except Exception:
         attention_enabled = False
+
+    priority = _normalize_priority(priority)
 
     if not attention_enabled or not db:
         # Feature off — send directly (bypass attention to avoid recursion)
@@ -615,11 +695,19 @@ async def route_through_attention_queue(
 
     from app.services.autonomy.attention_queue import attention_queue
 
+    attention_payload = _build_attention_payload(
+        title=title,
+        message=message,
+        category=category,
+        source=source,
+        payload=payload,
+    )
+
     # Always create attention item
     item_id = await attention_queue.create_item(
         db=db, user_id=user_id, title=title, body=message,
         category=category, priority=priority, source=source,
-        dedupe_key=dedupe_key, payload=payload,
+        dedupe_key=dedupe_key, payload=attention_payload,
     )
 
     # If attention queue persistence is unavailable (e.g., missing table/migration),
@@ -695,6 +783,109 @@ def _hash_topic(title: str, message: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
+def _normalize_priority(priority: Optional[str]) -> str:
+    """Normalize priority labels across callers."""
+    value = (priority or "normal").strip().lower()
+    mapping = {
+        "low": "low",
+        "normal": "normal",
+        "default": "normal",
+        "medium": "normal",
+        "high": "high",
+        "important": "high",
+        "urgent": "urgent",
+        "critical": "critical",
+    }
+    return mapping.get(value, "normal")
+
+
+def _default_attention_actions(
+    title: str,
+    message: str,
+    category: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Generate contextual action buttons per category for attention queue items."""
+    actions: List[Dict[str, Any]] = []
+    has_chat = False
+    payload = payload or {}
+
+    # Extract URLs from payload for potential open_url action
+    item_url = payload.get("url") or payload.get("link") or payload.get("original_url")
+
+    if category == "calendar":
+        actions.extend([
+            {"id": "open_calendar", "label": "Open calendar", "kind": "navigate", "target": "calendar"},
+            {"id": "snooze_10m", "label": "Snooze 10m", "kind": "snooze", "minutes": 10},
+            {"id": "snooze_30m", "label": "Snooze 30m", "kind": "snooze", "minutes": 30},
+        ])
+    elif category == "checkin":
+        actions.append({"id": "reply", "label": "Reply to Sara", "kind": "chat", "prompt": f"Help me handle this: {title}"})
+        actions.append({"id": "snooze_1h", "label": "Snooze 1h", "kind": "snooze", "minutes": 60})
+        has_chat = True
+    elif category == "reminder":
+        actions.extend([
+            {"id": "mark_done", "label": "Mark done", "kind": "complete"},
+            {"id": "snooze_30m", "label": "Snooze 30m", "kind": "snooze", "minutes": 30},
+            {"id": "add_calendar", "label": "Add to calendar", "kind": "add_calendar"},
+        ])
+    elif category == "email":
+        actions.append({"id": "open_email", "label": "Open email", "kind": "navigate", "target": "email"})
+        if item_url:
+            actions.append({"id": "open_link", "label": "Open link", "kind": "open_url", "url": item_url})
+        actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
+    elif category == "security":
+        actions.append({"id": "details", "label": "Details", "kind": "chat", "prompt": f"Tell me more about this security event: {title}"})
+        has_chat = True
+    elif category == "home":
+        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": f"Help me with this home event: {title}"})
+        has_chat = True
+    elif category in ("health", "fitness", "wellness"):
+        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": f"Help me with: {title}"})
+        actions.append({"id": "remind_later", "label": "Remind me later", "kind": "add_reminder", "default_minutes": 120})
+        has_chat = True
+    elif category == "weather":
+        actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
+    elif category == "deferred_action":
+        actions.append({"id": "do_now", "label": "Do now", "kind": "chat", "prompt": f"Let's do this now: {title}"})
+        actions.append({"id": "snooze_1h", "label": "Snooze 1h", "kind": "snooze", "minutes": 60})
+        actions.append({"id": "set_reminder", "label": "Set reminder", "kind": "add_reminder", "default_minutes": 60})
+        has_chat = True
+    else:
+        # general / unknown
+        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": f"Help me handle this: {title}"})
+        actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
+        has_chat = True
+
+    # Universal tail: Ask Sara (if no chat action yet) + Done
+    if not has_chat:
+        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": f"Help me with: {title}"})
+    actions.append({"id": "done", "label": "Done", "kind": "complete"})
+
+    return actions
+
+
+def _build_attention_payload(
+    title: str,
+    message: str,
+    category: str,
+    source: str,
+    payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Ensure attention items carry actionable payload metadata."""
+    merged: Dict[str, Any] = dict(payload or {})
+    merged.setdefault("title", title)
+    merged.setdefault("message", message)
+    merged.setdefault("category", category)
+    merged.setdefault("source", source)
+
+    actions = merged.get("actions")
+    if not isinstance(actions, list) or not actions:
+        merged["actions"] = _default_attention_actions(title, message, category, payload=merged)
+
+    return merged
+
+
 async def _check_dedup(
     db: AsyncSession,
     user_id: str,
@@ -723,13 +914,14 @@ async def _check_dedup(
     # Extract category prefix from topic (e.g. "home" from "home:ecobee_xyz")
     category = topic.split(":")[0] if ":" in topic else topic
     category_limits = {
-        "home": (3, 6.0),      # max 3 per 6 hours
-        "security": (4, 6.0),  # max 4 per 6 hours
-        "checkin": (1, 6.0),   # max 1 per 6 hours
-        "weather": (2, 8.0),   # max 2 per 8 hours
-        "health": (1, 24.0),   # max 1 per 24 hours
-        "fitness": (1, 24.0),  # max 1 per 24 hours
-        "wellness": (1, 24.0), # max 1 per 24 hours
+        "home": (3, 6.0),          # max 3 per 6 hours
+        "security": (4, 6.0),      # max 4 per 6 hours
+        "checkin": (1, 6.0),       # max 1 per 6 hours
+        "weather": (2, 8.0),       # max 2 per 8 hours
+        "health": (1, 24.0),       # max 1 per 24 hours
+        "fitness": (1, 24.0),      # max 1 per 24 hours
+        "wellness": (1, 24.0),     # max 1 per 24 hours
+        "acs_discovery": (1, 4.0), # max 1 per 4 hours — finalization consolidates
     }
     if include_category_limits and category in category_limits:
         max_count, window_hours = category_limits[category]
@@ -807,14 +999,10 @@ async def _get_push_tokens(db: AsyncSession, user_id: str) -> List[str]:
 
 
 async def _get_push_tokens_sync(user_id: str) -> List[str]:
-    """Fallback: get push tokens with a sync engine."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
+    """Fallback: get push tokens with the shared sync session factory."""
+    from app.db.session import SessionLocal
 
-    engine = create_engine(settings.database_url)
-    Session = sessionmaker(bind=engine)
-    db = Session()
+    db = SessionLocal()
     try:
         result = db.execute(text("""
             SELECT DISTINCT token FROM push_token
@@ -826,28 +1014,41 @@ async def _get_push_tokens_sync(user_id: str) -> List[str]:
         db.close()
 
 
-async def _send_expo_push(
+async def _send_push(
     tokens: List[str],
     title: str,
     body: str,
     priority: str = "normal",
     source: str = "unified_heartbeat",
     notification_id: Optional[int] = None,
+    category: str = "general",
 ) -> bool:
-    """Send push notification via Expo Push API."""
+    """Send mobile push notification to all of the user's device tokens."""
     unique_tokens = [t for t in dict.fromkeys(tokens) if t]
     if not unique_tokens:
         return False
 
-    expo_priority = "high" if priority == "high" else "default"
+    normalized_priority = _normalize_priority(priority)
+    push_priority = "high" if normalized_priority in ("high", "urgent", "critical") else "default"
     push_data = {
         "type": "heartbeat" if source == "unified_heartbeat" else source,
-        "priority": priority,
+        "priority": normalized_priority,
         "title": title,
         "message": body,
+        "category": category,
     }
     if notification_id is not None:
         push_data["notification_id"] = notification_id
+
+    # Map category to interactive notification category id
+    push_category_map = {
+        "checkin": "MORNING_CHECKIN",
+        "acs_discovery": "ACS_DISCOVERY",
+        "calendar_prep": "SARA_INSIGHT",
+        "system_health": "GENERAL_NUDGE",
+    }
+    push_category_id = push_category_map.get(category, "GENERAL_NUDGE")
+
     messages = [
         {
             "to": token,
@@ -855,7 +1056,10 @@ async def _send_expo_push(
             "title": title,
             "body": body,
             "data": push_data,
-            "priority": expo_priority,
+            "priority": push_priority,
+            "categoryId": push_category_id,
+            "_contentAvailable": True,
+            "badge": 1,
         }
         for token in unique_tokens
     ]
@@ -871,13 +1075,13 @@ async def _send_expo_push(
                 },
             )
             if response.status_code == 200:
-                logger.info(f"Expo push sent to {len(unique_tokens)} token(s): {title[:50]}")
+                logger.info(f"Push sent to {len(unique_tokens)} token(s): {title[:50]}")
                 return True
             else:
-                logger.error(f"Expo push failed: {response.status_code} - {response.text[:200]}")
+                logger.error(f"Push failed: {response.status_code} - {response.text[:200]}")
                 return False
     except Exception as e:
-        logger.error(f"Expo push error: {e}")
+        logger.error(f"Push error: {e}")
         return False
 
 

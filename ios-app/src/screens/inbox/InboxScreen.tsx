@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   FlatList,
@@ -11,13 +11,20 @@ import {
   Modal,
   ScrollView,
   RefreshControl,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import * as ExpoClipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import type { RouteProp } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as ExpoLinking from 'expo-linking';
+import { useToast } from '../../context/ToastContext';
+import { SkeletonList } from '../../components/SkeletonLoader';
 import apiClient from '../../services/api';
-import { navigateToChat } from '../../services/navigation';
+import { navigateToChat, navigateToTab } from '../../services/navigation';
+import type { AppStackParamList } from '../../navigation/AppNavigator';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 interface InboxItem {
@@ -43,6 +50,37 @@ interface InboxStats {
   total: number;
 }
 
+type InboxMode = 'content' | 'attention';
+type InboxNavigationProp = NativeStackNavigationProp<AppStackParamList, 'Inbox'>;
+type InboxRouteProp = RouteProp<AppStackParamList, 'Inbox'>;
+
+interface AttentionItem {
+  id: string;
+  title: string;
+  body: string | null;
+  category: string;
+  priority: 'low' | 'normal' | 'high' | 'urgent' | 'critical';
+  status: 'new' | 'sent' | 'read' | 'archived' | 'dropped';
+  source: string;
+  payload?: Record<string, any> | null;
+  created_at: string;
+}
+
+interface AttentionCountResponse {
+  counts: Record<string, number>;
+  unread: number;
+}
+
+interface AttentionAction {
+  id: string;
+  label: string;
+  kind: string;
+  target?: string;
+  prompt?: string;
+  url?: string;
+  default_minutes?: number;
+}
+
 const CONTENT_TYPE_ICONS: Record<string, string> = {
   url: '🔗',
   reddit: '🟠',
@@ -56,6 +94,14 @@ const STATUS_COLORS: Record<string, string> = {
   read: colors.textMuted,
   kept: colors.success,
   discarded: colors.error,
+};
+
+const ATTENTION_PRIORITY_COLORS: Record<string, string> = {
+  critical: '#ef4444',
+  urgent: '#f97316',
+  high: '#eab308',
+  normal: colors.info,
+  low: colors.textMuted,
 };
 
 function timeAgo(dateStr: string): string {
@@ -81,18 +127,67 @@ function getDomain(url: string | null): string {
   }
 }
 
+function SwipeableArchiveRow({ children, onArchive }: { children: React.ReactNode; onArchive: () => void }) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 15 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+      onPanResponderMove: (_, gestureState) => {
+        if (gestureState.dx < 0) {
+          translateX.setValue(gestureState.dx);
+        }
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dx < -80) {
+          Animated.timing(translateX, { toValue: -400, duration: 200, useNativeDriver: true }).start(() => {
+            onArchive();
+            translateX.setValue(0);
+          });
+        } else {
+          Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+        }
+      },
+    })
+  ).current;
+
+  return (
+    <View style={{ overflow: 'hidden' }}>
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.error, justifyContent: 'center', alignItems: 'flex-end', paddingRight: spacing.lg }]}>
+        <Text style={{ color: '#fff', fontWeight: '600', fontSize: fontSizes.sm }}>Archive</Text>
+      </View>
+      <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
 export default function InboxScreen() {
+  const navigation = useNavigation<InboxNavigationProp>();
+  const route = useRoute<InboxRouteProp>();
+  const { showToast } = useToast();
+  const initialMode: InboxMode = route?.params?.tab === 'attention' ? 'attention' : 'content';
+
+  const [mode, setMode] = useState<InboxMode>(initialMode);
   const [items, setItems] = useState<InboxItem[]>([]);
   const [stats, setStats] = useState<InboxStats | null>(null);
+  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
+  const [attentionCounts, setAttentionCounts] = useState<AttentionCountResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<string>('all');
+  const [attentionFilter, setAttentionFilter] = useState<'all' | 'unread' | 'read'>('all');
   const [shareInput, setShareInput] = useState('');
   const [sharing, setSharing] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InboxItem | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [expandedAttentionId, setExpandedAttentionId] = useState<string | null>(null);
+  const [attentionActionBusy, setAttentionActionBusy] = useState<string | null>(null);
+  const [hitlReplyText, setHitlReplyText] = useState('');
+  const [hitlReplyItemId, setHitlReplyItemId] = useState<string | null>(null);
+  const [hitlReplySending, setHitlReplySending] = useState(false);
 
-  const loadItems = useCallback(async () => {
+  const loadContentItems = useCallback(async () => {
     try {
       const statusParam = filter === 'all' ? undefined : filter;
       const [itemsData, statsData] = await Promise.all([
@@ -109,15 +204,49 @@ export default function InboxScreen() {
     }
   }, [filter]);
 
+  const loadAttentionItems = useCallback(async () => {
+    try {
+      const [itemsData, countsData] = await Promise.all([
+        apiClient.getAttentionItems(undefined, 100),
+        apiClient.getAttentionCount(),
+      ]);
+      setAttentionItems(itemsData || []);
+      setAttentionCounts(countsData || null);
+    } catch (error) {
+      console.error('Failed to load attention inbox:', error);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
   useEffect(() => {
-    loadItems();
-  }, [loadItems]);
+    if (route?.params?.tab === 'attention') {
+      setMode('attention');
+    } else if (route?.params?.tab === 'content') {
+      setMode('content');
+    }
+  }, [route?.params?.tab]);
+
+  useEffect(() => {
+    setLoading(true);
+    if (mode === 'content') {
+      loadContentItems();
+    } else {
+      loadAttentionItems();
+    }
+  }, [mode, loadContentItems, loadAttentionItems]);
 
   // Reload when screen comes into focus
   useFocusEffect(
     useCallback(() => {
-      loadItems();
-    }, [loadItems])
+      setLoading(true);
+      if (mode === 'content') {
+        loadContentItems();
+      } else {
+        loadAttentionItems();
+      }
+    }, [mode, loadContentItems, loadAttentionItems])
   );
 
   // Handle deep links from share extension (sara://inbox/share?url=...)
@@ -132,12 +261,14 @@ export default function InboxScreen() {
           setSharing(true);
           await apiClient.shareToInbox(sharedUrl);
           setSharing(false);
-          loadItems();
+          setMode('content');
+          loadContentItems();
         } else if (sharedText) {
           setSharing(true);
           await apiClient.shareTextToInbox(sharedText);
           setSharing(false);
-          loadItems();
+          setMode('content');
+          loadContentItems();
         }
       } catch (error) {
         console.error('Deep link share failed:', error);
@@ -159,7 +290,11 @@ export default function InboxScreen() {
 
   const handleRefresh = () => {
     setRefreshing(true);
-    loadItems();
+    if (mode === 'content') {
+      loadContentItems();
+    } else {
+      loadAttentionItems();
+    }
   };
 
   const handleShare = async () => {
@@ -177,10 +312,10 @@ export default function InboxScreen() {
         await apiClient.shareTextToInbox(input);
       }
       setShareInput('');
-      await loadItems();
+      await loadContentItems();
     } catch (error) {
       console.error('Share failed:', error);
-      Alert.alert('Error', 'Failed to share content');
+      showToast('error', 'Failed to share content');
     } finally {
       setSharing(false);
     }
@@ -225,7 +360,7 @@ export default function InboxScreen() {
       const statsData = await apiClient.getInboxStats();
       setStats(statsData);
     } catch (error) {
-      Alert.alert('Error', 'Failed to update status');
+      showToast('error', 'Failed to update status');
     }
   };
 
@@ -243,7 +378,7 @@ export default function InboxScreen() {
             const statsData = await apiClient.getInboxStats();
             setStats(statsData);
           } catch (error) {
-            Alert.alert('Error', 'Failed to delete item');
+            showToast('error', 'Failed to delete item');
           }
         },
       },
@@ -263,8 +398,297 @@ export default function InboxScreen() {
 
   const handleOpenUrl = (url: string) => {
     ExpoLinking.openURL(url).catch(() => {
-      Alert.alert('Error', 'Failed to open URL');
+      showToast('error', 'Failed to open URL');
     });
+  };
+
+  const getAttentionActions = (item: AttentionItem): AttentionAction[] => {
+    const actions = item.payload?.actions;
+    if (!Array.isArray(actions)) return [];
+    return actions.filter((action): action is AttentionAction =>
+      !!action &&
+      typeof action.id === 'string' &&
+      typeof action.label === 'string' &&
+      typeof action.kind === 'string'
+    );
+  };
+
+  const markAttentionRead = async (id: string) => {
+    try {
+      await apiClient.markAttentionRead(id);
+      await loadAttentionItems();
+    } catch {
+      showToast('error', 'Failed to mark as read');
+    }
+  };
+
+  const markAttentionEngaged = async (id: string) => {
+    try {
+      await apiClient.engageAttentionItem(id);
+      const countsData = await apiClient.getAttentionCount();
+      setAttentionCounts(countsData || null);
+    } catch {
+      // best effort
+    }
+  };
+
+  const archiveAttentionItem = async (id: string) => {
+    try {
+      await apiClient.archiveAttentionItem(id);
+      await loadAttentionItems();
+    } catch {
+      showToast('error', 'Failed to archive item');
+    }
+  };
+
+  const handleAttentionDirective = (directive?: { type?: string; target?: string; prompt?: string; url?: string }) => {
+    if (!directive?.type) return;
+    if (directive.type === 'navigate') {
+      const target = (directive.target || '').toLowerCase();
+      if (target === 'calendar') {
+        navigation.navigate('Calendar');
+      } else if (target === 'inbox') {
+        setMode('content');
+      } else {
+        navigateToTab('More');
+      }
+      return;
+    }
+
+    if (directive.type === 'open_url' && directive.url) {
+      ExpoLinking.openURL(directive.url).catch(() => {
+        showToast('error', 'Failed to open URL');
+      });
+      return;
+    }
+
+    if (directive.type === 'chat') {
+      navigateToChat({
+        heartbeat: {
+          title: 'Attention item',
+          message: directive.prompt || 'Help me handle this.',
+          priority: 'normal',
+        },
+      });
+    }
+  };
+
+  const runAttentionAction = async (itemId: string, action: AttentionAction, params?: Record<string, any>) => {
+    const busyKey = `${itemId}:${action.id}`;
+    setAttentionActionBusy(busyKey);
+    try {
+      const result = await apiClient.runAttentionAction(itemId, action.id, params);
+      handleAttentionDirective(result?.directive);
+      if (result?.reminder?.title && result?.reminder?.reminder_time) {
+        const when = new Date(result.reminder.reminder_time).toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+        });
+        showToast('success', `Reminder set: ${result.reminder.title} at ${when}`);
+      }
+      if (result?.calendar_event) {
+        const when = new Date(result.calendar_event.start_time).toLocaleString('en-US', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        });
+        showToast('success', `Event created: ${result.calendar_event.title} at ${when}`);
+      }
+      if (result?.status === 'completed') {
+        showToast('success', 'Item marked as completed.');
+      }
+      await loadAttentionItems();
+    } catch {
+      showToast('error', 'Could not run that action.');
+    } finally {
+      setAttentionActionBusy(null);
+    }
+  };
+
+  const showTimePicker = (itemId: string, action: AttentionAction) => {
+    const hoursFromNow = (h: number) => new Date(Date.now() + h * 3600_000).toISOString();
+    const tomorrow9am = () => {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      d.setHours(9, 0, 0, 0);
+      return d.toISOString();
+    };
+
+    if (action.kind === 'add_reminder') {
+      Alert.alert('Remind me', 'When should I remind you?', [
+        { text: '1 hour', onPress: () => runAttentionAction(itemId, action, { reminder_time: hoursFromNow(1) }) },
+        { text: '3 hours', onPress: () => runAttentionAction(itemId, action, { reminder_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(itemId, action, { reminder_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    } else if (action.kind === 'add_calendar') {
+      Alert.alert('Add to calendar', 'When should this event be?', [
+        { text: 'In 1 hour', onPress: () => runAttentionAction(itemId, action, { start_time: hoursFromNow(1) }) },
+        { text: 'In 3 hours', onPress: () => runAttentionAction(itemId, action, { start_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(itemId, action, { start_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    }
+  };
+
+  const handleAttentionActionPress = (itemId: string, action: AttentionAction) => {
+    if (action.kind === 'hitl_reply') {
+      setHitlReplyItemId(itemId);
+      setHitlReplyText('');
+      setExpandedAttentionId(itemId);
+      return;
+    }
+    if (action.kind === 'add_reminder' || action.kind === 'add_calendar') {
+      showTimePicker(itemId, action);
+    } else {
+      runAttentionAction(itemId, action);
+    }
+  };
+
+  const submitHitlReply = async (itemId: string, message: string) => {
+    if (!message.trim()) return;
+    setHitlReplySending(true);
+    try {
+      await apiClient.replyToAttentionItem(itemId, message);
+      showToast('success', 'Reply sent to Sara');
+      setHitlReplyItemId(null);
+      setHitlReplyText('');
+      await loadAttentionItems();
+    } catch {
+      showToast('error', 'Failed to send reply');
+    } finally {
+      setHitlReplySending(false);
+    }
+  };
+
+  const filteredAttentionItems = attentionItems.filter((item) => {
+    if (attentionFilter === 'unread') {
+      return item.status === 'new' || item.status === 'sent';
+    }
+    if (attentionFilter === 'read') {
+      return item.status === 'read';
+    }
+    return true;
+  });
+
+  const renderAttentionItem = ({ item }: { item: AttentionItem }) => {
+    const isCompleted = item.status === 'completed' as string;
+    const priorityColor = ATTENTION_PRIORITY_COLORS[item.priority] || colors.textMuted;
+    const actions = getAttentionActions(item);
+    const isExpanded = expandedAttentionId === item.id;
+    const isUnread = item.status === 'new' || item.status === 'sent';
+    const isHitl = item.payload?.type === 'human_input_request';
+
+    return (
+      <SwipeableArchiveRow onArchive={() => handleArchiveItem(item.id)}>
+      <TouchableOpacity
+        style={[
+          styles.itemCard,
+          isUnread && styles.itemCardUnread,
+          isCompleted && styles.itemCardCompleted,
+          isHitl && !isCompleted && { borderLeftWidth: 3, borderLeftColor: '#f97316' },
+        ]}
+        onPress={() => {
+          const nextExpanded = isExpanded ? null : item.id;
+          setExpandedAttentionId(nextExpanded);
+          if (nextExpanded && isUnread) {
+            markAttentionEngaged(item.id);
+          }
+        }}
+      >
+        <View style={styles.itemHeader}>
+          <View style={[styles.attentionPriorityBadge, { backgroundColor: `${priorityColor}22`, borderColor: `${priorityColor}66` }]}>
+            <Text style={[styles.attentionPriorityText, { color: priorityColor }]}>{item.priority}</Text>
+          </View>
+          <View style={styles.itemMeta}>
+            <Text style={[styles.itemTitle, isCompleted && styles.completedText]} numberOfLines={2}>
+              {isCompleted ? '\u2705 ' : ''}{item.title}
+            </Text>
+            <View style={styles.itemSubRow}>
+              <Text style={styles.itemDomain}>{item.category}</Text>
+              <Text style={styles.itemTime}>{timeAgo(item.created_at)}</Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            {isUnread && (
+              <TouchableOpacity onPress={() => markAttentionRead(item.id)}>
+                <Text style={styles.attentionReadText}>Read</Text>
+              </TouchableOpacity>
+            )}
+            {!isCompleted && (
+              <TouchableOpacity onPress={() => archiveAttentionItem(item.id)}>
+                <Text style={styles.attentionArchiveText}>Archive</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {item.body && (
+          <Text style={styles.itemDescription} numberOfLines={isExpanded ? undefined : 2}>
+            {item.body}
+          </Text>
+        )}
+
+        {!isCompleted && actions.length > 0 && (
+          <View style={styles.attentionActionsRow}>
+            {actions.map((action) => {
+              const busy = attentionActionBusy === `${item.id}:${action.id}`;
+              const isComplete = action.kind === 'complete';
+              return (
+                <TouchableOpacity
+                  key={action.id}
+                  style={[styles.attentionActionChip, isComplete && styles.completeActionChip]}
+                  disabled={busy}
+                  onPress={() => handleAttentionActionPress(item.id, action)}
+                >
+                  <Text style={[styles.attentionActionText, isComplete && styles.completeActionText]}>
+                    {busy ? 'Working...' : action.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
+        {/* HITL inline reply */}
+        {isExpanded && !isCompleted && item.payload?.type === 'human_input_request' && (
+          <View style={styles.hitlReplyContainer}>
+            {item.payload?.question && (
+              <View style={styles.hitlQuestionBox}>
+                <Text style={styles.hitlQuestionLabel}>Sara is asking:</Text>
+                <Text style={styles.hitlQuestionText}>{item.payload.question}</Text>
+              </View>
+            )}
+            <View style={styles.hitlReplyRow}>
+              <TextInput
+                style={styles.hitlReplyInput}
+                placeholder="Type your reply..."
+                placeholderTextColor={colors.textMuted}
+                value={hitlReplyItemId === item.id ? hitlReplyText : ''}
+                onChangeText={(text) => {
+                  setHitlReplyItemId(item.id);
+                  setHitlReplyText(text);
+                }}
+                onSubmitEditing={() => {
+                  if (hitlReplyText.trim()) submitHitlReply(item.id, hitlReplyText);
+                }}
+                returnKeyType="send"
+                editable={!hitlReplySending}
+              />
+              <TouchableOpacity
+                style={[styles.hitlReplySend, (!hitlReplyText.trim() || hitlReplySending) && { opacity: 0.3 }]}
+                disabled={!hitlReplyText.trim() || hitlReplySending}
+                onPress={() => submitHitlReply(item.id, hitlReplyText)}
+              >
+                <Text style={styles.hitlReplySendText}>
+                  {hitlReplySending ? '...' : 'Reply'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+      </TouchableOpacity>
+      </SwipeableArchiveRow>
+    );
   };
 
   const renderItem = ({ item }: { item: InboxItem }) => {
@@ -320,91 +744,165 @@ export default function InboxScreen() {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
-      </View>
+      <SafeAreaView style={styles.container} edges={['bottom']}>
+        <SkeletonList count={8} />
+      </SafeAreaView>
     );
   }
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
-      {/* Share Input */}
-      <View style={styles.shareContainer}>
-        <TextInput
-          style={styles.shareInput}
-          placeholder="Paste a URL or type something to save..."
-          placeholderTextColor={colors.textMuted}
-          value={shareInput}
-          onChangeText={setShareInput}
-          onSubmitEditing={handleShare}
-          returnKeyType="send"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        {shareInput ? (
-          <TouchableOpacity
-            style={[styles.shareButton, sharing && styles.shareButtonDisabled]}
-            onPress={handleShare}
-            disabled={sharing}
-          >
-            {sharing ? (
-              <ActivityIndicator size="small" color={colors.text} />
-            ) : (
-              <Text style={styles.shareButtonText}>Share</Text>
-            )}
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity style={styles.pasteButton} onPress={handlePasteAndShare}>
-            <Text style={styles.pasteButtonText}>Paste</Text>
-          </TouchableOpacity>
-        )}
+      <View style={styles.modeTabsRow}>
+        <TouchableOpacity
+          style={[styles.modeTab, mode === 'content' && styles.modeTabActive]}
+          onPress={() => { setMode('content'); setLoading(true); }}
+        >
+          <Text style={[styles.modeTabText, mode === 'content' && styles.modeTabTextActive]}>
+            Content ({stats?.unread ?? 0})
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.modeTab, mode === 'attention' && styles.modeTabActive]}
+          onPress={() => { setMode('attention'); setLoading(true); }}
+        >
+          <Text style={[styles.modeTabText, mode === 'attention' && styles.modeTabTextActive]}>
+            Attention ({attentionCounts?.unread ?? 0})
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Filter Tabs */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.filterContainer}
-        contentContainerStyle={styles.filterContent}
-      >
-        {filterTabs.map(tab => (
-          <TouchableOpacity
-            key={tab.key}
-            style={[styles.filterTab, filter === tab.key && styles.filterTabActive]}
-            onPress={() => { setFilter(tab.key); setLoading(true); }}
-          >
-            <Text style={[styles.filterTabText, filter === tab.key && styles.filterTabTextActive]}>
-              {tab.label}
-              {tab.count !== undefined ? ` (${tab.count})` : ''}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-
-      {/* Item List */}
-      <FlatList
-        data={items}
-        renderItem={renderItem}
-        keyExtractor={item => item.id}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor={colors.primary}
-          />
-        }
-        contentContainerStyle={styles.listContent}
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyIcon}>📥</Text>
-            <Text style={styles.emptyText}>
-              {filter === 'all'
-                ? 'No items yet. Share a URL or text above!'
-                : `No ${filter} items`}
-            </Text>
+      {mode === 'content' && (
+        <>
+          {/* Share Input */}
+          <View style={styles.shareContainer}>
+            <TextInput
+              style={styles.shareInput}
+              placeholder="Paste a URL or type something to save..."
+              placeholderTextColor={colors.textMuted}
+              value={shareInput}
+              onChangeText={setShareInput}
+              onSubmitEditing={handleShare}
+              returnKeyType="send"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {shareInput ? (
+              <TouchableOpacity
+                style={[styles.shareButton, sharing && styles.shareButtonDisabled]}
+                onPress={handleShare}
+                disabled={sharing}
+              >
+                {sharing ? (
+                  <ActivityIndicator size="small" color={colors.text} />
+                ) : (
+                  <Text style={styles.shareButtonText}>Share</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.pasteButton} onPress={handlePasteAndShare}>
+                <Text style={styles.pasteButtonText}>Paste</Text>
+              </TouchableOpacity>
+            )}
           </View>
-        }
-      />
+
+          {/* Filter Tabs */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filterContainer}
+            contentContainerStyle={styles.filterContent}
+          >
+            {filterTabs.map(tab => (
+              <TouchableOpacity
+                key={tab.key}
+                style={[styles.filterTab, filter === tab.key && styles.filterTabActive]}
+                onPress={() => { setFilter(tab.key); setLoading(true); }}
+              >
+                <Text style={[styles.filterTabText, filter === tab.key && styles.filterTabTextActive]}>
+                  {tab.label}
+                  {tab.count !== undefined ? ` (${tab.count})` : ''}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+
+          {/* Content List */}
+          <FlatList
+            data={items}
+            renderItem={renderItem}
+            keyExtractor={item => item.id}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                tintColor={colors.primary}
+              />
+            }
+            contentContainerStyle={styles.listContent}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyIcon}>📥</Text>
+                <Text style={styles.emptyText}>
+                  {filter === 'all'
+                    ? 'No items yet. Share a URL or text above!'
+                    : `No ${filter} items`}
+                </Text>
+              </View>
+            }
+          />
+        </>
+      )}
+
+      {mode === 'attention' && (
+        <>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filterContainer}
+            contentContainerStyle={styles.filterContent}
+          >
+            {[
+              { key: 'all', label: 'All', count: attentionItems.length },
+              { key: 'unread', label: 'Unread', count: attentionCounts?.unread ?? 0 },
+              { key: 'read', label: 'Read', count: attentionCounts?.counts?.read ?? 0 },
+            ].map(tab => (
+              <TouchableOpacity
+                key={tab.key}
+                style={[styles.filterTab, attentionFilter === tab.key && styles.filterTabActive]}
+                onPress={() => setAttentionFilter(tab.key as 'all' | 'unread' | 'read')}
+              >
+                <Text style={[styles.filterTabText, attentionFilter === tab.key && styles.filterTabTextActive]}>
+                  {tab.label} ({tab.count})
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+
+          <FlatList
+            data={filteredAttentionItems}
+            renderItem={renderAttentionItem}
+            keyExtractor={(item) => item.id}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                tintColor={colors.primary}
+              />
+            }
+            contentContainerStyle={styles.listContent}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyIcon}>🧠</Text>
+                <Text style={styles.emptyText}>
+                  {attentionFilter === 'all'
+                    ? 'No attention items right now.'
+                    : `No ${attentionFilter} attention items`}
+                </Text>
+              </View>
+            }
+          />
+        </>
+      )}
 
       {/* Detail Modal */}
       <Modal
@@ -512,6 +1010,30 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  modeTabsRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+  },
+  modeTab: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+  },
+  modeTabActive: {
+    backgroundColor: colors.primary,
+  },
+  modeTabText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  modeTabTextActive: {
+    color: colors.text,
   },
   loadingContainer: {
     flex: 1,
@@ -662,6 +1184,115 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: fontSizes.xs,
     marginTop: spacing.xs,
+  },
+  attentionPriorityBadge: {
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    marginTop: 2,
+  },
+  attentionPriorityText: {
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  attentionActionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  attentionActionChip: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.primary + '66',
+    backgroundColor: colors.primary + '12',
+  },
+  attentionActionText: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  attentionReadText: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  attentionArchiveText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  itemCardCompleted: {
+    opacity: 0.6,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.success,
+  },
+  completedText: {
+    textDecorationLine: 'line-through',
+    color: colors.textMuted,
+  },
+  completeActionChip: {
+    borderColor: colors.success + '66',
+    backgroundColor: colors.success + '14',
+  },
+  completeActionText: {
+    color: colors.success,
+  },
+
+  // HITL reply styles
+  hitlReplyContainer: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#f9731633',
+  },
+  hitlQuestionBox: {
+    backgroundColor: '#f9731618',
+    borderWidth: 1,
+    borderColor: '#f9731633',
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  hitlQuestionLabel: {
+    color: '#f97316',
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  hitlQuestionText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+  },
+  hitlReplyRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  hitlReplyInput: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: '#f9731644',
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    color: colors.text,
+    fontSize: fontSizes.sm,
+  },
+  hitlReplySend: {
+    backgroundColor: '#f9731622',
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md,
+    justifyContent: 'center',
+  },
+  hitlReplySendText: {
+    color: '#f97316',
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
 
   // Empty state

@@ -16,11 +16,11 @@ from app.services.unified_notification import (
 
 @pytest.fixture
 def patch_dedup_and_push():
-    """Context manager that patches _check_dedup, _log_notification, _get_push_tokens, _send_expo_push, and command_router."""
+    """Context manager that patches _check_dedup, _log_notification, _get_push_tokens, _send_push, and command_router."""
     with patch("app.services.unified_notification._check_dedup", new_callable=AsyncMock) as mock_dedup, \
          patch("app.services.unified_notification._log_notification", new_callable=AsyncMock) as mock_log, \
          patch("app.services.unified_notification._get_push_tokens", new_callable=AsyncMock) as mock_tokens, \
-         patch("app.services.unified_notification._send_expo_push", new_callable=AsyncMock) as mock_push, \
+         patch("app.services.unified_notification._send_push", new_callable=AsyncMock) as mock_push, \
          patch("app.services.unified_notification.command_router", create=True) as mock_cmd:
         mock_cmd.get_connected_devices = MagicMock(return_value=[])
         mock_log.return_value = "notif-log-id"
@@ -53,7 +53,7 @@ class TestDedupLogic:
         """Not a duplicate → sends."""
         mocks = patch_dedup_and_push
         mocks["dedup"].return_value = False
-        mocks["tokens"].return_value = ["ExponentPushToken[test]"]
+        mocks["tokens"].return_value = ["PushToken[test]"]
         mocks["push"].return_value = True
 
         db = AsyncMock()
@@ -68,7 +68,7 @@ class TestDedupLogic:
         """Two different topics should both be allowed."""
         mocks = patch_dedup_and_push
         mocks["dedup"].return_value = False
-        mocks["tokens"].return_value = ["ExponentPushToken[test]"]
+        mocks["tokens"].return_value = ["PushToken[test]"]
         mocks["push"].return_value = True
 
         db = AsyncMock()

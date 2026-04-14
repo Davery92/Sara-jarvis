@@ -199,7 +199,7 @@ class PrimitiveExecutor:
         task_id: str,
         step_state: Dict[str, Any]
     ) -> ExecutionResult:
-        """Send iOS push notification via Expo."""
+        """Send mobile push notification."""
         from app.main_simple import send_push_notification_async
 
         message = action.get("message", "")

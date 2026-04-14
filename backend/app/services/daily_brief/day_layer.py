@@ -9,7 +9,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 
+from app.core.timezone import now as local_now
+
 from .prompts import DAY_LAYER_SUMMARIZE, DAY_LAYER_CONSOLIDATE
+from .status_tracker import brief_status_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +32,9 @@ class DayLayer:
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR
-        self.fast_model = "qwen3-coder-next"
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
+        from app.core.llm_config import llm_config
+        self.fast_model = llm_config.fast_model
+        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", llm_config.primary_url)
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's brief directory structure exists."""
@@ -83,7 +87,7 @@ class DayLayer:
 
     def _get_date_header(self, timestamp: Optional[datetime] = None) -> str:
         """Get date header for day layer."""
-        timestamp = timestamp or datetime.now()
+        timestamp = timestamp or local_now()
         return f"## Today ({timestamp.strftime('%A, %B %d')})\n\n"
 
     def _extract_date_from_content(self, content: str) -> Optional[str]:
@@ -105,7 +109,7 @@ class DayLayer:
         Append a conversation summary to the day layer.
         Called after session gaps are detected.
         """
-        timestamp = timestamp or datetime.now()
+        timestamp = timestamp or local_now()
         time_str = timestamp.strftime("%H:%M")
 
         current_day = self._read_layer(user_id)
@@ -127,6 +131,7 @@ class DayLayer:
             new_content = f"{current_day}\n**{time_str}**\n{summary}\n"
 
         self._write_layer(user_id, new_content)
+        brief_status_tracker.record_event(user_id, "day_append", timestamp=timestamp)
         logger.info(f"📅 Appended session summary to day layer for user {user_id[:8]}")
 
         # Check if consolidation needed
@@ -223,6 +228,10 @@ class DayLayer:
     def read(self, user_id: str) -> str:
         """Read current day layer content."""
         return self._read_layer(user_id)
+
+    def clear(self, user_id: str):
+        """Clear day layer content after archival."""
+        self._write_layer(user_id, "")
 
     def needs_consolidation(self, user_id: str) -> bool:
         """Check if day layer needs consolidation."""

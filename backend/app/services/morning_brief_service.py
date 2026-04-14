@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 BRIEF_SYSTEM_PROMPT = """You are Sara, David's personal AI assistant. Write his morning brief.
 
 Rules:
-- First person ("you have", "your"), 300-500 words
+- First person ("you have", "your"), {word_min}-{word_max} words
 - Use light markdown: **bold** for emphasis, bullets where natural, but keep it speakable
 - Prioritize by relevance: busy day → lead with calendar; rest day → lighter brief
 - Pick the 2-3 most interesting news items, skip the rest
@@ -180,7 +180,7 @@ class MorningBriefService:
                 SELECT content, importance
                 FROM episode
                 WHERE user_id = :user_id
-                  AND importance >= 7
+                  AND importance >= 0.7
                 ORDER BY created_at DESC
                 LIMIT 8
             """), {"user_id": user_id}).fetchall()
@@ -407,8 +407,8 @@ Synthesized summary:"""
                         "model": self.llm_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 2000,
-                        "stream": False
+                        "stream": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                 ) as response:
                     if response.status != 200:
@@ -417,9 +417,13 @@ Synthesized summary:"""
                         return raw_news  # Fall back to raw news
 
                     data = await response.json()
-                    content = data["choices"][0]["message"]["content"]
+                    content = data["choices"][0]["message"]["content"] or ""
                     finish_reason = data["choices"][0].get("finish_reason", "unknown")
                     logger.info(f"News synthesis complete: {len(content)} chars, finish_reason: {finish_reason}")
+                    # If thinking mode consumed all tokens, fall back to raw news
+                    if not content.strip():
+                        logger.warning("News synthesis returned empty content, falling back to raw news")
+                        return raw_news
                     return content
 
         except Exception as e:
@@ -664,34 +668,6 @@ Synthesized summary:"""
             logger.warning(f"Could not check calendar sync freshness: {e}")
             return False, None
 
-    async def _fetch_calendar_from_google_api(self, user_id: str) -> Optional[List[Dict]]:
-        """
-        Fallback: fetch today's events directly from Google Calendar API.
-        Returns a list of event dicts, or None if unavailable.
-
-        TODO: Implement full Google Calendar API integration. Requires:
-          - GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET env vars
-          - OAuth2 refresh token stored per user (e.g. in user_settings or a credentials table)
-          - Use google-auth + google-api-python-client or direct REST calls
-        For now, returns None so the caller falls back to the stale-data warning.
-        """
-        google_client_id = os.environ.get("GOOGLE_CALENDAR_CLIENT_ID")
-        google_client_secret = os.environ.get("GOOGLE_CALENDAR_CLIENT_SECRET")
-
-        if not google_client_id or not google_client_secret:
-            logger.debug("Google Calendar API credentials not configured, skipping direct fetch")
-            return None
-
-        # TODO: Implement Google Calendar API fetch here:
-        # 1. Look up user's OAuth refresh token from DB
-        # 2. Exchange for access token
-        # 3. Call https://www.googleapis.com/calendar/v3/calendars/primary/events
-        #    with timeMin/timeMax for today, singleEvents=true, orderBy=startTime
-        # 4. Parse response into list of dicts with title, starts_at, ends_at, location
-        # 5. Optionally upsert fetched events into the event table to refresh the DB cache
-        logger.info("Google Calendar API credentials found but integration not yet implemented")
-        return None
-
     async def gather_calendar(self, user_id: str, db: Session) -> tuple[str, List[Dict]]:
         """Gather today's calendar events from iOS-synced calendar_event table."""
         try:
@@ -703,12 +679,22 @@ Synthesized summary:"""
             start_of_day = datetime.combine(today, datetime.min.time())
             end_of_day = datetime.combine(today, datetime.max.time())
 
+            # Exclude gym/workout calendar entries — David's split routine
+            # doesn't belong in the morning brief schedule. Workouts get
+            # surfaced through the dedicated fitness section instead.
             result = db.execute(text("""
                 SELECT title, start_time, end_time, location, all_day
                 FROM calendar_event
                 WHERE user_id = :user_id
                   AND start_time >= :start_of_day
                   AND start_time <= :end_of_day
+                  AND title NOT LIKE '%🏋️%'
+                  AND LOWER(title) NOT LIKE '%push a%'
+                  AND LOWER(title) NOT LIKE '%push b%'
+                  AND LOWER(title) NOT LIKE '%pull a%'
+                  AND LOWER(title) NOT LIKE '%pull b%'
+                  AND LOWER(title) NOT LIKE '%legs a%'
+                  AND LOWER(title) NOT LIKE '%legs b%'
                 ORDER BY start_time
             """), {
                 "user_id": user_id,
@@ -724,19 +710,6 @@ Synthesized summary:"""
                     ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
                     location=row.location
                 ))
-
-            # If data is stale AND empty, try Google Calendar API as fallback
-            if not events and not is_fresh:
-                google_events = await self._fetch_calendar_from_google_api(user_id)
-                if google_events:
-                    for ge in google_events:
-                        events.append(CalendarEvent(
-                            title=ge.get("title", "Untitled"),
-                            starts_at=ge.get("starts_at", ""),
-                            ends_at=ge.get("ends_at", ""),
-                            location=ge.get("location")
-                        ))
-                    logger.info(f"Fetched {len(events)} events from Google Calendar API fallback")
 
             # Build staleness warning if needed
             stale_warning = ""
@@ -769,184 +742,6 @@ Synthesized summary:"""
         except Exception as e:
             logger.error(f"Error gathering calendar: {e}")
             return "Calendar data unavailable.", []
-
-    def _compose_full_brief(
-        self,
-        weekday: str,
-        news_summary: str,
-        weather_summary: str,
-        calendar_summary: str,
-        insights_summary: str = "",
-        health_digest: str = "",
-        fitness_brief: Optional[FitnessRecoveryBrief] = None
-    ) -> str:
-        """Compose the full morning brief text."""
-        today_date = local_today().strftime("%B %d, %Y")
-
-        sections = [
-            f"# Good Morning! It's {weekday}, {today_date}",
-            "",
-            weather_summary,
-            "",
-            "---",
-            "",
-        ]
-
-        # FITNESS SECTIONS FIRST (per user preference)
-        if fitness_brief and fitness_brief.has_data:
-            # 1. Recovery Status (FIRST)
-            if fitness_brief.recovery_text:
-                sections.extend([
-                    fitness_brief.recovery_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-            # 2. Yesterday's Nutrition — skipped (Sara has its own nutrition section)
-
-            # 3. Yesterday's Workout
-            if fitness_brief.workout_recap_text:
-                sections.extend([
-                    fitness_brief.workout_recap_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-            # 4. Today's Plan
-            if fitness_brief.today_plan_text:
-                sections.extend([
-                    fitness_brief.today_plan_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-            # 5. Smart Insights (data-driven analysis)
-            if fitness_brief.insights_text:
-                sections.extend([
-                    fitness_brief.insights_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-        # Add health digest if we have data (may overlap with fitness - can be removed if redundant)
-        if health_digest and not (fitness_brief and fitness_brief.recovery_text):
-            sections.extend([
-                health_digest,
-                "",
-                "---",
-                "",
-            ])
-
-        # Add proactive insights if we have any
-        if insights_summary:
-            sections.extend([
-                insights_summary,
-                "",
-                "---",
-                "",
-            ])
-
-        sections.extend([
-            "## Tech News",
-            news_summary,
-            "",
-            "---",
-            "",
-            calendar_summary,
-            "",
-            "---",
-            "",
-            "Have a great day!"
-        ])
-
-        return "\n".join(sections)
-
-    def _compose_tts_text(
-        self,
-        weekday: str,
-        news_summary: str,
-        weather_tts: str,
-        calendar_events: List[Dict],
-        fitness_brief: Optional[FitnessRecoveryBrief] = None
-    ) -> str:
-        """Compose text optimized for TTS (more conversational)."""
-        parts = [
-            f"Good morning! It's {weekday}.",
-            "",
-            weather_tts,
-            "",
-        ]
-
-        # FITNESS SECTIONS (full TTS as requested by user)
-        if fitness_brief and fitness_brief.has_data:
-            # 1. Recovery Status
-            if fitness_brief.recovery_tts:
-                parts.append(fitness_brief.recovery_tts)
-                parts.append("")
-
-            # 2. Yesterday's Nutrition — skipped (Sara has its own nutrition section)
-
-            # 3. Yesterday's Workout
-            if fitness_brief.workout_recap_tts:
-                parts.append(fitness_brief.workout_recap_tts)
-                parts.append("")
-
-            # 4. Today's Plan
-            if fitness_brief.today_plan_tts:
-                parts.append(fitness_brief.today_plan_tts)
-                parts.append("")
-
-            # 5. Smart Insights
-            if fitness_brief.insights_tts:
-                parts.append(fitness_brief.insights_tts)
-                parts.append("")
-
-        # Calendar
-        if calendar_events:
-            if len(calendar_events) == 1:
-                event = calendar_events[0]
-                parts.append(f"You have one thing on the calendar today: {event['title']} at {event['starts_at']}.")
-            else:
-                parts.append(f"You have {len(calendar_events)} things scheduled today.")
-                for event in calendar_events[:3]:  # Limit to 3 for TTS
-                    parts.append(f"{event['title']} at {event['starts_at']}.")
-        else:
-            parts.append("Your calendar is clear today.")
-
-        parts.append("")
-        parts.append("Now for the tech news.")
-        parts.append(news_summary)
-        parts.append("")
-        parts.append("That's your morning brief. Have a great day!")
-
-        return " ".join(parts)
-
-    def _derive_tone_directive(self, body_estimate) -> str:
-        """Convert body state estimate into a tone instruction for the LLM."""
-        directives = []
-
-        if body_estimate.alertness < 0.35:
-            directives.append("gentle, warm, and brief — he's still waking up")
-        elif body_estimate.alertness > 0.7:
-            directives.append("energetic and upbeat")
-
-        if body_estimate.stress_load > 0.6:
-            directives.append("keep things light, don't pile on")
-
-        if body_estimate.overall_physical_readiness < 0.5:
-            directives.append("encouraging about rest and recovery")
-
-        if body_estimate.pattern_anomalies:
-            directives.append(f"note unusual patterns: {', '.join(body_estimate.pattern_anomalies[:2])}")
-
-        if not directives:
-            return "Warm and natural morning energy."
-
-        return ". ".join(directives) + "."
 
     def _strip_markdown_for_tts(self, text: str) -> str:
         """Remove markdown formatting for clean TTS output."""
@@ -983,7 +778,14 @@ Synthesized summary:"""
         """Generate a cohesive morning brief via a single LLM call."""
         try:
             self._refresh_llm_config()
-            system_msg = BRIEF_SYSTEM_PROMPT.format(tone_directive=tone_directive)
+            from app.services.tunables import get_tunable_int
+            word_min = get_tunable_int("morning_brief.target_word_count_min", 300)
+            word_max = get_tunable_int("morning_brief.target_word_count_max", 500)
+            system_msg = BRIEF_SYSTEM_PROMPT.format(
+                tone_directive=tone_directive,
+                word_min=word_min,
+                word_max=word_max,
+            )
 
             today_str = local_today().strftime("%B %d, %Y")
             user_msg = BRIEF_USER_PROMPT.format(
@@ -1012,8 +814,8 @@ Synthesized summary:"""
                             {"role": "user", "content": user_msg},
                         ],
                         "temperature": 0.7,
-                        "max_tokens": 2000,
-                        "stream": False
+                        "stream": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                 ) as response:
                     if response.status != 200:
@@ -1022,9 +824,13 @@ Synthesized summary:"""
                         return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
 
                     data = await response.json()
-                    content = data["choices"][0]["message"]["content"]
+                    content = data["choices"][0]["message"]["content"] or ""
                     word_count = len(content.split())
                     logger.info(f"LLM brief generated: {len(content)} chars, {word_count} words")
+                    # If thinking mode consumed all tokens, use fallback
+                    if not content.strip():
+                        logger.warning("LLM brief returned empty content, using fallback")
+                        return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
                     return content
 
         except Exception as e:
@@ -1073,10 +879,8 @@ Synthesized summary:"""
     async def send_notification(self, user_id: str, weekday: str, db: Session = None) -> bool:
         """Send iOS push notification that brief is ready."""
         try:
-            import httpx
-            from sqlalchemy import text
-            from sqlalchemy.orm import Session
             from app.db.base import SessionLocal
+            from app.services.unified_notification import send_notification as unified_send_notification
 
             # Get database session if not provided
             close_db = False
@@ -1085,46 +889,35 @@ Synthesized summary:"""
                 close_db = True
 
             try:
-                # Get user's push tokens
-                result = db.execute(text("""
-                    SELECT push_token FROM user_push_token
+                unread_row = db.execute(text("""
+                    SELECT COUNT(*)::int AS unread_count
+                    FROM shared_content
                     WHERE user_id = :user_id
-                """), {"user_id": user_id})
-                tokens = [row[0] for row in result.fetchall()]
+                      AND status = 'unread'
+                """), {"user_id": user_id}).fetchone()
+                unread_count = int(unread_row.unread_count if unread_row else 0)
 
-                if not tokens:
-                    logger.warning(f"No push tokens found for user {user_id}")
-                    return False
+                body = f"Your {weekday} briefing is ready with tech news, weather, and your schedule."
+                if unread_count > 0:
+                    item_word = "item" if unread_count == 1 else "items"
+                    body += f" Plus {unread_count} unread inbox {item_word}."
 
-                # Build Expo push messages
-                messages = []
-                for token in tokens:
-                    messages.append({
-                        "to": token,
-                        "sound": "default",
-                        "title": "Morning Brief Ready",
-                        "body": f"Your {weekday} briefing is ready with tech news, weather, and your schedule.",
-                        "data": {"screen": "MorningBrief"},
-                        "priority": "high",
-                    })
-
-                # Send to Expo push notification service
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://exp.host/--/api/v2/push/send",
-                        json=messages,
-                        headers={
-                            "Accept": "application/json",
-                            "Content-Type": "application/json",
-                        }
-                    )
-
-                    if response.status_code == 200:
-                        logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
-                        return True
-                    else:
-                        logger.error(f"Push notification failed: {response.text}")
-                        return False
+                result = await unified_send_notification(
+                    user_id=user_id,
+                    title="Morning Brief Ready",
+                    message=body,
+                    priority="high",
+                    topic=f"morning_brief:{local_today().isoformat()}",
+                    category="general",
+                    source="morning_brief",
+                    cooldown_hours=24.0,
+                    db=db,
+                )
+                if result.get("sent"):
+                    logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
+                    return True
+                logger.info(f"Morning brief push not sent for user {user_id}: {result}")
+                return False
 
             finally:
                 if close_db:
@@ -1189,7 +982,11 @@ Synthesized summary:"""
         except Exception as e:
             logger.debug(f"Morning brief: PKG review check failed: {e}")
 
-        tone_directive = "Warm and natural morning energy."
+        from app.services.tunables import get_tunable_str
+        tone_directive = get_tunable_str(
+            "morning_brief.tone_directive",
+            "Warm and natural morning energy.",
+        )
 
         # Phase 3: Single LLM call for cohesive brief
         date_str = today.strftime("%B %d, %Y")

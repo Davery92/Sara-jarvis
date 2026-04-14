@@ -34,7 +34,7 @@ export interface SceneObject {
 }
 
 // Window types
-export type WindowType = 'note' | 'chat' | 'learning' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report' | 'email' | 'documents' | 'automation' | 'pkg' | 'intelligence' | 'temerant'
+export type WindowType = 'note' | 'chat' | 'learning' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report' | 'email' | 'documents' | 'automation' | 'pkg' | 'intelligence'
 
 export interface Position {
   x: number
@@ -144,7 +144,6 @@ export type WindowData =
   | AutomationWindowData
   | PKGWindowData
   | IntelligenceWindowData
-  | TemerantWindowData
 
 export interface PKGWindowData {
   category?: string  // Filter by category on open
@@ -152,10 +151,6 @@ export interface PKGWindowData {
 
 export interface IntelligenceWindowData {
   sourceCategory?: string  // Filter by source category on open
-}
-
-export interface TemerantWindowData {
-  focus?: 'dashboard' | 'oracle' | 'journal'
 }
 
 // API types

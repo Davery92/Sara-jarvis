@@ -375,6 +375,14 @@ class ReactiveEngine:
         except Exception as e:
             logger.warning(f"WorkingMemorySubscriber failed to init: {e}")
 
+        # Memory access subscriber — boosts rating for recalled episodes
+        try:
+            from app.services.memory_subscribers import MemoryAccessSubscriber
+            self.memory_access = MemoryAccessSubscriber()
+            self.subscribers.append(self.memory_access)
+        except Exception as e:
+            logger.warning(f"MemoryAccessSubscriber failed to init: {e}")
+
         # Salience subscriber — scores events, logs observations, triggers deliberation
         try:
             from app.services.salience_subscriber import SalienceSubscriber
@@ -398,7 +406,7 @@ class ReactiveEngine:
         return {
             "subscribers": len(self.subscribers),
             "current_room": self.presence.get_current_room(),
-            "is_away": self.presence._was_away,
+            "is_away": self.presence._home_empty,
             "security_alerts_today": len(self.security._last_alert),
         }
 

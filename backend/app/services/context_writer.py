@@ -12,6 +12,8 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from app.core.timezone import now as local_now
+
 import redis.asyncio as aioredis
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -76,7 +78,7 @@ async def update_fields(user_id: str, source: str = "unknown", **kwargs) -> None
                 updates[k] = str(v)
 
         # Always bump version and updated_at
-        updates["updated_at"] = datetime.utcnow().isoformat()
+        updates["updated_at"] = local_now().isoformat()
 
         # Atomic write
         pipe = r.pipeline()
@@ -100,7 +102,7 @@ async def append_change(user_id: str, change_description: str) -> None:
     try:
         r = await _get_redis()
         key = CHANGES_KEY.format(user_id=user_id)
-        timestamp = datetime.utcnow().strftime("%H:%M")
+        timestamp = local_now().strftime("%H:%M")
         entry = f"[{timestamp}] {change_description}"
         pipe = r.pipeline()
         pipe.rpush(key, entry)
@@ -138,7 +140,7 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
     Reads from subconscious_state, calendar_event, episode, notification_log, etc.
     """
     snapshot = UnifiedContextSnapshot()
-    now = datetime.utcnow()
+    now = local_now()
 
     try:
         # ── Subconscious state (body + activity + presence) ──
@@ -214,7 +216,7 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         last_hb = db.execute(text("""
             SELECT run_at, handoff_note, watching_for
             FROM agent_run_log
-            WHERE user_id = :uid AND source IN ('unified_agent', 'unified_heartbeat')
+            WHERE user_id = :uid AND source IN ('unified_agent', 'unified_heartbeat', 'deliberation', 'consolidation')
             ORDER BY run_at DESC LIMIT 1
         """), {"uid": user_id}).fetchone()
 
@@ -230,23 +232,7 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         """), {"uid": user_id, "today": today_start}).scalar()
         snapshot.notifications_sent_today = notif_count or 0
 
-        # ── Learning reviews ──
-        try:
-            reviews_due = db.execute(text("""
-                SELECT COUNT(*) FROM learning_progress lp
-                JOIN learning_topic lt ON lp.topic_id = lt.id
-                WHERE lt.user_id = :uid AND lp.next_review_at <= :now
-            """), {"uid": user_id, "now": now}).scalar()
-            snapshot.learning_reviews_due = reviews_due or 0
-
-            topics = db.execute(text("""
-                SELECT name FROM learning_topic
-                WHERE user_id = :uid AND status = 'active'
-                ORDER BY updated_at DESC LIMIT 5
-            """), {"uid": user_id}).fetchall()
-            snapshot.active_learning_topics = [t.name for t in topics] if topics else []
-        except Exception:
-            pass  # learning tables may not exist
+        # ── Learning reviews — disabled ──
 
         # ── Active projects ──
         try:

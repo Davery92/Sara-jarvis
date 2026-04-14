@@ -68,8 +68,15 @@ class IOSCalendarEventSync(BaseModel):
 
 class IOSCalendarSyncRequest(BaseModel):
     events: List[IOSCalendarEventSync]
+    # Sync window — when provided, the backend reconciles deletions by removing
+    # any iOS-sourced events inside this window (from the listed calendars) that
+    # are NOT present in the payload. Optional for backwards compat.
+    window_start: Optional[str] = None  # ISO datetime (UTC)
+    window_end: Optional[str] = None    # ISO datetime (UTC)
+    calendar_ids: Optional[List[str]] = None  # iOS calendar IDs included in this sync
 
 
 class IOSCalendarSyncResponse(BaseModel):
     synced: int
     errors: int
+    deleted: int = 0

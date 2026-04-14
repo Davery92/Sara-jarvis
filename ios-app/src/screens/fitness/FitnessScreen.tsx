@@ -158,6 +158,29 @@ export default function FitnessScreen({ navigation }: Props) {
     });
   };
 
+  const handleEditFood = (log: FoodLog) => {
+    const mealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
+    Alert.alert(
+      'Change Meal Type',
+      `${log.food_name}\nCurrently: ${log.meal_type || 'none'}`,
+      [
+        ...mealTypes.map((type) => ({
+          text: `${type === 'breakfast' ? '🌅' : type === 'lunch' ? '🌞' : type === 'dinner' ? '🌙' : '🍎'} ${type.charAt(0).toUpperCase() + type.slice(1)}`,
+          onPress: async () => {
+            try {
+              await fitnessService.updateFoodLogMealType(log.meal_log_id, type);
+              loadData();
+            } catch (error) {
+              console.error('Failed to update meal type:', error);
+              Alert.alert('Error', 'Failed to update meal type');
+            }
+          },
+        })),
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
   const handleDeleteFood = (log: FoodLog) => {
     Alert.alert(
       'Delete Food Log',
@@ -353,7 +376,7 @@ export default function FitnessScreen({ navigation }: Props) {
           </TouchableOpacity>
         </View>
         {(foodLogs || []).slice(0, 3).map((log) => (
-          <FoodLogItem key={log.id} log={log} onLongPress={handleDeleteFood} />
+          <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
         ))}
         {(!foodLogs || foodLogs.length === 0) && (
           <Text style={styles.emptyText}>No food logs yet</Text>
@@ -877,7 +900,7 @@ export default function FitnessScreen({ navigation }: Props) {
           </View>
           {breakfastFoods.length > 0 ? (
             breakfastFoods.map((log) => (
-              <FoodLogItem key={log.id} log={log} onLongPress={handleDeleteFood} />
+              <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
             ))
           ) : (
             <Text style={styles.emptyMealText}>No breakfast logged yet</Text>
@@ -897,7 +920,7 @@ export default function FitnessScreen({ navigation }: Props) {
           </View>
           {lunchFoods.length > 0 ? (
             lunchFoods.map((log) => (
-              <FoodLogItem key={log.id} log={log} onLongPress={handleDeleteFood} />
+              <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
             ))
           ) : (
             <Text style={styles.emptyMealText}>No lunch logged yet</Text>
@@ -917,7 +940,7 @@ export default function FitnessScreen({ navigation }: Props) {
           </View>
           {dinnerFoods.length > 0 ? (
             dinnerFoods.map((log) => (
-              <FoodLogItem key={log.id} log={log} onLongPress={handleDeleteFood} />
+              <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
             ))
           ) : (
             <Text style={styles.emptyMealText}>No dinner logged yet</Text>
@@ -937,7 +960,7 @@ export default function FitnessScreen({ navigation }: Props) {
           </View>
           {snackFoods.length > 0 ? (
             snackFoods.map((log) => (
-              <FoodLogItem key={log.id} log={log} onLongPress={handleDeleteFood} />
+              <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
             ))
           ) : (
             <Text style={styles.emptyMealText}>No snacks logged yet</Text>

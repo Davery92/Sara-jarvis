@@ -12,6 +12,7 @@ import logging
 from datetime import datetime
 
 from app.celery_app import celery_app
+from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def intelligence_scan(self):
     Scan all intelligence sources, score, and store new items.
     Runs every 2 hours. Respects waking hours (6 AM - 11 PM).
     """
-    hour = datetime.now().hour
+    hour = local_now().hour
     if hour < 6 or hour >= 23:
         logger.info("Intelligence scan skipped: outside waking hours (6 AM - 11 PM)")
         return {"status": "skipped", "reason": "night_mode"}
@@ -146,3 +147,24 @@ def _notify_breaking_news(items: list, db):
 
     except ImportError:
         logger.debug("Notification service not available for intelligence alerts")
+
+
+def _run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
+@celery_app.task(name="app.tasks.intelligence.run_predictions", bind=True, max_retries=0)
+def run_predictions(self):
+    """Run the predictive engine to generate forward-looking suggestions."""
+    try:
+        from app.services.predictive_engine import send_predictions
+        _run_async(send_predictions(DEFAULT_USER_ID))
+    except Exception as e:
+        logger.warning(f"Predictive engine task failed: {e}")

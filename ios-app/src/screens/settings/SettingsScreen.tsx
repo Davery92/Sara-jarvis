@@ -27,6 +27,8 @@ import {
 import { apiClient, CodexOAuthStatus } from '../../services/api';
 import ProfileSection from '../../components/settings/ProfileSection';
 import MemoryListItem from '../../components/settings/MemoryListItem';
+import SchedulesSection from '../../components/settings/SchedulesSection';
+import TunablesSection from '../../components/settings/TunablesSection';
 import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
 import { iosCalendarSyncService, IOSCalendar } from '../../services/iosCalendarSync';
 
@@ -68,8 +70,8 @@ export default function SettingsScreen({ navigation }: Props) {
 
   // Claude model options
   const CLAUDE_MODELS = [
-    { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
-    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
   ];
   const CODEX_MODELS = [
@@ -441,7 +443,7 @@ export default function SettingsScreen({ navigation }: Props) {
       newModel = 'gemini-3-flash-preview';
       newUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/';
     } else if (provider === 'claude') {
-      newModel = 'claude-sonnet-4-5-20250929';
+      newModel = 'claude-sonnet-4-6';
       newUrl = 'https://api.anthropic.com/v1';
     } else if (provider === 'codex') {
       newModel = 'gpt-5.3-codex';
@@ -902,6 +904,12 @@ export default function SettingsScreen({ navigation }: Props) {
           })
         )}
       </View>
+
+      {/* Scheduled Jobs (DB-backed Celery beat) */}
+      <SchedulesSection />
+
+      {/* Behavior Tunables (cooldowns, ACS thresholds, brief tone) */}
+      <TunablesSection />
 
       {/* Calendar Sync Section (iOS only) */}
       {Platform.OS === 'ios' && (

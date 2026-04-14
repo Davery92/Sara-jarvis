@@ -20,7 +20,6 @@ from .scratchpad import ReflectionScratchpad, ObservationType, get_reflection_sc
 from .consolidation_auditor import ConsolidationAuditor, ConsolidationAuditResult
 from .pattern_detector import PatternDetector, DetectedPattern
 from .proposal_generator import PromptProposalGenerator, PromptProposal
-from app.services.karma import get_karma_service, KarmaEvent
 
 logger = logging.getLogger(__name__)
 
@@ -365,30 +364,13 @@ class ReflectionAgent:
 
     async def _self_assess(self, result: ReflectionCycleResult) -> None:
         """The reflection agent reflects on its own performance."""
-        karma_service = await get_karma_service(self.db)
-
-        # Did we find meaningful patterns?
         meaningful_patterns = [p for p in result.patterns_detected if p.confidence >= 0.6]
 
         if meaningful_patterns:
-            await karma_service.record_event(KarmaEvent(
-                agent_id="reflection",
-                dimension_name="insight_quality",
-                delta=len(meaningful_patterns) * 0.5,
-                reason=f"Identified {len(meaningful_patterns)} meaningful patterns",
-                evidence_type="automated",
-            ))
+            logger.info(f"Identified {len(meaningful_patterns)} meaningful patterns")
 
-        # Did we generate proposals?
         if result.proposals_generated:
-            # Small positive for generating proposals (approval/rejection adjusts later)
-            await karma_service.record_event(KarmaEvent(
-                agent_id="reflection",
-                dimension_name="insight_quality",
-                delta=0.5,
-                reason=f"Generated {len(result.proposals_generated)} proposals for review",
-                evidence_type="automated",
-            ))
+            logger.info(f"Generated {len(result.proposals_generated)} proposals for review")
 
 
 # Factory function for creating ReflectionAgent

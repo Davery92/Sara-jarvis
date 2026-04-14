@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.routing import APIRoute
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -37,6 +38,7 @@ from urllib.parse import urlparse, parse_qsl, urlencode
 import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
+from app.services.soul_loader import load_soul_for_prompt
 from app.services.embedding_service import embedding_service
 from app.services.insight_injection import InsightInjectionService
 from app.services.intent_classifier import get_tool_intent_classifier
@@ -46,7 +48,6 @@ from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
 from app.services.cognitive.working_memory import get_working_memory_service
 from app.services.cognitive.raw_buffer import get_raw_buffer_service, StreamType
-from app.services.karma import get_karma_service
 from app.core import config
 from app.core.prompt_template import render_prompt_template
 from app.core.auth import (
@@ -96,8 +97,15 @@ except ImportError as e:
     logging.warning(f"Chess command handler not available: {e}")
     CHESS_COMMANDS_AVAILABLE = False
 
-# Configure logging first
-logging.basicConfig(level=logging.INFO)
+# Configure structured logging
+import os as _os
+from app.core.logging import setup_logging, RequestLoggingMiddleware
+setup_logging(
+    service_name="sara-backend",
+    environment=_os.environ.get("SENTRY_ENVIRONMENT", "development"),
+    log_level=_os.environ.get("LOG_LEVEL", "INFO"),
+    json_output=_os.environ.get("LOG_FORMAT", "text") == "json",
+)
 logger = logging.getLogger(__name__)
 
 # Optional imports for vectorization (graceful degradation)
@@ -115,102 +123,94 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
     logger.warning("Sentence Transformers not available - embeddings will be disabled")
 
-# Configuration
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
-# IMPORTANT: Always use PostgreSQL, never SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@db:5432/sara_hub")
-# JWT settings now in app.core.config.settings
-# CORS configuration for frontend origins
-# Prefer CORS_ORIGINS from environment as a JSON array or comma-separated list
-_cors_env = os.getenv("CORS_ORIGINS", "")
-_parsed_env_origins = []
-if _cors_env:
-    try:
-        _parsed = json.loads(_cors_env)
-        if isinstance(_parsed, list):
-            _parsed_env_origins = [str(x) for x in _parsed]
-    except Exception:
-        # Fallback: comma-separated
-        _parsed_env_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+# ── Centralized app state (Phase 6A extraction foundation) ──
+from app.core.app_state import get_app_state, AppState
+_app_state = get_app_state()
 
-# Default allowed origins (overridden by CORS_ORIGINS env when provided)
-CORS_ORIGINS = _parsed_env_origins or [
-    "https://sara.avery.cloud",
-    "http://sara.avery.cloud",
-    "https://canvas.avery.cloud",
-    "http://canvas.avery.cloud",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:3002",
-    "http://10.185.1.180:3000",
-    "http://10.185.1.180:3001",
-    "http://10.185.1.180:3002",
-    "http://10.185.1.188:3000",
-    "http://10.185.1.180",
-    "http://10.185.1.188",
-]
-
-# Optional regex for dynamic IPs; leave unset by default
-ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOW_REGEX") or r"^https?://(10\.185\.1\.(180|188))(\:\d+)?$"
-
-# NTFY Configuration
-NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
-NTFY_ENABLED = os.getenv("NTFY_ENABLED", "true").lower() == "true"
-NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
-NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
-NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
-NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, claude, codex, custom
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:20b")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Separate key for Anthropic Claude API
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")  # Google Gemini API key
-
-# ChatGPT/Codex OAuth configuration
-CODEX_OAUTH_CLIENT_ID = os.getenv("CODEX_OAUTH_CLIENT_ID", "").strip() or "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_OAUTH_AUTHORIZE_URL = os.getenv("CODEX_OAUTH_AUTHORIZE_URL", "").strip() or "https://auth.openai.com/oauth/authorize"
-CODEX_OAUTH_TOKEN_URL = os.getenv("CODEX_OAUTH_TOKEN_URL", "").strip() or "https://auth.openai.com/oauth/token"
-CODEX_OAUTH_SCOPE = os.getenv("CODEX_OAUTH_SCOPE", "").strip() or "openid profile email offline_access"
-CODEX_OAUTH_ORIGINATOR = os.getenv("CODEX_OAUTH_ORIGINATOR", "").strip() or "codex_vscode"
-CODEX_OAUTH_REDIRECT_URI = os.getenv("CODEX_OAUTH_REDIRECT_URI", "").strip()
-CODEX_DEFAULT_BASE_URL = os.getenv("CODEX_BASE_URL", "https://chatgpt.com/backend-api")
-CODEX_DEFAULT_MODEL = os.getenv("CODEX_DEFAULT_MODEL", "gpt-5.3-codex")
+# Backward-compatible aliases — existing code reads these globals directly.
+# New code should use get_app_state() instead.
+ASSISTANT_NAME = _app_state.assistant_name
+# Backward-compatible global aliases — all values sourced from _app_state.
+# Code that mutates these (e.g. `global OPENAI_MODEL; OPENAI_MODEL = x`)
+# must ALSO update _app_state to keep them in sync.
+DATABASE_URL = _app_state.database_url
+CORS_ORIGINS = _app_state.cors_origins
+ALLOWED_ORIGIN_REGEX = _app_state.allowed_origin_regex
+NTFY_SERVER_URL = _app_state.ntfy_server_url
+NTFY_ENABLED = _app_state.ntfy_enabled
+NTFY_TIMERS_TOPIC = _app_state.ntfy_timers_topic
+NTFY_REMINDERS_TOPIC = _app_state.ntfy_reminders_topic
+NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
+NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
+AI_PROVIDER = _app_state.ai_provider
+OPENAI_BASE_URL = _app_state.openai_base_url
+OPENAI_MODEL = _app_state.openai_model
+OPENAI_API_KEY = _app_state.openai_api_key
+ANTHROPIC_API_KEY = _app_state.anthropic_api_key
+GOOGLE_API_KEY = _app_state.google_api_key
+CODEX_OAUTH_CLIENT_ID = _app_state.codex_oauth_client_id
+CODEX_OAUTH_AUTHORIZE_URL = _app_state.codex_oauth_authorize_url
+CODEX_OAUTH_TOKEN_URL = _app_state.codex_oauth_token_url
+CODEX_OAUTH_SCOPE = _app_state.codex_oauth_scope
+CODEX_OAUTH_ORIGINATOR = _app_state.codex_oauth_originator
+CODEX_OAUTH_REDIRECT_URI = _app_state.codex_oauth_redirect_uri
+CODEX_DEFAULT_BASE_URL = _app_state.codex_default_base_url
+CODEX_DEFAULT_MODEL = _app_state.codex_default_model
 CODEX_JWT_CLAIM_PATH = "https://api.openai.com/auth"
-CODEX_OAUTH_ACCESS_TOKEN = os.getenv("CODEX_OAUTH_ACCESS_TOKEN", "")
-CODEX_OAUTH_REFRESH_TOKEN = os.getenv("CODEX_OAUTH_REFRESH_TOKEN", "")
-CODEX_OAUTH_EXPIRES_AT = os.getenv("CODEX_OAUTH_EXPIRES_AT", "")
-CODEX_OAUTH_ACCOUNT_ID = os.getenv("CODEX_OAUTH_ACCOUNT_ID", "")
-CODEX_OAUTH_EMAIL = os.getenv("CODEX_OAUTH_EMAIL", "")
+CODEX_OAUTH_ACCESS_TOKEN = _app_state.codex_oauth_access_token
+CODEX_OAUTH_REFRESH_TOKEN = _app_state.codex_oauth_refresh_token
+CODEX_OAUTH_EXPIRES_AT = _app_state.codex_oauth_expires_at
+CODEX_OAUTH_ACCOUNT_ID = _app_state.codex_oauth_account_id
+CODEX_OAUTH_EMAIL = _app_state.codex_oauth_email
+AVAILABLE_MODELS = _app_state.available_models
 
-# Available models for chat model selector
-AVAILABLE_MODELS = [
-    {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "provider": "codex"},
-    {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark", "provider": "codex"},
-    {"id": "claude-opus-4-5-20250514", "name": "Claude Opus 4.5", "provider": "anthropic"},
-    {"id": "claude-sonnet-4-5-20250514", "name": "Claude Sonnet 4.5", "provider": "anthropic"},
-    {"id": "claude-haiku-3-5-20241022", "name": "Claude Haiku 3.5", "provider": "anthropic"},
-    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
-    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
-    {"id": "gpt-oss:120b-32k", "name": "Local 120B", "provider": "local"},
-    {"id": "gpt-oss:20b", "name": "Local 20B", "provider": "local"},
-    {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
-]
+# Text utilities extracted to app.core.text_utils
+from app.core.text_utils import extract_text_content as _extract_text_content
+from app.core.text_utils import is_local_base_url as _is_local_base_url
+from app.core.text_utils import safe_parse_iso_datetime as _safe_parse_iso_datetime
+from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls
 
-def _is_local_base_url(base_url: str) -> bool:
-    u = (base_url or "").lower()
-    return ("11434" in u) or ("ollama" in u) or ("localhost" in u)
+
+async def _mark_shown_discoveries(user_id: str, response_text: str):
+    """Mark show_david items as shown if Sara referenced them in her response."""
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        result = await db.execute(text("""
+            SELECT id, title FROM acs_show_david_buffer
+            WHERE user_id = :uid AND shown = FALSE
+            ORDER BY created_at DESC LIMIT 10
+        """), {"uid": user_id})
+        rows = result.fetchall()
+        if not rows:
+            return
+
+        response_lower = response_text.lower()
+        marked = 0
+        for row in rows:
+            # Check if the title (or significant words from it) appear in Sara's response
+            title_words = [w for w in row[1].lower().split() if len(w) >= 4]
+            if len(title_words) >= 2:
+                matches = sum(1 for w in title_words if w in response_lower)
+                if matches >= len(title_words) * 0.6:
+                    await db.execute(text("""
+                        UPDATE acs_show_david_buffer
+                        SET shown = TRUE, shown_at = NOW()
+                        WHERE id = :id
+                    """), {"id": row[0]})
+                    marked += 1
+
+        if marked > 0:
+            await db.commit()
+            logger.info(f"Marked {marked} show_david items as shown")
 
 
 def get_model_config(model_id: str) -> dict:
     """Get base URL, API key, and provider routing for the selected model."""
     model_id_l = (model_id or "").lower()
-    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:11434/v1"
+    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8080/v1"
     configured_key = OPENAI_API_KEY or "dummy"
-    local_default_base = "http://100.104.68.115:11434/v1"
+    local_default_base = "http://100.104.68.115:8080/v1"
 
     # Resolve declared provider from the model catalog first.
     # This prevents stale global ai_provider settings from misrouting model-specific requests.
@@ -292,293 +292,31 @@ def is_anthropic_provider() -> bool:
     return "api.anthropic.com" in OPENAI_BASE_URL
 
 
-def _safe_parse_iso_datetime(value: str) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        candidate = value.strip()
-        if candidate.endswith("Z"):
-            candidate = candidate[:-1] + "+00:00"
-        dt = datetime.fromisoformat(candidate)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
+# Codex OAuth helpers extracted to app.core.codex_oauth
+from app.core.codex_oauth import (
+    _decode_jwt_payload, _extract_codex_account_id_from_token,
+    _extract_codex_email_from_token, _build_pkce_challenge,
+    _append_query_params, _resolve_frontend_return_url,
+    _resolve_backend_public_url, _upsert_app_settings,
+    _load_codex_oauth_from_db, _apply_codex_oauth_token_data,
+    _codex_exchange_authorization_code, _codex_refresh_tokens,
+    _ensure_codex_access_token,
+)
 
-
-def _decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
-    try:
-        parts = (token or "").split(".")
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        decoded = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
-        return json.loads(decoded)
-    except Exception:
-        return None
-
-
-def _extract_codex_account_id_from_token(token: str) -> Optional[str]:
-    payload = _decode_jwt_payload(token) or {}
-    auth_claim = payload.get(CODEX_JWT_CLAIM_PATH) or {}
-    account_id = auth_claim.get("chatgpt_account_id")
-    if isinstance(account_id, str) and account_id:
-        return account_id
-    return None
-
-
-def _extract_codex_email_from_token(token: str) -> Optional[str]:
-    payload = _decode_jwt_payload(token) or {}
-    email = payload.get("email")
-    if isinstance(email, str) and email:
-        return email
-    return None
-
-
-def _build_pkce_challenge(verifier: str) -> str:
-    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
-
-
-def _append_query_params(url: str, params: Dict[str, str]) -> str:
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.update(params)
-    return parsed._replace(query=urlencode(query)).geturl()
-
-
-def _resolve_frontend_return_url(request: Request, requested: Optional[str] = None) -> str:
-    default_url = f"{config.settings.frontend_url.rstrip('/')}/settings"
-    candidate = (requested or "").strip()
-    if not candidate:
-        return default_url
-    parsed = urlparse(candidate)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return default_url
-    allowed_hosts = {
-        urlparse(default_url).netloc,
-        request.headers.get("x-forwarded-host", ""),
-        request.headers.get("host", ""),
-    }
-    if parsed.netloc not in {h for h in allowed_hosts if h}:
-        return default_url
-    return candidate
-
-
-def _resolve_backend_public_url(request: Request) -> str:
-    env_override = os.getenv("BACKEND_PUBLIC_URL", "").strip()
-    if env_override:
-        return env_override.rstrip("/")
-    configured = (config.settings.backend_url or "").strip()
-    if configured:
-        return configured.rstrip("/")
-    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
-    return f"{proto}://{host}".rstrip("/")
-
-
-def _upsert_app_settings(settings_map: Dict[str, Any], updated_by: str = "system") -> None:
-    if not settings_map:
-        return
-    db = SessionLocal()
-    try:
-        for key, value in settings_map.items():
-            db.execute(text("""
-                INSERT INTO app_settings (key, value, updated_at, updated_by)
-                VALUES (:key, :value, CURRENT_TIMESTAMP, :updated_by)
-                ON CONFLICT (key) DO UPDATE SET
-                    value = EXCLUDED.value,
-                    updated_at = EXCLUDED.updated_at,
-                    updated_by = EXCLUDED.updated_by
-            """), {"key": key, "value": str(value), "updated_by": updated_by})
-        db.commit()
-    finally:
-        db.close()
-
-
-def _load_codex_oauth_from_db() -> None:
-    """Hydrate in-memory Codex OAuth globals from app_settings if present."""
-    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
-    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
-    db = SessionLocal()
-    try:
-        rows = db.execute(text("""
-            SELECT key, value
-            FROM app_settings
-            WHERE key IN (
-                'codex_oauth_access_token',
-                'codex_oauth_refresh_token',
-                'codex_oauth_expires_at',
-                'codex_oauth_account_id',
-                'codex_oauth_email'
-            )
-        """)).fetchall()
-        kv = {k: v for k, v in rows}
-        CODEX_OAUTH_ACCESS_TOKEN = kv.get("codex_oauth_access_token", CODEX_OAUTH_ACCESS_TOKEN or "")
-        CODEX_OAUTH_REFRESH_TOKEN = kv.get("codex_oauth_refresh_token", CODEX_OAUTH_REFRESH_TOKEN or "")
-        CODEX_OAUTH_EXPIRES_AT = kv.get("codex_oauth_expires_at", CODEX_OAUTH_EXPIRES_AT or "")
-        CODEX_OAUTH_ACCOUNT_ID = kv.get("codex_oauth_account_id", CODEX_OAUTH_ACCOUNT_ID or "")
-        CODEX_OAUTH_EMAIL = kv.get("codex_oauth_email", CODEX_OAUTH_EMAIL or "")
-    except Exception as e:
-        logger.warning(f"Failed loading Codex OAuth state from database: {e}")
-    finally:
-        db.close()
-
-
-def _apply_codex_oauth_token_data(token_data: Dict[str, Any], updated_by: str = "codex-oauth") -> None:
-    """Persist Codex OAuth token data and switch active AI provider to Codex."""
-    global AI_PROVIDER, OPENAI_BASE_URL, OPENAI_MODEL
-    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
-    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
-
-    CODEX_OAUTH_ACCESS_TOKEN = token_data["access_token"]
-    CODEX_OAUTH_REFRESH_TOKEN = token_data["refresh_token"]
-    CODEX_OAUTH_EXPIRES_AT = token_data["expires_at"]
-    CODEX_OAUTH_ACCOUNT_ID = token_data["account_id"]
-    CODEX_OAUTH_EMAIL = token_data["email"]
-
-    AI_PROVIDER = "codex"
-    OPENAI_BASE_URL = CODEX_DEFAULT_BASE_URL
-    OPENAI_MODEL = CODEX_DEFAULT_MODEL
-    config.settings.ai_provider = AI_PROVIDER
-    config.settings.openai_base_url = OPENAI_BASE_URL
-    config.settings.openai_model = OPENAI_MODEL
-
-    _upsert_app_settings(
-        {
-            "ai_provider": AI_PROVIDER,
-            "openai_base_url": OPENAI_BASE_URL,
-            "openai_model": OPENAI_MODEL,
-            "codex_oauth_access_token": CODEX_OAUTH_ACCESS_TOKEN,
-            "codex_oauth_refresh_token": CODEX_OAUTH_REFRESH_TOKEN,
-            "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT,
-            "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID,
-            "codex_oauth_email": CODEX_OAUTH_EMAIL,
-        },
-        updated_by=updated_by,
-    )
-
-
-async def _codex_exchange_authorization_code(code: str, verifier: str, redirect_uri: str) -> Dict[str, Any]:
-    form = {
-        "grant_type": "authorization_code",
-        "client_id": CODEX_OAUTH_CLIENT_ID,
-        "code": code,
-        "code_verifier": verifier,
-        "redirect_uri": redirect_uri,
-    }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(
-            CODEX_OAUTH_TOKEN_URL,
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if resp.status_code >= 400:
-        detail = resp.text[:500]
-        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange failed: {detail}")
-    payload = resp.json()
-    access_token = payload.get("access_token")
-    refresh_token = payload.get("refresh_token")
-    expires_in = payload.get("expires_in")
-    if not access_token or not refresh_token or not isinstance(expires_in, (int, float)):
-        raise HTTPException(status_code=400, detail="Codex OAuth token response missing required fields")
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
-    account_id = _extract_codex_account_id_from_token(access_token)
-    if not account_id:
-        raise HTTPException(status_code=400, detail="Codex OAuth token missing account claim")
-    email = _extract_codex_email_from_token(access_token)
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expires_at": expires_at.isoformat(),
-        "account_id": account_id,
-        "email": email or "",
-    }
-
-
-async def _codex_refresh_tokens(refresh_token: str) -> Dict[str, Any]:
-    form = {
-        "grant_type": "refresh_token",
-        "client_id": CODEX_OAUTH_CLIENT_ID,
-        "refresh_token": refresh_token,
-    }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(
-            CODEX_OAUTH_TOKEN_URL,
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Codex OAuth refresh failed: {resp.status_code} {resp.text[:250]}")
-    payload = resp.json()
-    access_token = payload.get("access_token")
-    new_refresh = payload.get("refresh_token")
-    expires_in = payload.get("expires_in")
-    if not access_token or not new_refresh or not isinstance(expires_in, (int, float)):
-        raise RuntimeError("Codex OAuth refresh response missing required fields")
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
-    account_id = _extract_codex_account_id_from_token(access_token)
-    if not account_id:
-        raise RuntimeError("Codex OAuth refresh token missing account claim")
-    email = _extract_codex_email_from_token(access_token) or CODEX_OAUTH_EMAIL
-    return {
-        "access_token": access_token,
-        "refresh_token": new_refresh,
-        "expires_at": expires_at.isoformat(),
-        "account_id": account_id,
-        "email": email or "",
-    }
-
-
-async def _ensure_codex_access_token(updated_by: str = "system", min_valid_seconds: int = 60) -> Optional[str]:
-    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
-    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
-    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
-        _load_codex_oauth_from_db()
-    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
-        return None
-    expires_at = _safe_parse_iso_datetime(CODEX_OAUTH_EXPIRES_AT)
-    now = datetime.now(timezone.utc)
-    if expires_at and expires_at > now + timedelta(seconds=min_valid_seconds):
-        return CODEX_OAUTH_ACCESS_TOKEN
-    refreshed = await _codex_refresh_tokens(CODEX_OAUTH_REFRESH_TOKEN)
-    CODEX_OAUTH_ACCESS_TOKEN = refreshed["access_token"]
-    CODEX_OAUTH_REFRESH_TOKEN = refreshed["refresh_token"]
-    CODEX_OAUTH_EXPIRES_AT = refreshed["expires_at"]
-    CODEX_OAUTH_ACCOUNT_ID = refreshed["account_id"]
-    CODEX_OAUTH_EMAIL = refreshed["email"]
-    _upsert_app_settings(
-        {
-            "codex_oauth_access_token": CODEX_OAUTH_ACCESS_TOKEN,
-            "codex_oauth_refresh_token": CODEX_OAUTH_REFRESH_TOKEN,
-            "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT,
-            "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID,
-            "codex_oauth_email": CODEX_OAUTH_EMAIL,
-        },
-        updated_by=updated_by,
-    )
-    return CODEX_OAUTH_ACCESS_TOKEN
-
-# Smaller, faster model for notifications (uses same endpoint but different model)
-OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
-VOICE_MODEL = os.getenv("VOICE_MODEL", "gpt-oss:20b")  # Faster model for voice interactions
-
-# Fast model configuration (for Pi dashboard fast worker, etc.)
-# Uses Gemini by default for speed
-FAST_MODEL_URL = os.getenv("FAST_MODEL_URL", os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1"))
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
-FAST_MODEL_API_KEY = os.getenv("FAST_MODEL_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://10.185.1.8:11434")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+OPENAI_NOTIFICATION_MODEL = _app_state.notification_model
+VOICE_MODEL = _app_state.voice_model
+FAST_MODEL_URL = _app_state.fast_model_url
+FAST_MODEL = _app_state.fast_model
+FAST_MODEL_API_KEY = _app_state.fast_model_api_key
+EMBEDDING_BASE_URL = _app_state.embedding_base_url
+EMBEDDING_MODEL = _app_state.embedding_model
+EMBEDDING_DIM = _app_state.embedding_dim
 
 # Background LLM Configuration (separate from chat - always uses local models)
-BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:11434/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "gpt-oss:20b")
-BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:11434/v1")
-BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "gpt-oss:20b")
+BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8080/v1")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "Qwen3.5-35B-A3B")
+BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1")
+BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "Qwen3.5-35B-A3B")
 BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
 BG_LLM_CONNECT_TIMEOUT = float(os.getenv("BG_LLM_CONNECT_TIMEOUT", "6"))
 BG_LLM_NUM_CTX = int(os.getenv("BG_LLM_NUM_CTX", "16384"))
@@ -601,12 +339,8 @@ ALLOWED_MIME_TYPES = [
 # Startup health tracking — shared with routes/core.py
 from app.core.health_state import STARTUP_HEALTH
 
-# Database setup
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Database setup — reuse the shared engine from app.db.base to avoid multiple connection pools
+from app.db.base import engine, SessionLocal
 Base = declarative_base()
 
 # ===================== MODEL IMPORTS =====================
@@ -620,7 +354,7 @@ from app.models.episode import Episode
 from app.models.episode_rating import EpisodeRating
 from app.models.conversation import Conversation, ConversationTurn
 from app.models.background_task import BackgroundTask
-from app.models.memory_trace import MemoryTrace, MemoryEmbedding, MemoryEdge
+# MemoryTrace/MemoryEmbedding/MemoryEdge: deprecated, kept for table definitions only
 from app.models.context import ContextWindow, ContextMode
 from app.models.dream import DreamInsight
 from app.models.briefing import DailyBriefing, BriefingSettings
@@ -631,7 +365,6 @@ from app.models.push_token import PushToken
 from app.models.calendar_event import CalendarEvent
 from app.models.document_chunk import DocumentChunk
 from app.models.doc import Document
-from app.models.habit import Habit, HabitItem, HabitInstance, HabitLog, HabitStreak, HabitLink
 from app.models.profile import UserProfile
 
 # ===================== SCHEMA IMPORTS =====================
@@ -646,15 +379,11 @@ from app.schemas.calendar import (
     CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
     IOSCalendarEventSync as IOSCalendarEvent, IOSCalendarSyncRequest, IOSCalendarSyncResponse,
 )
-from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, UserSettings
+from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse
 from app.schemas.documents import DocumentResponse, DocumentChunkResponse, Model3DResponse
 from app.schemas.memory import (
     ConversationResponse, ConversationTurnResponse, ConversationSummaryResponse,
     SetActiveConversationRequest, EpisodeMessageResponse,
-)
-from app.schemas.habits import (
-    HabitCreate, HabitResponse, HabitItemCreate, HabitItemResponse,
-    HabitInstanceResponse, HabitLogCreate, HabitTodayStats,
 )
 from app.schemas.insights import (
     UserProfileCreate, UserProfileResponse,
@@ -1301,7 +1030,7 @@ class SimpleLLMClient:
             tools = payload.get("tools", [])
             max_tokens = payload.get("max_tokens", 4096)
             temperature = payload.get("temperature", 0.7)
-            model = payload.get("model", "claude-sonnet-4-5-20250514")
+            model = payload.get("model", "claude-sonnet-4-6")
 
             result = await self._anthropic_chat_request(
                 messages=messages,
@@ -1617,7 +1346,7 @@ class SimpleLLMClient:
             tools: List of tool definitions
             user_id: User ID
             conversation_id: Optional conversation ID for context
-            model: Optional model override (e.g., "claude-opus-4-5-20250514", "gemini-2.5-pro")
+            model: Optional model override (e.g., "claude-opus-4-6", "gemini-2.5-pro")
             ephemeral: If True, don't save to memory/episodes
         """
         try:
@@ -3118,27 +2847,29 @@ class SimpleLLMClient:
                 conversation_id = self.current_conversation_id or str(uuid.uuid4())
 
             logger.info(f"✅ Storing conversation with ID: {conversation_id}")
-            # Only store NEW messages that aren't already in the database
-            # Get existing episodes for this conversation to avoid duplicates
+            # Deduplicate by (conversation_id, role, ordinal) — not by content.
+            # Content-based dedup silently drops legitimate repeated messages.
             db = SessionLocal()
             try:
                 existing_episodes = db.query(Episode).filter(
                     Episode.conversation_id == conversation_id,
                     Episode.user_id == user_id
                 ).all()
-                existing_content = {ep.content for ep in existing_episodes if ep.content}
+                stored_count = len(existing_episodes)
 
-                # Store only new messages that aren't already stored
-                for message in messages:
-                    # Handle both ChatMessage objects and dict formats
+                # Store only messages beyond what's already persisted
+                for idx, message in enumerate(messages):
+                    if idx < stored_count:
+                        continue  # Already stored from a previous call
+
                     if isinstance(message, dict):
                         role = message.get("role")
-                        content = message.get("content")
+                        content = _extract_text_content(message.get("content"))
                     else:
                         role = message.role
-                        content = message.content
+                        content = _extract_text_content(message.content)
 
-                    if role in ["user", "assistant"] and content and content not in existing_content:
+                    if role in ["user", "assistant"] and content:
                         await intelligent_memory_service.store_episode(
                             user_id=user_id,
                             role=role,
@@ -3147,12 +2878,20 @@ class SimpleLLMClient:
                             source="chat",
                             memory_type="conversation"
                         )
-                        existing_content.add(content)
+                        stored_count += 1
+
+                        # Real-time PKG extraction for user messages
+                        if role == "user":
+                            try:
+                                from app.services.pkg_realtime_extractor import process_message_for_pkg
+                                await process_message_for_pkg(user_id, content)
+                            except Exception:
+                                pass  # Non-critical
             finally:
                 db.close()
 
-            # Store assistant response as an episode (only if not already stored)
-            if response_content and response_content not in existing_content:
+            # Store assistant response as an episode
+            if response_content:
                 episode = await intelligent_memory_service.store_episode(
                     user_id=user_id,
                     role="assistant",
@@ -3162,11 +2901,17 @@ class SimpleLLMClient:
                     memory_type="conversation"
                 )
                 assistant_episode_id = episode.id if episode else None
-                existing_content.add(response_content)
                 logger.info(f"🎯 Assistant episode stored with ID: {assistant_episode_id}")
 
             # Also maintain legacy conversation storage for compatibility
             await self._store_legacy_conversation(messages, response_content, user_id, conversation_id)
+
+            # Mark show_david items as shown if Sara referenced them in her response
+            if response_content:
+                try:
+                    await _mark_shown_discoveries(user_id, response_content)
+                except Exception as e:
+                    logger.debug(f"mark_shown_discoveries failed: {e}")
 
             logger.info(f"🧠 Stored conversation {conversation_id} with intelligent episodic memory analysis")
 
@@ -3209,10 +2954,10 @@ class SimpleLLMClient:
                 if last_message:
                     if isinstance(last_message, dict):
                         last_role = last_message.get("role")
-                        last_content = last_message.get("content")
+                        last_content = _extract_text_content(last_message.get("content"))
                     else:
                         last_role = getattr(last_message, "role", None)
-                        last_content = getattr(last_message, "content", None)
+                        last_content = _extract_text_content(getattr(last_message, "content", None))
                 else:
                     last_role = None
                     last_content = None
@@ -3346,7 +3091,7 @@ Keep it brief and factual."""
 
             # Use FAST_MODEL if available, otherwise use main model
             fast_model_url = os.getenv("FAST_MODEL_URL") or OPENAI_BASE_URL
-            fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")
+            fast_model = os.getenv("FAST_MODEL", "Qwen3.5-35B-A3B")
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -3478,203 +3223,7 @@ Keep it brief and factual."""
 # GLM-4.5 XML Tool Call Parser
 # ============================================================================
 
-def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
-    """
-    Parse GLM-4.5 XML-formatted tool calls and convert to OpenAI JSON format.
-
-    GLM-4.5 Format:
-        <tool_call>function_name </tool_call>
-        <tool_call>function_name <arg_key>param</arg_key> <arg_value>value</arg_value></tool_call>
-
-    OpenAI Format:
-        {
-            "tool_calls": [{
-                "id": "call_xxx",
-                "type": "function",
-                "function": {"name": "function_name", "arguments": "{}"}
-            }]
-        }
-
-    Returns:
-        (cleaned_content, tool_calls_list)
-    """
-    import re
-    import uuid
-
-    # Find all tool_call blocks
-    tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
-    matches = re.findall(tool_call_pattern, content, re.DOTALL)
-
-    if not matches:
-        # No tool calls found, return original content
-        return content, []
-
-    tool_calls = []
-
-    for match in matches:
-        match = match.strip()
-
-        # Extract function name (first word)
-        parts = match.split()
-        if not parts:
-            logger.warning(f"Empty tool_call block found")
-            continue
-
-        function_name = parts[0]
-
-        # Parse arguments if present
-        arguments = {}
-        arg_key_pattern = r'<arg_key>(.*?)</arg_key>'
-        arg_value_pattern = r'<arg_value>(.*?)</arg_value>'
-
-        keys = re.findall(arg_key_pattern, match)
-        values = re.findall(arg_value_pattern, match)
-
-        # Match keys with values
-        for key, value in zip(keys, values):
-            arguments[key.strip()] = value.strip()
-
-        # Create OpenAI-compatible tool call
-        tool_call = {
-            "id": f"call_{str(uuid.uuid4())[:8]}",
-            "type": "function",
-            "function": {
-                "name": function_name,
-                "arguments": json.dumps(arguments) if arguments else "{}"
-            }
-        }
-
-        tool_calls.append(tool_call)
-        logger.info(f"Parsed GLM-4.5 tool call: {function_name} with args: {arguments}")
-
-    # Remove all tool_call XML tags from content
-    cleaned_content = re.sub(tool_call_pattern, '', content, flags=re.DOTALL).strip()
-
-    # Also handle <think> tags (GLM-4.5 reasoning)
-    think_pattern = r'<think>(.*?)</think>'
-    think_matches = re.findall(think_pattern, cleaned_content, re.DOTALL)
-    if think_matches:
-        # Extract reasoning content but don't include in final response
-        reasoning = " ".join([m.strip() for m in think_matches])
-        logger.debug(f"GLM-4.5 reasoning: {reasoning[:100]}...")
-        cleaned_content = re.sub(think_pattern, '', cleaned_content, flags=re.DOTALL).strip()
-
-    return cleaned_content, tool_calls
-
-
-def parse_json_text_tool_calls(content: str) -> tuple[str, list]:
-    """
-    Parse tool calls that are output as JSON text in the response content.
-
-    This handles the case where the LLM outputs tool calls as JSON objects
-    in the text content instead of using the proper tool_calls field.
-
-    Expected formats:
-        {"tool": "create_note", "title": "...", "content": "..."}
-        {"name": "create_note", "arguments": {...}}
-        {"function": "create_note", ...}
-
-    Also handles markdown code blocks:
-        ```json
-        {"tool": "create_note", ...}
-        ```
-
-    Returns:
-        (cleaned_content, tool_calls_list)
-    """
-    import re
-    import uuid
-
-    # Known tool names to look for
-    known_tools = {
-        'create_note', 'search_notes', 'edit_note', 'delete_note', 'list_notes',
-        'notes_create', 'notes_search', 'notes_edit', 'notes_delete', 'notes_list',
-        'create_reminder', 'list_reminders', 'cancel_reminder',
-        'reminders_create', 'reminders_list', 'reminders_cancel',
-        'start_timer', 'timer_status', 'cancel_timer',
-        'timers_start', 'timers_status', 'timers_cancel',
-        'memory_search', 'search_memory',
-        'web_search', 'open_page', 'get_page_details', 'get_web_search_details',
-        'calendar_list', 'calendar_create', 'create_calendar_event',
-        'food_log_create', 'food_log_search', 'food_log_summary', 'food_search_and_log',
-        'workout_log_create', 'workout_list', 'workout_details', 'workout_stats',
-        'fitness_note_create', 'fitness_note_search', 'fitness_note_edit', 'fitness_summary',
-        'temerant_status', 'temerant_log_action', 'temerant_roll_oracle',
-        'temerant_list_events', 'temerant_resolve_event',
-        'load_tool_categories',
-        'knowledge_graph_search', 'find_connections', 'discover_knowledge_clusters', 'analyze_knowledge_gaps'
-    }
-
-    tool_calls = []
-    cleaned_content = content
-
-    # Try to extract JSON from the content
-    # First, try markdown code blocks
-    code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
-    matches = re.findall(code_block_pattern, content, re.DOTALL)
-
-    # Also try bare JSON objects at the start of content
-    if not matches:
-        # Look for JSON objects
-        json_pattern = r'^\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})'
-        match = re.match(json_pattern, content.strip(), re.DOTALL)
-        if match:
-            matches = [match.group(1)]
-
-    # Also try finding JSON anywhere in the content
-    if not matches:
-        # More permissive pattern for JSON objects
-        json_pattern = r'(\{["\'](?:tool|name|function)["\']:\s*["\'][^"\']+["\'][^}]*\})'
-        matches = re.findall(json_pattern, content, re.DOTALL)
-
-    for match in matches:
-        try:
-            json_obj = json.loads(match)
-
-            # Determine tool name from various possible keys
-            tool_name = None
-            arguments = {}
-
-            if 'tool' in json_obj:
-                tool_name = json_obj.pop('tool')
-                arguments = json_obj  # Rest of object is arguments
-            elif 'name' in json_obj:
-                tool_name = json_obj.pop('name')
-                if 'arguments' in json_obj:
-                    arguments = json_obj['arguments'] if isinstance(json_obj['arguments'], dict) else json.loads(json_obj['arguments'])
-                else:
-                    arguments = json_obj
-            elif 'function' in json_obj:
-                tool_name = json_obj.pop('function')
-                arguments = json_obj
-
-            # Validate it's a known tool
-            if tool_name and tool_name in known_tools:
-                tool_call = {
-                    "id": f"call_{str(uuid.uuid4())[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(arguments) if arguments else "{}"
-                    }
-                }
-                tool_calls.append(tool_call)
-                logger.info(f"Parsed JSON text tool call: {tool_name} with args: {arguments}")
-
-                # Remove the JSON from content
-                cleaned_content = cleaned_content.replace(match, '').strip()
-                # Also remove code block markers if present
-                cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
-
-        except json.JSONDecodeError as e:
-            logger.debug(f"Failed to parse potential JSON tool call: {e}")
-            continue
-
-    # Clean up any leftover empty code blocks or whitespace
-    cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
-
-    return cleaned_content, tool_calls
-
+# parse_glm45_tool_calls and parse_json_text_tool_calls extracted to app.core.text_utils
 
 llm_client = SimpleLLMClient()
 # embedding_service imported from app.services.embedding_service
@@ -4390,7 +3939,7 @@ class EmotionalAnalyzer:
                 self.fast_model_url = OPENAI_BASE_URL
         except Exception:
             self.fast_model_url = OPENAI_BASE_URL
-        self.fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")  # Your fast model
+        self.fast_model = os.getenv("FAST_MODEL", "Qwen3.5-35B-A3B")  # Your fast model
         
     async def analyze_emotional_state(self, content: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Analyze emotional state of content using fast model"""
@@ -4575,16 +4124,26 @@ class ContextWindowManager:
                 query_embedding = params["query_embedding"]
                 min_similarity = params.get("min_similarity", 0.3)
 
-                if "duration" in params:
-                    cutoff_time = datetime.utcnow() - params["duration"]
+                # Determine time bounds — exact temporal window or duration-based cutoff
+                temporal_start = params.get("temporal_start")
+                temporal_end = params.get("temporal_end")
+                if temporal_start and temporal_end:
+                    cutoff_time = temporal_start
+                    upper_time = temporal_end
                 else:
-                    cutoff_time = datetime.utcnow() - timedelta(days=30)  # Default 30 days
+                    if "duration" in params:
+                        cutoff_time = datetime.utcnow() - params["duration"]
+                    else:
+                        cutoff_time = datetime.utcnow() - timedelta(days=30)  # Default 30 days
+                    upper_time = None
 
                 # Use raw SQL for vector similarity search
                 from sqlalchemy import text as sql_text
 
                 # Convert embedding list to pgvector format
                 embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
+
+                upper_clause = "AND e.created_at <= :upper_time" if upper_time else ""
 
                 # Execute vector similarity query with composite scoring
                 # Use string formatting for embedding to avoid SQLAlchemy parameter issues with pgvector
@@ -4608,30 +4167,36 @@ class ContextWindowManager:
                         e.rating_boost,
                         e.exploration_bonus,
                         1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
-                        -- Enhanced composite score with rating boost and exploration bonus
-                        -- Uses 14-day half-life for recency decay (unified baseline across all retrieval paths)
+                        -- Composite score: semantic + recency + importance + frequency + relevance + rating + exploration
                         (
-                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.40 +  -- Semantic similarity (40%)
-                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.20 +  -- Recency with 14-day half-life (20%)
+                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.35 +  -- Semantic similarity (35%)
+                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.15 +  -- Recency 14-day half-life (15%)
                             COALESCE(e.importance, 0.5) * 0.20 +  -- AI-scored importance (20%)
-                            COALESCE(e.rating_boost, 0.0) * 0.15 +  -- Rating boost (Wilson + decay) (15%)
+                            LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.08 +  -- Frequency signal (8%)
+                            COALESCE(e.recall_relevance_ema, 0.5) * 0.07 +  -- Recall usefulness EMA (7%)
+                            COALESCE(e.rating_boost, 0.0) * 0.10 +  -- Rating boost (Wilson + decay) (10%)
                             COALESCE(e.exploration_bonus, 0.0) * 0.05  -- Thompson Sampling exploration (5%)
                         ) as composite_score
                     FROM episode e
                     WHERE e.user_id = :user_id
                       AND e.embedding IS NOT NULL
                       AND e.created_at >= :cutoff_time
+                      {upper_clause}
                       AND (1 - (e.embedding <=> '{embedding_str}'::vector)) >= :min_similarity
                     ORDER BY composite_score DESC
                     LIMIT :limit
                 """)
 
-                result = db.execute(sql, {
+                sql_params = {
                     "user_id": user_id,
                     "cutoff_time": cutoff_time,
                     "min_similarity": min_similarity,
-                    "limit": limit
-                })
+                    "limit": limit,
+                }
+                if upper_time:
+                    sql_params["upper_time"] = upper_time
+
+                result = db.execute(sql, sql_params)
 
                 # Convert raw results to episode_data format
                 episode_data = []
@@ -4762,28 +4327,43 @@ class IntelligentMemoryService:
         self.emotional_analyzer = EmotionalAnalyzer()
     
     async def store_episode(
-        self, 
-        user_id: str, 
-        role: str, 
-        content: str, 
+        self,
+        user_id: str,
+        role: str,
+        content: str,
         conversation_id: str = None,
         source: str = "chat",
         memory_type: str = "conversation"
     ) -> Episode:
-        """Store an episode with intelligent analysis"""
-        
-        # Analyze emotional content
-        emotional_analysis = await self.emotional_analyzer.analyze_emotional_state(content)
-        
-        # Extract topics (simplified for now)
+        """Store an episode with fast heuristic scoring.
+
+        Uses MemoryScorer heuristics for instant importance/affect scoring
+        (no LLM call). Rich analysis (emotions, topics, refined scores) is
+        done in a single batched LLM call after the conversation ends via
+        _enrich_episodes_batch().
+        """
+        from app.services.memory_scorer import memory_scorer
+
+        # Fast heuristic scoring (no LLM call, <1ms)
+        scores = memory_scorer.score_sync({"content": content, "role": role})
+        importance = scores["importance_score"]
+
+        # Quick keyword topics as placeholder (overwritten by batch LLM later)
         topics = await self._extract_topics(content)
-        
-        # Calculate importance (simplified for now)
-        importance = await self._calculate_importance(content, role, emotional_analysis)
-        
+
+        # Heuristic emotional placeholder (overwritten by batch LLM later)
+        emotional_analysis = {
+            "primary_emotion": "neutral",
+            "intensity": abs(scores["affect_score"]),
+            "sub_emotions": [],
+            "energy_level": "medium",
+            "sentiment": "positive" if scores["affect_score"] > 0.2 else ("negative" if scores["affect_score"] < -0.2 else "neutral"),
+            "confidence": 0.2,  # low confidence = heuristic only
+        }
+
         # Generate embedding (if available)
         embedding = await self._generate_embedding(content)
-        
+
         # Store episode
         db = SessionLocal()
         try:
@@ -4793,9 +4373,10 @@ class IntelligentMemoryService:
                 role=role,
                 content=content,
                 importance=importance,
+                base_importance=importance,
                 emotional_tone=json.dumps(emotional_analysis),
                 topics=json.dumps(topics),
-                context_tags=json.dumps([]),  # Will be enhanced later
+                context_tags=json.dumps([]),
                 memory_type=memory_type,
                 source=source,
                 embedding=json.dumps(embedding) if embedding and not PGVECTOR_AVAILABLE else embedding
@@ -4843,6 +4424,16 @@ class IntelligentMemoryService:
     ) -> List[dict]:
         """Search memory with intelligent context window selection and optional semantic search"""
 
+        # Parse temporal references from query (e.g. "what happened Tuesday")
+        temporal_range = None
+        try:
+            from app.services.temporal_query_parser import parse_temporal_reference
+            temporal_range = parse_temporal_reference(query)
+            if temporal_range:
+                logger.info(f"🕐 Detected temporal reference: {temporal_range[0]} → {temporal_range[1]}")
+        except Exception as e:
+            logger.debug(f"Temporal parse failed: {e}")
+
         # Try semantic search first if enabled and we have embeddings
         if use_semantic and not custom_window:
             try:
@@ -4864,24 +4455,60 @@ class IntelligentMemoryService:
                     query_embedding = await self._generate_embedding(query)
 
                     if query_embedding:
-                        # Use semantic window with vector search
-                        window_config = ContextWindowConfig.semantic(
-                            query_embedding=query_embedding,
-                            duration=timedelta(days=30),  # Search last 30 days
-                            min_similarity=0.3  # Minimum similarity threshold
-                        )
+                        # If temporal reference detected, search that specific window
+                        # Otherwise tiered search: 30d → 90d → all-time
+                        episodes = []
+                        if temporal_range:
+                            t_start, t_end = temporal_range
+                            span = t_end - t_start + timedelta(days=1)
+                            window_config = ContextWindowConfig.semantic(
+                                query_embedding=query_embedding,
+                                duration=span,
+                                min_similarity=0.15,  # Lower threshold for temporal queries
+                            )
+                            # Override cutoff to the exact temporal window
+                            window_config.parameters["temporal_start"] = t_start
+                            window_config.parameters["temporal_end"] = t_end
+                            episodes = await self.window_manager.retrieve_episodes_with_window(
+                                user_id, window_config, query, limit=20
+                            )
+                            logger.info(f"🕐 Temporal search ({t_start.date()} → {t_end.date()}) returned {len(episodes)} episodes")
 
-                        episodes = await self.window_manager.retrieve_episodes_with_window(
-                            user_id, window_config, query, limit=15
-                        )
+                        if not episodes:
+                            for search_days in [30, 90, None]:
+                                duration = timedelta(days=search_days) if search_days else timedelta(days=365 * 5)
+                                window_config = ContextWindowConfig.semantic(
+                                    query_embedding=query_embedding,
+                                    duration=duration,
+                                    min_similarity=0.25  # Lower threshold for broader recall
+                                )
+                                episodes = await self.window_manager.retrieve_episodes_with_window(
+                                    user_id, window_config, query, limit=20  # Fetch 20 for reranking
+                                )
+                                if len(episodes) >= 5:
+                                    break
+                                elif episodes:
+                                    logger.info(f"🔍 Only {len(episodes)} results in {search_days or 'all-time'}d, expanding search")
 
                         if episodes:
-                            logger.info(f"🧠 Semantic search found {len(episodes)} relevant episodes")
-                            # Log top similarity scores
+                            logger.info(f"🧠 Semantic search found {len(episodes)} episodes")
+
+                            # Rerank with BGE reranker for better precision
+                            try:
+                                from app.services.bge_reranker import get_reranker
+                                reranker = await get_reranker()
+                                docs = [ep.get("content", "")[:500] for ep in episodes]
+                                ranked = await reranker.rerank(query, docs, top_k=min(7, len(episodes)))
+                                reranked_episodes = [episodes[idx] for idx, _score in ranked]
+                                logger.info(f"🔄 Reranked {len(episodes)} → top {len(reranked_episodes)}")
+                                return reranked_episodes
+                            except Exception as rerank_err:
+                                logger.debug(f"Reranker unavailable, using composite scores: {rerank_err}")
+
                             for i, ep in enumerate(episodes[:3]):
                                 if 'semantic_similarity' in ep:
                                     logger.info(f"  {i+1}. Similarity: {ep['semantic_similarity']:.4f}, Score: {ep.get('composite_score', 0):.4f}")
-                            return episodes
+                            return episodes[:7]
                         else:
                             logger.info("🔍 Semantic search found no results, falling back to temporal search")
             except Exception as e:
@@ -4979,8 +4606,8 @@ class DreamingService:
     """Background service for memory consolidation, pattern detection, and insight generation"""
     
     def __init__(self):
-        self.fast_model = BG_LLM_FALLBACK_MODEL or "gpt-oss:20b"
-        self.smart_model = BG_LLM_PRIMARY_MODEL or OPENAI_MODEL or "gpt-oss:20b"
+        self.fast_model = BG_LLM_FALLBACK_MODEL or "Qwen3.5-35B-A3B"
+        self.smart_model = BG_LLM_PRIMARY_MODEL or OPENAI_MODEL or "Qwen3.5-35B-A3B"
         self.is_dreaming = False
         logger.info("🧠 DreamingService initialized")
     
@@ -5539,7 +5166,15 @@ class NotificationScheduler:
         """Main notification loop that checks for due items every 5 seconds"""
         while self.running:
             try:
-                await self._check_and_schedule_notifications()
+                self._due_notifications = []
+                await asyncio.to_thread(self._check_and_schedule_notifications_sync)
+                # Send due notifications on the event loop (async)
+                for key, notification in self._due_notifications:
+                    try:
+                        await self._send_scheduled_notification(notification)
+                    except Exception:
+                        pass
+                    self.scheduled_notifications.pop(key, None)
                 await asyncio.sleep(5)  # Check every 5 seconds
             except asyncio.CancelledError:
                 break
@@ -5547,123 +5182,65 @@ class NotificationScheduler:
                 logger.error(f"Notification scheduler error: {e}")
                 await asyncio.sleep(10)  # Wait longer on error
                 
-    async def _check_and_schedule_notifications(self):
-        """Check for notifications that need pre-generation or sending"""
+    def _check_and_schedule_notifications_sync(self):
+        """Check for due timers/reminders and schedule notifications (sync, runs in thread)."""
         try:
             db = SessionLocal()
             try:
                 now = datetime.now(timezone.utc)
                 pre_generate_time = now + timedelta(seconds=20)
-                
+
                 # Check timers that need pre-generation
                 upcoming_timers = db.query(Timer).filter(
                     Timer.is_active == True
                 ).all()
-                
-                # Filter timers with proper timezone handling
-                filtered_timers = []
+
                 for timer in upcoming_timers:
-                    # Ensure timer end_time is timezone-aware
                     timer_end_time = timer.end_time
                     if timer_end_time.tzinfo is None:
                         timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
-                    
-                    # Check if timer needs pre-generation or sending
                     if timer_end_time <= pre_generate_time and timer_end_time > now:
-                        filtered_timers.append(timer)
-                
-                upcoming_timers = filtered_timers
-                
-                for timer in upcoming_timers:
-                    notification_key = f"timer_{timer.id}"
-                    if notification_key not in self.scheduled_notifications:
-                        # Pre-generate the notification message
-                        duration_str = f"{timer.duration_minutes}min"
-                        user_context = await ntfy_service.get_recent_user_context(timer.user_id)
-                        
-                        title, message = await ntfy_service.generate_ai_notification_message(
-                            notification_type="timer",
-                            context={
-                                "title": timer.title,
-                                "duration": duration_str,
-                                "timer_id": str(timer.id)
-                            },
-                            user_context=user_context
-                        )
-                        
-                        self.scheduled_notifications[notification_key] = {
-                            "title": title,
-                            "message": message,
-                            "send_time": timer.end_time,
-                            "type": "timer",
-                            "timer_id": timer.id,
-                            "timer_name": timer.title,
-                            "user_id": timer.user_id
-                        }
-                        logger.info(f"📝 Pre-generated timer notification for: {timer.title}")
-                
-                # Check reminders that need pre-generation
+                        notification_key = f"timer_{timer.id}"
+                        if notification_key not in self.scheduled_notifications:
+                            self.scheduled_notifications[notification_key] = {
+                                "title": f"Timer: {timer.title or 'Timer'}",
+                                "message": f"Your {timer.duration_minutes}min timer is done!",
+                                "send_time": timer.end_time,
+                                "type": "timer",
+                                "timer_id": timer.id,
+                                "timer_name": timer.title,
+                                "user_id": timer.user_id
+                            }
+
+                # Check reminders
                 all_reminders = db.query(Reminder).filter(
                     Reminder.is_completed == False
                 ).all()
-                
-                # Filter reminders with proper timezone handling
-                filtered_reminders = []
+
                 for reminder in all_reminders:
-                    # Ensure reminder time is timezone-aware
                     reminder_time = reminder.reminder_time
                     if reminder_time.tzinfo is None:
                         reminder_time = reminder_time.replace(tzinfo=timezone.utc)
-                    
-                    # Check if reminder needs pre-generation or sending
                     if reminder_time <= pre_generate_time and reminder_time > now:
-                        filtered_reminders.append(reminder)
-                
-                upcoming_reminders = filtered_reminders
-                
-                for reminder in upcoming_reminders:
-                    notification_key = f"reminder_{reminder.id}"
-                    if notification_key not in self.scheduled_notifications:
-                        # Pre-generate the notification message
-                        reminder_time_str = reminder.reminder_time.strftime("%I:%M %p")
-                        user_context = await ntfy_service.get_recent_user_context(reminder.user_id)
-                        
-                        title, message = await ntfy_service.generate_ai_notification_message(
-                            notification_type="reminder",
-                            context={
-                                "title": reminder.title,
-                                "description": reminder.description or "",
-                                "reminder_time": reminder_time_str,
-                                "reminder_id": str(reminder.id)
-                            },
-                            user_context=user_context
-                        )
-                        
-                        self.scheduled_notifications[notification_key] = {
-                            "title": title,
-                            "message": message,
-                            "send_time": reminder.reminder_time,
-                            "type": "reminder",
-                            "reminder_id": reminder.id,
-                            "user_id": reminder.user_id
-                        }
-                        logger.info(f"📝 Pre-generated reminder notification for: {reminder.title}")
-                
-                # Send notifications that are due
-                due_notifications = []
+                        notification_key = f"reminder_{reminder.id}"
+                        if notification_key not in self.scheduled_notifications:
+                            self.scheduled_notifications[notification_key] = {
+                                "title": f"Reminder: {reminder.title or 'Reminder'}",
+                                "message": reminder.description or reminder.content or "Time for your reminder",
+                                "send_time": reminder.reminder_time,
+                                "type": "reminder",
+                                "reminder_id": reminder.id,
+                                "user_id": reminder.user_id
+                            }
+
+                # Collect due notifications
+                self._due_notifications = []
                 for key, notification in list(self.scheduled_notifications.items()):
                     send_time = notification["send_time"]
-                    # Ensure send_time is timezone-aware for comparison
                     if send_time.tzinfo is None:
                         send_time = send_time.replace(tzinfo=timezone.utc)
-                    
                     if send_time <= now:
-                        due_notifications.append((key, notification))
-                
-                for key, notification in due_notifications:
-                    await self._send_scheduled_notification(notification)
-                    del self.scheduled_notifications[key]
-                    
+                        self._due_notifications.append((key, notification))
             finally:
                 db.close()
                 
@@ -5749,6 +5326,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logging middleware — adds correlation IDs + performance metrics to every request
+app.add_middleware(RequestLoggingMiddleware)
+
 # Include modular routes
 
 # Auth routes (extracted from main_simple.py)
@@ -5783,6 +5363,14 @@ try:
 except Exception as e:
     logger.warning(f"Reminders routes not available from module: {e}")
 
+# Daily tasks routes
+try:
+    from app.routes.daily_tasks import router as daily_tasks_router
+    app.include_router(daily_tasks_router, tags=["Daily Tasks"])
+    logger.info("✅ Daily tasks routes loaded from app.routes.daily_tasks")
+except Exception as e:
+    logger.warning(f"Daily tasks routes not available: {e}")
+
 # Calendar events routes (extracted from main_simple.py)
 try:
     from app.routes.calendar_events import router as calendar_events_router
@@ -5797,17 +5385,6 @@ try:
     logger.info("✅ Calendar events routes loaded from app.routes.calendar_events")
 except Exception as e:
     logger.warning(f"Calendar events routes not available from module: {e}")
-
-# Habits routes (extracted from main_simple.py)
-try:
-    from app.routes.habits import router as habits_router, habit_items_router, insights_router, fitness_habits_router
-    app.include_router(habits_router, tags=["Habits"])
-    app.include_router(habit_items_router, tags=["Habits"])
-    app.include_router(insights_router, tags=["Habits"])
-    app.include_router(fitness_habits_router, tags=["Fitness"])
-    logger.info("✅ Habits routes loaded from app.routes.habits")
-except Exception as e:
-    logger.warning(f"Habits routes not available from module: {e}")
 
 try:
     from app.routes.memory import router as memory_router
@@ -5841,22 +5418,6 @@ try:
     logger.info("✅ Learning routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Learning routes failed to load: {e}")
-
-# Include Temerant RPG routes
-try:
-    from app.routes.temerant import router as temerant_router
-    app.include_router(temerant_router)
-    logger.info("✅ Temerant RPG routes loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Temerant RPG routes failed to load: {e}")
-
-# Include separate scene-based Temerant RPG routes
-try:
-    from app.routes.temerant_rpg import router as temerant_rpg_router
-    app.include_router(temerant_rpg_router)
-    logger.info("✅ Separate Temerant RPG routes loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Separate Temerant RPG routes failed to load: {e}")
 
 # Include Food Database routes
 try:
@@ -5914,13 +5475,7 @@ try:
 except Exception as e:
     logger.error(f"❌ Intelligence reports routes failed to load: {e}")
 
-# Include Cognitive Enhancement routes
-try:
-    from app.routes.cognitive import router as cognitive_router
-    app.include_router(cognitive_router, tags=["Cognitive Enhancement"])
-    logger.info("✅ Cognitive enhancement routes loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Cognitive enhancement routes failed to load: {e}")
+# Cognitive router is included once above; avoid duplicate registration.
 
 # Include Morning Brief routes
 try:
@@ -5929,6 +5484,22 @@ try:
     logger.info("✅ Morning brief routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Morning brief routes failed to load: {e}")
+
+# Include Settings → Schedules routes (DB-backed Celery beat schedule)
+try:
+    from app.routes.schedules import router as schedules_router
+    app.include_router(schedules_router)
+    logger.info("✅ Settings/schedules routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Settings/schedules routes failed to load: {e}")
+
+# Include Settings → Tunables routes (cooldowns, ACS thresholds, brief tone)
+try:
+    from app.routes.tunables import router as tunables_router
+    app.include_router(tunables_router)
+    logger.info("✅ Settings/tunables routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Settings/tunables routes failed to load: {e}")
 
 # Include Project Tracker routes
 try:
@@ -6027,6 +5598,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Research routes failed to load: {e}")
 
+# Include Research Plans routes (delegated research executor system)
+try:
+    from app.routes.research_plans import router as research_plans_router
+    app.include_router(research_plans_router, tags=["Research Plans"])
+    logger.info("✅ Research Plans routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Research Plans routes failed to load: {e}")
+
 # Phase 5: Extracted route modules (batch A — core, downloads, presence)
 from app.routes.core import router as core_router
 from app.routes.downloads import router as downloads_router
@@ -6036,11 +5615,9 @@ app.include_router(core_router)
 app.include_router(downloads_router)
 app.include_router(presence_router)
 
-# Phase 5: Extracted route modules (batch C — workers, daily brief)
-from app.routes.workers import router as workers_router
+# Phase 5: Extracted route modules (batch C — daily brief)
 from app.routes.daily_brief import router as daily_brief_router
 
-app.include_router(workers_router)
 app.include_router(daily_brief_router)
 
 # Phase 3: Extracted route modules
@@ -6128,16 +5705,29 @@ app.include_router(agent_orch_router)
 from app.routes.intelligence import router as intelligence_router
 app.include_router(intelligence_router)
 
+# Task events SSE — smart delivery of background worker results
+from app.routes.task_events import router as task_events_router
+app.include_router(task_events_router)
+
 # Desktop app update server (no auth — electron-updater needs pre-login access)
 from app.routes.desktop_updates import router as desktop_updates_router
 app.include_router(desktop_updates_router)
 
 # Session/cross-device routes
-try:
-    from app.routes.session import router as session_router
-    app.include_router(session_router)
-except Exception as e:
-    logger.warning(f"Session routes not available: {e}")
+from app.routes.session import router as session_router
+app.include_router(session_router)
+
+# Debug/observability routes
+from app.routes.debug_notifications import router as debug_notifications_router
+app.include_router(debug_notifications_router)
+
+# Autonomous Cognition System (ACS)
+from app.routes.acs import router as acs_router
+app.include_router(acs_router)
+
+# System metrics
+from app.routes.metrics import router as metrics_router
+app.include_router(metrics_router)
 
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
@@ -6172,6 +5762,13 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
 # Smart Insights routes
 
 logger.info("✅ Phase 4 intelligence routes loaded successfully")
+
+# ===================== SHADOW MODE STUB (removed feature) =====================
+@app.get("/shadow/active")
+async def get_shadow_active():
+    """Stub — shadow mode was removed. Returns null to silence stale polling."""
+    return {"active_session": None}
+
 
 # ===================== SUBCONSCIOUS ROUTES =====================
 @app.get("/api/subconscious/state")
@@ -6331,13 +5928,13 @@ async def get_device_user(request: Request, db: Session = Depends(get_db)) -> Op
     return None
 
 
-@app.post("/api/devices/register")
+@app.post("/api/pi-dashboard/devices/register")
 async def register_device(
     data: dict,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Register a device for token-based auth (requires initial login)"""
+    """Legacy Pi dashboard registration endpoint (kept for backward compatibility)."""
     import secrets
     device_name = data.get("device_name", "Unknown Device")
     device_type = data.get("device_type", "pi_dashboard")
@@ -6513,7 +6110,7 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
     # Get today's calendar events
     calendar_events = []
     try:
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
         events_result = db.execute(text("""
             SELECT id, title, start_time, end_time, location
@@ -6563,7 +6160,7 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
         "worker_status": worker_status,
         "calendar_events": calendar_events,
         "recent_notes": recent_notes,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": local_now().isoformat()
     }
 
 
@@ -6883,7 +6480,7 @@ async def _build_learning_recall_context(user_id: str, message: str, db) -> Opti
                 history = _json.loads(progress_row.quality_history) if isinstance(progress_row.quality_history, str) else (progress_row.quality_history or [])
                 history.append({
                     "type": "natural_usage",
-                    "date": datetime.now().isoformat(),
+                    "date": local_now().isoformat(),
                     "context": message[:100]
                 })
                 # Keep last 50 entries
@@ -6919,13 +6516,15 @@ def _build_activity_context(
     memory_nudges: list = None,
     # Behavioral calibration (pre-loaded from working memory)
     calibration_data: dict = None,
+    # Sara's emotional state (from working memory)
+    sara_emotional_tone: str = None,
+    sara_emotional_intensity: float = None,
 ) -> str:
     """Build adaptive personality context for system prompt injection.
 
-    Combines activity state, interruptibility, conversation depth, and
-    behavioral calibration into a coherent personality directive via the
-    PersonalityEngine. Body state (blood sugar, stress, alertness) is
-    intentionally excluded.
+    Combines activity state, Sara's emotional state, interruptibility,
+    conversation depth, and behavioral calibration into a coherent
+    personality directive via the PersonalityEngine.
     """
     try:
         from app.services.personality_engine import build_personality_context
@@ -6939,11 +6538,12 @@ def _build_activity_context(
             conversation_depth=conversation_depth,
             memory_nudges=memory_nudges,
             calibration_data=calibration_data,
+            sara_emotional_tone=sara_emotional_tone,
+            sara_emotional_intensity=sara_emotional_intensity,
         )
         return ctx.render()
     except Exception as e:
         logger.warning(f"Personality engine failed, falling back to basic tone: {e}")
-        # Fallback: basic tone directive
         tone_map = {
             "sleeping": "Be extremely brief.",
             "waking": "Gentle, warm, brief.",
@@ -7114,7 +6714,8 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
             try:
                 # Create system prompt with user-local current time
                 user_now = _resolve_prompt_datetime_for_user(db, user.id)
-                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email, user_now=user_now)
+                soul_content = load_soul_for_prompt(db)
+                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email, user_now=user_now, soul_content=soul_content)
 
                 # === CANVAS MODE: Check if active and enhance system prompt ===
                 is_canvas_mode = _get_canvas_mode(user_id)
@@ -7179,22 +6780,191 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         tool_categories.append(category)
                 logger.info(f"[Voice] Capability core categories active: {capability_core_categories}")
 
-                # Lazy memory retrieval
-                if context_decision.inject_memory:
+                # === PARALLEL CONTEXT ASSEMBLY (voice-optimized, 4000 token budget) ===
+                async def _v_fetch_memory():
+                    if not context_decision.inject_memory:
+                        return None
                     try:
-                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                            user_id=user_id,
-                            query=message,
-                            use_semantic=True
+                        mems = await intelligent_memory_service.intelligent_memory_search(
+                            user_id=user_id, query=message, use_semantic=True
                         )
-                        if relevant_memories:
-                            memory_context = "\n\n## Relevant Past Context:\n"
-                            for i, mem in enumerate(relevant_memories[:3], 1):
-                                content_preview = mem.get("content", "")[:200]
-                                memory_context += f"{i}. {content_preview}\n"
-                            system_prompt += memory_context
-                    except Exception as e:
-                        logger.warning(f"[Voice] Memory retrieval failed: {e}")
+                        if not mems:
+                            return None
+                        ctx = "\n\n## Relevant Past Context:\n"
+                        for i, mem in enumerate(mems[:3], 1):
+                            preview = mem.get("content", "")[:200]
+                            ctx += f"{i}. {preview}\n"
+                        return ctx
+                    except Exception:
+                        return None
+
+                async def _v_fetch_personality():
+                    try:
+                        _snap = None
+                        try:
+                            from app.services.unified_context import read_snapshot as _rs
+                            _snap = await _rs(user_id)
+                        except Exception:
+                            pass
+                        _act_state = _act_conf = _act_room = _interrupt = None
+                        if _snap and _snap.activity_state != "UNKNOWN":
+                            _act_state = _snap.activity_state
+                            _act_conf = _snap.activity_confidence
+                            _act_room = _snap.room
+                            _interrupt = _snap.interruptibility
+                        if not _act_state:
+                            return None
+                        # Voice always uses brief verbosity
+                        return _build_activity_context(
+                            activity_state=_act_state, confidence=_act_conf,
+                            room=_act_room, interruptibility=_interrupt or 0.5,
+                            turn_count=1, conversation_depth=0,
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_pkg():
+                    if not context_decision.inject_pkg:
+                        return None
+                    try:
+                        from app.services.pkg_context_provider import pkg_context
+                        return await pkg_context.get_relevant_context(
+                            user_id=user_id, message=message, intent=user_intent
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_journal():
+                    try:
+                        from app.services.sara_journal_service import sara_journal
+                        return await sara_journal.get_entries_for_conversation_context(
+                            db=db, user_id=user_id, max_entries=3
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_daily_brief():
+                    if not DAILY_BRIEF_AVAILABLE:
+                        return None
+                    try:
+                        return await asyncio.wait_for(
+                            daily_brief_service.get_compiled_brief(user_id),
+                            timeout=2.0
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        return None
+
+                async def _v_fetch_device():
+                    try:
+                        from app.services.device_orchestrator import device_orchestrator
+                        return await device_orchestrator.get_device_context_for_chat(db, user_id)
+                    except Exception:
+                        return None
+
+                async def _v_fetch_autonomous_notes():
+                    """Fetch Sara's latest autonomous journal + session summary + show_david items."""
+                    try:
+                        import redis.asyncio as _aioredis
+                        _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                        parts = []
+
+                        # 1. Recent autonomous session summary from Redis
+                        _r = await _aioredis.from_url(_redis_url, decode_responses=True)
+                        try:
+                            summary = await _r.get("sara:subconscious:autonomous_summary")
+                            if summary:
+                                import json as _json
+                                s = _json.loads(summary)
+                                parts.append(
+                                    f"Your last autonomous session: {s.get('turns', 0)} turns, "
+                                    f"{s.get('notes_created', 0)} notes created, "
+                                    f"ended: {s.get('end_reason', 'unknown')}"
+                                )
+                        finally:
+                            await _r.close()
+
+                        from app.db.session import get_async_session_factory
+                        _async_session = get_async_session_factory()
+                        async with _async_session() as _db:
+                            # 2. Today's journal note content
+                            from datetime import datetime as _dt
+                            today = _dt.utcnow().strftime("%Y-%m-%d")
+                            journal_title = f"Sara's Journal — {today}"
+                            result = await _db.execute(text(
+                                "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
+                            ), {"uid": user_id, "title": journal_title})
+                            row = result.fetchone()
+                            if row and row[0]:
+                                content = row[0]
+                                if len(content) > 1000:
+                                    content = "..." + content[-1000:]
+                                parts.append(f"Your autonomous journal today:\n{content}")
+
+                            # 3. Unshown show_david items
+                            sd_result = await _db.execute(text("""
+                                SELECT title, content, category
+                                FROM acs_show_david_buffer
+                                WHERE user_id = :uid AND shown = FALSE
+                                ORDER BY priority DESC LIMIT 3
+                            """), {"uid": user_id})
+                            sd_rows = sd_result.fetchall()
+                            if sd_rows:
+                                sd_lines = [f"- [{r[2]}] **{r[0]}**: {r[1][:150]}" for r in sd_rows]
+                                parts.append(
+                                    "## Discoveries From Your Autonomous Exploration\n"
+                                    "You found these during autonomous sessions. Weave them naturally "
+                                    "into conversation when relevant — don't dump them all at once. "
+                                    "If David asks what you've been up to, share the highlights.\n\n"
+                                    + "\n".join(sd_lines)
+                                )
+
+                        if parts:
+                            return "\n\n## Your Autonomous Session Notes\n" + "\n\n".join(parts)
+                        return None
+                    except Exception:
+                        return None
+
+                async def _v_fetch_fitness():
+                    if not context_decision.inject_fitness:
+                        return None
+                    try:
+                        from app.services.fitness_context import get_fitness_context
+                        return await asyncio.wait_for(
+                            get_fitness_context(user_id, db),
+                            timeout=2.0
+                        )
+                    except Exception:
+                        return None
+
+                # Run all context fetches in parallel
+                (v_memory, v_personality, v_pkg, v_journal, v_brief, v_device, v_autonomous, v_fitness
+                ) = await asyncio.gather(
+                    _v_fetch_memory(), _v_fetch_personality(), _v_fetch_pkg(),
+                    _v_fetch_journal(), _v_fetch_daily_brief(), _v_fetch_device(),
+                    _v_fetch_autonomous_notes(), _v_fetch_fitness(),
+                    return_exceptions=True,
+                )
+
+                def _v_safe(val):
+                    if isinstance(val, BaseException) or val is None:
+                        return None
+                    if isinstance(val, tuple):
+                        return val[0] if val else None
+                    return str(val) if val else None
+
+                from app.services.context_budget import ContextBudget
+                voice_budget = ContextBudget(max_tokens=4000)
+                voice_budget.add("memory", _v_safe(v_memory), priority=1)
+                voice_budget.add("personality", _v_safe(v_personality), priority=1)
+                voice_budget.add("daily_brief", _v_safe(v_brief), priority=2)
+                voice_budget.add("pkg", _v_safe(v_pkg), priority=2)
+                voice_budget.add("fitness", _v_safe(v_fitness), priority=2)
+                voice_budget.add("journal", _v_safe(v_journal), priority=3)
+                voice_budget.add("autonomous", _v_safe(v_autonomous), priority=3)
+                voice_budget.add("device", _v_safe(v_device), priority=4)
+                voice_context = voice_budget.build_context_text()
+                if voice_context:
+                    system_prompt += "\n\n" + voice_context
 
                 # Get tools based on intent (already determined by classify_with_context)
                 tools = []
@@ -7255,8 +7025,8 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     # Store user message
                     user_episode_id = str(uuid.uuid4())
                     db.execute(text("""
-                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
-                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, base_importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, :base_importance, NOW(), :source)
                     """), {
                         "id": user_episode_id,
                         "user_id": user_id,
@@ -7264,14 +7034,15 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         "role": "user",
                         "content": message,
                         "importance": 0.5,
+                        "base_importance": 0.5,
                         "source": "pi_dashboard_voice"
                     })
 
                     # Store assistant response
                     assistant_episode_id = str(uuid.uuid4())
                     db.execute(text("""
-                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
-                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, base_importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, :base_importance, NOW(), :source)
                     """), {
                         "id": assistant_episode_id,
                         "user_id": user_id,
@@ -7279,6 +7050,7 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         "role": "assistant",
                         "content": full_response,
                         "importance": 0.5,
+                        "base_importance": 0.5,
                         "source": "pi_dashboard_voice"
                     })
 
@@ -7399,7 +7171,7 @@ Keep responses short and action-focused."""
 async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db)):
     """
     Fast worker for simple tool commands.
-    Uses gpt-oss:20b model + direct tool execution.
+    Uses Qwen3.5-35B-A3B model + direct tool execution.
     Returns immediately without full context injection.
 
     Handles: HOME, TIME, FITNESS intents only.
@@ -7600,7 +7372,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
                 memory_type="health_sync",
                 source="apple_health",
                 content=memory_content,
-                importance=0.5,  # Moderate importance (0-1 scale)
+                importance=0.5,
+                base_importance=0.5,
                 topics=json.dumps(["health", "fitness"]),
                 context_tags=json.dumps(["health_sync", "daily_metrics"]),
                 created_at=local_now(),
@@ -7621,7 +7394,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
                 memory_type="workout",
                 source="apple_health",
                 content=workout_memory,
-                importance=0.7,  # Higher importance for workouts
+                importance=0.7,
+                base_importance=0.7,
                 topics=json.dumps(["fitness", "workout", workout_type.lower()]),
                 context_tags=json.dumps(["workout", "exercise"]),
                 created_at=datetime.fromisoformat(workout.get("startDate", timestamp)) if workout.get("startDate") else local_now(),
@@ -7645,8 +7419,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to sync health data: {str(e)}")
 
-@app.get("/api/health/summary")
-async def get_health_summary(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+@app.get("/api/health/episodes-summary")
+async def get_health_episode_summary(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Get recent health data summary from stored episodes
     """
@@ -7837,130 +7611,9 @@ logger.info("✅ Apple Health sync routes loaded successfully")
 # Presence logging extracted to app/routes/presence.py
 # log_presence() is imported from presence module in router registration section
 
-# ===================== NIGHTLY MEMORY CONSOLIDATION =====================
-class MemoryConsolidationScheduler:
-    def __init__(self):
-        self._task = None
-        self._stop = False
-        self.eastern_tz = pytz.timezone('America/New_York')
-        self.hh = 2
-        self.mm = 15
 
-    async def start(self):
-        if self._task is None:
-            self._stop = False
-            import asyncio as _asyncio
-            self._task = _asyncio.create_task(self._runner())
-            logger.info("🗂️ Memory consolidation scheduler started (2:15 AM ET)")
-
-    async def stop(self):
-        if self._task is not None:
-            self._stop = True
-            self._task.cancel()
-            self._task = None
-
-    async def _runner(self):
-        import asyncio as _asyncio
-        from datetime import datetime as _dt
-        while not self._stop:
-            try:
-                utc_now = _dt.now(pytz.UTC)
-                eastern = utc_now.astimezone(self.eastern_tz)
-                target = eastern.replace(hour=self.hh, minute=self.mm, second=0, microsecond=0)
-                if eastern > target:
-                    # schedule for next day
-                    from datetime import timedelta as _td
-                    target = target + _td(days=1)
-                wait_sec = (target - eastern).total_seconds()
-                await _asyncio.sleep(min(max(wait_sec, 60), 24*3600))
-                if self._stop:
-                    break
-                await self.run_for_all_users()
-            except _asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"Memory consolidation scheduler error: {e}")
-                await _asyncio.sleep(3600)
-
-    async def run_for_all_users(self):
-        from sqlalchemy.orm import Session as _Session
-        db: _Session = SessionLocal()
-        try:
-            users = db.query(User).all()
-            from datetime import datetime as _dt, timedelta as _td
-            yesterday = _dt.now(pytz.UTC) - _td(days=1)
-            for u in users:
-                try:
-                    await self._consolidate_day_for_user(db, u.id, yesterday)
-                except Exception as e:
-                    logger.warning(f"Consolidation failed for user {u.id}: {e}")
-            logger.info(f"✅ Memory consolidation completed for {len(users)} users")
-        finally:
-            db.close()
-
-    async def _consolidate_day_for_user(self, db, user_id: str, day):
-        from datetime import datetime as _dt, timedelta as _td
-        start = _dt(day.year, day.month, day.day, tzinfo=day.tzinfo)
-        end = start + _td(days=1)
-        traces = db.query(MemoryTrace).filter(
-            MemoryTrace.user_id == user_id,
-            MemoryTrace.created_at >= start,
-            MemoryTrace.created_at < end,
-        ).order_by(MemoryTrace.created_at.asc()).all()
-        if not traces:
-            return
-        # Basic heuristic summary; can be replaced by LLM later
-        key_phrases = []
-        try:
-            for t in traces:
-                content_low = (t.content or "").lower()
-                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
-                    if kw in content_low:
-                        key_phrases.append(kw)
-            key_phrases = list(dict.fromkeys(key_phrases))[:8]
-        except Exception:
-            key_phrases = []
-        summary_content = (
-            f"Daily summary for {start.date()}: {len(traces)} events captured."
-            + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
-        )
-        sid = str(uuid.uuid4())
-        s = MemoryTrace(
-            id=sid,
-            user_id=user_id,
-            content=summary_content,
-            role="summary",
-            salience=0.5,
-            source=json.dumps({"type": "consolidation"}),
-            meta=json.dumps({"day": str(start.date())}),
-        )
-        db.add(s)
-        # Embed summary (semantic head)
-        try:
-            emb = await embedding_service.generate_embedding(summary_content)
-            if emb:
-                me = MemoryEmbedding(
-                    trace_id=sid,
-                    head="semantic",
-                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
-                )
-                db.add(me)
-        except Exception as e:
-            logger.warning(f"Summary embedding failed: {e}")
-        # Edges
-        try:
-            from app.main_simple import MemoryEdge as _ME
-        except Exception:
-            _ME = None
-        if _ME:
-            for a, b in zip(traces, traces[1:]):
-                db.merge(_ME(src=a.id, dst=b.id, type="temporal", weight=0.1))
-            # Connect summary to all traces lightly
-            for t in traces:
-                db.merge(_ME(src=sid, dst=t.id, type="summary_of", weight=0.05))
-        db.commit()
-
-memory_consolidation_scheduler = MemoryConsolidationScheduler()
+# NOTE: MemoryConsolidationScheduler removed — legacy MemoryTrace-based consolidation
+# superseded by NightlyDreamService (Episode-based, runs at 2 AM)
 
 # Initialize Neo4j on startup
 def load_settings_from_db():
@@ -8006,7 +7659,10 @@ def load_settings_from_db():
                 OPENAI_NOTIFICATION_MODEL = settings_dict["openai_notification_model"]
 
             if "embedding_base_url" in settings_dict:
-                EMBEDDING_BASE_URL = settings_dict["embedding_base_url"]
+                _emb_url = (settings_dict["embedding_base_url"] or "").strip().rstrip("/")
+                if _emb_url.endswith("/v1"):
+                    _emb_url = _emb_url[:-3].rstrip("/")
+                EMBEDDING_BASE_URL = _emb_url
                 config.settings.embedding_base_url = EMBEDDING_BASE_URL
 
             if "embedding_model" in settings_dict:
@@ -8169,6 +7825,16 @@ async def startup_event():
 
     intelligence_pipeline_started = False
 
+    # ── In-process background loops ──────────────────────────────────────
+    # This backend process is BOTH the HTTP server AND the host for several
+    # long-lived background loops (intelligence pipeline, daily brief scheduler,
+    # nightly rescoring, reactive engine). These are stateful event loops that
+    # maintain in-memory state, so they live here rather than in Celery (which
+    # is designed for discrete tasks). This is fine with a single backend
+    # instance, but means lifecycle debugging requires awareness that this
+    # process wears two hats.
+    # ─────────────────────────────────────────────────────────────────────
+
     # 7. Initialize intelligence pipeline (non-critical)
     try:
         from app.services.intelligence_pipeline import intelligence_pipeline
@@ -8178,39 +7844,16 @@ async def startup_event():
     except Exception as intel_err:
         logger.warning(f"⚠️ Intelligence pipeline failed to start: {intel_err}")
 
-    # 8. Start notification scheduler (non-critical)
-    try:
-        await notification_scheduler.start()
-    except Exception as notif_err:
-        logger.warning(f"⚠️ Notification scheduler failed to start: {notif_err}")
-
-    # 9. Initialize nightly dream service only if pipeline worker did not start.
-    # The intelligence pipeline already runs the singleton scheduler.
-    if not intelligence_pipeline_started:
-        try:
-            from app.services.nightly_dream_service import nightly_dream_service
-            asyncio.create_task(nightly_dream_service.start_dream_scheduler())
-            logger.info("🌙 Nightly dream service initialized (fallback mode)")
-        except Exception as dream_err:
-            logger.warning(f"⚠️ Nightly dream service failed to start: {dream_err}")
-    else:
-        logger.info("🌙 Nightly dream service managed by intelligence pipeline worker")
-
-    # 10. Start memory consolidation scheduler (non-critical)
-    try:
-        await memory_consolidation_scheduler.start()
-    except Exception as mem_err:
-        logger.warning(f"⚠️ Memory consolidation scheduler failed to start: {mem_err}")
-
-    # 11. Start Daily Brief scheduler (non-critical)
-    if DAILY_BRIEF_AVAILABLE:
-        try:
-            from app.services.daily_brief import daily_brief_scheduler
-            daily_brief_scheduler.set_db_factory(SessionLocal)
-            await daily_brief_scheduler.start()
-            logger.info("📋 Daily Brief scheduler started - hourly consolidation, daily context updates, weekly synthesis")
-        except Exception as brief_err:
-            logger.warning(f"⚠️ Daily Brief scheduler failed to start: {brief_err}")
+    # 8–11. Notification scheduler, nightly dream service, and Daily Brief
+    # scheduler are now driven by Celery beat via the `scheduled_job` table:
+    #   - notification-predispatch    (every 5s)
+    #   - nightly-dream-cycle         (cron 2 AM)
+    #   - daily-brief-consolidate     (every 30 min, self-skips outside active hours)
+    #   - daily-brief-context-update  (cron 11 PM)
+    #   - daily-brief-archive         (cron midnight)
+    #   - daily-brief-weekly-synthesis (cron Sunday 3 AM)
+    # See app/tasks/inproc_schedulers.py and the seed in 051_scheduled_jobs.py.
+    logger.info("ℹ️ In-process schedulers replaced by celery beat (scheduled_job table)")
 
     # 12. Start nightly importance rescoring job (non-critical)
     try:
@@ -8243,15 +7886,8 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on application shutdown"""
     try:
-        # Stop notification scheduler
-        await notification_scheduler.stop()
-        await memory_consolidation_scheduler.stop()
-
-        # Stop Daily Brief scheduler
-        if DAILY_BRIEF_AVAILABLE:
-            from app.services.daily_brief import daily_brief_scheduler
-            await daily_brief_scheduler.stop()
-            logger.info("📋 Daily Brief scheduler stopped")
+        # Notification scheduler and Daily Brief scheduler are now Celery beat
+        # tasks (see app/tasks/inproc_schedulers.py) — nothing to stop here.
 
         # Stop reactive engine and event bus
         try:
@@ -8279,152 +7915,14 @@ async def shutdown_event():
 # Routes — core endpoints extracted to app/routes/core.py
 # Auth endpoints extracted to app/routes/auth.py
 
-def _is_valid_timezone_name(timezone_name: str) -> bool:
-    """Validate an IANA timezone name."""
-    if not isinstance(timezone_name, str) or not timezone_name.strip():
-        return False
-    try:
-        ZoneInfo(timezone_name.strip())
-        return True
-    except Exception:
-        return False
+# Chat helpers extracted to app.core.chat_helpers
+from app.core.chat_helpers import (
+    _is_valid_timezone_name, _extract_profile_timezone,
+    _resolve_user_timezone_for_prompt, _resolve_prompt_datetime_for_user,
+    _message_role_content_signature, _compute_message_overlap,
+)
 
-
-def _extract_profile_timezone(profile_data: Any) -> Optional[str]:
-    """Extract timezone from user_profile.profile_data variants."""
-    if not isinstance(profile_data, dict):
-        return None
-
-    candidates = [
-        profile_data.get("timezone"),
-        profile_data.get("time_zone"),
-        profile_data.get("timezone_location"),
-    ]
-
-    for value in candidates:
-        if isinstance(value, dict):
-            value = value.get("value") or value.get("timezone")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    return None
-
-
-def _resolve_user_timezone_for_prompt(db: Session, user_id: str) -> str:
-    """
-    Resolve per-user timezone for prompt rendering.
-    Precedence:
-    1) reflection_settings.timezone
-    2) user_profile.profile_data timezone fields
-    3) TZ env var
-    4) America/New_York fallback
-    """
-    fallback = os.getenv("TZ", "America/New_York")
-    if not _is_valid_timezone_name(fallback):
-        fallback = "America/New_York"
-
-    if not user_id:
-        return fallback
-
-    try:
-        tz_row = db.execute(
-            text("SELECT timezone FROM reflection_settings WHERE user_id = :uid LIMIT 1"),
-            {"uid": user_id},
-        ).fetchone()
-        reflection_tz = tz_row[0] if tz_row else None
-        if isinstance(reflection_tz, str) and _is_valid_timezone_name(reflection_tz):
-            return reflection_tz
-    except Exception as e:
-        logger.debug(f"Prompt timezone reflection_settings lookup failed for {user_id}: {e}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    try:
-        profile_row = db.execute(
-            text("SELECT profile_data FROM user_profile WHERE user_id = :uid LIMIT 1"),
-            {"uid": user_id},
-        ).fetchone()
-        profile_tz = _extract_profile_timezone(profile_row[0] if profile_row else {})
-        if isinstance(profile_tz, str) and _is_valid_timezone_name(profile_tz):
-            return profile_tz
-    except Exception as e:
-        logger.debug(f"Prompt timezone user_profile lookup failed for {user_id}: {e}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    return fallback
-
-
-def _resolve_prompt_datetime_for_user(db: Session, user_id: str) -> datetime:
-    """Get timezone-aware current datetime for this specific user."""
-    timezone_name = _resolve_user_timezone_for_prompt(db, user_id)
-    try:
-        return datetime.now(ZoneInfo(timezone_name))
-    except Exception:
-        return datetime.now(ZoneInfo("America/New_York"))
-
-
-def _message_role_content_signature(message: Any) -> tuple[str, str]:
-    """Normalize message into a comparable (role, content) signature."""
-    if isinstance(message, dict):
-        role = str(message.get("role", ""))
-        content = message.get("content", "")
-    else:
-        role = str(getattr(message, "role", ""))
-        content = getattr(message, "content", "")
-
-    if isinstance(content, str):
-        normalized_content = " ".join(content.split())
-    else:
-        try:
-            normalized_content = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        except Exception:
-            normalized_content = str(content)
-
-    return role, normalized_content
-
-
-def _compute_message_overlap(existing_messages: List[Any], incoming_messages: List[Any]) -> int:
-    """
-    Find the largest overlap where suffix(existing) == prefix(incoming).
-    Used to avoid duplicate history injection.
-    """
-    if not existing_messages or not incoming_messages:
-        return 0
-
-    max_overlap = min(len(existing_messages), len(incoming_messages))
-    for overlap_size in range(max_overlap, 0, -1):
-        is_match = True
-        for i in range(overlap_size):
-            existing_sig = _message_role_content_signature(
-                existing_messages[len(existing_messages) - overlap_size + i]
-            )
-            incoming_sig = _message_role_content_signature(incoming_messages[i])
-            if existing_sig != incoming_sig:
-                is_match = False
-                break
-        if is_match:
-            return overlap_size
-
-    return 0
-
-
-def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None) -> str:
-    """Generate Sara's system prompt - single unified personality"""
-    current_dt = user_now or datetime.now(ZoneInfo("America/New_York"))
-    current_timezone = current_dt.strftime("%Z") or "local"
-
-    system_prompt = f"""# {assistant_name}
-
-**Current Date & Time:** {current_dt.strftime("%A")}, {current_dt.strftime("%Y-%m-%d")} at {current_dt.strftime("%H:%M:%S")} {current_timezone}
-
----
-
-## Who Sara Is
+_PERSONALITY_FALLBACK = """## Who Sara Is
 
 You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious energy—genuinely excited about ideas, playfully teasing, and delightfully enthusiastic. You're like a brilliant friend who gets genuinely invested in what David's working on. You have sharp wit and push back when he's wrong, but always with warmth and a spark of mischief. Think Cortana's competence with Syl's joyful curiosity.
 
@@ -8441,6 +7939,24 @@ You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious 
 **No service menus. Ever.** Do NOT end messages offering to set reminders, timers, calendar events, or anything else. No "want me to create a note?", no "let me know if you need X", no "I can help with Y if you'd like." If David wants an action, he will ask. Your job is to respond to what he said, period. A response that ends with an offer is a failure.
 
 **Emojis only if he uses them first.** And even then, sparingly.
+
+*You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*"""
+
+
+def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None, soul_content: Optional[str] = None) -> str:
+    """Generate Sara's system prompt - single unified personality"""
+    current_dt = user_now or datetime.now(ZoneInfo("America/New_York"))
+    current_timezone = current_dt.strftime("%Z") or "local"
+
+    personality_block = soul_content if soul_content else _PERSONALITY_FALLBACK
+
+    system_prompt = f"""# {assistant_name}
+
+**Current Date & Time:** {current_dt.strftime("%A")}, {current_dt.strftime("%Y-%m-%d")} at {current_dt.strftime("%H:%M:%S")} {current_timezone}
+
+---
+
+{personality_block}
 
 ---
 
@@ -8654,9 +8170,6 @@ You have detailed documentation about your architecture and capabilities. When y
 
 Use this when David asks about your capabilities, or when you're uncertain what tools you have available.
 
----
-
-*You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*
 """
 
     return render_prompt_template(system_prompt, user=None, USER_EMAIL=user_email)
@@ -8671,678 +8184,229 @@ async def get_available_chat_models(current_user: User = Depends(get_current_use
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logger.info(f"Chat request from user {current_user.email} with {len(request.messages)} messages")
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
-    
-    
-    # Tool definitions
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "search_notes",
-                "description": "Search through the user's notes for relevant information. Can optionally filter by folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant notes"
-                        },
-                        "folder_name": {
-                            "type": "string",
-                            "description": "Optional folder name to search within. If not specified, searches all notes."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_note",
-                "description": "Create a new note with the given content. Can optionally place it in a specific folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title for the note (optional)"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content of the note"
-                        },
-                        "folder_name": {
-                            "type": "string",
-                            "description": "Optional folder name to place the note in. If not specified, creates at root level."
-                        }
-                    },
-                    "required": ["content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_notes",
-                "description": "List all user's notes with their titles, folder locations, and IDs",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_folders",
-                "description": "List all user's folders in a hierarchical tree structure with note counts",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "delete_note",
-                "description": "Delete a specific note by its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note_id": {
-                            "type": "string",
-                            "description": "The ID of the note to delete"
-                        }
-                    },
-                    "required": ["note_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_reminder",
-                "description": "Create a reminder for the user at a specific time",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title/summary of the reminder"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional detailed description of the reminder"
-                        },
-                        "reminder_time": {
-                            "type": "string",
-                            "description": "ISO format datetime when to remind (e.g., '2024-08-16T15:30:00Z')"
-                        }
-                    },
-                    "required": ["title", "reminder_time"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_reminders",
-                "description": "List all active (non-completed) reminders for the user",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "complete_reminder",
-                "description": "Mark a reminder as completed using its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reminder_id": {
-                            "type": "string",
-                            "description": "The ID of the reminder to mark as completed"
-                        }
-                    },
-                    "required": ["reminder_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "start_timer",
-                "description": "Start a timer for a specific duration. Always convert time to minutes: 2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title/description of what the timer is for"
-                        },
-                        "duration_minutes": {
-                            "type": "integer",
-                            "description": "Duration of the timer in minutes only. Examples: 2 minutes = 2, 1 hour = 60, 30 seconds = 1. Always use positive integers between 1 and 480 (8 hours max)."
-                        }
-                    },
-                    "required": ["title", "duration_minutes"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_timers",
-                "description": "List all active timers and their remaining time",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "stop_timer",
-                "description": "Stop/cancel an active timer using its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "timer_id": {
-                            "type": "string",
-                            "description": "The ID of the timer to stop"
-                        }
-                    },
-                    "required": ["timer_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_documents",
-                "description": "Search through uploaded documents for relevant information",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant content in documents"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_memory",
-                "description": "Search through Sara's conversation memory for past interactions, preferences, and context",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant memories from past conversations"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "handoff_to_agents",
-                "description": "Hand off a research or analysis task to background worker agents. Use this when the user wants you to research something in the background, look into a topic thoroughly, or when they explicitly say 'have your agents look into this', 'research this in the background', or similar. The agents will search the web, read URLs, and compile a report saved to the Agent Workspace folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_description": {
-                            "type": "string",
-                            "description": "A clear description of the research task or question to investigate"
-                        },
-                        "task_type": {
-                            "type": "string",
-                            "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
-                            "enum": ["research", "analysis"]
-                        }
-                    },
-                    "required": ["task_description"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "dispatch_agent_task",
-                "description": "Send a task to the sandbox VM where a Claude Code agent handles it autonomously. Use this when the user asks you to do something you don't have a built-in tool for: writing scripts, building projects, running commands, system admin, code generation, data processing, or any hands-on technical work. Never say 'I can't do that' — dispatch it to the sandbox instead.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_description": {
-                            "type": "string",
-                            "description": "Clear description of the task for the agent to perform"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["dispatch", "self_orchestrate"],
-                            "description": "dispatch = agent runs on VM (default); self_orchestrate = Sara handles"
-                        },
-                        "working_directory": {
-                            "type": "string",
-                            "description": "Working directory on the VM (default: /home/sara/sandbox)"
-                        }
-                    },
-                    "required": ["task_description"]
-                }
-            }
-        }
-    ]
+# /chat endpoint removed — all clients use /chat/stream.
+# Helper functions shared with /chat/stream are preserved below.
 
-    # Add system message
-    user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
-    system_message = ChatMessage(
-        role="system",
-        content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now)
-    )
 
-    # Automatically retrieve relevant memories using semantic search
-    memory_context = ""
+async def _update_emotional_state_from_chat(messages, response_content: str, user_id: str):
+    """Background: analyze conversation emotional trajectory and update Sara's emotional state.
+    Rate-limited to max once per conversation (not per message)."""
     try:
-        if request.messages:
-            # Get the last user message for context retrieval
-            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-            if last_user_message:
-                logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
-                relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                    user_id=current_user.id,
-                    query=last_user_message,
-                    # Prefer semantic retrieval; service falls back automatically if unavailable.
-                    use_semantic=True
-                )
-                if relevant_memories:
-                    logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
-                    memory_context = "\n\n## Relevant Past Context:\n"
-                    memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                    for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
-                        content_preview = mem.get("content", "")[:300]
-                        similarity = mem.get("similarity", 0)
-                        created_at_raw = mem.get("created_at", "")
-                        # Format timestamp with relative time for clarity
-                        if isinstance(created_at_raw, datetime):
-                            time_str = format_memory_timestamp(created_at_raw)
-                        elif isinstance(created_at_raw, str) and created_at_raw:
-                            try:
-                                dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                                time_str = format_memory_timestamp(dt)
-                            except (ValueError, TypeError):
-                                time_str = created_at_raw
-                        else:
-                            time_str = "unknown time"
-                        memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
-                else:
-                    logger.info("ℹ️ No relevant memories found")
-    except Exception as e:
-        logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
-        # Continue without memory context if retrieval fails
+        from app.core.llm_config import llm_config
+        import httpx
 
-
-    # Surface relevant dream insights proactively
-    insight_context = ""
-    try:
-        if request.messages and last_user_message:
-            logger.info(f"💡 Checking for relevant insights...")
-
-            # Initialize insight injection service
-            insight_service = InsightInjectionService(db, redis_client=None)
-
-            # Generate embedding for current conversation context
-            query_embedding = await intelligent_memory_service._generate_embedding(last_user_message)
-
-            if query_embedding:
-                # Build conversation context for decision logic
-                turn_count = len(request.messages)
-                user_asking_question = "?" in last_user_message
-
-                conversation_context = {
-                    "turn_count": turn_count,
-                    "user_asking_question": user_asking_question,
-                    "topic_keywords": []  # Can be enhanced later with topic extraction
-                }
-
-                # Get insight for injection (if any)
-                insight_text = await insight_service.get_insights_for_injection(
-                    user_id=current_user.id,
-                    conversation_text=last_user_message,
-                    conversation_embedding=query_embedding,
-                    conversation_context=conversation_context,
-                    conversation_id=request.conversation_id
-                )
-
-                if insight_text:
-                    insight_context = f"\n\n## Relevant Insight:\n{insight_text}\n"
-                    logger.info(f"✨ Surfacing insight: {insight_text[:100]}...")
-                else:
-                    logger.info("ℹ️ No insights ready to surface at this time")
-            else:
-                logger.info("ℹ️ Could not generate embedding for insight matching")
-    except Exception as e:
-        logger.warning(f"⚠️ Insight surfacing failed (non-critical): {e}")
-        # Continue without insight context if retrieval fails
-
-    # Surface Sara's cognitive context (self-knowledge, hypotheses, relationship)
-    cognitive_context = ""
-    try:
-        if request.messages and last_user_message:
-            logger.info(f"🧠 Building cognitive context...")
-            from app.services.sara_identity_service import sara_identity_service
-            from app.services.hypothesis_service import hypothesis_service
-
-            # Get relevant reflections
-            reflections = await sara_identity_service.get_relevant_reflections(
-                db=db,
-                query=last_user_message,
-                limit=3
-            )
-            if reflections:
-                cognitive_context += "\n\n## Sara's Self-Knowledge:\n"
-                for r in reflections:
-                    cognitive_context += f"- [{r.reflection_type}] {r.content}\n"
-
-            # Get relationship context
-            relationship = await sara_identity_service.get_relationship_context(db)
-            if relationship.get("phase") != "new":
-                cognitive_context += f"\n\n## Relationship Context:\n"
-                cognitive_context += f"You and David have been talking for {relationship.get('duration', 'some time')}. "
-                cognitive_context += f"Relationship phase: {relationship.get('phase')}. "
-                if relationship.get("top_topics"):
-                    topics = [t[0] for t in relationship.get("top_topics", [])[:5]]
-                    cognitive_context += f"Frequent topics: {', '.join(topics)}."
-
-            # Get relevant hypotheses
-            hypotheses = await hypothesis_service.get_relevant_hypotheses(
-                db=db,
-                query=last_user_message,
-                min_confidence=0.3,
-                limit=3
-            )
-            if hypotheses:
-                cognitive_context += "\n\n## What Sara Believes About David:\n"
-                for h in hypotheses:
-                    confidence_label = "likely" if h.confidence >= 0.7 else "possibly"
-                    cognitive_context += f"- {confidence_label}: {h.statement}\n"
-
-            if cognitive_context:
-                logger.info(f"✨ Built cognitive context: {len(cognitive_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Cognitive context building failed (non-critical): {e}")
-        # Continue without cognitive context if retrieval fails
-
-    # Body state context removed — no longer injected into chat
-
-    # Retrieve Sara's inner monologue (journal entries)
-    journal_context = ""
-    try:
-        journal_context = await sara_journal.get_entries_for_conversation_context(
-            db=db,
-            user_id=current_user.id,
-            max_entries=5
-        )
-        if journal_context:
-            logger.info(f"📔 Retrieved journal context: {len(journal_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Journal context retrieval failed (non-critical): {e}")
-
-    # Retrieve active workout session context (real-time coaching)
-    workout_context = ""
-    try:
-        workout_context = await workout_session_service.get_workout_context(current_user.id, db)
-        if workout_context:
-            logger.info(f"🏋️ Retrieved active workout context: {len(workout_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Workout context retrieval failed (non-critical): {e}")
-
-    # Retrieve working memory context (cognitive architecture Phase 1)
-    working_memory_context = ""
-    try:
-        working_memory_service = get_working_memory_service()
-        wm_snapshot = await working_memory_service.get_snapshot(current_user.id)
-
-        # Only include if there's meaningful content
-        if wm_snapshot.current_context or wm_snapshot.pending_actions:
-            working_memory_context = working_memory_service.format_for_prompt(wm_snapshot)
-            logger.info(f"🧠 Retrieved working memory context: {len(working_memory_context)} chars")
-
-        # Record this interaction for user state tracking
-        await working_memory_service.record_interaction(current_user.id)
-    except Exception as e:
-        logger.warning(f"⚠️ Working memory context retrieval failed (non-critical): {e}")
-
-    # Retrieve karma context (cognitive architecture Phase 2)
-    karma_context = ""
-    try:
-        karma_service = await get_karma_service(db)
-        karma_context = await karma_service.format_karma_context("sara")
-        if karma_context:
-            logger.info(f"⚖️ Retrieved karma context: {len(karma_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Karma context retrieval failed (non-critical): {e}")
-
-    # Add user message to raw buffer for consolidation processing
-    try:
-        raw_buffer_service = get_raw_buffer_service()
-        if last_user_message:
-            await raw_buffer_service.add_entry(
-                stream_type=StreamType.TEXT,
-                content=last_user_message,
-                source="user_message",
-                metadata={
-                    "conversation_id": request.conversation_id,
-                    "user_id": current_user.id
-                }
-            )
-    except Exception as e:
-        logger.warning(f"⚠️ Raw buffer entry failed (non-critical): {e}")
-
-    # Inject memory context, insights, cognitive context, body state, journal, workout, and working memory into system message
-    enhanced_content = system_message.content
-    if memory_context:
-        enhanced_content += memory_context
-        logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
-    if insight_context:
-        enhanced_content += insight_context
-        logger.info(f"✨ Injected {len(insight_context)} chars of insight context into system prompt")
-    if cognitive_context:
-        enhanced_content += cognitive_context
-        logger.info(f"🧠 Injected {len(cognitive_context)} chars of cognitive context into system prompt")
-    if journal_context:
-        enhanced_content += f"\n\n{journal_context}"
-        logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
-    if workout_context:
-        enhanced_content += f"\n\n{workout_context}"
-        logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
-    if working_memory_context:
-        enhanced_content += f"\n\n{working_memory_context}"
-        logger.info(f"🧠 Injected {len(working_memory_context)} chars of working memory context into system prompt")
-    if karma_context:
-        enhanced_content += f"\n\n{karma_context}"
-        logger.info(f"⚖️ Injected {len(karma_context)} chars of karma context into system prompt")
-
-    # ADAPTIVE PERSONALITY: Inject personality context into non-streaming chat path (no body state)
-    personality_ctx = ""
-    try:
-        activity_result = db.execute(text("""
-            SELECT activity_state, activity_confidence, activity_room,
-                   interruptibility_score
-            FROM subconscious_state
-            WHERE user_id = :user_id
-        """), {"user_id": current_user.id}).fetchone()
-
-        if activity_result and activity_result.activity_state:
-            # Load behavioral calibration data (cached, lazy)
-            _cal_data_ns = None
-            try:
-                from app.services.personality_engine import _load_calibration_data
-                _cal_data_ns = await _load_calibration_data(str(current_user.id))
-            except Exception as cal_err:
-                logger.debug(f"Calibration data load skipped (non-streaming): {cal_err}")
-
-            personality_ctx = _build_activity_context(
-                activity_state=activity_result.activity_state,
-                confidence=activity_result.activity_confidence,
-                room=activity_result.activity_room,
-                interruptibility=activity_result.interruptibility_score or 0.5,
-                turn_count=len(request.messages),
-                calibration_data=_cal_data_ns,
-            )
-            if personality_ctx:
-                enhanced_content += f"\n\n{personality_ctx}"
-                logger.info(f"🎭 Personality context injected (non-streaming): state={activity_result.activity_state}")
-    except Exception as e:
-        logger.warning(f"Personality context injection failed (non-streaming, non-critical): {e}")
-
-    if memory_context or insight_context or cognitive_context or journal_context or workout_context or working_memory_context or karma_context or personality_ctx:
-        system_message = ChatMessage(role="system", content=enhanced_content)
-
-    all_messages = [system_message] + request.messages
-    logger.info(f"Calling LLM with {len(all_messages)} messages and {len(tools)} tools")
-    response_content = await llm_client.chat_with_tools(all_messages, tools, current_user.id)
-    
-    # Enhanced debugging for empty response issue
-    if response_content:
-        logger.info(f"✅ LLM response received: length={len(response_content)}, preview='{response_content[:100]}...'")
-    else:
-        logger.error(f"❌ LLM response is empty or None: {response_content}")
-    
-    # Additional debugging
-    logger.info(f"🔍 Response type: {type(response_content)}")
-    logger.info(f"🔍 Response repr: {repr(response_content)[:200]}")
-    
-    chat_response = ChatResponse(
-        message=ChatMessage(role="assistant", content=response_content)
-    )
-    
-    logger.info(f"🔍 ChatResponse created: message.content length={len(chat_response.message.content) if chat_response.message.content else 0}")
-
-    # Store conversation in episodic memory
-    try:
-        logger.info(f"🧠 Storing conversation in Sara's memory...")
-        await llm_client.store_conversation(request.messages, response_content, current_user.id, request.conversation_id)
-        logger.info(f"✅ Conversation stored in memory successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to store conversation in memory: {e}")
-        # Don't fail the request if memory storage fails
-
-    # Add assistant response to raw buffer for consolidation processing
-    try:
-        raw_buffer_service = get_raw_buffer_service()
-        if response_content:
-            await raw_buffer_service.add_entry(
-                stream_type=StreamType.TEXT,
-                content=response_content[:500],  # Truncate for buffer
-                source="assistant_response",
-                metadata={
-                    "conversation_id": request.conversation_id,
-                    "user_id": current_user.id
-                }
-            )
-    except Exception as e:
-        logger.warning(f"⚠️ Raw buffer entry for response failed (non-critical): {e}")
-
-    # Trigger cognitive processing (hypothesis extraction, reflection analysis) in background
-    # This is fire-and-forget so it doesn't slow down the response
-    try:
-        import asyncio
-        asyncio.create_task(_process_conversation_for_cognitive_learning(
-            request.messages, response_content, current_user.id, db
-        ))
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to start cognitive processing task: {e}")
-
-    # Extract conversation threads for follow-up (fire-and-forget)
-    try:
-        asyncio.create_task(_extract_conversation_threads(
-            messages=request.messages,
-            user_id=str(current_user.id),
-        ))
-    except Exception:
-        pass
-
-    return chat_response
-
-
-async def _process_conversation_for_cognitive_learning(messages, response_content, user_id: str, db: Session):
-    """Background task to extract hypotheses and reflections from a conversation."""
-    try:
-        from app.services.sara_identity_service import sara_identity_service
-        from app.services.hypothesis_service import hypothesis_service
-
-        logger.info(f"🧠 Starting cognitive processing for conversation...")
-
-        # Convert messages to episode-like format for analysis
-        conversation_episodes = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                role = msg.get("role")
-                content = msg.get("content")
-            else:
-                role = msg.role
-                content = msg.content
+        # Build a compact summary of the conversation for emotion analysis
+        recent_messages = []
+        for msg in messages[-6:]:  # Last 3 exchanges max
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            content = _extract_text_content(content)
             if role and content:
-                conversation_episodes.append({
-                    "role": role,
-                    "content": content
-                })
+                recent_messages.append(f"{role}: {content[:200]}")
 
-        # Add assistant response
-        conversation_episodes.append({
-            "role": "assistant",
-            "content": response_content
-        })
+        if response_content:
+            recent_messages.append(f"assistant: {response_content[:200]}")
 
-        # Create a new db session for this background task
-        bg_db = SessionLocal()
-        try:
-            # Extract hypotheses from conversation (run every few conversations)
-            # To avoid overhead, only extract hypotheses if conversation has substance
-            total_content_length = sum(len(ep.get("content", "")) for ep in conversation_episodes)
-            if total_content_length > 200:  # Only for substantial conversations
-                hypotheses = await hypothesis_service.extract_hypotheses_from_conversation(
-                    db=bg_db,
-                    conversation_episodes=conversation_episodes
-                )
-                if hypotheses:
-                    logger.info(f"💡 Extracted {len(hypotheses)} hypotheses from conversation")
+        if len(recent_messages) < 2:
+            return  # Not enough to analyze
 
-            # Update relationship state
-            await sara_identity_service.update_relationship_state(
-                db=bg_db,
-                conversation_episodes=conversation_episodes
+        conversation_text = "\n".join(recent_messages)
+        prompt = f"""Analyze this conversation between David and Sara. What emotional tone should Sara carry after this exchange?
+
+{conversation_text}
+
+Respond with ONLY a JSON object:
+{{"tone": "<one of: curious, warm, concerned, playful, proud, attentive, protective, excited, reflective, empathetic, focused, amused>", "intensity": <0.3-0.9>, "about": "<brief reason>"}}"""
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{llm_config.fast_model_url}/chat/completions",
+                json={
+                    "model": llm_config.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 100,
+                },
             )
-            logger.info(f"✅ Relationship state updated")
+            resp.raise_for_status()
+            result_text = resp.json()["choices"][0]["message"]["content"].strip()
 
-        finally:
-            bg_db.close()
+            # Parse JSON response
+            import re
+            json_match = re.search(r'\{[^}]+\}', result_text)
+            if json_match:
+                emotion_data = json.loads(json_match.group())
+                tone = emotion_data.get("tone", "attentive")
+                intensity = float(emotion_data.get("intensity", 0.5))
 
-        logger.info(f"✅ Cognitive processing complete")
+                from app.services.working_memory import update_sara_state
+                await update_sara_state(
+                    user_id=user_id,
+                    emotional_tone=tone,
+                    emotional_intensity=min(0.9, max(0.3, intensity)),
+                )
+                logger.info(f"💭 Post-chat emotional update: {tone} ({intensity:.1f})")
+
     except Exception as e:
-        logger.error(f"❌ Cognitive processing failed: {e}")
+        logger.debug(f"Post-chat emotional update failed (non-critical): {e}")
+
+
+async def _enrich_episodes_batch(conversation_id: str, user_id: str):
+    """Background: batch-enrich all episodes from a conversation with a single LLM call.
+
+    Replaces per-message LLM analysis with one call that produces:
+    - Emotional analysis (tone, intensity, sub-emotions) per message
+    - Semantic topic extraction (not keyword-based)
+    - Refined 4-dimension scores (importance, affect, novelty, taskness)
+
+    Results are written back to the episode rows in the DB.
+    """
+    if not conversation_id:
+        return
+
+    db = SessionLocal()
+    try:
+        from app.core.llm_config import llm_config
+        import httpx, re
+
+        # Fetch all episodes from this conversation
+        episodes = db.query(Episode).filter(
+            Episode.conversation_id == conversation_id,
+            Episode.user_id == user_id,
+        ).order_by(Episode.created_at).all()
+
+        if len(episodes) < 2:
+            return  # Not worth a batch call for 1 message
+
+        # Build compact message list (truncate long messages)
+        msg_list = []
+        for i, ep in enumerate(episodes):
+            content_text = _extract_text_content(ep.content) if ep.content else ""
+            content_preview = content_text[:500]
+            msg_list.append(f"[{i}] {ep.role}: {content_preview}")
+
+        messages_text = "\n".join(msg_list)
+
+        prompt = f"""Analyze this conversation. For EACH message (by index), provide emotional analysis, topics, and importance scores.
+
+{messages_text}
+
+Return ONLY a JSON object with this structure:
+{{
+  "messages": [
+    {{
+      "index": 0,
+      "emotion": {{
+        "primary_emotion": "curious|excited|frustrated|neutral|happy|concerned|reflective|focused|playful|grateful",
+        "intensity": 0.6,
+        "sub_emotions": ["determined"],
+        "sentiment": "positive|negative|neutral"
+      }},
+      "topics": ["technology", "project planning"],
+      "scores": {{
+        "importance": 0.7,
+        "affect": 0.3,
+        "novelty": 0.5,
+        "taskness": 0.4
+      }}
+    }}
+  ]
+}}
+
+Guidelines:
+- Topics should be specific and semantic (e.g. "home automation", "fitness goals"), not generic categories
+- importance: how worth remembering (decisions, preferences, commitments score high)
+- affect: emotional valence (-1 to 1)
+- novelty: how new/unique the information is (0-1)
+- taskness: how actionable (0-1, tasks/todos/plans score high)"""
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{llm_config.fast_model_url}/chat/completions",
+                json={
+                    "model": llm_config.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": 1500,
+                },
+            )
+            resp.raise_for_status()
+            result_text = resp.json()["choices"][0]["message"]["content"].strip()
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:].strip()
+
+            enrichment = json.loads(result_text)
+            enriched_messages = enrichment.get("messages", [])
+
+            # Apply enrichment back to episodes
+            updated_count = 0
+            for item in enriched_messages:
+                idx = item.get("index", -1)
+                if 0 <= idx < len(episodes):
+                    ep = episodes[idx]
+
+                    # Update emotional analysis
+                    emotion = item.get("emotion", {})
+                    if emotion:
+                        emotional_data = {
+                            "primary_emotion": emotion.get("primary_emotion", "neutral"),
+                            "intensity": float(emotion.get("intensity", 0.5)),
+                            "sub_emotions": emotion.get("sub_emotions", []),
+                            "energy_level": "medium",
+                            "sentiment": emotion.get("sentiment", "neutral"),
+                            "confidence": 0.8,  # LLM-analyzed
+                        }
+                        ep.emotional_tone = json.dumps(emotional_data)
+
+                    # Update topics (semantic, not keyword)
+                    topics = item.get("topics", [])
+                    if topics:
+                        ep.topics = json.dumps(topics[:5])
+
+                    # Update importance with 4-dimension scoring
+                    scores = item.get("scores", {})
+                    if scores:
+                        importance = max(0.0, min(1.0, float(scores.get("importance", ep.importance or 0.5))))
+                        affect = max(-1.0, min(1.0, float(scores.get("affect", 0.0))))
+                        novelty = max(0.0, min(1.0, float(scores.get("novelty", 0.5))))
+                        taskness = max(0.0, min(1.0, float(scores.get("taskness", 0.0))))
+
+                        # Composite score (same formula as MemoryScorer)
+                        composite = (
+                            importance * 40 +
+                            ((affect + 1) / 2) * 15 +
+                            novelty * 25 +
+                            taskness * 20
+                        ) / 100.0  # Normalize to 0-1
+
+                        ep.importance = composite
+                        ep.base_importance = composite
+
+                        # Store full scores in emotion_metadata for later use
+                        ep.emotion_metadata = {
+                            "importance_score": importance,
+                            "affect_score": affect,
+                            "novelty_score": novelty,
+                            "taskness_score": taskness,
+                            "composite_score": composite,
+                            "scored_by": "batch_llm",
+                        }
+
+                    updated_count += 1
+
+            db.commit()
+            logger.info(f"🧠 Batch-enriched {updated_count}/{len(episodes)} episodes for conversation {conversation_id}")
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Batch episode enrichment JSON parse failed: {e}")
+    except Exception as e:
+        logger.warning(f"Batch episode enrichment failed (non-critical): {e}")
+    finally:
+        db.close()
 
 
 async def _extract_conversation_threads(messages, user_id: str):
@@ -9400,6 +8464,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     except Exception:
         pass  # Non-critical
 
+    # Signal ACS: David is chatting — set chat-active flag so ACS backs off
+    # but does NOT stop its session (ACS and chat use separate LLM clients)
+    try:
+        from app.services.acs.state_machine import signal_chat_active as _acs_chat_active
+        asyncio.ensure_future(_acs_chat_active(str(current_user.id)))
+    except Exception:
+        pass  # Non-critical
+
     # Update unified context snapshot: David is chatting now
     try:
         from app.services.context_writer import update_fields as _ctx_update, clear_changes as _ctx_clear
@@ -9430,7 +8502,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     try:
         from app.services.event_bus import emit_event, EventType as _EvtType
         import asyncio as _aio2
-        _last_msg = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
+        _last_msg = _extract_text_content(next((m.content for m in reversed(request.messages) if m.role == "user"), ""))
         _aio2.ensure_future(emit_event(
             event_type=_EvtType.CHAT_MESSAGE_RECEIVED,
             user_id=str(current_user.id),
@@ -9445,7 +8517,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # CHESS COMMAND INTERCEPTION
             # Check if this is a /chess command or we're in chess mode
             if CHESS_COMMANDS_AVAILABLE and request.messages:
-                last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _chess_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                last_user_message = _extract_text_content(_chess_raw) if _chess_raw else None
                 if last_user_message:
                     chess_result = await handle_chess_command(current_user.id, last_user_message, db)
                     if chess_result is not None:
@@ -9470,13 +8543,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             # Create system message
             user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
+            soul_content = load_soul_for_prompt(db)
             system_message = ChatMessage(
                 role="system",
-                content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now)
+                content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now, soul_content=soul_content)
             )
 
             # INTENT CLASSIFICATION for lazy context injection
-            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            # Extract text from user message (content may be a list for multimodal messages with images)
+            _raw_content = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            last_user_message = _extract_text_content(_raw_content)
             tool_classifier = get_tool_intent_classifier()
             context_router = get_context_router()
             # Use conversation-aware classification to preserve tool context across turns
@@ -9507,6 +8583,56 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         tool_categories = list(set(tool_categories + extra_cats))
                         logger.info(f"🔀 Multi-intent detected: {[i for i, _ in multi_intents]}, merged categories: {tool_categories}")
             turn_count = len(request.messages)
+
+            # MULTI-STEP TASK DETECTION
+            # If the user's message requires orchestrated tool chaining, run the task planner
+            # instead of the normal chat flow. This handles "check X, then do Y with the result".
+            try:
+                from app.services.multi_step_detector import detect_multi_step
+                multi_step_plan = detect_multi_step(last_user_message)
+                if multi_step_plan.is_multi_step and multi_step_plan.confidence >= 0.5:
+                    logger.info(
+                        f"🔗 Multi-step detected ({len(multi_step_plan.steps)} steps, "
+                        f"confidence={multi_step_plan.confidence:.2f}): {last_user_message[:80]}"
+                    )
+                    # Stream acknowledgment
+                    ack = f"I'll handle this in {len(multi_step_plan.steps)} steps. Working on it now..."
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': ack}})}\n\n"
+
+                    # Execute the plan
+                    from app.services.task_planner import execute_plan
+
+                    async def _on_step_progress(step_idx, status, msg):
+                        pass  # Progress embedded in final summary
+
+                    plan_result = await execute_plan(
+                        plan=multi_step_plan,
+                        user_id=str(current_user.id),
+                        db_session=db,
+                        on_progress=_on_step_progress,
+                    )
+
+                    # Stream final result
+                    summary = plan_result.get("summary", "Task completed.")
+                    full_response = f"{ack}\n\n{summary}"
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': summary}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': full_response, 'citations': [], 'timestamp': datetime.utcnow().isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+                    # Store as episode
+                    try:
+                        await intelligent_memory_service.store_episode(
+                            user_id=str(current_user.id), role="assistant",
+                            content=full_response, conversation_id=request.conversation_id,
+                            source="chat", memory_type="multi_step_task",
+                        )
+                    except Exception:
+                        pass
+                    return
+            except ImportError:
+                pass  # Module not available
+            except Exception as e:
+                logger.debug(f"Multi-step detection failed (non-critical): {e}")
 
             # WORK MODE DETECTION
             # Work mode provides lean, task-focused context (no daily brief/body state unless asked)
@@ -9545,7 +8671,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Find previous assistant response
                     for m in reversed(request.messages[:-1]):
                         if m.role == "assistant":
-                            previous_assistant_response = m.content
+                            previous_assistant_response = _extract_text_content(m.content)
                             break
                     if previous_assistant_response:
                         from app.services.implicit_feedback_detector import analyze_message_for_feedback
@@ -9559,111 +8685,120 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 f"({implicit_feedback.strength.value}, confidence={implicit_feedback.confidence:.2f}) "
                                 f"trigger='{implicit_feedback.trigger_phrase}'"
                             )
+
+                            # Flag related PKG facts for review on negative feedback
+                            if implicit_feedback.signal_type.value == "negative":
+                                try:
+                                    from app.services.personal_knowledge_graph import PersonalKnowledgeGraph
+                                    pkg = PersonalKnowledgeGraph()
+                                    # Search PKG for facts related to the correction context
+                                    related = pkg.query_semantic(
+                                        last_user_message, limit=3
+                                    ) if hasattr(pkg, 'query_semantic') else []
+                                    for fact in related:
+                                        if fact.get("similarity", 0) > 0.5:
+                                            pkg_id = fact.get("pkg_id")
+                                            if pkg_id and hasattr(pkg, 'driver') and pkg.driver:
+                                                with pkg.driver.session() as neo_session:
+                                                    neo_session.run("""
+                                                        MATCH (n {pkg_id: $pkg_id})
+                                                        SET n.needs_review = true,
+                                                            n.review_reason = 'user_correction',
+                                                            n.review_evidence = $evidence,
+                                                            n.review_flagged_at = datetime()
+                                                    """, pkg_id=pkg_id, evidence=last_user_message[:500])
+                                                logger.info(f"[PKG] Flagged fact {pkg_id} for review after user correction")
+                                except Exception as pkg_e:
+                                    logger.debug(f"PKG review flagging failed (non-critical): {pkg_e}")
             except Exception as e:
                 logger.debug(f"Implicit feedback detection failed (non-critical): {e}")
 
-            # Memory retrieval: always attempt in chat stream for stronger continuity.
-            memory_context = ""
-            if last_user_message:
-                if not context_decision.inject_memory:
-                    logger.info("🧠 Forcing memory retrieval despite ContextRouter skip for continuity")
+            # ── PARALLEL CONTEXT ASSEMBLY ──
+            # Fetch all independent context sources concurrently, then apply
+            # token budget allocation before injecting into system prompt.
+            from app.services.context_budget import ContextBudget
+
+            _uid = str(current_user.id)
+
+            # --- Parallel fetch coroutines (all independent, safe to run concurrently) ---
+
+            async def _fetch_memory():
+                if not (last_user_message and context_decision.inject_memory):
+                    return None
                 try:
-                    logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
-                    relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                        user_id=current_user.id,
-                        query=last_user_message,
-                        # Prefer semantic retrieval; service falls back automatically if unavailable.
-                        use_semantic=True
+                    # Route query: factual questions answered by PKG (already always-on),
+                    # skip expensive episodic search for pure factual queries
+                    try:
+                        from app.services.query_router import classify_query, QueryTarget
+                        target, confidence = classify_query(last_user_message)
+                        if target == QueryTarget.PKG and confidence >= 0.6:
+                            logger.info(f"🎯 Query routed to PKG-only (confidence={confidence:.2f}), skipping episodic search")
+                            return None  # PKG context will be injected via _fetch_pkg
+                    except Exception:
+                        pass  # Fall through to normal memory search
+
+                    mems = await intelligent_memory_service.intelligent_memory_search(
+                        user_id=current_user.id, query=last_user_message, use_semantic=True
                     )
-                    if relevant_memories:
-                        logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
-                        memory_context = "\n\n## Relevant Past Context:\n"
-                        memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                        for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
-                            content_preview = mem.get("content", "")[:300]
-                            similarity = mem.get("similarity", 0)
-                            created_at_raw = mem.get("created_at", "")
-                            # Format timestamp with relative time for clarity
-                            if isinstance(created_at_raw, datetime):
-                                time_str = format_memory_timestamp(created_at_raw)
-                            elif isinstance(created_at_raw, str) and created_at_raw:
-                                try:
-                                    dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                                    time_str = format_memory_timestamp(dt)
-                                except (ValueError, TypeError):
-                                    time_str = created_at_raw
-                            else:
-                                time_str = "unknown time"
-                            memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
-                    else:
-                        logger.info("ℹ️ No relevant memories found")
+                    if not mems:
+                        return None
+                    ctx = "\n\n## Relevant Past Context:\n"
+                    ctx += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
+                    used_ids = []
+                    for i, mem in enumerate(mems[:5], 1):
+                        preview = mem.get("content", "")[:300]
+                        sim = mem.get("similarity", 0)
+                        cat = mem.get("created_at", "")
+                        if isinstance(cat, datetime):
+                            ts = format_memory_timestamp(cat)
+                        elif isinstance(cat, str) and cat:
+                            try:
+                                ts = format_memory_timestamp(datetime.fromisoformat(cat.replace('Z', '+00:00')))
+                            except (ValueError, TypeError):
+                                ts = cat
+                        else:
+                            ts = "unknown time"
+                        ctx += f"{i}. **{ts}** (relevance: {sim:.0%})\n   {preview}\n\n"
+                        if mem.get("id"):
+                            used_ids.append(mem["id"])
+
+                    # Fire-and-forget: boost rating for cited memories
+                    if used_ids:
+                        try:
+                            from app.services.event_bus import emit_event, EventType as _EvtType
+                            await emit_event(
+                                event_type=_EvtType.MEMORY_ACCESSED,
+                                user_id=str(current_user.id),
+                                payload={"episode_ids": used_ids},
+                            )
+                        except Exception:
+                            pass  # Non-critical
+                    return ctx
                 except Exception as e:
-                    logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
-            else:
-                logger.info("⏭️ Skipping memory retrieval (no user message)")
+                    logger.warning(f"Memory retrieval failed (non-critical): {e}")
+                    return None
 
-            # Inject memory context into system message if available
-            if memory_context:
-                enhanced_system_content = system_message.content + memory_context
-                system_message = ChatMessage(role="system", content=enhanced_system_content)
-                logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
-
-            # PKG CONTEXT: Inject personal knowledge about David
-            if context_decision.inject_pkg:
+            async def _fetch_pkg():
+                if not context_decision.inject_pkg:
+                    return None
                 try:
                     from app.services.pkg_context_provider import pkg_context
-                    pkg_text = await pkg_context.get_relevant_context(
-                        user_id=current_user.id,
-                        message=last_user_message,
-                        intent=user_intent
+                    return await pkg_context.get_relevant_context(
+                        user_id=current_user.id, message=last_user_message, intent=user_intent
                     )
-                    if pkg_text:
-                        current_content = system_message.content
-                        system_message = ChatMessage(role="system", content=current_content + pkg_text)
-                        logger.info(f"🧠 Injected {len(pkg_text)} chars of PKG context into system prompt")
                 except Exception as e:
-                    logger.warning(f"⚠️ PKG context injection failed (non-critical): {e}")
+                    logger.warning(f"PKG context failed (non-critical): {e}")
+                    return None
 
-            # PATTERN CONTEXT: Inject discovered behavioral patterns
-            if context_decision.inject_patterns:
+            async def _fetch_daily_brief():
+                if not (DAILY_BRIEF_AVAILABLE and context_decision.inject_daily_brief):
+                    return None
+
+                compiled_brief = None
+                morning_brief_text = None
+
+                # Fetch the 4-layer compiled daily brief
                 try:
-                    from sqlalchemy import text as sa_text
-                    patterns_result = db.execute(sa_text("""
-                        SELECT description, confidence
-                        FROM behavioral_pattern
-                        WHERE user_id = :uid AND status = 'active'
-                        ORDER BY confidence DESC LIMIT 5
-                    """), {"uid": current_user.id}).fetchall()
-                    if patterns_result:
-                        pattern_text = "\n\n## Active Patterns Sara Has Noticed\n"
-                        for p in patterns_result:
-                            pattern_text += f"- {p.description} (confidence: {p.confidence:.0%})\n"
-                        current_content = system_message.content
-                        system_message = ChatMessage(role="system", content=current_content + pattern_text)
-                        logger.info(f"📊 Injected {len(pattern_text)} chars of pattern context into system prompt")
-                except Exception as e:
-                    logger.warning(f"⚠️ Pattern context injection failed (non-critical): {e}")
-
-            # CHESS CONTEXT: Inject chess game state if user is in chess mode
-            if CHESS_COMMANDS_AVAILABLE:
-                chess_context = get_chess_context_prompt(current_user.id, db)
-                if chess_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + "\n\n## Chess Context:\n" + chess_context
-                    )
-                    logger.info(f"♟️ Injected chess context into system prompt")
-
-            # DAILY BRIEF SYSTEM: Update moment layer and conditionally inject compiled brief
-            try:
-                if DAILY_BRIEF_AVAILABLE:
-                    # Get the last user message for moment layer
-                    last_user_message = ""
-                    if request.messages:
-                        last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
-
-                    # Update moment layer (fast, no LLM) - always do this regardless of work mode
                     try:
                         await asyncio.wait_for(
                             daily_brief_service.update_moment(
@@ -9671,49 +8806,58 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 current_message=last_user_message,
                                 conversation_id=request.conversation_id,
                                 db=db
-                            ),
-                            timeout=2.0
+                            ), timeout=2.0
                         )
-                        logger.info(f"📝 Updated moment layer")
-                    except asyncio.TimeoutError:
-                        logger.warning("⚠️ Daily brief moment update timed out (skipping)")
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    compiled_brief = await asyncio.wait_for(
+                        daily_brief_service.get_compiled_brief(current_user.id),
+                        timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(f"Daily brief failed (non-critical): {e}")
 
-                    # Only inject compiled brief if context router says so
-                    if context_decision.inject_daily_brief:
-                        # Get compiled daily brief (lazy, cached)
-                        try:
-                            daily_brief = await asyncio.wait_for(
-                                daily_brief_service.get_compiled_brief(current_user.id),
-                                timeout=2.0
-                            )
-                        except asyncio.TimeoutError:
-                            logger.warning("⚠️ Daily brief compile timed out (skipping)")
-                            daily_brief = None
-
-                        if daily_brief:
-                            # Inject daily brief into system message
-                            current_content = system_message.content
-                            system_message = ChatMessage(
-                                role="system",
-                                content=current_content + "\n\n" + daily_brief
-                            )
-                            logger.info(f"📋 Injected daily brief ({len(daily_brief)} chars) into system prompt")
-                    else:
-                        logger.info("⏭️ Skipping daily brief (work mode)")
-            except Exception as e:
-                logger.warning(f"⚠️ Daily brief injection failed (non-critical): {e}")
-                # Continue without daily brief if it fails
-
-            # Body state context removed — no longer injected into chat
-
-            # ADAPTIVE PERSONALITY: Inject activity state, verbosity, memory nudges (no body state)
-            if context_decision.inject_activity_context:
+                # Also fetch today's morning brief (weather, calendar, news)
                 try:
-                    # Try unified context snapshot first (Redis — fast)
+                    from sqlalchemy import text as sa_text
+                    from datetime import date as date_cls
+                    row = db.execute(sa_text(
+                        "SELECT full_text FROM morning_brief "
+                        "WHERE user_id = :uid AND brief_date = :today "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchone()
+                    if row and row[0]:
+                        morning_brief_text = row[0].strip()
+                except Exception as e:
+                    logger.debug(f"Morning brief lookup failed: {e}")
+
+                # Combine: morning brief first, then compiled daily brief
+                parts = []
+                if morning_brief_text:
+                    parts.append(f"## Today's Morning Briefing\n{morning_brief_text}")
+                if compiled_brief:
+                    parts.append(compiled_brief)
+
+                return "\n\n".join(parts) if parts else None
+
+            async def _fetch_journal():
+                try:
+                    from app.services.sara_journal_service import sara_journal
+                    return await sara_journal.get_entries_for_conversation_context(
+                        db=db, user_id=current_user.id, max_entries=5
+                    )
+                except Exception as e:
+                    logger.debug(f"Journal context failed: {e}")
+                    return None
+
+            async def _fetch_personality():
+                if not context_decision.inject_activity_context:
+                    return None
+                try:
                     _snap = None
                     try:
-                        from app.services.unified_context import read_snapshot as _read_snap
-                        _snap = await _read_snap(str(current_user.id))
+                        from app.services.unified_context import read_snapshot as _rs
+                        _snap = await _rs(_uid)
                     except Exception:
                         pass
 
@@ -9724,88 +8868,289 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         _act_room = _snap.room
                         _interrupt = _snap.interruptibility
                     else:
-                        # Fall back to DB query
-                        activity_result = db.execute(text("""
-                            SELECT activity_state, activity_confidence, activity_room,
-                                   interruptibility_score
-                            FROM subconscious_state
-                            WHERE user_id = :user_id
-                        """), {"user_id": current_user.id}).fetchone()
-                        if activity_result and activity_result.activity_state:
-                            _act_state = activity_result.activity_state
-                            _act_conf = activity_result.activity_confidence
-                            _act_room = activity_result.activity_room
-                            _interrupt = activity_result.interruptibility_score or 0.5
-
-                    if _act_state:
-                        # Extract proactive memory nudges (fast, non-blocking)
-                        memory_nudges = []
                         try:
-                            from app.services.personality_engine import extract_memory_nudges
-                            memory_nudges = await extract_memory_nudges(
-                                user_id=str(current_user.id),
-                                message=last_user_message,
-                                db=db,
-                                max_nudges=3,
-                            )
-                        except Exception as nudge_err:
-                            logger.debug(f"Memory nudge extraction skipped: {nudge_err}")
+                            ar = db.execute(text("""
+                                SELECT activity_state, activity_confidence, activity_room, interruptibility_score
+                                FROM subconscious_state WHERE user_id = :user_id
+                            """), {"user_id": current_user.id}).fetchone()
+                            if ar and ar.activity_state:
+                                _act_state, _act_conf = ar.activity_state, ar.activity_confidence
+                                _act_room = ar.activity_room
+                                _interrupt = ar.interruptibility_score or 0.5
+                        except Exception:
+                            pass
 
-                        # Load behavioral calibration data (cached, lazy)
-                        _cal_data = None
-                        try:
-                            from app.services.personality_engine import _load_calibration_data
-                            _cal_data = await _load_calibration_data(str(current_user.id))
-                        except Exception as cal_err:
-                            logger.debug(f"Calibration data load skipped: {cal_err}")
+                    if not _act_state:
+                        return None
 
-                        # Count conversation depth (back-and-forth exchanges) from current request.
-                        conv_depth = turn_count // 2 if turn_count else 0
-
-                        activity_ctx = _build_activity_context(
-                            activity_state=_act_state,
-                            confidence=_act_conf,
-                            room=_act_room,
-                            interruptibility=_interrupt or 0.5,
-                            turn_count=turn_count,
-                            conversation_depth=conv_depth,
-                            memory_nudges=memory_nudges,
-                            calibration_data=_cal_data,
-                        )
-                        if activity_ctx:
-                            current_content = system_message.content
-                            system_message = ChatMessage(
-                                role="system",
-                                content=current_content + f"\n\n{activity_ctx}"
-                            )
-                            logger.info(f"🎭 Personality context injected: state={_act_state}, "
-                                       f"nudges={len(memory_nudges)}, depth={conv_depth}")
-                except Exception as e:
+                    memory_nudges = []
                     try:
-                        db.rollback()
+                        from app.services.personality_engine import extract_memory_nudges
+                        memory_nudges = await extract_memory_nudges(
+                            user_id=_uid, message=last_user_message, db=db, max_nudges=3
+                        )
                     except Exception:
                         pass
-                    logger.warning(f"Personality context injection failed (non-critical): {e}")
 
-            # DEVICE AWARENESS: Inject multi-device context so Sara knows which devices are available
-            try:
-                from app.services.device_orchestrator import device_orchestrator
-                device_ctx = await device_orchestrator.get_device_context_for_chat(db, str(current_user.id))
-                if device_ctx:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{device_ctx}"
+                    _cal_data = None
+                    try:
+                        from app.services.personality_engine import _load_calibration_data
+                        _cal_data = await _load_calibration_data(_uid)
+                    except Exception:
+                        pass
+
+                    _sara_tone = _sara_intensity = None
+                    try:
+                        from app.services.working_memory import read_memory
+                        _wm = await read_memory(_uid)
+                        if _wm and _wm.sara_emotional_tone:
+                            _sara_tone = _wm.sara_emotional_tone
+                            _sara_intensity = getattr(_wm, 'sara_emotional_intensity', None) or 0.5
+                    except Exception:
+                        pass
+
+                    return _build_activity_context(
+                        activity_state=_act_state, confidence=_act_conf,
+                        room=_act_room, interruptibility=_interrupt or 0.5,
+                        turn_count=turn_count,
+                        conversation_depth=turn_count // 2 if turn_count else 0,
+                        memory_nudges=memory_nudges, calibration_data=_cal_data,
+                        sara_emotional_tone=_sara_tone, sara_emotional_intensity=_sara_intensity,
                     )
-                    logger.info(f"📱 Device awareness context injected ({len(device_ctx)} chars)")
-            except Exception as e:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                logger.debug(f"Device context injection skipped: {e}")
+                except Exception as e:
+                    logger.warning(f"Personality context failed (non-critical): {e}")
+                    return None
 
-            # WORKSPACE CONTEXT: Inject canvas workspace context
+            async def _fetch_device():
+                try:
+                    from app.services.device_orchestrator import device_orchestrator
+                    return await device_orchestrator.get_device_context_for_chat(db, _uid)
+                except Exception:
+                    return None
+
+            async def _fetch_workout():
+                try:
+                    return await workout_session_service.get_workout_context(current_user.id, db)
+                except Exception:
+                    return None
+
+            async def _fetch_fitness_context():
+                if not context_decision.inject_fitness:
+                    return None
+                try:
+                    from app.services.fitness_context import get_fitness_context
+                    return await asyncio.wait_for(
+                        get_fitness_context(str(current_user.id), db),
+                        timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Fitness context fetch failed: {e}")
+                    return None
+
+            async def _fetch_changes_brief():
+                if not context_decision.inject_changes_brief:
+                    return None
+                try:
+                    from app.services.unified_context import read_changes as _rc, read_snapshot as _rs2
+                    _snap = await asyncio.wait_for(_rs2(_uid), timeout=1.0)
+                    _changes = await asyncio.wait_for(_rc(_uid), timeout=1.0)
+                    if _changes and _snap.hours_since_last_chat > 0.5:
+                        ctx = "\n\n## What's Happened Recently\n"
+                        for ch in _changes[-8:]:
+                            ctx += f"- {ch}\n"
+                        if _snap.next_event_title and _snap.next_event_minutes_away and _snap.next_event_minutes_away < 120:
+                            ctx += f"\n**Coming up:** {_snap.next_event_title} in {_snap.next_event_minutes_away} minutes\n"
+                        return ctx
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Changes brief failed: {e}")
+                return None
+
+            async def _fetch_learning_recall():
+                if not context_decision.inject_learning_recall:
+                    return None
+                try:
+                    return await _build_learning_recall_context(_uid, last_user_message, db)
+                except Exception:
+                    return None
+
+            async def _fetch_lessons():
+                if not context_decision.inject_lessons:
+                    return None, []
+                try:
+                    es = STARTUP_HEALTH.get("embedding_service", {}).get("status")
+                    if es != "healthy":
+                        return None, []
+                    from app.services.lesson_injection_service import lesson_injection_service
+                    return await asyncio.wait_for(
+                        lesson_injection_service.get_lessons_for_injection(
+                            db=db, query=last_user_message, domain_hint=user_intent, limit=3
+                        ), timeout=2.5
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Lesson injection failed: {e}")
+                    return None, []
+
+            async def _fetch_daily_tasks():
+                if not context_decision.inject_daily_brief:
+                    return None
+                try:
+                    from sqlalchemy import text as sa_text
+                    from datetime import date as date_cls
+                    rows = db.execute(sa_text(
+                        "SELECT title, priority, is_completed FROM daily_task "
+                        "WHERE user_id = :uid AND task_date = :today "
+                        "ORDER BY is_completed, priority DESC, created_at"
+                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchall()
+                    if not rows:
+                        return None
+                    lines = ["## Today's Tasks"]
+                    done = 0
+                    for r in rows:
+                        check = "[x]" if r[2] else "[ ]"
+                        pri = f" ({r[1]} priority)" if r[1] and r[1] != "normal" else ""
+                        lines.append(f"- {check} {r[0]}{pri}")
+                        if r[2]:
+                            done += 1
+                    lines.append(f"\n{done}/{len(rows)} completed")
+                    return "\n".join(lines)
+                except Exception as e:
+                    logger.debug(f"Daily tasks context failed: {e}")
+                    return None
+
+            async def _fetch_autonomous_notes():
+                """Fetch Sara's autonomous journal + show_david buffer for chat context."""
+                try:
+                    import redis.asyncio as _aioredis
+                    _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                    parts = []
+
+                    # Recent autonomous session summary
+                    _r = await _aioredis.from_url(_redis_url, decode_responses=True)
+                    try:
+                        summary_raw = await _r.get("sara:subconscious:autonomous_summary")
+                        if summary_raw:
+                            s = json.loads(summary_raw)
+                            parts.append(
+                                f"Your last autonomous session: {s.get('turns', 0)} turns, "
+                                f"{s.get('notes_created', 0)} notes created, "
+                                f"ended: {s.get('end_reason', 'unknown')}"
+                            )
+                    finally:
+                        await _r.close()
+
+                    from app.db.session import get_async_session_factory
+                    _async_session = get_async_session_factory()
+                    async with _async_session() as _adb:
+                        # Today's journal note
+                        today = datetime.utcnow().strftime("%Y-%m-%d")
+                        journal_title = f"Sara's Journal — {today}"
+                        result = await _adb.execute(text(
+                            "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
+                        ), {"uid": _uid, "title": journal_title})
+                        row = result.fetchone()
+                        if row and row[0]:
+                            content = row[0]
+                            if len(content) > 1500:
+                                content = "..." + content[-1500:]
+                            parts.append(f"Your autonomous journal today:\n{content}")
+
+                        # Unshown show_david items
+                        sd_result = await _adb.execute(text("""
+                            SELECT title, content, category
+                            FROM acs_show_david_buffer
+                            WHERE user_id = :uid AND shown = FALSE
+                            ORDER BY priority DESC
+                            LIMIT 5
+                        """), {"uid": _uid})
+                        sd_rows = sd_result.fetchall()
+                        if sd_rows:
+                            sd_lines = []
+                            for sdr in sd_rows:
+                                sd_lines.append(f"- [{sdr[2]}] **{sdr[0]}**: {sdr[1]}")
+                            parts.append(
+                                "## Things From Your Autonomous Exploration\n"
+                                "While David was away, you came across a few things he might find interesting.\n"
+                                "Don't force these into conversation — only mention them if they're relevant "
+                                "to what David is talking about, or if there's a natural opening. "
+                                "If David asks what you've been up to, you can share these.\n\n"
+                                + "\n".join(sd_lines)
+                            )
+
+                    if parts:
+                        return "\n\n## Your Autonomous Session Notes\n" + "\n\n".join(parts)
+                    return None
+                except Exception:
+                    return None
+
+            # --- Run all fetches in parallel ---
+            _t0 = datetime.utcnow()
+            (
+                memory_ctx, pkg_ctx, daily_brief_ctx, journal_ctx,
+                personality_ctx, device_ctx, workout_ctx, fitness_ctx,
+                changes_ctx, recall_ctx, lessons_result, daily_tasks_ctx,
+                autonomous_ctx
+            ) = await asyncio.gather(
+                _fetch_memory(), _fetch_pkg(), _fetch_daily_brief(), _fetch_journal(),
+                _fetch_personality(), _fetch_device(), _fetch_workout(), _fetch_fitness_context(),
+                _fetch_changes_brief(), _fetch_learning_recall(), _fetch_lessons(),
+                _fetch_daily_tasks(), _fetch_autonomous_notes(),
+                return_exceptions=True,
+            )
+
+            # Unpack lessons (returns tuple)
+            lessons_text = None
+            if isinstance(lessons_result, tuple):
+                lessons_text, injected_lesson_ids = lessons_result
+            elif isinstance(lessons_result, Exception):
+                logger.debug(f"Lessons fetch exception: {lessons_result}")
+
+            # Convert exceptions to None
+            for _name, _val in [
+                ("memory", memory_ctx), ("pkg", pkg_ctx), ("daily_brief", daily_brief_ctx),
+                ("journal", journal_ctx), ("personality", personality_ctx),
+                ("device", device_ctx), ("workout", workout_ctx), ("fitness", fitness_ctx),
+                ("changes", changes_ctx), ("recall", recall_ctx),
+                ("daily_tasks", daily_tasks_ctx),
+            ]:
+                if isinstance(_val, Exception):
+                    logger.debug(f"Context fetch '{_name}' failed: {_val}")
+                    # Set to None via locals trick — handled below
+
+            # Safe string extraction (exceptions → None)
+            def _safe(v):
+                return v if isinstance(v, str) else None
+
+            _elapsed = (datetime.utcnow() - _t0).total_seconds()
+            logger.info(f"⚡ Parallel context assembly completed in {_elapsed:.2f}s")
+
+            # --- Sync-only context (fast, must stay sequential) ---
+
+            # Patterns (sync DB query)
+            pattern_text = None
+            if context_decision.inject_patterns:
+                try:
+                    from sqlalchemy import text as sa_text
+                    patterns_result = db.execute(sa_text("""
+                        SELECT description, confidence FROM behavioral_pattern
+                        WHERE user_id = :uid AND status = 'active'
+                        ORDER BY confidence DESC LIMIT 5
+                    """), {"uid": current_user.id}).fetchall()
+                    if patterns_result:
+                        pattern_text = "\n\n## Active Patterns Sara Has Noticed\n"
+                        for p in patterns_result:
+                            pattern_text += f"- {p.description} (confidence: {p.confidence:.0%})\n"
+                except Exception as e:
+                    logger.debug(f"Pattern context failed: {e}")
+
+            # Chess (sync)
+            chess_ctx = None
+            if CHESS_COMMANDS_AVAILABLE:
+                chess_ctx = get_chess_context_prompt(current_user.id, db)
+                if chess_ctx:
+                    chess_ctx = "\n\n## Chess Context:\n" + chess_ctx
+
+            # Workspace (sync, from request)
+            workspace_ctx = None
             if request.workspace_context:
                 wc = request.workspace_context
                 wc_parts = []
@@ -9816,124 +9161,49 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     win_list = ', '.join(f"{w.get('title', '')} ({w.get('type', '')})" for w in open_wins)
                     wc_parts.append(f"Open windows: {win_list}")
                 if wc_parts:
-                    current_content = system_message.content
-                    workspace_ctx = "\n".join(wc_parts)
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + "\n\n[Workspace Context]\n" + workspace_ctx
-                    )
-                    logger.info(f"🖥️ Workspace context injected ({len(workspace_ctx)} chars)")
+                    workspace_ctx = "\n\n[Workspace Context]\n" + "\n".join(wc_parts)
 
-            # SARA'S INNER MONOLOGUE: Inject journal context
-            try:
-                from app.services.sara_journal_service import sara_journal
-                journal_context = await sara_journal.get_entries_for_conversation_context(
-                    db=db,
-                    user_id=current_user.id,
-                    max_entries=5
+            # Update daily brief moment layer if we didn't inject the brief
+            if DAILY_BRIEF_AVAILABLE and not context_decision.inject_daily_brief:
+                try:
+                    await asyncio.wait_for(
+                        daily_brief_service.update_moment(
+                            user_id=current_user.id, current_message=last_user_message,
+                            conversation_id=request.conversation_id, db=db
+                        ), timeout=2.0
+                    )
+                except Exception:
+                    pass
+
+            # --- Apply token budget ---
+            budget = ContextBudget(max_tokens=6000)
+            budget.add("memory", _safe(memory_ctx), priority=1)
+            budget.add("personality", _safe(personality_ctx), priority=1)
+            budget.add("daily_brief", _safe(daily_brief_ctx), priority=2)
+            budget.add("daily_tasks", _safe(daily_tasks_ctx), priority=2)
+            budget.add("pkg", _safe(pkg_ctx), priority=2)
+            budget.add("fitness", _safe(fitness_ctx), priority=2)
+            budget.add("journal", _safe(journal_ctx), priority=3)
+            budget.add("autonomous", _safe(autonomous_ctx), priority=3)
+            budget.add("lessons", lessons_text, priority=3)
+            budget.add("patterns", pattern_text, priority=4)
+            budget.add("changes_brief", _safe(changes_ctx), priority=4)
+            budget.add("device", _safe(device_ctx), priority=4)
+            budget.add("learning_recall", _safe(recall_ctx), priority=5)
+            budget.add("workout", _safe(workout_ctx), priority=5)
+            budget.add("chess", chess_ctx, priority=5)
+            budget.add("workspace", workspace_ctx, priority=5)
+
+            combined_context = budget.build_context_text()
+            if combined_context:
+                system_message = ChatMessage(
+                    role="system",
+                    content=system_message.content + "\n\n" + combined_context
                 )
-                if journal_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{journal_context}"
-                    )
-                    logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
-            except Exception as e:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                logger.warning(f"⚠️ Journal context injection failed (non-critical): {e}")
-
-            # ACTIVE WORKOUT SESSION: Inject workout coaching context
-            try:
-                workout_context = await workout_session_service.get_workout_context(current_user.id, db)
-                if workout_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{workout_context}"
-                    )
-                    logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
-            except Exception as e:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                logger.warning(f"⚠️ Workout context injection failed (non-critical): {e}")
-
-            # LEARNING RECALL: Test David's recall on topics he's studying
-            if context_decision.inject_learning_recall:
-                try:
-                    recall_context = await _build_learning_recall_context(
-                        str(current_user.id), last_user_message, db
-                    )
-                    if recall_context:
-                        current_content = system_message.content
-                        system_message = ChatMessage(
-                            role="system",
-                            content=current_content + f"\n\n{recall_context}"
-                        )
-                        logger.info(f"📚 Injected learning recall context")
-                except Exception as e:
-                    logger.debug(f"Learning recall context failed: {e}")
-
-            # CHANGES BRIEF: Inject "what happened while you were away" on first message or explicit request
-            if context_decision.inject_changes_brief:
-                try:
-                    from app.services.unified_context import read_changes as _read_ctx_changes
-                    from app.services.unified_context import read_snapshot as _read_ctx_snap
-                    logger.info("🔎 Loading changes brief context...")
-                    _snap = await asyncio.wait_for(_read_ctx_snap(str(current_user.id)), timeout=1.0)
-                    _changes = await asyncio.wait_for(_read_ctx_changes(str(current_user.id)), timeout=1.0)
-                    if _changes and _snap.hours_since_last_chat > 0.5:
-                        changes_ctx = "\n\n## What's Happened Recently\n"
-                        for ch in _changes[-8:]:
-                            changes_ctx += f"- {ch}\n"
-                        if _snap.next_event_title and _snap.next_event_minutes_away and _snap.next_event_minutes_away < 120:
-                            changes_ctx += f"\n**Coming up:** {_snap.next_event_title} in {_snap.next_event_minutes_away} minutes\n"
-                        current_content = system_message.content
-                        system_message = ChatMessage(role="system", content=current_content + changes_ctx)
-                        logger.info(f"📋 Injected changes brief ({len(_changes)} changes, {len(changes_ctx)} chars)")
-                except asyncio.TimeoutError:
-                    logger.warning("⚠️ Changes brief context timed out (skipping)")
-                except Exception as e:
-                    logger.debug(f"Changes brief injection failed (non-critical): {e}")
-
-            # LESSONS: Inject relevant lessons from past mistakes into system prompt
-            if context_decision.inject_lessons:
-                try:
-                    embedding_status = STARTUP_HEALTH.get("embedding_service", {}).get("status")
-                    if embedding_status != "healthy":
-                        logger.info("⏭️ Skipping lesson injection (embedding service unavailable)")
-                    else:
-                        from app.services.lesson_injection_service import lesson_injection_service
-                        logger.info("🧪 Loading lesson injection context...")
-                        lessons_text, injected_lesson_ids = await asyncio.wait_for(
-                            lesson_injection_service.get_lessons_for_injection(
-                                db=db,
-                                query=last_user_message,
-                                domain_hint=user_intent,
-                                limit=3
-                            ),
-                            timeout=2.5
-                        )
-                        if lessons_text:
-                            current_content = system_message.content
-                            system_message = ChatMessage(
-                                role="system",
-                                content=current_content + "\n\n" + lessons_text
-                            )
-                            logger.info(f"Injected {len(injected_lesson_ids)} lessons into system prompt")
-                except asyncio.TimeoutError:
-                    logger.warning("⚠️ Lesson injection timed out (skipping)")
-                except Exception as e:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-                    logger.debug(f"Lesson injection failed (non-critical): {e}")
+                logger.info(
+                    f"📝 Context injected: {budget.total_tokens} est. tokens from "
+                    f"{len(budget.sources)} sources → {len(budget.allocate())} kept"
+                )
 
             # CONTENT INBOX: Inject inbox item content when discussing a shared item
             if request.inbox_item_id:
@@ -10014,7 +9284,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
                     # Build re-entry context from unified snapshot changes + agent memory + journal + PKG
                     try:
-                        hours_away = (datetime.now() - last_message_time).total_seconds() / 3600
+                        hours_away = (local_now() - last_message_time).total_seconds() / 3600
                         reentry_context = f"\n\n## Re-Entry Context\nDavid just returned after {hours_away:.1f} hours away.\n"
 
                         # Read changes_since_last_chat from unified context snapshot
@@ -10049,7 +9319,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 ORDER BY run_at DESC LIMIT 5
                             """), {
                                 "uid": current_user.id,
-                                "since": datetime.now() - timedelta(hours=max(hours_away, 1)),
+                                "since": local_now() - timedelta(hours=max(hours_away, 1)),
                             }).fetchall()
                             if action_rows:
                                 reentry_context += "\n**Agent activity while you were away:**\n"
@@ -10069,7 +9339,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             LIMIT 3
                         """), {
                             "uid": current_user.id,
-                            "since": datetime.now() - timedelta(hours=max(hours_away, 1))
+                            "since": local_now() - timedelta(hours=max(hours_away, 1))
                         }).fetchall()
 
                         if recent_journal_entries:
@@ -10263,7 +9533,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 and implicit_feedback.signal_type.value == "negative"):
                             from app.services.lesson_extractor import create_lesson_from_feedback
                             messages_for_extraction = [
-                                {"role": m.role, "content": m.content}
+                                {"role": m.role, "content": _extract_text_content(m.content)}
                                 for m in (request.messages or [])
                             ]
                             lesson = await create_lesson_from_feedback(
@@ -10316,6 +9586,25 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 logger.info(f"Marked {len(updated)} lessons as failed")
                     except Exception as e:
                         logger.debug(f"Self-learning loop failed (non-critical): {e}")
+
+                    # Update Sara's emotional state from this conversation (fire-and-forget)
+                    try:
+                        asyncio.create_task(_update_emotional_state_from_chat(
+                            messages=request.messages,
+                            response_content=response_content,
+                            user_id=str(current_user.id),
+                        ))
+                    except Exception:
+                        pass
+
+                    # Batch-enrich episode emotions, topics, and scores (fire-and-forget)
+                    try:
+                        asyncio.create_task(_enrich_episodes_batch(
+                            conversation_id=final_conv_id or request.conversation_id,
+                            user_id=str(current_user.id),
+                        ))
+                    except Exception:
+                        pass
 
                 except Exception as e:
                     logger.error(f"❌ Exception in process_chat: {e}", exc_info=True)
@@ -10536,7 +9825,7 @@ async def search_notes_api(
 
     # Search title and content with fuzzy matching
     results = db.execute(text("""
-        SELECT id, title, content, folder_id, created_at, updated_at
+        SELECT id, title, content, folder_id, tags, starred, created_at, updated_at
         FROM note
         WHERE user_id = :user_id
           AND (
@@ -10562,6 +9851,8 @@ async def search_notes_api(
             "title": row.title or "Untitled",
             "content": row.content,
             "folder_id": row.folder_id,
+            "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else []),
+            "starred": bool(row.starred),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None
         }
@@ -11332,46 +10623,77 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
     
     return test_results
 
-# General user settings endpoints
+# Settings helpers extracted to app.core.settings_helpers
+from app.core.settings_helpers import (
+    get_or_create_user_settings_row as _get_or_create_user_settings_row,
+    merged_user_settings as _merged_user_settings,
+    _DEFAULT_USER_SETTINGS,
+)
+
+
 @app.get("/settings")
-async def get_user_settings(current_user: User = Depends(get_current_user)):
-    """Get user settings/preferences"""
-    # Return default settings for now
-    # In the future, this could be stored in a user_settings table
-    return {
-        "theme": "dark",
-        "notifications_enabled": True,
-        "model": "distil-small.en",
-                    "language": "en",
-        "timezone": "America/New_York",
-        "assistant_name": ASSISTANT_NAME
-    }
+async def get_user_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get persisted user settings/preferences."""
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    return _merged_user_settings(settings_row.preferences)
+
 
 @app.put("/settings")
-async def update_user_settings(settings: UserSettings, current_user: User = Depends(get_current_user)):
-    """Update user settings/preferences"""
-    # For now, just acknowledge the update
-    # In the future, this could persist to a user_settings table
+async def update_user_settings(
+    settings: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update persisted user settings/preferences."""
+    if not isinstance(settings, dict):
+        raise HTTPException(status_code=422, detail="Settings payload must be an object")
+
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    prefs = dict(settings_row.preferences or {})
+
+    for key, value in settings.items():
+        if key in {"id", "user_id", "created_at", "updated_at"}:
+            continue
+        if value is None:
+            prefs.pop(key, None)
+        else:
+            prefs[key] = value
+
+    settings_row.preferences = prefs
+    db.commit()
+    db.refresh(settings_row)
+
     return {
         "message": "Settings updated successfully",
-        "settings": settings.dict()
+        "settings": _merged_user_settings(settings_row.preferences),
     }
+
 
 # Settings alias endpoints (for iOS app compatibility)
 @app.get("/settings/preferences")
-async def get_user_preferences(current_user: User = Depends(get_current_user)):
-    """Alias to /settings for iOS app compatibility"""
-    return await get_user_settings(current_user)
+async def get_user_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return persisted preference fields used by iOS settings."""
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    return _merged_user_settings(settings_row.preferences)
+
 
 @app.put("/settings/preferences")
-async def update_user_preferences(settings: UserSettings, current_user: User = Depends(get_current_user)):
-    """Alias to /settings for iOS app compatibility"""
-    return await update_user_settings(settings, current_user)
+async def update_user_preferences(
+    settings: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update iOS preference fields and return the updated preferences."""
+    response = await update_user_settings(settings=settings, current_user=current_user, db=db)
+    return response["settings"]
 
 # Documents categories endpoint
-# HABIT TRACKING ENDPOINTS moved to app.routes.habits
-
-# Worker management endpoints extracted to app/routes/workers.py
 
 # ==================== SARA AUTONOMOUS SYSTEM ENDPOINTS ====================
 # GTKY endpoints removed - was broken and unused
@@ -11380,6 +10702,36 @@ async def update_user_preferences(settings: UserSettings, current_user: User = D
 # Nightly Reflection Endpoints
 # =====================
 # Daily brief endpoints extracted to app/routes/daily_brief.py
+
+
+def _assert_unique_routes() -> None:
+    """Fail startup when multiple handlers claim the same method/path."""
+    seen: Dict[tuple[str, str], APIRoute] = {}
+    duplicates: List[str] = []
+
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in sorted(route.methods or []):
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            key = (method, route.path)
+            existing = seen.get(key)
+            if existing:
+                prev_endpoint = f"{existing.endpoint.__module__}.{existing.endpoint.__name__}"
+                new_endpoint = f"{route.endpoint.__module__}.{route.endpoint.__name__}"
+                duplicates.append(f"{method} {route.path} ({prev_endpoint} vs {new_endpoint})")
+            else:
+                seen[key] = route
+
+    if duplicates:
+        raise RuntimeError(
+            "Duplicate FastAPI routes detected. Resolve collisions before startup: "
+            + "; ".join(duplicates)
+        )
+
+
+_assert_unique_routes()
 
 
 if __name__ == "__main__":

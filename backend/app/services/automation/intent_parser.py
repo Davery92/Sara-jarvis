@@ -188,8 +188,9 @@ Return JSON:
 Return ONLY valid JSON, no other text."""
 
     try:
-        openai_base = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-        openai_model = model or os.getenv("OPENAI_MODEL", "gpt-oss:20b")
+        from app.core.llm_config import llm_config
+        openai_base = os.getenv("OPENAI_BASE_URL", llm_config.primary_url)
+        openai_model = model or os.getenv("OPENAI_MODEL", llm_config.fast_model)
         openai_key = os.getenv("OPENAI_API_KEY", "")
 
         headers = {}

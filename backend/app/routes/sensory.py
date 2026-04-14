@@ -12,16 +12,21 @@ Real-time monitoring of audio/visual pipeline:
 import asyncio
 import json
 import logging
+import re
+import shlex
+import shutil
 import subprocess
 from datetime import datetime
-from typing import Optional, AsyncGenerator
-from fastapi import APIRouter, Depends, Request
+from typing import Optional, AsyncGenerator, Dict, List
+from app.core.timezone import now as local_now
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 import redis
 
 from app.main_simple import get_current_user
+from app.services.voice.control_plane import update_service_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +101,7 @@ async def get_sensory_status(current_user=Depends(get_current_user)):
             if result.returncode == 0:
                 status["voice_agent"] = {
                     "status": "online",
-                    "last_seen": datetime.utcnow().isoformat(),
+                    "last_seen": local_now().isoformat(),
                     "state": "listening"
                 }
             else:
@@ -129,7 +134,7 @@ async def stream_sensory_events(request: Request, current_user=Depends(get_curre
         log_queue: asyncio.Queue = asyncio.Queue()
         log_task = asyncio.create_task(tail_jetson_logs(log_queue))
 
-        last_status_check = datetime.utcnow()
+        last_status_check = local_now()
 
         try:
             while True:
@@ -156,7 +161,7 @@ async def stream_sensory_events(request: Request, current_user=Depends(get_curre
                     pass
 
                 # Periodic status update (every 10 seconds)
-                now = datetime.utcnow()
+                now = local_now()
                 if (now - last_status_check).seconds >= 10:
                     last_status_check = now
                     # Could emit status update here if needed
@@ -236,8 +241,8 @@ async def publish_sensory_event(
                 pass
 
         event = {
-            "id": f"{datetime.utcnow().timestamp()}",
-            "timestamp": datetime.utcnow().isoformat(),
+            "id": f"{local_now().timestamp()}",
+            "timestamp": local_now().isoformat(),
             "type": event_type,
             "content": content,
             "speaker": speaker,
@@ -300,7 +305,7 @@ async def update_audio_playback(
             "is_playing": is_playing,
             "volume_level": volume_level,
             "applications": applications.split(",") if applications else [],
-            "updated_at": datetime.utcnow().isoformat()
+            "updated_at": local_now().isoformat()
         }
 
         # Store with 30 second TTL (desktop agent should update every few seconds)
@@ -425,6 +430,264 @@ class EnrollmentStatus(BaseModel):
 # Store recording state in Redis
 ENROLLMENT_STATE_KEY = "sensory:enrollment_state"
 ENROLLMENT_SAMPLES_DIR = "/tmp/enrollment_samples"
+DATASET_RECORDING_STATE_KEY = "sensory:dataset_recording_state"
+
+VOICE_DATASET_ROOT = os.getenv("VOICE_DATASET_ROOT", "/tmp/voice_datasets")
+WAKE_DATASET_ROOT = os.getenv("WAKE_DATASET_ROOT", f"{VOICE_DATASET_ROOT}/wake_word")
+SPEAKER_DATASET_ROOT = os.getenv("SPEAKER_DATASET_ROOT", f"{VOICE_DATASET_ROOT}/speakers")
+
+# Remote dataset mirrors used by training workers.
+JETSON_WAKE_DATASET_ROOT = os.getenv(
+    "JETSON_WAKE_DATASET_ROOT",
+    "/home/david/data/wake-word-datasets",
+)
+GPU_SPEAKER_DATASET_ROOT = os.getenv(
+    "GPU_SPEAKER_DATASET_ROOT",
+    "/data/enrollment-samples",
+)
+
+IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _normalize_identifier(raw_value: str, field_name: str) -> str:
+    value = (raw_value or "").strip().lower()
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    if not IDENTIFIER_PATTERN.fullmatch(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} must use lowercase letters, numbers, underscores, or hyphens "
+                "(max 64 chars)"
+            ),
+        )
+    return value
+
+
+def _dataset_sample_dir(dataset_id: str, family: str, speaker_id: Optional[str] = None) -> str:
+    if family == "wake_word":
+        return os.path.join(WAKE_DATASET_ROOT, dataset_id)
+    if family == "speakers":
+        if not speaker_id:
+            raise ValueError("speaker_id is required for speaker dataset samples")
+        return os.path.join(SPEAKER_DATASET_ROOT, dataset_id, speaker_id)
+    raise ValueError(f"Unsupported dataset family: {family}")
+
+
+def _list_sample_files(sample_dir: str) -> List[Dict[str, object]]:
+    if not os.path.exists(sample_dir):
+        return []
+
+    samples: List[Dict[str, object]] = []
+    for filename in sorted(os.listdir(sample_dir)):
+        if not filename.endswith(".wav"):
+            continue
+        path = os.path.join(sample_dir, filename)
+        samples.append(
+            {
+                "filename": filename,
+                "size_bytes": os.path.getsize(path),
+                "created": datetime.fromtimestamp(os.path.getctime(path)).isoformat(),
+            }
+        )
+    return samples
+
+
+def _parse_json_state(raw_state: Optional[str]) -> Optional[Dict[str, object]]:
+    if not raw_state:
+        return None
+    try:
+        parsed = json.loads(raw_state)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        return None
+    return None
+
+
+def _is_active_recording(state: Optional[Dict[str, object]]) -> bool:
+    if not state:
+        return False
+    return str(state.get("status") or "").lower() in {"recording", "processing"}
+
+
+def _clear_sample_dir(sample_dir: str) -> int:
+    if not os.path.exists(sample_dir):
+        return 0
+    deleted = len([f for f in os.listdir(sample_dir) if f.endswith(".wav")])
+    shutil.rmtree(sample_dir)
+    return deleted
+
+
+async def _run_command(*args: str) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_raw, stderr_raw = await process.communicate()
+    return (
+        process.returncode,
+        stdout_raw.decode("utf-8", errors="replace"),
+        stderr_raw.decode("utf-8", errors="replace"),
+    )
+
+
+async def _sync_wake_sample_to_jetson(
+    dataset_id: str,
+    remote_tmp_file: str,
+    filename: str,
+) -> None:
+    remote_dataset_dir = f"{JETSON_WAKE_DATASET_ROOT}/{dataset_id}"
+    remote_target_path = f"{remote_dataset_dir}/{filename}"
+    command = (
+        f"mkdir -p {shlex.quote(remote_dataset_dir)} && "
+        f"cp {shlex.quote(remote_tmp_file)} {shlex.quote(remote_target_path)}"
+    )
+    code, _, stderr = await _run_command(
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        JETSON_SSH_TARGET,
+        command,
+    )
+    if code != 0:
+        raise RuntimeError(f"wake dataset sync to Jetson failed: {stderr.strip()}")
+
+
+async def _sync_speaker_sample_to_gpu(
+    dataset_id: str,
+    speaker_id: str,
+    local_file: str,
+    filename: str,
+) -> None:
+    remote_dataset_dir = f"{GPU_SPEAKER_DATASET_ROOT}/{dataset_id}/{speaker_id}"
+    remote_target_path = f"{remote_dataset_dir}/{filename}"
+    mkdir_command = f"mkdir -p {shlex.quote(remote_dataset_dir)}"
+    mkdir_code, _, mkdir_stderr = await _run_command(
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        GPU_CLUSTER_SSH_TARGET,
+        mkdir_command,
+    )
+    if mkdir_code != 0:
+        raise RuntimeError(f"GPU dataset mkdir failed: {mkdir_stderr.strip()}")
+
+    scp_code, _, scp_stderr = await _run_command(
+        "scp",
+        "-o",
+        "ConnectTimeout=5",
+        local_file,
+        f"{GPU_CLUSTER_SSH_TARGET}:{remote_target_path}",
+    )
+    if scp_code != 0:
+        raise RuntimeError(f"speaker dataset sync to GPU failed: {scp_stderr.strip()}")
+
+
+async def _record_dataset_clip_on_jetson(
+    *,
+    dataset_id: str,
+    family: str,
+    duration_seconds: int,
+    redis_client,
+    speaker_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+) -> None:
+    sample_dir = _dataset_sample_dir(dataset_id, family, speaker_id=speaker_id)
+    os.makedirs(sample_dir, exist_ok=True)
+
+    existing = [f for f in os.listdir(sample_dir) if f.endswith(".wav")]
+    sample_num = len(existing)
+    timestamp = local_now().strftime("%Y%m%d_%H%M%S")
+    file_prefix = f"{family}_{dataset_id}"
+    if speaker_id:
+        file_prefix += f"_{speaker_id}"
+    filename = f"{file_prefix}_{sample_num:03d}_{timestamp}.wav"
+    local_file = os.path.join(sample_dir, filename)
+    remote_tmp_file = f"/tmp/{filename}"
+
+    state: Dict[str, object] = {
+        "status": "recording",
+        "dataset_id": dataset_id,
+        "family": family,
+        "speaker_id": speaker_id,
+        "duration_seconds": duration_seconds,
+        "progress": 5,
+        "filename": filename,
+        "prompt": prompt,
+        "message": f"Recording on Jetson for {duration_seconds}s...",
+    }
+    redis_client.setex(DATASET_RECORDING_STATE_KEY, 600, json.dumps(state))
+
+    record_command = (
+        f"arecord -d {duration_seconds} -f cd -t wav {shlex.quote(remote_tmp_file)}"
+    )
+    process = await asyncio.create_subprocess_exec(
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        JETSON_SSH_TARGET,
+        record_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        for elapsed in range(duration_seconds):
+            await asyncio.sleep(1)
+            progress = 5 + int(((elapsed + 1) / max(duration_seconds, 1)) * 70)
+            state["progress"] = progress
+            state["message"] = f"Recording... {max(duration_seconds - elapsed - 1, 0)}s remaining"
+            redis_client.setex(DATASET_RECORDING_STATE_KEY, 600, json.dumps(state))
+
+        stdout_raw, stderr_raw = await process.communicate()
+        if process.returncode != 0:
+            stderr = stderr_raw.decode("utf-8", errors="replace").strip()
+            stdout = stdout_raw.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(stderr or stdout or "arecord failed on Jetson")
+
+        state["status"] = "processing"
+        state["progress"] = 82
+        state["message"] = "Transferring recorded clip..."
+        redis_client.setex(DATASET_RECORDING_STATE_KEY, 600, json.dumps(state))
+
+        scp_code, _, scp_stderr = await _run_command(
+            "scp",
+            "-o",
+            "ConnectTimeout=5",
+            f"{JETSON_SSH_TARGET}:{remote_tmp_file}",
+            local_file,
+        )
+        if scp_code != 0:
+            raise RuntimeError(f"Failed to copy clip from Jetson: {scp_stderr.strip()}")
+
+        # Keep datasets where training workers expect them.
+        if family == "wake_word":
+            await _sync_wake_sample_to_jetson(dataset_id, remote_tmp_file, filename)
+        elif family == "speakers" and speaker_id:
+            await _sync_speaker_sample_to_gpu(dataset_id, speaker_id, local_file, filename)
+
+        sample_count = len([f for f in os.listdir(sample_dir) if f.endswith(".wav")])
+        state["status"] = "complete"
+        state["progress"] = 100
+        state["sample_count"] = sample_count
+        state["message"] = "Recording complete."
+        redis_client.setex(DATASET_RECORDING_STATE_KEY, 600, json.dumps(state))
+    except Exception as e:
+        logger.error(f"Dataset recording failed: {e}")
+        state["status"] = "error"
+        state["progress"] = 0
+        state["message"] = f"Recording failed: {str(e)}"
+        redis_client.setex(DATASET_RECORDING_STATE_KEY, 600, json.dumps(state))
+    finally:
+        await _run_command(
+            "ssh",
+            "-o",
+            "ConnectTimeout=5",
+            JETSON_SSH_TARGET,
+            f"rm -f {shlex.quote(remote_tmp_file)}",
+        )
 
 
 @router.get("/speakers/enrollment-status")
@@ -439,6 +702,217 @@ async def get_enrollment_status(current_user=Depends(get_current_user)):
         return EnrollmentStatus(status="idle").dict()
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ==========================================
+# DATASET RECORDING FOR WAKE/SPEAKER LABS
+# ==========================================
+
+@router.get("/datasets/recording-status")
+async def get_dataset_recording_status(current_user=Depends(get_current_user)):
+    """Get current dataset recording task status."""
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
+        if state:
+            return state
+        return {"status": "idle"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/datasets/{dataset_id}/wake-word/start-recording")
+async def start_wake_dataset_recording(
+    dataset_id: str,
+    request: RecordingRequest,
+    current_user=Depends(get_current_user),
+):
+    """Record one wake-word training clip from Jetson into a dataset."""
+    try:
+        normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+        duration = max(2, min(int(request.duration_seconds), 60))
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+        active_dataset_state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
+        active_enrollment_state = _parse_json_state(r.get(ENROLLMENT_STATE_KEY))
+        if _is_active_recording(active_dataset_state) or _is_active_recording(active_enrollment_state):
+            return {"status": "error", "message": "A recording is already in progress"}
+
+        asyncio.create_task(
+            _record_dataset_clip_on_jetson(
+                dataset_id=normalized_dataset_id,
+                family="wake_word",
+                duration_seconds=duration,
+                redis_client=r,
+                prompt=request.prompt,
+            )
+        )
+        return {
+            "status": "started",
+            "dataset_id": normalized_dataset_id,
+            "family": "wake_word",
+            "duration_seconds": duration,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start wake dataset recording: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/datasets/{dataset_id}/speakers/{speaker_id}/start-recording")
+async def start_speaker_dataset_recording(
+    dataset_id: str,
+    speaker_id: str,
+    request: RecordingRequest,
+    current_user=Depends(get_current_user),
+):
+    """Record one speaker training clip from Jetson into a dataset."""
+    try:
+        normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+        normalized_speaker_id = _normalize_identifier(speaker_id, "speaker_id")
+        duration = max(2, min(int(request.duration_seconds), 60))
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+        active_dataset_state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
+        active_enrollment_state = _parse_json_state(r.get(ENROLLMENT_STATE_KEY))
+        if _is_active_recording(active_dataset_state) or _is_active_recording(active_enrollment_state):
+            return {"status": "error", "message": "A recording is already in progress"}
+
+        asyncio.create_task(
+            _record_dataset_clip_on_jetson(
+                dataset_id=normalized_dataset_id,
+                family="speakers",
+                duration_seconds=duration,
+                redis_client=r,
+                speaker_id=normalized_speaker_id,
+                prompt=request.prompt,
+            )
+        )
+        return {
+            "status": "started",
+            "dataset_id": normalized_dataset_id,
+            "family": "speakers",
+            "speaker_id": normalized_speaker_id,
+            "duration_seconds": duration,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start speaker dataset recording: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/datasets/{dataset_id}/wake-word/samples")
+async def get_wake_dataset_samples(
+    dataset_id: str,
+    current_user=Depends(get_current_user),
+):
+    """List wake-word dataset clips recorded via Jetson."""
+    normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word")
+    samples = _list_sample_files(sample_dir)
+    return {
+        "dataset_id": normalized_dataset_id,
+        "family": "wake_word",
+        "samples": samples,
+        "count": len(samples),
+    }
+
+
+@router.get("/datasets/{dataset_id}/speakers/{speaker_id}/samples")
+async def get_speaker_dataset_samples(
+    dataset_id: str,
+    speaker_id: str,
+    current_user=Depends(get_current_user),
+):
+    """List speaker dataset clips recorded via Jetson."""
+    normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+    normalized_speaker_id = _normalize_identifier(speaker_id, "speaker_id")
+    sample_dir = _dataset_sample_dir(
+        normalized_dataset_id,
+        "speakers",
+        speaker_id=normalized_speaker_id,
+    )
+    samples = _list_sample_files(sample_dir)
+    return {
+        "dataset_id": normalized_dataset_id,
+        "family": "speakers",
+        "speaker_id": normalized_speaker_id,
+        "samples": samples,
+        "count": len(samples),
+    }
+
+
+@router.delete("/datasets/{dataset_id}/wake-word/samples")
+async def clear_wake_dataset_samples(
+    dataset_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Clear all wake-word samples for one dataset."""
+    normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word")
+    deleted_count = _clear_sample_dir(sample_dir)
+
+    remote_dataset_dir = f"{JETSON_WAKE_DATASET_ROOT}/{normalized_dataset_id}"
+    clear_code, _, clear_stderr = await _run_command(
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        JETSON_SSH_TARGET,
+        f"rm -rf {shlex.quote(remote_dataset_dir)}",
+    )
+    warnings: List[str] = []
+    if clear_code != 0:
+        warnings.append(f"Jetson mirror clear failed: {clear_stderr.strip()}")
+
+    return {
+        "status": "success",
+        "dataset_id": normalized_dataset_id,
+        "family": "wake_word",
+        "deleted_count": deleted_count,
+        "warnings": warnings,
+    }
+
+
+@router.delete("/datasets/{dataset_id}/speakers/{speaker_id}/samples")
+async def clear_speaker_dataset_samples(
+    dataset_id: str,
+    speaker_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Clear speaker samples for one dataset + speaker id."""
+    normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
+    normalized_speaker_id = _normalize_identifier(speaker_id, "speaker_id")
+    sample_dir = _dataset_sample_dir(
+        normalized_dataset_id,
+        "speakers",
+        speaker_id=normalized_speaker_id,
+    )
+    deleted_count = _clear_sample_dir(sample_dir)
+
+    remote_dataset_dir = (
+        f"{GPU_SPEAKER_DATASET_ROOT}/{normalized_dataset_id}/{normalized_speaker_id}"
+    )
+    clear_code, _, clear_stderr = await _run_command(
+        "ssh",
+        "-o",
+        "ConnectTimeout=5",
+        GPU_CLUSTER_SSH_TARGET,
+        f"rm -rf {shlex.quote(remote_dataset_dir)}",
+    )
+    warnings: List[str] = []
+    if clear_code != 0:
+        warnings.append(f"GPU mirror clear failed: {clear_stderr.strip()}")
+
+    return {
+        "status": "success",
+        "dataset_id": normalized_dataset_id,
+        "family": "speakers",
+        "speaker_id": normalized_speaker_id,
+        "deleted_count": deleted_count,
+        "warnings": warnings,
+    }
 
 
 @router.post("/speakers/{speaker_id}/start-recording")
@@ -471,14 +945,13 @@ async def start_speaker_recording(
             "samples_collected": 0,
             "samples_needed": 3,
             "duration_seconds": request.duration_seconds,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": local_now().isoformat(),
             "message": f"Recording... Please speak naturally for {request.duration_seconds} seconds."
         }
         r.setex(ENROLLMENT_STATE_KEY, 300, json.dumps(state))  # 5 min TTL
 
         # Trigger Jetson to record via SSH
         # The recording script will update Redis with progress
-        import asyncio
         asyncio.create_task(record_on_jetson(speaker_id, request.duration_seconds, r))
 
         return {"status": "started", "speaker_id": speaker_id, "duration": request.duration_seconds}
@@ -490,8 +963,6 @@ async def start_speaker_recording(
 
 async def record_on_jetson(speaker_id: str, duration: int, redis_client):
     """Background task to trigger Jetson recording."""
-    import shutil
-
     try:
         # Create local directory for samples
         sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
@@ -668,7 +1139,6 @@ async def delete_speaker(
                 # Also clean up local samples
                 sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
                 if os.path.exists(sample_dir):
-                    import shutil
                     shutil.rmtree(sample_dir)
 
                 # Clean up on GPU cluster
@@ -697,7 +1167,6 @@ async def clear_speaker_samples(
     try:
         sample_dir = f"{ENROLLMENT_SAMPLES_DIR}/{speaker_id}"
         if os.path.exists(sample_dir):
-            import shutil
             shutil.rmtree(sample_dir)
             os.makedirs(sample_dir)
 
@@ -824,6 +1293,7 @@ async def get_voice_listening(current_user=Depends(get_current_user)):
 class JetsonHealthReport(BaseModel):
     uptime_seconds: float = 0
     cpu_percent: float = 0
+    cpu_temperature_c: float = 0
     memory_percent: float = 0
     memory_used_mb: int = 0
     gpu_available: bool = False
@@ -873,6 +1343,36 @@ async def report_jetson_health(
         r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         r.setex("sara:jetson:health", 60, json.dumps(report.dict()))
         r.setex("sara:jetson:online", 90, "1")
+
+        # Bridge Jetson sensory reports into voice-control heartbeat state so
+        # the wake sensor card reflects current device health.
+        try:
+            service_state = (report.service_state or "").strip().lower()
+            if service_state in {"offline", "stopped"}:
+                wake_status = "offline"
+            elif service_state in {"error", "failed"}:
+                wake_status = "degraded"
+            else:
+                wake_status = "healthy"
+
+            update_service_heartbeat(
+                "wake-sensor",
+                {
+                    "status": wake_status,
+                    "version": "jetson-health-bridge-v1",
+                    "details": {
+                        "service_state": report.service_state,
+                        "uptime_seconds": report.uptime_seconds,
+                        "cpu_percent": report.cpu_percent,
+                        "cpu_temp_c": report.cpu_temperature_c,
+                        "memory_percent": report.memory_percent,
+                        "gpu_temp_c": report.gpu_temperature_c,
+                        "gpu_utilization_pct": report.gpu_utilization_pct,
+                    },
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Wake-sensor heartbeat bridge failed: {e}")
 
         # Update unified context
         try:

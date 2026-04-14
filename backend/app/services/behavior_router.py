@@ -593,10 +593,10 @@ class BehaviorRouter:
             return await self._execute_heartbeat_database(user_id, params)
 
     async def _execute_heartbeat_database(self, user_id: str, params: Dict[str, Any]) -> ToolResult:
-        """Add heartbeat item to database"""
-        from app.tools.heartbeat import AddHeartbeatItemTool
-
-        tool = AddHeartbeatItemTool()
+        """Add heartbeat item to database via direct SQL (CRUD tools were removed)."""
+        import uuid
+        from sqlalchemy import text
+        from app.db.session import get_db
 
         item_type = params.get("item_type", "monitor")
         description = params.get("description", "")
@@ -606,35 +606,42 @@ class BehaviorRouter:
         expires_at = params.get("expires_at")
         config = params.get("config", {})
 
-        result = await tool.execute(
-            user_id,
-            item_type=item_type,
-            description=description,
-            check_logic=check_logic,
-            priority=priority,
-            condition=condition,
-            expires_at=expires_at,
-            config=config,
-            source_context="Routed from behavior intent",
-        )
-
-        if result.success and result.data:
-            result.data["storage"] = "database"
-            result.data["next_steps"] = None  # Heartbeat items are immediately active
-
-        return result
+        db_gen = get_db()
+        db = next(db_gen)
+        try:
+            item_id = str(uuid.uuid4())
+            db.execute(text("""
+                INSERT INTO heartbeat_items
+                    (id, user_id, item_type, description, check_logic,
+                     priority, condition, expires_at, config, source_context, is_active)
+                VALUES
+                    (:id, :uid, :itype, :desc, :logic,
+                     :prio, :cond, :exp, :cfg::jsonb, :src, true)
+            """), {
+                "id": item_id, "uid": user_id, "itype": item_type,
+                "desc": description, "logic": check_logic, "prio": priority,
+                "cond": condition, "exp": expires_at,
+                "cfg": json.dumps(config), "src": "Routed from behavior intent",
+            })
+            db.commit()
+            return ToolResult(
+                success=True,
+                data={"id": item_id, "storage": "database", "next_steps": None},
+                message=f"Heartbeat item created: {description[:60]}",
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to create heartbeat item: {e}")
+        finally:
+            db.close()
 
     async def _execute_heartbeat_file(self, description: str, params: Dict[str, Any]) -> ToolResult:
-        """Add rule to HEARTBEAT.md file"""
-        from app.tools.heartbeat import UpdateHeartbeatFileTool
+        """Append rule to HEARTBEAT.md file (CRUD tools were removed)."""
+        from pathlib import Path
 
-        tool = UpdateHeartbeatFileTool()
-
-        # Format as a markdown rule
         priority = params.get("priority", "normal")
         item_type = params.get("item_type", "monitor")
 
-        # Determine which section this belongs in based on item_type and priority
         if item_type == "time_bound":
             section = "## Time-Sensitive"
         elif priority == "high":
@@ -642,27 +649,26 @@ class BehaviorRouter:
         else:
             section = "## Always (Every Heartbeat)"
 
-        # Format the rule
-        rule_text = f"{section}\n- {description}"
+        heartbeat_path = Path(__file__).parent.parent / "data" / "HEARTBEAT.md"
+        try:
+            if not heartbeat_path.exists():
+                heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+                heartbeat_path.write_text(f"# Heartbeat Checklist\n\n{section}\n- {description}\n")
+            else:
+                content = heartbeat_path.read_text()
+                if section in content:
+                    content = content.replace(section, f"{section}\n- {description}", 1)
+                else:
+                    content += f"\n{section}\n- {description}\n"
+                heartbeat_path.write_text(content)
 
-        result = await tool.execute(
-            user_id="system",  # File edits don't need user context
-            append_section=rule_text,
-        )
-
-        if result.success:
             return ToolResult(
                 success=True,
-                data={
-                    "storage": "file",
-                    "rule": description,
-                    "section": section,
-                    "next_steps": None,
-                },
+                data={"storage": "file", "rule": description, "section": section, "next_steps": None},
                 message=f"Added rule to HEARTBEAT.md: {description[:50]}...",
             )
-        else:
-            return result
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to update HEARTBEAT.md: {e}")
 
 
 # Singleton instance

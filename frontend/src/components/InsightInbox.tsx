@@ -84,12 +84,10 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
 
   const getInsightIcon = (type: string) => {
     const icons: Record<string, string> = {
-      'habit_salvage': '💪',
       'content_pattern': '🔍',
       'knowledge_connection': '🔗',
       'calendar_prep': '📅',
       'weekly_summary': '📊',
-      'habit_performance': '📈',
       'emotional_check': '💝',
       'big_suggestion': '💡',
       'long_term_trend': '📈'
@@ -239,15 +237,6 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
                   >
                     ✗ Not useful
                   </button>
-                  
-                  {insight.insight_type === 'habit_salvage' && (
-                    <button
-                      onClick={() => onNavigate?.('habits')}
-                      className="px-4 py-2 bg-blue-600/20 text-blue-400 rounded-lg hover:bg-blue-600/30 text-sm"
-                    >
-                      View Habits
-                    </button>
-                  )}
                   
                   {insight.insight_type === 'knowledge_connection' && (
                     <button

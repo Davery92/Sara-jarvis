@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
@@ -14,18 +14,21 @@ interface MenuItem {
 
 const menuItems: MenuItem[] = [
   { name: 'Notes', icon: '📝', label: 'Notes', screen: 'Notes' },
+  { name: 'Email', icon: '📧', label: 'Email', screen: 'Email' },
+  { name: 'DailyTasks', icon: '✅', label: 'Daily Tasks', screen: 'DailyTasks' },
   { name: 'Calendar', icon: '📅', label: 'Calendar', screen: 'Calendar' },
+  { name: 'Notifications', icon: '🔔', label: 'Notifications', screen: 'Notifications' },
   { name: 'Inbox', icon: '📥', label: 'Inbox', screen: 'Inbox' },
+  { name: 'Learning', icon: '🎓', label: 'Learning', screen: 'Learning' },
+  { name: 'Automations', icon: '⚡', label: 'Automations', screen: 'Automations' },
   { name: 'AgentTasks', icon: '🤖', label: 'Agent Tasks', screen: 'AgentTasks' },
-  { name: 'SaraActivity', icon: '🧠', label: "Sara's Mind", screen: 'SaraActivity' },
+  { name: 'ACS', icon: '🧠', label: 'ACS', screen: 'ACS' },
   { name: 'Knowledge', icon: '🧬', label: 'Knowledge', screen: 'Knowledge' },
   { name: 'Documents', icon: '📄', label: 'Documents', screen: 'Documents' },
   { name: 'Projects', icon: '📋', label: 'Projects', screen: 'Projects' },
   { name: 'Recipes', icon: '🍳', label: 'Recipes', screen: 'Recipes' },
   { name: 'Intelligence', icon: '📡', label: 'Intelligence', screen: 'Intelligence' },
-  { name: 'Temerant', icon: '🗝️', label: 'Temerant', screen: 'Temerant' },
-  { name: 'TemerantRpg', icon: '🎭', label: 'Temerant RPG', screen: 'TemerantRpg' },
-  { name: 'Briefings', icon: '☀️', label: 'Morning Brief', screen: 'Briefings' },
+{ name: 'Briefings', icon: '☀️', label: 'Morning Brief', screen: 'Briefings' },
   { name: 'Health', icon: '⚕️', label: 'Apple Health', screen: 'Health' },
   { name: 'Settings', icon: '⚙️', label: 'Settings', screen: 'Settings' },
 ];
@@ -33,47 +36,28 @@ const menuItems: MenuItem[] = [
 export default function MoreScreen() {
   const navigation = useNavigation();
   const [inboxUnread, setInboxUnread] = useState(0);
-  const [temerantEnabled, setTemerantEnabled] = useState(true);
-  const [temerantRpgEnabled, setTemerantRpgEnabled] = useState(true);
-
   useFocusEffect(
     React.useCallback(() => {
       const loadBadges = async () => {
         try {
-          const stats = await apiClient.getInboxStats();
-          setInboxUnread(stats?.unread || 0);
+          const [stats, attention] = await Promise.all([
+            apiClient.getInboxStats(),
+            apiClient.getAttentionCount(),
+          ]);
+          const contentUnread = stats?.unread || 0;
+          const attentionUnread = attention?.unread || 0;
+          setInboxUnread(contentUnread + attentionUnread);
         } catch {}
       };
       loadBadges();
     }, [])
   );
 
-  useEffect(() => {
-    const loadFlags = async () => {
-      try {
-        const flags = await apiClient.getAutonomyFlags();
-        if (typeof flags?.temerant_enabled === 'boolean') {
-          setTemerantEnabled(flags.temerant_enabled);
-        }
-        if (typeof flags?.temerant_rpg_enabled === 'boolean') {
-          setTemerantRpgEnabled(flags.temerant_rpg_enabled);
-        }
-      } catch {
-        // Keep default if flags endpoint is unavailable.
-      }
-    };
-    loadFlags();
-  }, []);
-
   const handleItemPress = (screen: string) => {
     (navigation as any).navigate(screen);
   };
 
-  const visibleMenuItems = menuItems.filter((item) => {
-    if (item.name === 'Temerant' && !temerantEnabled) return false;
-    if (item.name === 'TemerantRpg' && !temerantRpgEnabled) return false;
-    return true;
-  });
+  const visibleMenuItems = menuItems;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>

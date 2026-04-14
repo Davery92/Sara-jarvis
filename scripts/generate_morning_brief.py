@@ -3,9 +3,9 @@
 Morning Brief Generation Script
 
 Generates the morning brief for the configured solo user at 6 AM ET.
-Run via cron (with CRON_TZ=America/New_York set above the entry):
-    CRON_TZ=America/New_York
-    0 6 * * * SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub" /usr/bin/python3 /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
+Run via cron (system timezone is UTC, CRON_TZ is NOT supported by vixie cron):
+    # 11:00 UTC = 6 AM EST / 7 AM EDT
+    0 11 * * * SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub" /usr/bin/python3 /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
 
 Push notification is sent automatically when brief is ready (via notification_service).
 """
@@ -76,6 +76,22 @@ async def generate_brief():
 
     except Exception as e:
         logger.error(f"Failed to generate brief: {e}")
+        # Send error notification so David knows the brief failed
+        try:
+            from app.services.unified_notification import send_notification
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as async_db:
+                await send_notification(
+                    user_id=SOLO_USER_ID,
+                    title="Morning brief failed",
+                    message=f"Brief generation error: {str(e)[:200]}",
+                    priority="important",
+                    category="system",
+                    source="morning_brief_script",
+                    db=async_db,
+                )
+        except Exception as notify_err:
+            logger.error(f"Failed to send error notification: {notify_err}")
         raise
 
     finally:

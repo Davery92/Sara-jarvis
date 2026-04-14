@@ -4,10 +4,12 @@ API endpoints for fitness tracking: notes, food logging, workouts
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import uuid
+
+from app.core.timezone import now as local_now
 import logging
 import re
 import asyncio
@@ -60,9 +62,18 @@ class FoodItem(BaseModel):
     unit: str
 
 
+VALID_MEAL_TYPES = {"breakfast", "lunch", "dinner", "snack"}
+
+
 class FoodLogCreate(BaseModel):
     meal_type: str  # breakfast, lunch, dinner, snack
     food_items: List[FoodItem]
+
+    @validator("meal_type", pre=True)
+    def validate_meal_type(cls, v):
+        if not isinstance(v, str) or v.lower() not in VALID_MEAL_TYPES:
+            return "snack"
+        return v.lower()
     detailed_items: Optional[List[dict]] = None  # Detailed food items from food database
     calories: Optional[float] = None
     protein: Optional[float] = None
@@ -419,6 +430,8 @@ async def list_food_log(
 ):
     """List recent food log entries"""
     try:
+        import json as json_mod
+
         query = text("""
             SELECT id as log_id, user_id, meal_type, food_items, detailed_items, calories, protein, carbs, fats, notes, logged_at
             FROM food_log
@@ -428,7 +441,24 @@ async def list_food_log(
         """)
 
         result = db.execute(query, {"user_id": user_id, "limit": limit})
-        entries = [dict(row._mapping) for row in result]
+        entries = []
+        for row in result:
+            entry = dict(row._mapping)
+
+            # Parse JSON fields that may come back as strings
+            for json_field in ("food_items", "detailed_items"):
+                val = entry.get(json_field)
+                if isinstance(val, str):
+                    try:
+                        entry[json_field] = json_mod.loads(val)
+                    except (json_mod.JSONDecodeError, TypeError):
+                        entry[json_field] = []
+
+            # Serialize logged_at to ISO string
+            if entry.get("logged_at") and hasattr(entry["logged_at"], "isoformat"):
+                entry["logged_at"] = entry["logged_at"].isoformat()
+
+            entries.append(entry)
         return entries
     except Exception as e:
         logger.error(f"Failed to list food log: {e}")
@@ -576,6 +606,48 @@ async def update_food_log_entry(
         raise
     except Exception as e:
         logger.error(f"Failed to update food log entry: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/food-log/{log_id}")
+async def patch_food_log_entry(
+    log_id: str,
+    updates: dict,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Partial update of a food log entry (e.g. change meal_type)"""
+    try:
+        allowed_fields = {"meal_type", "notes"}
+        fields_to_update = {k: v for k, v in updates.items() if k in allowed_fields}
+
+        if not fields_to_update:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+
+        set_clauses = ", ".join(f"{k} = :{k}" for k in fields_to_update)
+        query = text(f"""
+            UPDATE food_log
+            SET {set_clauses}, updated_at = NOW()
+            WHERE id = :log_id AND user_id = :user_id
+            RETURNING id
+        """)
+
+        fields_to_update["log_id"] = log_id
+        fields_to_update["user_id"] = user_id
+
+        result = db.execute(query, fields_to_update)
+        updated = result.fetchone()
+        db.commit()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        return {"success": True, "message": "Food log entry updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to patch food log entry: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -773,7 +845,7 @@ async def get_yesterday_foods(
 
     try:
         # Get yesterday's date range
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today - timedelta(days=1)
         yesterday_end = today
 
@@ -1454,9 +1526,9 @@ async def fitness_chat(
         import json
 
         # Get LLM configuration
-        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
+        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1")
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:20b")
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
 
         # ===== GATHER FITNESS CONTEXT =====
 
@@ -1890,7 +1962,7 @@ async def fitness_chat_stream(
                         "type": "final_response",
                         "data": {
                             "content": response_content,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": local_now().isoformat()
                         }
                     })
                     await event_queue.put({"type": "done"})
@@ -1912,7 +1984,7 @@ async def fitness_chat_stream(
 
                     except asyncio.TimeoutError:
                         # Send heartbeat to keep connection alive
-                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': local_now().isoformat()})}\n\n"
                     except Exception as e:
                         logger.error(f"Error in event stream: {e}")
                         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -1963,7 +2035,7 @@ async def get_fitness_dashboard(user_id: str = Depends(get_current_user_id)):
         dashboard = {
             "nutrition": food_result.data if food_result.success else {},
             "workouts": workout_result.data if workout_result.success else {},
-            "updated_at": datetime.now().isoformat()
+            "updated_at": local_now().isoformat()
         }
 
         return dashboard
@@ -2345,7 +2417,7 @@ async def get_active_program(user_id: str = Depends(get_current_user_id), db: Se
     """Get the currently active program with its phases"""
     try:
         program = db.execute(text("""
-            SELECT id, name, goal, start_date, end_date, is_active, notes, created_at, updated_at
+            SELECT id, name, goal, start_date, end_date, is_active, notes, plan_markdown, created_at, updated_at
             FROM fitness_program
             WHERE user_id = :user_id AND is_active = true
             LIMIT 1
@@ -2357,10 +2429,8 @@ async def get_active_program(user_id: str = Depends(get_current_user_id), db: Se
         program_dict = dict(program._mapping)
 
         # Get phases for this program
-        phases = db.execute(text("""
-            SELECT id, name, goal, program_id, order_index, duration_weeks, start_date, end_date,
-                   calories_target, protein_target, carbs_target, fat_target,
-                   training_days_per_week, deload_week, status, notes, created_at, updated_at
+        phases = db.execute(text(f"""
+            SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
             WHERE user_id = :user_id AND program_id = :program_id
             ORDER BY order_index ASC, start_date ASC NULLS LAST
@@ -2380,7 +2450,7 @@ async def get_program(program_id: str, user_id: str = Depends(get_current_user_i
     """Get a specific program with its phases"""
     try:
         program = db.execute(text("""
-            SELECT id, name, goal, start_date, end_date, is_active, notes, created_at, updated_at
+            SELECT id, name, goal, start_date, end_date, is_active, notes, plan_markdown, created_at, updated_at
             FROM fitness_program
             WHERE id = :program_id AND user_id = :user_id
         """), {"program_id": program_id, "user_id": user_id}).fetchone()
@@ -2391,10 +2461,8 @@ async def get_program(program_id: str, user_id: str = Depends(get_current_user_i
         program_dict = dict(program._mapping)
 
         # Get phases for this program
-        phases = db.execute(text("""
-            SELECT id, name, goal, program_id, order_index, duration_weeks, start_date, end_date,
-                   calories_target, protein_target, carbs_target, fat_target,
-                   training_days_per_week, deload_week, status, notes, created_at, updated_at
+        phases = db.execute(text(f"""
+            SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
             WHERE user_id = :user_id AND program_id = :program_id
             ORDER BY order_index ASC, start_date ASC NULLS LAST
@@ -2543,11 +2611,19 @@ class PhaseCreate(BaseModel):
     parent_phase_id: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
-    # Nutrition targets
+    # Nutrition targets — single (weekly average / fallback)
     calories_target: Optional[int] = None
     protein_target: Optional[int] = None
     carbs_target: Optional[int] = None
     fat_target: Optional[int] = None
+    # Nutrition targets — calorie cycling (training day vs rest day)
+    calories_training_day: Optional[int] = None
+    calories_rest_day: Optional[int] = None
+    carbs_training_day: Optional[int] = None
+    carbs_rest_day: Optional[int] = None
+    fat_training_day: Optional[int] = None
+    fat_rest_day: Optional[int] = None
+    daily_steps_target: Optional[int] = None
     training_days_per_week: Optional[int] = None
     deload_week: Optional[int] = None
     notes: Optional[str] = None
@@ -2562,25 +2638,43 @@ class PhaseUpdate(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     status: Optional[str] = None
-    # Nutrition targets
+    # Nutrition targets — single (weekly average / fallback)
     calories_target: Optional[int] = None
     protein_target: Optional[int] = None
     carbs_target: Optional[int] = None
     fat_target: Optional[int] = None
+    # Nutrition targets — calorie cycling
+    calories_training_day: Optional[int] = None
+    calories_rest_day: Optional[int] = None
+    carbs_training_day: Optional[int] = None
+    carbs_rest_day: Optional[int] = None
+    fat_training_day: Optional[int] = None
+    fat_rest_day: Optional[int] = None
+    daily_steps_target: Optional[int] = None
     training_days_per_week: Optional[int] = None
     deload_week: Optional[int] = None
     notes: Optional[str] = None
+
+
+# Canonical column list for fitness_phase SELECT — keeps GET endpoints in sync
+PHASE_SELECT_COLS = """
+    id, name, goal, program_id, order_index, duration_weeks,
+    parent_phase_id, start_date, end_date,
+    calories_target, protein_target, carbs_target, fat_target,
+    calories_training_day, calories_rest_day,
+    carbs_training_day, carbs_rest_day,
+    fat_training_day, fat_rest_day,
+    daily_steps_target,
+    training_days_per_week, deload_week,
+    status, notes, created_at, updated_at
+"""
 
 @router.get("/phases")
 async def list_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """List all phases for user (hierarchical)"""
     try:
-        phases = db.execute(text("""
-            SELECT id, name, goal, program_id, order_index, duration_weeks,
-                   parent_phase_id, start_date, end_date,
-                   calories_target, protein_target, carbs_target, fat_target,
-                   training_days_per_week, deload_week,
-                   status, notes, created_at, updated_at
+        phases = db.execute(text(f"""
+            SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
             WHERE user_id = :user_id
             ORDER BY program_id NULLS LAST, order_index ASC, start_date DESC NULLS LAST, created_at DESC
@@ -2602,6 +2696,10 @@ async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_us
                 id, user_id, name, goal, program_id, order_index, duration_weeks,
                 parent_phase_id, start_date, end_date,
                 calories_target, protein_target, carbs_target, fat_target,
+                calories_training_day, calories_rest_day,
+                carbs_training_day, carbs_rest_day,
+                fat_training_day, fat_rest_day,
+                daily_steps_target,
                 training_days_per_week, deload_week,
                 status, notes
             )
@@ -2609,6 +2707,10 @@ async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_us
                 :id, :user_id, :name, :goal, :program_id, :order_index, :duration_weeks,
                 :parent_phase_id, :start_date, :end_date,
                 :calories_target, :protein_target, :carbs_target, :fat_target,
+                :calories_training_day, :calories_rest_day,
+                :carbs_training_day, :carbs_rest_day,
+                :fat_training_day, :fat_rest_day,
+                :daily_steps_target,
                 :training_days_per_week, :deload_week,
                 :status, :notes
             )
@@ -2627,6 +2729,13 @@ async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_us
             "protein_target": phase.protein_target,
             "carbs_target": phase.carbs_target,
             "fat_target": phase.fat_target,
+            "calories_training_day": phase.calories_training_day,
+            "calories_rest_day": phase.calories_rest_day,
+            "carbs_training_day": phase.carbs_training_day,
+            "carbs_rest_day": phase.carbs_rest_day,
+            "fat_training_day": phase.fat_training_day,
+            "fat_rest_day": phase.fat_rest_day,
+            "daily_steps_target": phase.daily_steps_target,
             "training_days_per_week": phase.training_days_per_week,
             "deload_week": phase.deload_week,
             "status": "planned",
@@ -2684,6 +2793,27 @@ async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends
         if phase.fat_target is not None:
             updates.append("fat_target = :fat_target")
             params["fat_target"] = phase.fat_target
+        if phase.calories_training_day is not None:
+            updates.append("calories_training_day = :calories_training_day")
+            params["calories_training_day"] = phase.calories_training_day
+        if phase.calories_rest_day is not None:
+            updates.append("calories_rest_day = :calories_rest_day")
+            params["calories_rest_day"] = phase.calories_rest_day
+        if phase.carbs_training_day is not None:
+            updates.append("carbs_training_day = :carbs_training_day")
+            params["carbs_training_day"] = phase.carbs_training_day
+        if phase.carbs_rest_day is not None:
+            updates.append("carbs_rest_day = :carbs_rest_day")
+            params["carbs_rest_day"] = phase.carbs_rest_day
+        if phase.fat_training_day is not None:
+            updates.append("fat_training_day = :fat_training_day")
+            params["fat_training_day"] = phase.fat_training_day
+        if phase.fat_rest_day is not None:
+            updates.append("fat_rest_day = :fat_rest_day")
+            params["fat_rest_day"] = phase.fat_rest_day
+        if phase.daily_steps_target is not None:
+            updates.append("daily_steps_target = :daily_steps_target")
+            params["daily_steps_target"] = phase.daily_steps_target
         if phase.training_days_per_week is not None:
             updates.append("training_days_per_week = :training_days_per_week")
             params["training_days_per_week"] = phase.training_days_per_week
@@ -2720,16 +2850,90 @@ async def delete_phase(phase_id: str, user_id: str = Depends(get_current_user_id
         logger.error(f"Failed to delete phase: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/today-target")
+async def get_today_nutrition_target(
+    on_date: Optional[date] = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Return today's nutrition target, picking training-day vs rest-day macros from
+    the active phase based on whether a workout_session is scheduled for the date.
+
+    Falls back to single (weekly average) targets if no cycling is configured.
+    """
+    target_date = on_date or date.today()
+
+    # Find the active phase whose date range covers target_date
+    phase_row = db.execute(text(f"""
+        SELECT {PHASE_SELECT_COLS}
+        FROM fitness_phase
+        WHERE user_id = :uid
+          AND start_date IS NOT NULL
+          AND :d >= start_date
+          AND (end_date IS NULL OR :d <= end_date)
+        ORDER BY start_date DESC LIMIT 1
+    """), {"uid": user_id, "d": target_date}).fetchone()
+
+    if not phase_row:
+        return {
+            "date": target_date.isoformat(),
+            "is_training_day": False,
+            "phase": None,
+            "target": None,
+        }
+
+    phase = dict(phase_row._mapping)
+
+    # Is today a training day? Look for any workout_session on this date.
+    sess = db.execute(text("""
+        SELECT id FROM workout_session
+        WHERE user_id = :uid AND session_date = :d
+        LIMIT 1
+    """), {"uid": user_id, "d": target_date}).fetchone()
+    is_training = sess is not None
+
+    # Pick the right macros
+    if is_training:
+        target = {
+            "calories": phase.get("calories_training_day") or phase.get("calories_target"),
+            "protein": phase.get("protein_target"),
+            "carbs": phase.get("carbs_training_day") or phase.get("carbs_target"),
+            "fat": phase.get("fat_training_day") or phase.get("fat_target"),
+        }
+    else:
+        target = {
+            "calories": phase.get("calories_rest_day") or phase.get("calories_target"),
+            "protein": phase.get("protein_target"),
+            "carbs": phase.get("carbs_rest_day") or phase.get("carbs_target"),
+            "fat": phase.get("fat_rest_day") or phase.get("fat_target"),
+        }
+
+    # Compute deload state too — useful for the food log to show why training-day
+    # macros may be appropriate even on a deload day.
+    from app.services.progressive_overload import get_deload_state
+    deload = get_deload_state(db, user_id, target_date)
+
+    return {
+        "date": target_date.isoformat(),
+        "is_training_day": is_training,
+        "is_deload": deload["is_deload"],
+        "week_of_phase": deload["week_of_phase"],
+        "phase": {
+            "id": phase["id"],
+            "name": phase["name"],
+            "daily_steps_target": phase.get("daily_steps_target"),
+        },
+        "target": target,
+    }
+
+
 @router.get("/phases/active")
 async def get_active_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """Get currently active phases with nutrition targets"""
     try:
-        phases = db.execute(text("""
-            SELECT id, name, goal, program_id, order_index, duration_weeks,
-                   parent_phase_id, start_date, end_date,
-                   calories_target, protein_target, carbs_target, fat_target,
-                   training_days_per_week, deload_week,
-                   status, notes, created_at, updated_at
+        phases = db.execute(text(f"""
+            SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
             WHERE user_id = :user_id AND status = 'active'
             ORDER BY order_index ASC, start_date DESC NULLS LAST
@@ -2782,7 +2986,7 @@ async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_
 
         # If no dates set, use today + duration_weeks
         if not start_date:
-            start_date = datetime.now().date()
+            start_date = local_now().date()
         if not end_date:
             end_date = start_date + timedelta(weeks=duration_weeks)
 
@@ -3145,6 +3349,11 @@ class TemplateExerciseCreate(BaseModel):
     rest_seconds: Optional[int] = 120
     progression_rule: Optional[str] = "DOUBLE_PROGRESSION"  # DOUBLE_PROGRESSION, LINEAR, RPE_BASED
     notes: Optional[str] = None
+    # Advanced execution markers
+    metric_type: Optional[str] = "reps"          # 'reps' | 'time_seconds'
+    is_per_side: Optional[bool] = False          # unilateral exercises (per-leg/per-arm)
+    superset_group: Optional[str] = None         # short label like "A" — exercises sharing it are supersetted
+    set_technique: Optional[str] = None          # 'drop_set' | 'rest_pause' | 'amrap' | 'myo_reps' (typically applied to last set)
 
 
 class TemplateExerciseUpdate(BaseModel):
@@ -3157,6 +3366,60 @@ class TemplateExerciseUpdate(BaseModel):
     rest_seconds: Optional[int] = None
     progression_rule: Optional[str] = None
     notes: Optional[str] = None
+    metric_type: Optional[str] = None
+    is_per_side: Optional[bool] = None
+    superset_group: Optional[str] = None
+    set_technique: Optional[str] = None
+
+
+def _exercise_row_to_json(row_mapping: dict) -> dict:
+    """Convert a template_exercise row dict to the JSON exercise dict shape used by
+    fitness_template.exercises (which is what the live workout view reads)."""
+    lo = row_mapping.get("rep_range_low")
+    hi = row_mapping.get("rep_range_high")
+    if lo is not None and hi is not None and lo != hi:
+        reps_str = f"{lo}-{hi}"
+    elif lo is not None:
+        reps_str = str(lo)
+    else:
+        reps_str = "8-10"
+    return {
+        "name": row_mapping.get("exercise_name"),
+        "sets": row_mapping.get("target_sets") or 3,
+        "reps": reps_str,
+        "rep_range_low": lo,
+        "rep_range_high": hi,
+        "rpe_target": float(row_mapping["target_rpe"]) if row_mapping.get("target_rpe") is not None else None,
+        "rest_seconds": row_mapping.get("rest_seconds") or 120,
+        "progression_rule": row_mapping.get("progression_rule") or "DOUBLE_PROGRESSION",
+        "notes": row_mapping.get("notes") or "",
+        # Advanced markers
+        "metric_type": row_mapping.get("metric_type") or "reps",
+        "is_per_side": bool(row_mapping.get("is_per_side") or False),
+        "superset_group": row_mapping.get("superset_group"),
+        "set_technique": row_mapping.get("set_technique"),
+    }
+
+
+def _sync_template_exercises_json(db: Session, template_id: str) -> None:
+    """Rebuild fitness_template.exercises JSON from the relational template_exercise rows.
+    Called after every create/update/delete/reorder of a template_exercise so the JSON
+    (which the live workout view reads from) stays in sync with the relational data."""
+    import json as _json
+    rows = db.execute(text("""
+        SELECT exercise_name, order_index, target_sets, rep_range_low, rep_range_high,
+               target_rpe, rest_seconds, progression_rule, notes,
+               metric_type, is_per_side, superset_group, set_technique
+        FROM template_exercise
+        WHERE template_id = :tid
+        ORDER BY order_index ASC, created_at ASC
+    """), {"tid": template_id}).fetchall()
+    exercises_json = [_exercise_row_to_json(dict(r._mapping)) for r in rows]
+    db.execute(text("""
+        UPDATE fitness_template
+        SET exercises = :ex, updated_at = CURRENT_TIMESTAMP
+        WHERE id = :tid
+    """), {"ex": _json.dumps(exercises_json), "tid": template_id})
 
 
 @router.get("/templates/{template_id}/exercises")
@@ -3178,7 +3441,9 @@ async def list_template_exercises(
         exercises = db.execute(text("""
             SELECT id, template_id, exercise_name, order_index, target_sets,
                    rep_range_low, rep_range_high, target_rpe, rest_seconds,
-                   progression_rule, notes, created_at, updated_at
+                   progression_rule, notes,
+                   metric_type, is_per_side, superset_group, set_technique,
+                   created_at, updated_at
             FROM template_exercise
             WHERE template_id = :template_id
             ORDER BY order_index ASC
@@ -3215,11 +3480,13 @@ async def create_template_exercise(
             INSERT INTO template_exercise (
                 id, template_id, exercise_name, order_index, target_sets,
                 rep_range_low, rep_range_high, target_rpe, rest_seconds,
-                progression_rule, notes
+                progression_rule, notes,
+                metric_type, is_per_side, superset_group, set_technique
             ) VALUES (
                 :id, :template_id, :exercise_name, :order_index, :target_sets,
                 :rep_range_low, :rep_range_high, :target_rpe, :rest_seconds,
-                :progression_rule, :notes
+                :progression_rule, :notes,
+                :metric_type, :is_per_side, :superset_group, :set_technique
             )
         """), {
             "id": exercise_id,
@@ -3232,8 +3499,13 @@ async def create_template_exercise(
             "target_rpe": exercise.target_rpe,
             "rest_seconds": exercise.rest_seconds or 120,
             "progression_rule": exercise.progression_rule or "DOUBLE_PROGRESSION",
-            "notes": exercise.notes
+            "notes": exercise.notes,
+            "metric_type": exercise.metric_type or "reps",
+            "is_per_side": bool(exercise.is_per_side),
+            "superset_group": exercise.superset_group,
+            "set_technique": exercise.set_technique,
         })
+        _sync_template_exercises_json(db, template_id)
         db.commit()
 
         return {"success": True, "exercise_id": exercise_id, "message": "Exercise added to template"}
@@ -3293,11 +3565,25 @@ async def update_template_exercise(
         if exercise.notes is not None:
             updates.append("notes = :notes")
             params["notes"] = exercise.notes
+        if exercise.metric_type is not None:
+            updates.append("metric_type = :metric_type")
+            params["metric_type"] = exercise.metric_type
+        if exercise.is_per_side is not None:
+            updates.append("is_per_side = :is_per_side")
+            params["is_per_side"] = bool(exercise.is_per_side)
+        if exercise.superset_group is not None:
+            # Allow clearing by passing empty string
+            updates.append("superset_group = :superset_group")
+            params["superset_group"] = exercise.superset_group or None
+        if exercise.set_technique is not None:
+            updates.append("set_technique = :set_technique")
+            params["set_technique"] = exercise.set_technique or None
 
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
             sql = f"UPDATE template_exercise SET {', '.join(updates)} WHERE id = :exercise_id AND template_id = :template_id"
             db.execute(text(sql), params)
+            _sync_template_exercises_json(db, template_id)
             db.commit()
 
         return {"success": True, "message": "Exercise updated successfully"}
@@ -3330,6 +3616,7 @@ async def delete_template_exercise(
             DELETE FROM template_exercise
             WHERE id = :exercise_id AND template_id = :template_id
         """), {"exercise_id": exercise_id, "template_id": template_id})
+        _sync_template_exercises_json(db, template_id)
         db.commit()
 
         return {"success": True, "message": "Exercise removed from template"}
@@ -3366,6 +3653,7 @@ async def reorder_template_exercises(
                 WHERE id = :exercise_id AND template_id = :template_id
             """), {"order_index": idx, "exercise_id": exercise_id, "template_id": template_id})
 
+        _sync_template_exercises_json(db, template_id)
         db.commit()
         return {"success": True, "message": "Exercises reordered successfully"}
     except HTTPException:
@@ -4399,7 +4687,7 @@ async def get_workout_session(
     """
     try:
         import json
-        from app.services.progressive_overload import suggest_weight
+        from app.services.progressive_overload import suggest_weight, get_deload_state
 
         # Get session with template
         session_query = text("""
@@ -4407,7 +4695,7 @@ async def get_workout_session(
                 ws.id, ws.user_id, ws.template_id, ws.session_date, ws.status,
                 ws.started_at, ws.completed_at, ws.created_at,
                 ft.name as template_name, ft.exercises, ft.notes as template_notes,
-                ft.starting_weights
+                ft.starting_weights, ft.phase_id
             FROM workout_session ws
             LEFT JOIN fitness_template ft ON ws.template_id = ft.id
             WHERE ws.id = :session_id AND ws.user_id = :user_id
@@ -4435,10 +4723,11 @@ async def get_workout_session(
 
         # Get logged sets for this session
         sets_query = text("""
-            SELECT id, exercise_id, set_index, weight, reps, rpe, notes, logged_at
+            SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
+                   COALESCE(session_time, created_at) AS logged_at
             FROM workout_log
             WHERE session_id = :session_id
-            ORDER BY logged_at
+            ORDER BY COALESCE(session_time, created_at)
         """)
         logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
         session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
@@ -4453,7 +4742,36 @@ async def get_workout_session(
         recovery = db.execute(recovery_query, {"user_id": user_id, "today": today}).fetchone()
         session_dict['recovery_data'] = dict(recovery._mapping) if recovery else None
 
-        # Generate AI weight suggestions for each exercise
+        # Determine deload state for the session date (or today if missing)
+        deload = get_deload_state(
+            db=db,
+            user_id=user_id,
+            on_date=session_dict.get('session_date') or date.today(),
+        )
+        session_dict['is_deload'] = deload['is_deload']
+        session_dict['week_of_phase'] = deload['week_of_phase']
+        session_dict['deload_week'] = deload['deload_week']
+        session_dict['phase_name'] = deload['phase_name']
+
+        # Pull active phase nutrition targets so the frontend can display
+        # training-day vs rest-day macros + step goals during the workout.
+        if session_dict.get('phase_id'):
+            phase_nut = db.execute(text("""
+                SELECT calories_target, protein_target, carbs_target, fat_target,
+                       calories_training_day, calories_rest_day,
+                       carbs_training_day, carbs_rest_day,
+                       fat_training_day, fat_rest_day,
+                       daily_steps_target
+                FROM fitness_phase
+                WHERE id = :pid
+            """), {"pid": session_dict['phase_id']}).fetchone()
+            session_dict['phase_nutrition'] = dict(phase_nut._mapping) if phase_nut else None
+        else:
+            session_dict['phase_nutrition'] = None
+
+        # Generate AI weight suggestions for each exercise.
+        # Apply deload sets-halving and surface advanced fields (per_side, metric_type,
+        # superset_group, set_technique) the JSON dicts now carry.
         recovery_data = session_dict['recovery_data']
         for exercise in session_dict['exercises']:
             exercise_name = exercise['name']
@@ -4476,17 +4794,34 @@ async def get_workout_session(
             if starting_weights and exercise_name in starting_weights:
                 starting_weight = starting_weights[exercise_name]
 
-            # Generate AI suggestion
+            # Generate AI suggestion (deload-aware)
             suggestion = suggest_weight(
                 db=db,
                 user_id=user_id,
                 exercise_name=exercise_name,
                 target_reps=target_reps,
                 recovery_data=recovery_data,
-                starting_weight=starting_weight
+                starting_weight=starting_weight,
+                is_deload=session_dict['is_deload'],
             )
 
             exercise['weight_suggestion'] = suggestion
+
+            # On deload, halve target sets (min 2). Reflect this on the exercise dict
+            # so the UI shows the deload prescription instead of the normal one.
+            if session_dict['is_deload'] and exercise.get('sets'):
+                try:
+                    base_sets = int(exercise['sets'])
+                    exercise['sets_original'] = base_sets
+                    exercise['sets'] = max(2, base_sets // 2)
+                except (TypeError, ValueError):
+                    pass
+
+            # Defaults so older JSON dicts (without the new keys) don't break the UI
+            exercise.setdefault('metric_type', 'reps')
+            exercise.setdefault('is_per_side', False)
+            exercise.setdefault('superset_group', None)
+            exercise.setdefault('set_technique', None)
 
         return session_dict
 
@@ -4924,39 +5259,6 @@ async def complete_active_workout(
     """
     try:
         result = await workout_session_service.complete_workout(user_id, db)
-
-        if app_settings.temerant_enabled and app_settings.temerant_auto_ingestion_enabled:
-            try:
-                from app.services.temerant import CharacterService, IngestionService
-
-                character = CharacterService.get_character(db, user_id)
-                if character:
-                    summary = result.get("summary") or {}
-                    sets_completed = int(summary.get("total_sets") or 0)
-                    quantity = max(1.0, round(sets_completed / 3.0, 2)) if sets_completed else 1.0
-                    IngestionService.log_external_action(
-                        db=db,
-                        user_id=user_id,
-                        character=character,
-                        source_type="fitness",
-                        source_ref_id=result.get("session_id"),
-                        mapping_ref="workout_complete",
-                        default_action_type="workout",
-                        action_label=summary.get("workout_name") or "Workout",
-                        notes=None,
-                        quantity=quantity,
-                        occurred_at=datetime.utcnow(),
-                        metadata={
-                            "source": "workout_session_complete",
-                            "duration_minutes": summary.get("duration_minutes"),
-                            "total_sets": sets_completed,
-                            "total_volume": summary.get("total_volume"),
-                        },
-                    )
-                    db.commit()
-            except Exception:
-                db.rollback()
-                logger.exception("Temerant auto-ingestion failed for completed workout")
 
         return result
     except HTTPException:

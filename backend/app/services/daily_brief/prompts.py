@@ -26,6 +26,9 @@ Write a comprehensive but concise understanding covering:
 
 Write naturally, as private notes to yourself. Be specific about observed patterns, not generic.
 ONLY include things explicitly supported by the data above. NEVER invent or fabricate details.
+Focus on ENDURING patterns, not one-time events. A single mention of a location,
+meal, or event does not make it a stable fact. Look for things that appear repeatedly
+or are explicitly stated as ongoing.
 Do NOT include any health, fitness, biometric, or body data.
 Keep it under 800 words."""
 
@@ -184,6 +187,19 @@ MY REFLECTIONS:
 CONFIRMED HYPOTHESES:
 {hypotheses}
 
+TODAY'S DATE: {today_date}
+
+CRITICAL — stable layer temporal hygiene:
+- This document persists 7+ days. ONLY include facts that will still be true next week.
+- The "recurrence test": if something appeared on only 1 day out of 7 in the archives,
+  it is ephemeral — do NOT include it.
+- Locations: Only include home base or regular workplace. A single-day trip or visit
+  to another city is NOT a stable fact.
+- Cooking/meals: Only include enduring preferences ("smokes meats regularly"), never
+  a specific meal from one day.
+- Events/appointments: Only include recurring patterns, never one-off events.
+- When in doubt, OMIT. The context layer handles short-lived items.
+
 Using the data below (current stable layer + last 7 days of archived summaries +
 reflections + confirmed hypotheses), write an updated understanding of David.
 
@@ -204,11 +220,15 @@ GOOD: "When David's working on Sara's codebase, he often works in 2-3 hour burst
 commits every 20-40 minutes. If he goes quiet mid-burst, he's probably debugging — don't
 interrupt with check-ins."
 
-### 2. Active Life Context
-What's actually going on in David's life right now. Job, projects, relationships,
-living situation — things that come up in conversation and that Sara should know
-without being told again.
+### 2. Enduring Life Context
+The stable, ongoing facts about David's life — true week over week. Job, relationships,
+living situation, long-running projects, regular routines.
 
+Do NOT include: one-time locations, single-day trips, specific meals, single events,
+or anything that appeared on only one day this week.
+
+BAD: "David visited Sparta, NJ for a timed test." (one-day trip)
+BAD: "David smoked beef ribs on Monday." (single meal)
 BAD: "David works in IT and has a side project."
 
 GOOD: "David is a Network & IT Support Tech at Marvel IT Services — he handles client

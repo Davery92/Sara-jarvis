@@ -24,16 +24,6 @@ from .memory import (
     EpisodeMessageResponse, ConversationSummaryResponse,
     SetActiveConversationRequest
 )
-from .habits import (
-    HabitCreate, HabitResponse,
-    HabitItemCreate, HabitItemResponse,
-    HabitInstanceResponse, HabitTodayStats, HabitTodayResponse,
-    HabitInsightsOverview, HabitInsightsWeeklyStats,
-    HabitInsightsPerformance, HabitInsightsPatterns, HabitInsightsResponse,
-    HabitLogCreate, HabitLogResponse,
-    HabitStreakResponse, HabitLinkCreate, HabitLinkResponse,
-    HabitPauseRequest
-)
 from .insights import (
     UserProfileCreate, UserProfileResponse,
     AutonomousInsightResponse, InsightFeedbackRequest,
@@ -63,15 +53,6 @@ __all__ = [
     "ConversationResponse", "ConversationTurnResponse",
     "EpisodeMessageResponse", "ConversationSummaryResponse",
     "SetActiveConversationRequest",
-    # Habits
-    "HabitCreate", "HabitResponse",
-    "HabitItemCreate", "HabitItemResponse",
-    "HabitInstanceResponse", "HabitTodayStats", "HabitTodayResponse",
-    "HabitInsightsOverview", "HabitInsightsWeeklyStats",
-    "HabitInsightsPerformance", "HabitInsightsPatterns", "HabitInsightsResponse",
-    "HabitLogCreate", "HabitLogResponse",
-    "HabitStreakResponse", "HabitLinkCreate", "HabitLinkResponse",
-    "HabitPauseRequest",
     # Insights
     "UserProfileCreate", "UserProfileResponse",
     "AutonomousInsightResponse", "InsightFeedbackRequest",

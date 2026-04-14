@@ -195,36 +195,7 @@ def memory_service(redis_client, db_session_factory, mock_embedding_service, mem
 
 
 # ==========================================
-# DREAM CONSOLIDATION FIXTURES
-# ==========================================
-
-@pytest.fixture
-def dream_service(mock_llm_client, mock_embedding_service, monkeypatch):
-    """Create a DreamConsolidationService with mocked dependencies"""
-    from app.services.dream_consolidation import DreamConsolidationService
-
-    # Force SQLite-compatible embedding storage
-    monkeypatch.setattr("app.main_simple.PGVECTOR_AVAILABLE", False)
-    monkeypatch.setattr("app.main_simple.DATABASE_URL", "sqlite:///:memory:")
-
-    service = DreamConsolidationService()
-
-    # Mock LLM client
-    def mock_get_llm():
-        return mock_llm_client
-
-    # Mock embedding service
-    def mock_get_embedding():
-        return mock_embedding_service
-
-    monkeypatch.setattr(service, "_get_llm_client", mock_get_llm)
-    monkeypatch.setattr(service, "_get_embedding_service", mock_get_embedding)
-
-    return service
-
-
-# ==========================================
-# MEMORY TABLE FIXTURES
+# MEMORY TABLE FIXTURES (legacy — for MemoryTrace tests)
 # ==========================================
 
 @pytest.fixture
@@ -293,20 +264,22 @@ def memory_tables(db_engine):
 
 @pytest.fixture
 def sample_memory_traces(db_session, test_user_id, memory_tables):
-    """Create sample memory traces for testing"""
-    from app.main_simple import MemoryTrace
+    """Create sample episode records for testing (was MemoryTrace, now Episode)"""
+    from app.models.episode import Episode
     from datetime import datetime, timedelta
 
     traces = []
     base_time = datetime.utcnow() - timedelta(days=1)
 
     for i in range(5):
-        trace = MemoryTrace(
+        trace = Episode(
             id=str(uuid.uuid4()),
             user_id=test_user_id,
             content=f"Test memory trace {i}: This is sample content about topic {i % 3}",
             role="user" if i % 2 == 0 else "assistant",
-            salience=0.5 + (i * 0.1),
+            importance=0.5 + (i * 0.1),
+            source="chat",
+            memory_type="conversation",
             created_at=base_time + timedelta(minutes=i * 10)
         )
         db_session.add(trace)

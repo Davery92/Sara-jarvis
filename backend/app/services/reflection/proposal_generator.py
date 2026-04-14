@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .scratchpad import PatternType
 from .pattern_detector import DetectedPattern
-from app.services.karma import get_karma_service, KarmaEvent
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,6 @@ class PromptProposal:
     supporting_pattern_ids: List[str] = None
     expected_improvement: Optional[str] = None
     status: str = "pending"
-    karma_state_at_proposal: Optional[Dict] = None
 
     def __post_init__(self):
         if self.supporting_pattern_ids is None:
@@ -200,27 +198,15 @@ class PromptProposalGenerator:
 
     async def submit_proposal(self, proposal: PromptProposal) -> int:
         """Submit a proposal for approval and notify David."""
-        # Get current karma state
-        karma_service = await get_karma_service(self.db)
-        sara_karma = await karma_service.get_agent_karma("sara")
-        karma_state = {
-            "composite_score": sara_karma.composite_score if sara_karma else 50,
-            "dimensions": {
-                d.dimension_name: d.current_score
-                for d in (sara_karma.dimensions if sara_karma else [])
-            }
-        }
-
         # Save proposal to database
         result = await self.db.execute(
             text("""
                 INSERT INTO prompt_proposals
                 (target_agent, target_prompt_section, current_content, proposed_content,
-                 reasoning, supporting_pattern_ids, expected_improvement,
-                 karma_state_at_proposal)
+                 reasoning, supporting_pattern_ids, expected_improvement)
                 VALUES
                 (:agent, :section, :current, :proposed, :reasoning, :patterns,
-                 :expected, :karma)
+                 :expected)
                 RETURNING proposal_id
             """),
             {
@@ -231,7 +217,6 @@ class PromptProposalGenerator:
                 "reasoning": proposal.reasoning,
                 "patterns": proposal.supporting_pattern_ids,
                 "expected": proposal.expected_improvement,
-                "karma": karma_state,
             }
         )
         await self.db.commit()
@@ -273,28 +258,8 @@ class PromptProposalGenerator:
         )
         await self.db.commit()
 
-        # Update reflection karma
-        karma_service = await get_karma_service(self.db)
-
         if decision == "approved":
             await self._implement_proposal(proposal_id)
-            await karma_service.record_event(KarmaEvent(
-                agent_id="reflection",
-                dimension_name="proposal_acceptance",
-                delta=3.0,
-                reason=f"Proposal {proposal_id} approved",
-                evidence_type="feedback",
-                evidence_ids=[str(proposal_id)],
-            ))
-        else:
-            await karma_service.record_event(KarmaEvent(
-                agent_id="reflection",
-                dimension_name="proposal_acceptance",
-                delta=-2.0,
-                reason=f"Proposal {proposal_id} rejected: {notes}",
-                evidence_type="feedback",
-                evidence_ids=[str(proposal_id)],
-            ))
 
     async def _implement_proposal(self, proposal_id: int) -> None:
         """Implement an approved proposal."""
@@ -302,7 +267,7 @@ class PromptProposalGenerator:
         result = await self.db.execute(
             text("""
                 SELECT target_agent, target_prompt_section, proposed_content,
-                       current_content, karma_state_at_proposal
+                       current_content
                 FROM prompt_proposals
                 WHERE proposal_id = :proposal_id
             """),
@@ -312,7 +277,7 @@ class PromptProposalGenerator:
         if not row:
             return
 
-        agent, section, proposed, current, karma_at_proposal = row
+        agent, section, proposed, current = row
 
         # Save version history
         await self.db.execute(
@@ -349,21 +314,14 @@ class PromptProposalGenerator:
             )
 
         # Mark proposal as implemented
-        karma_service = await get_karma_service(self.db)
-        current_karma = await karma_service.get_agent_karma(agent)
-
         await self.db.execute(
             text("""
                 UPDATE prompt_proposals
-                SET status = 'implemented', implemented_at = NOW(),
-                    karma_state_at_implementation = :karma
+                SET status = 'implemented', implemented_at = NOW()
                 WHERE proposal_id = :proposal_id
             """),
             {
                 "proposal_id": proposal_id,
-                "karma": {
-                    "composite_score": current_karma.composite_score if current_karma else 50,
-                }
             }
         )
 

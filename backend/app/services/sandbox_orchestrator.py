@@ -2,8 +2,8 @@
 Sandbox Orchestrator — GLM-based multi-step agent coordinator.
 
 Three-tier system:
-1. Sara (gpt-oss:120b) → understands user intent, crafts task prompt, dispatches
-2. Orchestrator (gpt-oss:120b) → plans approach, decomposes into steps,
+1. Sara (Qwen3.5-122B-A10B) → understands user intent, crafts task prompt, dispatches
+2. Orchestrator (Qwen3.5-122B-A10B) → plans approach, decomposes into steps,
    manages Claude Code agents on the sandbox VM
 3. Claude Code (on VM 10.185.1.176) → executes individual steps
 
@@ -188,9 +188,10 @@ class SandboxOrchestrator:
         self.mission_id = mission_id
         self.user_id = user_id
         self.skill_context = skill_context or ""
-        self.llm_url = "http://100.104.68.115:11434/v1"
-        self.model = "gpt-oss:120b-32k"
-        self.max_iterations = 20
+        from app.core.llm_config import llm_config
+        self.llm_url = llm_config.primary_url
+        self.model = llm_config.primary_model
+        self.max_iterations = 30
         self.active_sessions: Dict[str, str] = {}  # session_id → description
         self._step_counter = 0
         self._should_pause = False
@@ -301,6 +302,18 @@ class SandboxOrchestrator:
                 # Compact messages after iteration 8 to prevent unbounded growth
                 if iteration == 7 and len(messages) > 10:
                     messages = self._compact_messages(messages)
+
+                # Inject deadline warning 3 iterations before the limit
+                if iteration == self.max_iterations - 3:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "IMPORTANT: You are running low on iterations. "
+                            "You MUST call report_complete on your NEXT step "
+                            "with a thorough summary of everything you've found so far. "
+                            "Do NOT start new research — synthesize what you have NOW."
+                        ),
+                    })
             else:
                 # No tool call — GLM thinks it's done
                 logger.info("[orchestrator] GLM returned no tool calls — treating as implicit completion")
@@ -311,11 +324,12 @@ class SandboxOrchestrator:
                     "messages": messages,
                 }
 
-        # Exceeded max iterations
+        # Exceeded max iterations — extract best summary from accumulated results
         logger.warning(f"[orchestrator] Hit max iterations ({self.max_iterations}) for task {self.task_id}")
+        summary = self._extract_best_summary(messages)
         return {
             "status": "completed",
-            "summary": "Task completed (reached iteration limit)",
+            "summary": summary,
             "artifacts": [],
             "messages": messages,
         }
@@ -511,6 +525,42 @@ class SandboxOrchestrator:
             "status": "completed",
             "summary": self._complete_summary,
         })
+
+    def _extract_best_summary(self, messages: List[dict]) -> str:
+        """Extract the best summary from messages when hitting the iteration limit.
+
+        Walks messages in reverse to find the last substantial tool output
+        or assistant synthesis, rather than returning a useless generic string.
+        """
+        # First: check if the last assistant message has a real summary
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                content = (msg.get("content") or "").strip()
+                if content and len(content) > 100:
+                    return content[:5000]
+                break  # only check the last assistant message
+
+        # Second: find the longest/last tool output that looks like a report
+        best_tool_output = ""
+        for msg in reversed(messages):
+            if msg["role"] == "tool":
+                content = msg.get("content", "")
+                # Try to parse JSON tool results for stdout
+                try:
+                    data = json.loads(content)
+                    stdout = data.get("stdout", "")
+                    if len(stdout) > len(best_tool_output):
+                        best_tool_output = stdout
+                except (json.JSONDecodeError, TypeError):
+                    if len(content) > len(best_tool_output):
+                        best_tool_output = content
+                if len(best_tool_output) > 500:
+                    break  # good enough
+
+        if best_tool_output:
+            return best_tool_output[:5000]
+
+        return "Task completed but no summary was produced (iteration limit reached)."
 
     def _compact_messages(self, messages: List[dict]) -> List[dict]:
         """Summarize prior tool results to keep context manageable."""

@@ -10,90 +10,94 @@ import uuid
 
 class RemindersCreateTool(BaseTool):
     """Tool for creating new reminders"""
-    
+
     @property
     def name(self) -> str:
         return "reminders_create"
-    
+
     @property
     def description(self) -> str:
-        return "Create a new reminder with text and due date/time. The due_at parameter should be an ISO 8601 datetime string."
-    
+        return "Create a new reminder with a title and due date/time. The reminder_time parameter should be an ISO 8601 datetime string."
+
     @property
     def parameters(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "text": {
+                "title": {
                     "type": "string",
-                    "description": "The reminder text/message"
+                    "description": "The reminder title/message"
                 },
-                "due_at": {
+                "description": {
+                    "type": "string",
+                    "description": "Optional longer description"
+                },
+                "reminder_time": {
                     "type": "string",
                     "description": "When the reminder should trigger (ISO 8601 datetime format, e.g., '2024-01-15T14:30:00Z')"
                 }
             },
-            "required": ["text", "due_at"]
+            "required": ["title", "reminder_time"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Create a new reminder"""
-        
-        text = kwargs.get("text")
-        due_at_str = kwargs.get("due_at")
-        
-        if not text:
+
+        title = kwargs.get("title")
+        description = kwargs.get("description", "")
+        reminder_time_str = kwargs.get("reminder_time")
+
+        if not title:
             return ToolResult(
                 success=False,
-                message="Reminder text is required"
+                message="Reminder title is required"
             )
-        
-        if not due_at_str:
+
+        if not reminder_time_str:
             return ToolResult(
                 success=False,
-                message="Due date/time is required"
+                message="Reminder time is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
-            # Parse the due_at datetime
+            # Parse the reminder_time datetime
             try:
-                due_at = datetime.fromisoformat(due_at_str.replace('Z', '+00:00'))
-                # Ensure it's timezone-aware
-                if due_at.tzinfo is None:
-                    due_at = due_at.replace(tzinfo=timezone.utc)
+                reminder_time = datetime.fromisoformat(reminder_time_str.replace('Z', '+00:00'))
+                if reminder_time.tzinfo is None:
+                    reminder_time = reminder_time.replace(tzinfo=timezone.utc)
             except ValueError:
                 return ToolResult(
                     success=False,
-                    message="Invalid due_at format. Please use ISO 8601 format (e.g., '2024-01-15T14:30:00Z')"
+                    message="Invalid reminder_time format. Please use ISO 8601 format (e.g., '2024-01-15T14:30:00Z')"
                 )
-            
-            # Create reminder
+
             reminder = Reminder(
                 user_id=user_id,
-                text=text,
-                due_at=due_at,
-                status="scheduled"
+                title=title,
+                description=description,
+                reminder_time=reminder_time,
+                is_completed=False,
             )
-            
+
             db.add(reminder)
             db.commit()
             db.refresh(reminder)
-            
+
             return ToolResult(
                 success=True,
                 data={
                     "reminder_id": str(reminder.id),
-                    "text": reminder.text,
-                    "due_at": reminder.due_at.isoformat(),
-                    "status": reminder.status,
+                    "title": reminder.title,
+                    "reminder_time": reminder.reminder_time.isoformat(),
+                    "is_completed": reminder.is_completed,
                     "created_at": reminder.created_at.isoformat()
                 },
-                message=f"Created reminder: {text[:50]}{'...' if len(text) > 50 else ''}"
+                message=f"Created reminder: {title[:50]}{'...' if len(title) > 50 else ''}"
             )
-            
+
         except Exception as e:
             db.rollback()
             return ToolResult(
@@ -106,15 +110,15 @@ class RemindersCreateTool(BaseTool):
 
 class RemindersListTool(BaseTool):
     """Tool for listing reminders"""
-    
+
     @property
     def name(self) -> str:
         return "reminders_list"
-    
+
     @property
     def description(self) -> str:
-        return "List reminders for a specific day or all upcoming reminders. Can filter by status (scheduled, completed, cancelled)."
-    
+        return "List reminders for a specific day or all upcoming reminders. Can filter by completion status."
+
     @property
     def parameters(self) -> Dict[str, Any]:
         return {
@@ -124,10 +128,10 @@ class RemindersListTool(BaseTool):
                     "type": "string",
                     "description": "Optional date to filter reminders (YYYY-MM-DD format). If not provided, shows all upcoming reminders."
                 },
-                "status": {
-                    "type": "string",
-                    "description": "Filter by status (scheduled, completed, cancelled). Defaults to 'scheduled'.",
-                    "default": "scheduled"
+                "include_completed": {
+                    "type": "boolean",
+                    "description": "Include completed reminders (default: false)",
+                    "default": False
                 },
                 "limit": {
                     "type": "integer",
@@ -136,34 +140,34 @@ class RemindersListTool(BaseTool):
                 }
             }
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """List reminders"""
-        
+
         date_str = kwargs.get("date")
-        status = kwargs.get("status", "scheduled")
+        include_completed = kwargs.get("include_completed", False)
         limit = kwargs.get("limit", 20)
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
-            query = db.query(Reminder).filter(
-                Reminder.user_id == user_id,
-                Reminder.status == status
-            )
-            
+            query = db.query(Reminder).filter(Reminder.user_id == user_id)
+
+            if not include_completed:
+                query = query.filter(Reminder.is_completed == False)
+
             # Filter by date if provided
             if date_str:
                 try:
                     filter_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                     start_of_day = datetime.combine(filter_date, datetime.min.time(), timezone.utc)
                     end_of_day = datetime.combine(filter_date, datetime.max.time(), timezone.utc)
-                    
+
                     query = query.filter(
                         and_(
-                            Reminder.due_at >= start_of_day,
-                            Reminder.due_at <= end_of_day
+                            Reminder.reminder_time >= start_of_day,
+                            Reminder.reminder_time <= end_of_day
                         )
                     )
                 except ValueError:
@@ -173,36 +177,36 @@ class RemindersListTool(BaseTool):
                     )
             else:
                 # Show upcoming reminders only
-                if status == "scheduled":
-                    query = query.filter(Reminder.due_at >= datetime.now(timezone.utc))
-            
-            reminders = query.order_by(Reminder.due_at).limit(limit).all()
-            
+                if not include_completed:
+                    query = query.filter(Reminder.reminder_time >= datetime.now(timezone.utc))
+
+            reminders = query.order_by(Reminder.reminder_time).limit(limit).all()
+
             reminder_list = []
             for reminder in reminders:
                 reminder_list.append({
                     "reminder_id": str(reminder.id),
-                    "text": reminder.text,
-                    "due_at": reminder.due_at.isoformat(),
-                    "status": reminder.status,
+                    "title": reminder.title,
+                    "description": reminder.description or "",
+                    "reminder_time": reminder.reminder_time.isoformat(),
+                    "is_completed": bool(reminder.is_completed),
                     "created_at": reminder.created_at.isoformat()
                 })
-            
-            message = f"Found {len(reminder_list)} {status} reminders"
+
+            message = f"Found {len(reminder_list)} reminders"
             if date_str:
                 message += f" for {date_str}"
-            
+
             return ToolResult(
                 success=True,
                 data={
                     "reminders": reminder_list,
-                    "status": status,
                     "date": date_str,
                     "total_found": len(reminder_list)
                 },
                 message=message
             )
-            
+
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -213,16 +217,16 @@ class RemindersListTool(BaseTool):
 
 
 class RemindersCancelTool(BaseTool):
-    """Tool for canceling reminders"""
-    
+    """Tool for canceling/completing reminders"""
+
     @property
     def name(self) -> str:
         return "reminders_cancel"
-    
+
     @property
     def description(self) -> str:
-        return "Cancel a reminder by ID. This sets the reminder status to 'cancelled'."
-    
+        return "Cancel or complete a reminder by ID. Marks it as completed."
+
     @property
     def parameters(self) -> Dict[str, Any]:
         return {
@@ -230,60 +234,58 @@ class RemindersCancelTool(BaseTool):
             "properties": {
                 "reminder_id": {
                     "type": "string",
-                    "description": "The ID of the reminder to cancel"
+                    "description": "The ID of the reminder to cancel/complete"
                 }
             },
             "required": ["reminder_id"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
-        """Cancel a reminder"""
-        
+        """Cancel a reminder by marking it completed"""
+
         reminder_id = kwargs.get("reminder_id")
-        
+
         if not reminder_id:
             return ToolResult(
                 success=False,
                 message="Reminder ID is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
-            # Find the reminder
             reminder = db.query(Reminder).filter(
                 Reminder.id == reminder_id,
                 Reminder.user_id == user_id
             ).first()
-            
+
             if not reminder:
                 return ToolResult(
                     success=False,
                     message="Reminder not found"
                 )
-            
-            if reminder.status == "cancelled":
+
+            if reminder.is_completed:
                 return ToolResult(
                     success=False,
-                    message="Reminder is already cancelled"
+                    message="Reminder is already completed"
                 )
-            
-            # Cancel the reminder
-            reminder.status = "cancelled"
+
+            reminder.is_completed = True
             db.commit()
-            
+
             return ToolResult(
                 success=True,
                 data={
                     "reminder_id": str(reminder.id),
-                    "text": reminder.text,
-                    "due_at": reminder.due_at.isoformat(),
-                    "status": reminder.status
+                    "title": reminder.title,
+                    "reminder_time": reminder.reminder_time.isoformat(),
+                    "is_completed": True
                 },
-                message=f"Cancelled reminder: {reminder.text[:50]}{'...' if len(reminder.text) > 50 else ''}"
+                message=f"Cancelled reminder: {reminder.title[:50]}{'...' if len(reminder.title) > 50 else ''}"
             )
-            
+
         except Exception as e:
             db.rollback()
             return ToolResult(

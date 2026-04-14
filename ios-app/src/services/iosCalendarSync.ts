@@ -331,15 +331,22 @@ class IOSCalendarSyncService {
         };
       });
 
-      // Send to backend
-      const response = await apiClient.post<{ synced: number; errors: number }>(
+      // Send to backend, including the sync window + calendar IDs so the
+      // backend can reconcile deletions (events removed on iOS that still
+      // exist on Sara's side inside the window).
+      const response = await apiClient.post<{ synced: number; errors: number; deleted?: number }>(
         '/api/calendar/ios-sync',
-        { events: eventsToSync }
+        {
+          events: eventsToSync,
+          window_start: startDate.toISOString(),
+          window_end: endDate.toISOString(),
+          calendar_ids: selectedCalendarIds,
+        }
       );
 
       await this.updateLastSyncTime();
 
-      console.log(`[IOSCalendar] Sync complete: ${response.synced} synced, ${response.errors} errors`);
+      console.log(`[IOSCalendar] Sync complete: ${response.synced} synced, ${response.deleted ?? 0} deleted, ${response.errors} errors`);
       return {
         success: true,
         synced: response.synced,

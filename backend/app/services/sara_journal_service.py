@@ -200,6 +200,16 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             if conversation_digest:
                 context_parts.append(f"**Recent conversation with David (last ~4 hours):**\n{conversation_digest}")
 
+            # Inject Sara's current emotional state
+            try:
+                from app.services.working_memory import read_memory
+                wm = await read_memory(user_id)
+                if wm and wm.sara_emotional_tone and wm.sara_emotional_tone != "attentive":
+                    intensity = wm.sara_emotional_intensity if wm.sara_emotional_intensity else 0.3
+                    context_parts.append(f"**Sara's current feeling:** {wm.sara_emotional_tone} (intensity: {intensity:.1f})")
+            except Exception:
+                pass
+
             context_str = "\n\n".join(context_parts) if context_parts else "Not much data right now - quiet period."
 
             # Generate the entry
@@ -216,8 +226,17 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
                 logger.warning("Failed to generate periodic journal entry")
                 return None
 
-            # Parse emotional state from content (simple heuristic)
-            emotional_state = self._infer_emotional_state(entry_content)
+            # Use tracked emotional state from working memory (with heuristic fallback)
+            emotional_state = None
+            try:
+                from app.services.working_memory import read_memory
+                wm = await read_memory(user_id)
+                if wm and wm.sara_emotional_tone:
+                    emotional_state = wm.sara_emotional_tone
+            except Exception:
+                pass
+            if not emotional_state:
+                emotional_state = self._infer_emotional_state(entry_content)
 
             # Store the entry
             entry = await self._store_entry(

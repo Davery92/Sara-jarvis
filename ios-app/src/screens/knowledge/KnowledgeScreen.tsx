@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
+import { useToast } from '../../context/ToastContext';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 // --- Types ---
@@ -125,6 +126,7 @@ function formatDate(iso: string): string {
 // --- Component ---
 
 export default function KnowledgeScreen() {
+  const { showToast } = useToast();
   const [activeCategory, setActiveCategory] = useState<Category>('All');
   const [facts, setFacts] = useState<PKGFact[]>([]);
   const [stats, setStats] = useState<PKGStats | null>(null);
@@ -186,7 +188,7 @@ export default function KnowledgeScreen() {
               await apiClient.delete(`/api/pkg/${fact.pkg_id}`);
               loadData();
             } catch {
-              Alert.alert('Error', 'Failed to delete fact');
+              showToast('error', 'Failed to delete fact');
             }
           },
         },
@@ -210,7 +212,7 @@ export default function KnowledgeScreen() {
               await apiClient.patch(`/api/pkg/${fact.pkg_id}`, { confidence: 0.95 });
               loadData();
             } catch {
-              Alert.alert('Error', 'Failed to update');
+              showToast('error', 'Failed to update');
             }
           },
         },
@@ -222,7 +224,7 @@ export default function KnowledgeScreen() {
               await apiClient.patch(`/api/pkg/${fact.pkg_id}`, { confidence: 0.3 });
               loadData();
             } catch {
-              Alert.alert('Error', 'Failed to update');
+              showToast('error', 'Failed to update');
             }
           },
         },
@@ -233,9 +235,9 @@ export default function KnowledgeScreen() {
   const handleReextract = async () => {
     try {
       await apiClient.post('/api/pkg/reextract');
-      Alert.alert('Queued', 'PKG re-extraction has been queued. New facts will appear shortly.');
+      showToast('info', 'PKG re-extraction has been queued. New facts will appear shortly.');
     } catch {
-      Alert.alert('Error', 'Failed to queue re-extraction');
+      showToast('error', 'Failed to queue re-extraction');
     }
   };
 
@@ -245,7 +247,7 @@ export default function KnowledgeScreen() {
       if (v.trim()) filledProps[k] = v.trim();
     }
     if (Object.keys(filledProps).length === 0) {
-      Alert.alert('Error', 'Please fill in at least one property');
+      showToast('error', 'Please fill in at least one property');
       return;
     }
     try {
@@ -257,9 +259,9 @@ export default function KnowledgeScreen() {
       setShowAddModal(false);
       setAddProps({});
       loadData();
-      Alert.alert('Success', 'Fact added to knowledge graph');
+      showToast('success', 'Fact added to knowledge graph');
     } catch {
-      Alert.alert('Error', 'Failed to add fact');
+      showToast('error', 'Failed to add fact');
     }
   };
 

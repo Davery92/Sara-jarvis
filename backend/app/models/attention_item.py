@@ -24,3 +24,5 @@ class AttentionItem(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     read_at = Column(DateTime(timezone=True))
     archived_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    action_history = Column(JSONB, default=[])

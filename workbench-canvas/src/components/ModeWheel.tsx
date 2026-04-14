@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
-import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search, Mail, GraduationCap, Radio, BookOpen } from 'lucide-react'
+import { useState } from 'react'
+import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search, Mail, GraduationCap, Radio } from 'lucide-react'
 import { useCanvasStore } from '../store/canvasStore'
-import { settingsApi } from '../services/api'
 import type { WindowType } from '../types'
 
 interface AppConfig {
@@ -17,7 +16,6 @@ const apps: AppConfig[] = [
   { id: 'email', icon: Mail, label: 'Email', color: 'bg-cyan-500' },
   { id: 'research', icon: Search, label: 'Research', color: 'bg-purple-500' },
   { id: 'learning', icon: GraduationCap, label: 'Learning', color: 'bg-indigo-500' },
-  { id: 'temerant', icon: BookOpen, label: 'Temerant', color: 'bg-rose-600' },
   { id: 'documents', icon: FileText, label: 'Docs', color: 'bg-blue-600' },
   { id: 'note', icon: FileText, label: 'Notes', color: 'bg-blue-500' },
   { id: 'maps', icon: GitBranch, label: 'Maps', color: 'bg-teal-600', opensPickerFirst: true },
@@ -31,21 +29,6 @@ const apps: AppConfig[] = [
 export default function ModeWheel() {
   const { openWindow, setMapPickerOpen } = useCanvasStore()
   const [isExpanded, setIsExpanded] = useState(false)
-  const [temerantEnabled, setTemerantEnabled] = useState(true)
-
-  useEffect(() => {
-    settingsApi
-      .getAutonomyFlags()
-      .then((flags) => {
-        if (typeof flags.temerant_enabled === 'boolean') {
-          setTemerantEnabled(flags.temerant_enabled)
-        }
-      })
-      .catch(() => {
-        // Keep default behavior if flags are unavailable.
-      })
-  }, [])
-
   const handleAppClick = (app: AppConfig) => {
     // Special case for maps - open the picker
     if (app.id === 'maps') {
@@ -63,8 +46,6 @@ export default function ModeWheel() {
     setIsExpanded(!isExpanded)
   }
 
-  const visibleApps = temerantEnabled ? apps : apps.filter((app) => app.id !== 'temerant')
-
   return (
     <div className="fixed bottom-8 right-8 z-50">
       {/* Expanded app buttons - 2 columns */}
@@ -73,7 +54,7 @@ export default function ModeWheel() {
           isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
         }`}
       >
-        {visibleApps.map((app) => {
+        {apps.map((app) => {
           const Icon = app.icon
 
           return (

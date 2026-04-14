@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 USER_TZ = ZoneInfo("America/New_York")
 DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
-# Anomaly: door/motion events during these hours are noteworthy
-QUIET_HOURS = (23, 5)  # 11 PM to 5 AM
+# Anomaly: door/motion events during these hours are noteworthy.
+# Runtime-overridable via tunable_setting (`notification.quiet_hours.start`,
+# `notification.quiet_hours.end`).
+QUIET_HOURS = (23, 5)  # 11 PM to 5 AM (fallback default)
 
 # Track recent events for anomaly detection (in-memory)
 _recent_events: list = []
@@ -30,8 +32,10 @@ _MAX_RECENT = 200
 
 
 def _is_quiet_hours(now: datetime) -> bool:
+    from app.services.tunables import get_tunable_int
+    start = get_tunable_int("notification.quiet_hours.start", QUIET_HOURS[0])
+    end = get_tunable_int("notification.quiet_hours.end", QUIET_HOURS[1])
     h = now.hour
-    start, end = QUIET_HOURS
     if start > end:
         return h >= start or h < end
     return start <= h < end
@@ -155,6 +159,59 @@ def _classify_ha_event(
                     "room": _extract_room(entity_id),
                     "media_title": attributes.get("media_title"),
                 },
+            }
+
+    # --- Appliance power sensors (washer, dryer, dishwasher, etc.) ---
+    elif domain == "sensor" and any(
+        kw in name for kw in ["power", "energy", "washer", "dryer", "dishwasher", "oven"]
+    ):
+        try:
+            power_w = float(to_state)
+        except (ValueError, TypeError):
+            power_w = None
+
+        if power_w is not None:
+            result["payload"]["power_watts"] = power_w
+            result["payload"]["appliance"] = friendly or _extract_room(entity_id)
+            # Detect appliance start/stop (>10W = running, <5W = idle)
+            try:
+                old_power = float(from_state) if from_state else 0
+            except (ValueError, TypeError):
+                old_power = 0
+
+            if power_w > 10 and old_power <= 10:
+                result["payload"]["appliance_event"] = "started"
+            elif power_w <= 5 and old_power > 10:
+                result["payload"]["appliance_event"] = "finished"
+
+    # --- Person tracking (HA person domain) ---
+    elif domain == "person":
+        result["payload"]["person_state"] = to_state  # "home", "not_home", zone name
+        result["payload"]["person_name"] = friendly or entity_id
+        if to_state == "home" and from_state == "not_home":
+            result["activity_signal"] = {
+                "signal_type": "device",
+                "source": entity_id,
+                "value": "home_arrival",
+                "metadata": {"person": friendly},
+            }
+        elif to_state == "not_home" and from_state == "home":
+            result["activity_signal"] = {
+                "signal_type": "device",
+                "source": entity_id,
+                "value": "left_home",
+                "metadata": {"person": friendly},
+            }
+
+    # --- Device tracker (phones, watches) ---
+    elif domain == "device_tracker":
+        result["payload"]["tracker_state"] = to_state
+        if to_state == "home" and from_state != "home":
+            result["activity_signal"] = {
+                "signal_type": "device",
+                "source": entity_id,
+                "value": "home_arrival",
+                "metadata": {"device": friendly},
             }
 
     return result

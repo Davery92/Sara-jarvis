@@ -11,6 +11,7 @@ Manages:
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+from app.core.timezone import now as local_now
 from enum import Enum
 from dataclasses import dataclass
 
@@ -57,7 +58,7 @@ class WorkerCoordinator:
     Features:
     - Exclusive locks for conflicting task groups
     - Resource budget enforcement
-    - Adaptive scheduling based on user state and karma
+    - Adaptive scheduling based on user state
     - Graceful degradation under constraints
     """
 
@@ -88,7 +89,6 @@ class WorkerCoordinator:
         "context-refresh": 90,
         "consolidation-sweep": 85,
         "buffer-cleanup": 80,
-        "karma-alerts": 75,
         "proactive-check": 50,
         "reflection-cycle": 45,
         "morning-anticipation": 40,
@@ -104,12 +104,21 @@ class WorkerCoordinator:
     def __init__(self, redis_url: str = "redis://redis:6379/0"):
         self.redis_url = redis_url
         self._redis: Optional[redis.Redis] = None
+        self._redis_loop_id: Optional[int] = None
         self._mode = SystemMode.NORMAL
 
     async def _get_redis(self) -> redis.Redis:
-        """Get Redis connection."""
-        if self._redis is None:
+        """Get Redis connection, recreated when event loop changes."""
+        import asyncio
+        cur_loop = id(asyncio.get_running_loop())
+        if self._redis is None or cur_loop != self._redis_loop_id:
+            if self._redis is not None:
+                try:
+                    await self._redis.aclose()
+                except Exception:
+                    pass
             self._redis = redis.from_url(self.redis_url)
+            self._redis_loop_id = cur_loop
         return self._redis
 
     async def acquire_exclusive(self, worker_name: str, group: str) -> bool:
@@ -233,7 +242,6 @@ class WorkerCoordinator:
         self,
         worker_name: str,
         user_availability: Optional[str] = None,
-        karma_score: Optional[float] = None,
     ) -> int:
         """
         Get adaptive schedule for a worker based on context.
@@ -250,13 +258,6 @@ class WorkerCoordinator:
         elif user_availability == "dnd":
             if "proactive" in worker_name:
                 multiplier *= 2.0  # Less proactive during DND
-
-        # Adjust for karma (for proactive workers)
-        if karma_score is not None and "proactive" in worker_name:
-            if karma_score < 30:
-                multiplier *= 1.5  # Be more conservative with low karma
-            elif karma_score > 70:
-                multiplier *= 0.75  # Can be more active with high karma
 
         # Adjust for system load
         load = await self._get_system_load()
@@ -348,7 +349,7 @@ class WorkerCoordinator:
                 "concurrent_heavy_tasks": int(heavy_tasks or 0),
             },
             "active_locks": active_locks,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": local_now().isoformat(),
         }
 
 

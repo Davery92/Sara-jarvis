@@ -12,6 +12,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
+from app.core.timezone import now as local_now
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -98,7 +99,7 @@ class RawBufferService:
         Returns:
             The entry ID assigned by Redis
         """
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or local_now()
 
         entry_data = {
             "content": json.dumps(content) if not isinstance(content, str) else content,
@@ -163,7 +164,7 @@ class RawBufferService:
         stream_key = self._stream_key(stream_type)
 
         # Default time window
-        end = end or datetime.utcnow()
+        end = end or local_now()
         start = start or (end - timedelta(hours=1))
 
         # Convert to Redis stream ID format
@@ -311,7 +312,7 @@ class RawBufferService:
             Dict mapping stream types to number of entries removed
         """
         max_age = max_age_hours or self.DEFAULT_TTL_HOURS
-        cutoff_ms = int((datetime.utcnow() - timedelta(hours=max_age)).timestamp() * 1000)
+        cutoff_ms = int((local_now() - timedelta(hours=max_age)).timestamp() * 1000)
 
         result = {}
 

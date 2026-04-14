@@ -35,12 +35,26 @@ interface FoodLogEntry {
   logged_at: string
 }
 
+interface TodayTarget {
+  date: string
+  is_training_day: boolean
+  is_deload: boolean
+  phase: { id: string; name: string; daily_steps_target?: number | null } | null
+  target: {
+    calories?: number | null
+    protein?: number | null
+    carbs?: number | null
+    fat?: number | null
+  } | null
+}
+
 export default function FoodLog() {
   const [showAddForm, setShowAddForm] = useState(false)
   const [entries, setEntries] = useState<FoodLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [editingEntry, setEditingEntry] = useState<FoodLogEntry | null>(null)
   const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set())
+  const [todayTarget, setTodayTarget] = useState<TodayTarget | null>(null)
 
   const toggleDay = (date: string) => {
     const newExpanded = new Set(expandedDays)
@@ -52,10 +66,25 @@ export default function FoodLog() {
     setExpandedDays(newExpanded)
   }
 
-  // Load entries on component mount
+  // Load entries + today's target on component mount
   useEffect(() => {
     fetchEntries()
+    fetchTodayTarget()
   }, [])
+
+  const fetchTodayTarget = async () => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/today-target`, {
+        credentials: 'include'
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setTodayTarget(data)
+      }
+    } catch (e) {
+      console.warn('Failed to fetch today target:', e)
+    }
+  }
 
   const fetchEntries = async () => {
     try {
@@ -113,6 +142,61 @@ export default function FoodLog() {
           Log Meal
         </button>
       </div>
+
+      {/* Today's target banner — pulled from active phase + cycling */}
+      {todayTarget?.target && (
+        <div className={`mb-6 rounded-lg p-4 border ${
+          todayTarget.is_training_day
+            ? 'bg-purple-900/20 border-purple-700/40'
+            : 'bg-blue-900/20 border-blue-700/40'
+        }`}>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div className="text-sm font-semibold text-gray-200">
+                Today's target ·{' '}
+                <span className={todayTarget.is_training_day ? 'text-purple-300' : 'text-blue-300'}>
+                  {todayTarget.is_training_day ? 'TRAINING DAY' : 'REST DAY'}
+                </span>
+                {todayTarget.is_deload && (
+                  <span className="ml-2 px-2 py-0.5 text-xs rounded bg-amber-600/20 text-amber-300">
+                    DELOAD
+                  </span>
+                )}
+              </div>
+              {todayTarget.phase && (
+                <div className="text-xs text-gray-500 mt-0.5">{todayTarget.phase.name}</div>
+              )}
+            </div>
+            <div className="flex gap-4 text-sm">
+              {todayTarget.target.calories != null && (
+                <span className="text-gray-300">
+                  <span className="font-semibold text-white">{todayTarget.target.calories}</span> kcal
+                </span>
+              )}
+              {todayTarget.target.protein != null && (
+                <span className="text-gray-300">
+                  P: <span className="font-semibold text-white">{todayTarget.target.protein}g</span>
+                </span>
+              )}
+              {todayTarget.target.carbs != null && (
+                <span className="text-gray-300">
+                  C: <span className="font-semibold text-white">{todayTarget.target.carbs}g</span>
+                </span>
+              )}
+              {todayTarget.target.fat != null && (
+                <span className="text-gray-300">
+                  F: <span className="font-semibold text-white">{todayTarget.target.fat}g</span>
+                </span>
+              )}
+              {todayTarget.phase?.daily_steps_target && (
+                <span className="text-emerald-400">
+                  {todayTarget.phase.daily_steps_target.toLocaleString()} steps
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Meal Form Modal */}
       {showAddForm && (

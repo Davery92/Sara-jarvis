@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import logging
 
-from app.models.calendar import CalendarEvent
+from app.models.calendar_event import CalendarEvent
 from app.models.jarvis_inbox import InboxKind
 from app.services.jarvis_inbox_service import inbox_service
 

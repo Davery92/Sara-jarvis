@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+from app.core.timezone import now as local_now
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.core.deps import get_current_user
-from app.core.database import get_db
+from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ async def get_active_session(current_user=Depends(get_current_user)):
         last_activity = session_data.get("last_activity_at")
         if last_activity:
             last_dt = datetime.fromisoformat(last_activity)
-            if (datetime.utcnow() - last_dt) > timedelta(hours=1):
+            if (local_now() - last_dt) > timedelta(hours=1):
                 return SessionResponse(active=False)
 
         return SessionResponse(
@@ -94,12 +95,12 @@ async def update_active_session(
         else:
             session_data = {
                 "conversation_id": conversation_id,
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": local_now().isoformat(),
             }
 
         # Update fields
         session_data["conversation_id"] = conversation_id
-        session_data["last_activity_at"] = datetime.utcnow().isoformat()
+        session_data["last_activity_at"] = local_now().isoformat()
         session_data["last_device"] = device
         session_data["turn_count"] = turn_count
         if topic_summary:
@@ -127,7 +128,7 @@ async def ack_notification(
     """
     from sqlalchemy import text
     try:
-        now = datetime.utcnow()
+        now = local_now()
         # Get the notification to compute response time
         row = db.execute(text("""
             SELECT sent_at FROM notification_log

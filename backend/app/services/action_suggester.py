@@ -158,13 +158,7 @@ def suggest(
                     "message": f"Let's follow up on {topics[0]}",
                 })
 
-        # Learning reviews due
-        reviews_due = unified_context.get("reviews_due", 0)
-        if reviews_due > 0 and "Start review" not in seen_labels:
-            suggestions.append({
-                "label": "Start review",
-                "message": "I want to do my learning reviews",
-            })
+        # Learning reviews due — disabled
 
     # Cap at 4 suggestions
     return suggestions[:4]

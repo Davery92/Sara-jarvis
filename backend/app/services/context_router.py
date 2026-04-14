@@ -18,7 +18,6 @@ class ContextDecision(NamedTuple):
     inject_cognitive: bool
     inject_insight: bool
     inject_daily_brief: bool
-    inject_body_state: bool  # DEPRECATED: always False, body state removed from chat
     inject_soul: bool  # Always True - Sara's core identity
     inject_pkg: bool  # Personal Knowledge Graph about David
     inject_patterns: bool  # Discovered behavioral patterns
@@ -26,6 +25,7 @@ class ContextDecision(NamedTuple):
     inject_learning_recall: bool  # Test recall on topics David is studying
     inject_changes_brief: bool  # Changes since last chat (re-entry, first msg of day, "catch me up")
     inject_lessons: bool  # Lessons learned from past mistakes (self-correction)
+    inject_fitness: bool  # Today's nutrition plan, macros eaten/remaining
     reason: str
 
 
@@ -103,6 +103,20 @@ class ContextRouter:
     # Intents eligible for lesson injection (conversational quality improvement)
     LESSON_INTENTS = ['CONVERSATIONAL', 'GENERAL', 'KNOWLEDGE', 'MEMORY', 'NOTES']
 
+    # Keywords that trigger fitness/nutrition context injection
+    FITNESS_KEYWORDS = [
+        'eat', 'eating', 'ate', 'meal', 'lunch', 'dinner', 'breakfast', 'snack',
+        'packing', 'cook', 'cooking', 'making', 'food', 'recipe',
+        'calories', 'calorie', 'carbs', 'protein', 'fat', 'fats', 'macros',
+        'nutrition', 'diet', 'good choice', 'healthy', 'should i eat',
+        'how much', 'portion', 'serving',
+        'workout', 'training', 'gym', 'exercise', 'lift', 'cardio',
+        'recovery', 'rest day', 'training day', 'phase', 'deload',
+    ]
+
+    # Intents that benefit from fitness context
+    FITNESS_INTENTS = ['FITNESS', 'HEALTH']
+
     def decide(
         self,
         intent: str,
@@ -140,8 +154,6 @@ class ContextRouter:
 
         # Determine if daily brief should be injected (body state removed from chat)
         inject_daily_brief = self._should_inject_daily_brief(message_lower, in_work_mode)
-        inject_body_state = False  # Body state permanently disabled
-
         # Soul is always injected - it's Sara's core identity
         inject_soul = True
 
@@ -160,6 +172,9 @@ class ContextRouter:
 
         # Determine if lessons from past mistakes should be injected
         inject_lessons = self._should_inject_lessons(intent, in_work_mode)
+
+        # Determine if fitness/nutrition context should be injected
+        inject_fitness = self._should_inject_fitness(intent, message_lower)
 
         # Build reason string for logging
         reasons = ["soul"]  # Always included
@@ -183,6 +198,8 @@ class ContextRouter:
             reasons.append("changes_brief")
         if inject_lessons:
             reasons.append("lessons")
+        if inject_fitness:
+            reasons.append("fitness")
 
         reason = f"Injecting: {', '.join(reasons)}"
         if in_work_mode:
@@ -193,7 +210,6 @@ class ContextRouter:
             inject_cognitive=inject_cognitive,
             inject_insight=inject_insight,
             inject_daily_brief=inject_daily_brief,
-            inject_body_state=inject_body_state,
             inject_soul=inject_soul,
             inject_pkg=inject_pkg,
             inject_patterns=inject_patterns,
@@ -201,6 +217,7 @@ class ContextRouter:
             inject_learning_recall=inject_learning_recall,
             inject_changes_brief=inject_changes_brief,
             inject_lessons=inject_lessons,
+            inject_fitness=inject_fitness,
             reason=reason
         )
 
@@ -281,45 +298,35 @@ class ContextRouter:
     def _should_inject_daily_brief(self, message_lower: str, in_work_mode: bool) -> bool:
         """
         Daily brief is injected when:
-        1. Not in work mode (always inject in normal mode)
-        2. In work mode but user asks about schedule/calendar/day
+        1. Schedule-related keywords detected (always)
+        2. Not in work mode AND message is substantive (>15 chars)
+        Skip for ultra-short messages (greetings, single words) to save latency.
         """
-        if not in_work_mode:
+        # Schedule keywords always trigger regardless of mode
+        if any(kw in message_lower for kw in self.DAILY_BRIEF_KEYWORDS):
             return True
 
-        # In work mode, check for schedule-related keywords
-        return any(kw in message_lower for kw in self.DAILY_BRIEF_KEYWORDS)
+        if in_work_mode:
+            return False
+
+        # Skip for greetings / ultra-short messages — not useful context
+        if len(message_lower.strip()) < 15:
+            return False
+
+        return True
 
     def _should_inject_pkg(self, intent: str, message_lower: str,
                            turn_count: int, in_work_mode: bool) -> bool:
         """
-        PKG context is injected when:
-        1. Not in work mode and intent benefits from personal knowledge
-        2. PKG keywords detected
-        3. First turn of conversation (rapport building)
-        4. Personal question detected
+        PKG is always-on — personal knowledge improves every response.
+        Only skip for ultra-short messages (greetings) to save latency.
+        The provider itself handles graceful fallback if Neo4j is unavailable.
         """
-        if in_work_mode:
-            # In work mode, only inject if explicitly asking about personal knowledge
-            return any(kw in message_lower for kw in self.PKG_KEYWORDS)
+        # Skip for greetings / ultra-short messages
+        if len(message_lower.strip()) < 10:
+            return False
 
-        # PKG keywords always trigger
-        if any(kw in message_lower for kw in self.PKG_KEYWORDS):
-            return True
-
-        # First turn of conversation
-        if turn_count <= 1:
-            return True
-
-        # Conversational/memory/general/fitness intents benefit from PKG
-        if intent in self.PKG_INTENTS:
-            return True
-
-        # Personal questions
-        if '?' in message_lower and any(w in message_lower for w in ['i ', 'my ', 'me ']):
-            return True
-
-        return False
+        return True
 
     def _should_inject_learning_recall(self, intent: str, message_lower: str,
                                       in_work_mode: bool) -> bool:
@@ -343,9 +350,14 @@ class ContextRouter:
         """
         Pattern context is injected when:
         1. Pattern-related keywords detected
-        2. First turn of day (morning greeting)
+        2. First turn of day (morning greeting), if message is substantive
         3. Conversational/fitness/general intents (not work mode)
+        Skip for ultra-short messages (greetings) to save latency.
         """
+        # Skip for greetings / ultra-short messages
+        if len(message_lower.strip()) < 10:
+            return False
+
         if in_work_mode:
             return any(kw in message_lower for kw in self.PATTERN_KEYWORDS)
 
@@ -384,6 +396,15 @@ class ContextRouter:
         if in_work_mode:
             return False
         return intent in self.LESSON_INTENTS
+
+    def _should_inject_fitness(self, intent: str, message_lower: str) -> bool:
+        """
+        Fitness context is needed when the user is talking about food, meals,
+        nutrition, workouts, or anything where knowing their plan/targets helps.
+        """
+        if intent in self.FITNESS_INTENTS:
+            return True
+        return any(kw in message_lower for kw in self.FITNESS_KEYWORDS)
 
 
 # Singleton instance

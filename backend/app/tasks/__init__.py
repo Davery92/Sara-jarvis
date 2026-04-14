@@ -6,7 +6,6 @@ This package contains all background tasks organized by function:
 - working_memory: Memory management and refresh
 - health: System health monitoring
 - input_processing: Sensory input handling
-- karma: Performance tracking (Phase 2)
 - reflection: Meta-cognitive auditing (Phase 3)
 - autonomy: Proactive behavior (Phase 4)
 """

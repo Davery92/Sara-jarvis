@@ -163,7 +163,6 @@ async def send_push_notification(
 ):
     """
     Send a push notification to a user's devices (for testing or internal use).
-    Uses Expo's push notification service.
     """
     try:
         user_id = data.get("user_id", current_user.id)
@@ -180,7 +179,7 @@ async def send_push_notification(
         if not tokens:
             return {"success": False, "message": "No push tokens found for user"}
 
-        # Prepare messages for Expo push API
+        # Prepare push messages
         messages = []
         for token in tokens:
             messages.append({
@@ -191,7 +190,7 @@ async def send_push_notification(
                 "data": notification_data,
             })
 
-        # Send to Expo push notification service
+        # Send to push notification service
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://exp.host/--/api/v2/push/send",
@@ -280,6 +279,139 @@ async def notification_feedback(
         logger.error(f"Error recording notification feedback: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to record feedback: {str(e)}")
+
+
+@router.get("/api/notifications")
+async def list_notifications(
+    limit: int = 50,
+    offset: int = 0,
+    category: Optional[str] = None,
+    source_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List notifications for the current user, newest first.
+    Combines notification_log (push notifications) and acs_show_david_buffer (ACS discoveries).
+    """
+    try:
+        user_id = current_user.id
+        params: dict = {"user_id": user_id, "limit": min(limit, 100), "offset": offset}
+
+        # Build category/source filters
+        cat_filter = ""
+        if category:
+            cat_filter = "AND category = :category"
+            params["category"] = category
+
+        src_filter = ""
+        if source_filter:
+            src_filter = "AND source = :source_filter"
+            params["source_filter"] = source_filter
+
+        # Unified query: merge notification_log + acs_show_david_buffer
+        rows = db.execute(text(f"""
+            (
+                SELECT
+                    CAST(id AS VARCHAR) as id,
+                    title,
+                    message,
+                    category,
+                    COALESCE(priority, 'normal') as priority,
+                    source,
+                    'notification' as item_type,
+                    sent_at as created_at,
+                    read_at,
+                    engaged,
+                    response_text
+                FROM notification_log
+                WHERE user_id = :user_id AND sent = TRUE
+                {cat_filter} {src_filter}
+            )
+            UNION ALL
+            (
+                SELECT
+                    id,
+                    title,
+                    content as message,
+                    COALESCE(category, 'discovery') as category,
+                    CASE
+                        WHEN priority >= 0.8 THEN 'high'
+                        WHEN priority >= 0.5 THEN 'normal'
+                        ELSE 'low'
+                    END as priority,
+                    'acs_session' as source,
+                    'acs_discovery' as item_type,
+                    created_at,
+                    shown_at as read_at,
+                    shown as engaged,
+                    NULL as response_text
+                FROM acs_show_david_buffer
+                WHERE user_id = :user_id
+                {"AND COALESCE(category, 'discovery') = :category" if category else ""}
+                {"AND 'acs_session' = :source_filter" if source_filter else ""}
+            )
+            ORDER BY created_at DESC
+            LIMIT :limit OFFSET :offset
+        """), params).fetchall()
+
+        # Count total
+        count_row = db.execute(text(f"""
+            SELECT (
+                SELECT COUNT(*) FROM notification_log
+                WHERE user_id = :user_id AND sent = TRUE {cat_filter} {src_filter}
+            ) + (
+                SELECT COUNT(*) FROM acs_show_david_buffer
+                WHERE user_id = :user_id
+                {"AND COALESCE(category, 'discovery') = :category" if category else ""}
+                {"AND 'acs_session' = :source_filter" if source_filter else ""}
+            )
+        """), params).fetchone()
+
+        notifications = []
+        for r in rows:
+            notifications.append({
+                "id": r.id,
+                "title": r.title,
+                "message": r.message,
+                "category": r.category,
+                "priority": r.priority,
+                "source": r.source,
+                "item_type": r.item_type,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "read_at": r.read_at.isoformat() if hasattr(r.read_at, 'isoformat') and r.read_at else None,
+                "engaged": bool(r.engaged),
+                "response_text": r.response_text,
+            })
+
+        return {
+            "notifications": notifications,
+            "total": count_row[0] if count_row else 0,
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing notifications: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/notifications/acs/{item_id}/mark-read")
+async def mark_acs_notification_read(
+    item_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark an ACS show_david_buffer item as shown/read."""
+    try:
+        db.execute(text("""
+            UPDATE acs_show_david_buffer
+            SET shown = TRUE, shown_at = NOW()
+            WHERE id = :id AND user_id = :user_id
+        """), {"id": item_id, "user_id": current_user.id})
+        db.commit()
+        return {"success": True}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/notifications/engagement-stats")

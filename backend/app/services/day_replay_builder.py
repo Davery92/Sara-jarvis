@@ -40,8 +40,6 @@ class DataSource(str, Enum):
     EMAIL = "email"
     RESEARCH = "research"
     LEARNING = "learning"
-    KARMA = "karma"
-    HABITS = "habits"
     TIMERS = "timers"
     REMINDERS = "reminders"
 
@@ -148,16 +146,6 @@ class DayReplayBuilder:
         if learning_events:
             events.extend(learning_events)
             sources_included.append(DataSource.LEARNING.value)
-
-        karma_events = await self._get_karma_events(db, day_start, day_end)
-        if karma_events:
-            events.extend(karma_events)
-            sources_included.append(DataSource.KARMA.value)
-
-        habit_events = await self._get_habit_events(db, user_id, replay_date)
-        if habit_events:
-            events.extend(habit_events)
-            sources_included.append(DataSource.HABITS.value)
 
         timer_events = await self._get_timer_events(db, user_id, day_start, day_end)
         if timer_events:
@@ -635,98 +623,6 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get learning events: {e}")
-
-        return events
-
-    async def _get_karma_events(
-        self,
-        db: Session,
-        day_start: datetime,
-        day_end: datetime
-    ) -> List[DayReplayEvent]:
-        """Get karma events for Sara's performance tracking."""
-        events = []
-        try:
-            result = db.execute(
-                text("""
-                    SELECT agent_id, dimension_name, delta, new_score, reason, created_at
-                    FROM karma_events
-                    WHERE agent_id = 'sara'
-                      AND created_at BETWEEN :day_start AND :day_end
-                    ORDER BY created_at
-                """),
-                {"day_start": day_start, "day_end": day_end}
-            ).fetchall()
-
-            # Group by dimension for summary
-            dimension_changes = {}
-            for row in result:
-                dim = row.dimension_name
-                if dim not in dimension_changes:
-                    dimension_changes[dim] = {"total_delta": 0, "events": 0, "final_score": row.new_score}
-                dimension_changes[dim]["total_delta"] += row.delta
-                dimension_changes[dim]["events"] += 1
-                dimension_changes[dim]["final_score"] = row.new_score
-
-            if dimension_changes:
-                events.append(DayReplayEvent(
-                    timestamp=day_end,
-                    source=DataSource.KARMA,
-                    event_type="karma_summary",
-                    summary=f"Karma: {len(result)} events across {len(dimension_changes)} dimensions",
-                    details={
-                        "total_events": len(result),
-                        "dimensions": dimension_changes
-                    },
-                    importance=0.5
-                ))
-
-        except Exception as e:
-            logger.warning(f"Failed to get karma events: {e}")
-
-        return events
-
-    async def _get_habit_events(
-        self,
-        db: Session,
-        user_id: str,
-        replay_date: date
-    ) -> List[DayReplayEvent]:
-        """Get habit completions for the day."""
-        events = []
-        try:
-            result = db.execute(
-                text("""
-                    SELECT hi.id, hi.status, h.name, h.category, hl.ts
-                    FROM habit_instances hi
-                    JOIN habits h ON hi.habit_id = h.id
-                    LEFT JOIN habit_logs hl ON hi.habit_id = hl.habit_id AND hi.date = DATE(hl.ts)
-                    WHERE hi.user_id = :user_id
-                      AND hi.date = :replay_date
-                """),
-                {"user_id": user_id, "replay_date": replay_date}
-            ).fetchall()
-
-            completed = [r for r in result if r.status == "complete"]
-            total = len(result)
-
-            if total > 0:
-                events.append(DayReplayEvent(
-                    timestamp=datetime.combine(replay_date, datetime.max.time()),
-                    source=DataSource.HABITS,
-                    event_type="habits_summary",
-                    summary=f"Habits: {len(completed)}/{total} completed",
-                    details={
-                        "total_habits": total,
-                        "completed": len(completed),
-                        "completion_rate": len(completed) / total if total > 0 else 0,
-                        "completed_habits": [r.name for r in completed]
-                    },
-                    importance=0.5
-                ))
-
-        except Exception as e:
-            logger.warning(f"Failed to get habit events: {e}")
 
         return events
 

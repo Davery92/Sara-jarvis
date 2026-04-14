@@ -10,6 +10,8 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
+from app.core.timezone import now as local_now, today as local_today, start_of_day
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,7 +55,7 @@ class AnticipationService:
         """
         Run morning anticipation - prepare for the day ahead.
         """
-        today = datetime.utcnow().date()
+        today = local_today()
         tomorrow = today + timedelta(days=1)
 
         # Get today's calendar events
@@ -63,7 +65,7 @@ class AnticipationService:
         )
 
         # Get any patterns relevant to today
-        day_of_week = datetime.utcnow().strftime("%A")
+        day_of_week = local_now().strftime("%A")
         patterns = await self._get_day_patterns(day_of_week)
 
         # Get pending items
@@ -97,7 +99,7 @@ class AnticipationService:
         """
         Run evening anticipation - prepare for tomorrow.
         """
-        today = datetime.utcnow().date()
+        today = local_today()
         tomorrow = today + timedelta(days=1)
         day_after = today + timedelta(days=2)
 
@@ -252,7 +254,7 @@ class AnticipationService:
             return []
 
         # Build context for Sara
-        time_until = start_time - datetime.utcnow()
+        time_until = start_time - local_now()
         context = f"""Upcoming event:
 - Title: {event['title']}
 - Start time: {start_time.strftime('%Y-%m-%d %H:%M')}
@@ -307,7 +309,7 @@ class AnticipationService:
 
         # Set reminder 30 minutes before
         reminder_time = start_time - timedelta(minutes=30)
-        if reminder_time > datetime.utcnow():
+        if reminder_time > local_now():
             preparations.append(Preparation(
                 prep_type=PreparationType.REMINDER,
                 title=f"Upcoming: {event['title']}",
@@ -380,7 +382,7 @@ class AnticipationService:
 
     async def _summarize_today(self) -> Dict:
         """Generate a summary of today's activity."""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        today_start = start_of_day()
 
         # Count interactions
         interaction_result = await self.db.execute(

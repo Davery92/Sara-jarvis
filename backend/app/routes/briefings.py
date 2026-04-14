@@ -263,7 +263,7 @@ async def get_reports_list(db: Session = Depends(get_db), current_user: dict = D
         return []
 
 
-@router.post("/api/reports/generate")
+@router.post("/api/reports/generate/phase4")
 async def generate_report_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Generate an intelligence report"""
     try:

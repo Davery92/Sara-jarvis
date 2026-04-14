@@ -23,12 +23,11 @@ class EmbeddingService:
             if not p.scheme or not p.netloc:
                 logger.warning("Embedding base URL invalid or empty; falling back to openai_base_url")
                 base = (settings.openai_base_url or "").rstrip("/")
-                if base.endswith("/v1"):
-                    base = base[:-3].rstrip("/")
         except Exception:
             base = (settings.openai_base_url or "").rstrip("/")
-            if base.endswith("/v1"):
-                base = base[:-3].rstrip("/")
+        # Strip /v1 suffix — this service appends /v1/embeddings itself
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
         return base, settings.embedding_model, settings.embedding_dim
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:

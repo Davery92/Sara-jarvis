@@ -21,8 +21,6 @@ const WINDOW_TYPE_MAP: Record<string, WindowType> = {
   modelviewer: 'modelviewer',
   automation: 'automation',
   pkg: 'pkg',
-  temerant: 'temerant',
-  rpg: 'temerant',
 }
 
 function normalizeWindowType(raw?: string): WindowType {

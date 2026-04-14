@@ -3,6 +3,7 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import apiClient from './api';
+import { navigateToInbox, navigateToNotifications } from './navigation';
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
@@ -30,6 +31,7 @@ const NOTIFICATION_CATEGORIES = {
   HEALTH_ALERT: 'HEALTH_ALERT',
   GENERAL_NUDGE: 'GENERAL_NUDGE',
   SARA_INSIGHT: 'SARA_INSIGHT',
+  ACS_DISCOVERY: 'ACS_DISCOVERY',
   THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
   LEARNING_REVIEW: 'LEARNING_REVIEW',
 };
@@ -90,6 +92,20 @@ async function setupNotificationCategories() {
       options: { opensAppToForeground: true },
       textInput: { submitButtonTitle: 'Send', placeholder: 'Reply to Sara...' },
     },
+    {
+      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+      buttonTitle: 'View',
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.DISMISS,
+      buttonTitle: 'Not Now',
+      options: { opensAppToForeground: false },
+    },
+  ]);
+
+  // ACS autonomous discoveries
+  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.ACS_DISCOVERY, [
     {
       identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
       buttonTitle: 'View',
@@ -397,6 +413,13 @@ class PushNotificationService {
           );
         }
         break;
+      case 'task_chat_inject':
+        // Background task result was persisted to conversation — reload chat
+        console.log('[PushNotifications] Task chat inject:', data);
+        if (this.onTaskChatInject) {
+          this.onTaskChatInject(data.task_id, data.conversation_id, data.note_id);
+        }
+        break;
       case 'background_task':
         // Background task completed - notify listeners
         console.log('[PushNotifications] Background task notification:', data);
@@ -418,15 +441,9 @@ class PushNotificationService {
         break;
       case 'sara_insight':
       case 'observation':
-        // Sara proactive insight — open chat to discuss
+        // Sara proactive insight — open notifications screen
         console.log('[PushNotifications] Sara insight notification:', data);
-        if (this.onHeartbeatTapped) {
-          this.onHeartbeatTapped(
-            data.title || 'Sara noticed something',
-            data.message || data.body || '',
-            data.priority || 'normal'
-          );
-        }
+        navigateToNotifications({ notificationId: data.notification_id });
         break;
       case 'thread_followup':
         // Thread follow-up — Sara following up on a prior conversation topic
@@ -451,33 +468,34 @@ class PushNotificationService {
           );
         }
         break;
+      case 'inbox_digest':
+      case 'inbox':
+        // Morning inbox summary - open Inbox directly
+        console.log('[PushNotifications] Inbox digest notification:', data);
+        navigateToInbox({ tab: 'content' });
+        break;
+      case 'attention_digest':
+        // Attention backlog summary - open Inbox Attention tab
+        console.log('[PushNotifications] Attention digest notification:', data);
+        navigateToInbox({ tab: 'attention' });
+        break;
       case 'heartbeat':
       case 'unified_heartbeat':
       case 'checkin':
-        // Heartbeat/check-in notification from Sara - open chat
+        // Heartbeat/check-in notification from Sara
         console.log('[PushNotifications] Heartbeat notification:', data);
-        if (this.onHeartbeatTapped) {
-          this.onHeartbeatTapped(
-            data.title || 'Sara noticed something',
-            data.message || '',
-            data.priority || 'normal'
-          );
-        }
+        navigateToNotifications({ notificationId: data.notification_id });
         break;
       default:
-        // Any other notification type - navigate to chat as default
-        console.log('[PushNotifications] Unknown notification type, navigating to chat:', data.type);
-        if (this.onHeartbeatTapped) {
-          this.onHeartbeatTapped(
-            data.title || 'Sara',
-            data.message || '',
-            data.priority || 'normal'
-          );
-        }
+        // Any other notification type — open notifications screen
+        console.log('[PushNotifications] Notification tapped, opening notifications:', data.type);
+        navigateToNotifications({ notificationId: data.notification_id });
         break;
     }
   }
 
+  // Callback for task chat inject (result persisted to conversation — reload chat)
+  private onTaskChatInject: ((taskId: string, conversationId?: string, noteId?: string) => void) | null = null;
   // Callback for background task completion
   private onBackgroundTaskComplete: ((taskId: string, noteId?: string) => void) | null = null;
   private onAgentClarificationNeeded: ((taskId: string) => void) | null = null;
@@ -500,6 +518,15 @@ class PushNotificationService {
     callback: (taskId: string, noteId?: string) => void
   ): void {
     this.onBackgroundTaskComplete = callback;
+  }
+
+  /**
+   * Set callback for task chat inject (task result was persisted — reload conversation)
+   */
+  setOnTaskChatInject(
+    callback: (taskId: string, conversationId?: string, noteId?: string) => void
+  ): void {
+    this.onTaskChatInject = callback;
   }
 
   /**

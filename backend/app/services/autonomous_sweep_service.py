@@ -15,6 +15,8 @@ from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from sqlalchemy.orm import Session
 from sqlalchemy import text, desc, and_, or_, func
 
+from app.core.timezone import now as local_now
+
 
 @dataclass
 class SweepMetrics:
@@ -443,14 +445,14 @@ class AutonomousSweepService:
             return insights
         
         # Check if reflection is done today (reflection existing means it's done)
-        today = datetime.now().date()
+        today = local_now().date()
         today_reflection = self.db.query(DailyReflection).filter(
             DailyReflection.user_id == user_id,
             DailyReflection.reflection_date == today
         ).first()
         
         # Check time - only suggest after 5 PM
-        current_hour = datetime.now().hour
+        current_hour = local_now().hour
         
         if not today_reflection and current_hour >= 17:
             # Higher priority later in the evening
@@ -473,7 +475,7 @@ class AutonomousSweepService:
         insights = []
         
         # Get recent reflections (last 2 weeks) - all existing reflections are completed
-        two_weeks_ago = datetime.now() - timedelta(days=14)
+        two_weeks_ago = local_now() - timedelta(days=14)
         recent_reflections = self.db.query(DailyReflection).filter(
             DailyReflection.user_id == user_id,
             DailyReflection.created_at >= two_weeks_ago
@@ -482,7 +484,7 @@ class AutonomousSweepService:
         if len(recent_reflections) >= 3:
             # Calculate reflection streak
             consecutive_days = 0
-            current_date = datetime.now().date()
+            current_date = local_now().date()
             
             for i in range(14):  # Check last 14 days
                 check_date = current_date - timedelta(days=i)
@@ -572,7 +574,7 @@ class AutonomousSweepService:
 
         insights = []
 
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow_start = today_start + timedelta(days=1)
         completed_today = self.db.query(HabitInstance.habit_id).filter(
             HabitInstance.user_id == user_id,
@@ -635,7 +637,7 @@ class AutonomousSweepService:
         insights = []
         
         # Get recent notes (last 7 days)
-        week_ago = datetime.now() - timedelta(days=7)
+        week_ago = local_now() - timedelta(days=7)
         recent_notes = self.db.query(Note).filter(
             Note.user_id == user_id,
             Note.updated_at >= week_ago
@@ -677,7 +679,7 @@ class AutonomousSweepService:
             return insights
         
         # Get recent habit performance
-        week_ago = datetime.now() - timedelta(days=7)
+        week_ago = local_now() - timedelta(days=7)
         recent_instances = self.db.query(HabitInstance).filter(
             and_(
                 HabitInstance.user_id == user_id,
@@ -764,7 +766,7 @@ class AutonomousSweepService:
             return insights
 
         # Get recent conversation turns
-        week_ago = datetime.now() - timedelta(days=7)
+        week_ago = local_now() - timedelta(days=7)
         recent_turns = self.db.query(ConversationTurn).filter(
             and_(
                 ConversationTurn.user_id == user_id,
@@ -804,8 +806,8 @@ class AutonomousSweepService:
         insights = []
         
         # Generate a summary based on recent activity
-        week_ago = datetime.now() - timedelta(days=7)
-        
+        week_ago = local_now() - timedelta(days=7)
+
         # Count activities
         notes_count = self.db.query(Note).filter(
             and_(Note.user_id == user_id, Note.updated_at >= week_ago)

@@ -10,6 +10,8 @@ from pydantic import BaseModel
 import json
 import logging
 
+from app.core.timezone import now as local_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,7 +236,7 @@ class ProactiveIntelligenceEngine:
     async def _suggest_meal(self, user_id: str, pattern: DetectedPattern) -> Optional[ProactiveSuggestion]:
         """Suggest meal based on typical timing"""
         try:
-            current_hour = datetime.utcnow().hour
+            current_hour = local_now().hour
             typical_hours = pattern.pattern_data.get("typical_hours", [])
 
             # Check if approaching typical meal time (within 30min before)
@@ -269,7 +271,7 @@ class ProactiveIntelligenceEngine:
     async def _suggest_workout(self, user_id: str, pattern: DetectedPattern) -> Optional[ProactiveSuggestion]:
         """Suggest workout based on typical schedule"""
         try:
-            now = datetime.utcnow()
+            now = local_now()
             typical_day = pattern.pattern_data.get("day")
             typical_hour = pattern.pattern_data.get("hour")
 
@@ -317,8 +319,8 @@ class ProactiveIntelligenceEngine:
         suggestions = []
 
         # Check if it's 3pm and haven't eaten much today
-        now = datetime.utcnow()
-        if now.hour == 15:  # 3pm
+        now = local_now()
+        if now.hour == 15:  # 3pm ET
             today_meals = await self._get_meals_today(user_id)
             if len(today_meals) < 2:
                 # Check for duplicates
@@ -637,3 +639,102 @@ class ProactiveIntelligenceEngine:
 def get_proactive_intelligence(db: Session, event_bus=None) -> ProactiveIntelligenceEngine:
     """Get proactive intelligence engine instance"""
     return ProactiveIntelligenceEngine(db, event_bus)
+
+
+async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Cross-reference recent emails, upcoming calendar, and notes to find connections.
+
+    Returns list of insights like:
+    "You got an email from Mike about Q3 timeline, and you have a meeting with Mike tomorrow"
+    """
+    from app.db.session import get_async_session_factory
+
+    async_session = get_async_session_factory()
+    insights = []
+
+    try:
+        async with async_session() as db:
+            # Get recent email senders + subjects (last 24h)
+            emails = await db.execute(text("""
+                SELECT sender_name, subject, importance_score
+                FROM email
+                WHERE user_id = :uid AND received_at > NOW() - INTERVAL '24 hours'
+                ORDER BY received_at DESC LIMIT 20
+            """), {"uid": user_id})
+            email_rows = emails.fetchall()
+
+            # Get upcoming calendar events (next 48h)
+            events = await db.execute(text("""
+                SELECT title, start_time, description
+                FROM calendar_event
+                WHERE user_id = :uid
+                  AND start_time BETWEEN NOW() AND NOW() + INTERVAL '48 hours'
+                ORDER BY start_time ASC LIMIT 10
+            """), {"uid": user_id})
+            event_rows = events.fetchall()
+
+            # Get recent notes (last 7 days)
+            notes = await db.execute(text("""
+                SELECT title, tags
+                FROM note
+                WHERE user_id = :uid AND updated_at > NOW() - INTERVAL '7 days'
+                ORDER BY updated_at DESC LIMIT 20
+            """), {"uid": user_id})
+            note_rows = notes.fetchall()
+
+        if not email_rows or not event_rows:
+            return insights
+
+        # Extract entities from emails
+        email_entities = set()
+        for sender, subject, _ in email_rows:
+            if sender:
+                email_entities.add(sender.lower().split()[0])  # First name
+            if subject:
+                for word in subject.split():
+                    if len(word) > 4 and word[0].isupper():
+                        email_entities.add(word.lower())
+
+        # Check calendar events for overlap
+        for title, start_time, description in event_rows:
+            event_text = f"{title} {description or ''}".lower()
+            matches = [e for e in email_entities if e in event_text]
+
+            if matches:
+                # Find the matching email
+                for sender, subject, importance in email_rows:
+                    sender_match = sender and sender.lower().split()[0] in matches
+                    subject_match = subject and any(m in subject.lower() for m in matches)
+                    if sender_match or subject_match:
+                        time_str = start_time.strftime("%A at %I:%M %p") if start_time else "soon"
+                        insights.append({
+                            "type": "email_calendar_link",
+                            "title": f"Email from {sender} may relate to upcoming event",
+                            "message": f"You received an email from {sender} about \"{subject}\" — and you have \"{title}\" {time_str}.",
+                            "priority": "normal",
+                            "confidence": 0.7,
+                        })
+                        break  # One insight per event
+
+        # Check notes for calendar overlap
+        for title, start_time, description in event_rows:
+            event_words = set(w.lower() for w in f"{title} {description or ''}".split() if len(w) > 4)
+            for note_title, note_tags in note_rows:
+                note_words = set(w.lower() for w in (note_title or "").split() if len(w) > 4)
+                overlap = event_words & note_words
+                if len(overlap) >= 2:
+                    time_str = start_time.strftime("%A at %I:%M %p") if start_time else "soon"
+                    insights.append({
+                        "type": "note_calendar_link",
+                        "title": f"Your note \"{note_title}\" relates to upcoming event",
+                        "message": f"Your note \"{note_title}\" overlaps with \"{title}\" ({time_str}) on: {', '.join(overlap)}",
+                        "priority": "low",
+                        "confidence": 0.5,
+                    })
+                    break
+
+    except Exception as e:
+        logger.warning(f"Cross-reference check failed: {e}")
+
+    return insights[:3]  # Max 3 insights per check

@@ -36,6 +36,7 @@ class PersonalityContext:
     tone_directive: str = ""
     verbosity: str = "balanced"  # ultra_brief, brief, balanced, detailed
     emotional_modulation: str = ""
+    emotional_state: str = ""  # Sara's current emotional tone + intensity
     memory_nudges: List[str] = field(default_factory=list)
     calibration_directives: List[str] = field(default_factory=list)
 
@@ -45,6 +46,9 @@ class PersonalityContext:
 
         if self.tone_directive:
             lines.append(f"Tone: {self.tone_directive}")
+
+        if self.emotional_state:
+            lines.append(self.emotional_state)
 
         if self.emotional_modulation:
             lines.append(f"Emotional awareness: {self.emotional_modulation}")
@@ -213,36 +217,43 @@ def build_personality_context(
     memory_nudges: Optional[List[str]] = None,
     # Behavioral calibration (pre-loaded)
     calibration_data: Optional[Dict] = None,
-    # Body state params kept for backward compat but ignored
-    stress_load: float = 0.3,
-    alertness: float = 0.5,
-    blood_sugar: float = 0.5,
-    circadian_phase: str = "normal",
+    # Sara's emotional state (from working memory)
+    sara_emotional_tone: Optional[str] = None,
+    sara_emotional_intensity: Optional[float] = None,
 ) -> PersonalityContext:
     """
     Build the full adaptive personality context.
 
-    Merges activity state, conversation signals, and behavioral calibration
-    into a personality directive. Body state is intentionally not used.
+    Merges activity state, Sara's emotional state, conversation signals,
+    and behavioral calibration into a personality directive.
     """
     ctx = PersonalityContext()
 
     # 1. BASE TONE from activity state
     ctx.tone_directive = ACTIVITY_TONES.get(activity_state, ACTIVITY_TONES["active"])
 
-    # 2. EMOTIONAL MODULATION — activity-based only (no body state)
+    # 2. SARA'S EMOTIONAL STATE — colors her responses subtly
+    if sara_emotional_tone and sara_emotional_tone != "attentive":
+        intensity = sara_emotional_intensity or 0.3
+        intensity_word = "subtly" if intensity < 0.5 else "noticeably" if intensity < 0.75 else "strongly"
+        ctx.emotional_state = (
+            f"Sara's inner state: currently feeling {sara_emotional_tone} ({intensity_word}). "
+            f"Let this subtly color your responses — don't announce it, just let it influence word choice and energy."
+        )
+
+    # 3. EMOTIONAL MODULATION — activity-based context about David
     ctx.emotional_modulation = _build_emotional_modulation(activity_state, room)
 
-    # 3. VERBOSITY CALIBRATION
+    # 4. VERBOSITY CALIBRATION
     base_verbosity = ACTIVITY_VERBOSITY.get(activity_state, "balanced")
     ctx.verbosity = _calibrate_verbosity(
         base_verbosity, interruptibility, turn_count, conversation_depth
     )
 
-    # 4. BEHAVIORAL CALIBRATION DIRECTIVES
+    # 5. BEHAVIORAL CALIBRATION DIRECTIVES
     ctx.calibration_directives = _build_calibration_directives(calibration_data)
 
-    # 5. MEMORY NUDGES
+    # 6. MEMORY NUDGES
     if memory_nudges:
         ctx.memory_nudges = memory_nudges[:3]
 

@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 USER_TIMEZONE = ZoneInfo("America/New_York")
 
 from app.celery_app import celery_app
+from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ async def _sync_emails_async():
                         since = sync_state.last_sync_at
                     else:
                         # First sync - get last 24 hours
-                        since = datetime.utcnow() - timedelta(hours=24)
+                        since = local_now() - timedelta(hours=24)
 
                     logger.info(f"Syncing {mailbox} since {since} (max_received_at: {max_received_at})")
 
@@ -232,7 +233,7 @@ async def _sync_emails_async():
                                         )
                                         if content:
                                             # Generate storage key
-                                            date_prefix = datetime.utcnow().strftime("%Y/%m/%d")
+                                            date_prefix = local_now().strftime("%Y/%m/%d")
                                             minio_key = f"email-attachments/{date_prefix}/{email_data.id}/{att.name}"
 
                                             # Upload to MinIO
@@ -243,7 +244,7 @@ async def _sync_emails_async():
                                                 length=len(content),
                                                 content_type=att.content_type or "application/octet-stream"
                                             )
-                                            downloaded_at = datetime.utcnow()
+                                            downloaded_at = local_now()
                                             logger.info(f"Downloaded attachment: {att.name} -> {bucket}/{minio_key}")
                                     except Exception as e:
                                         logger.warning(f"Failed to download attachment {att.name}: {e}")
@@ -276,7 +277,7 @@ async def _sync_emails_async():
                     # fetches recent messages (last 3 days) with just id+isRead and
                     # reconciles against locally-unread emails.
                     try:
-                        reconcile_since = datetime.utcnow() - timedelta(days=3)
+                        reconcile_since = local_now() - timedelta(days=3)
                         read_check_emails = await msgraph.get_emails(
                             mailbox, since=reconcile_since, top=100,
                             select_fields=["id", "isRead"]
@@ -307,14 +308,14 @@ async def _sync_emails_async():
 
                     # Update sync state
                     if sync_state:
-                        sync_state.last_sync_at = datetime.utcnow()
+                        sync_state.last_sync_at = local_now()
                         sync_state.last_sync_count = synced_count
                         sync_state.last_sync_errors = total_errors
                     else:
                         sync_state = EmailSyncState(
                             user_id=user_id,
                             mailbox=mailbox,
-                            last_sync_at=datetime.utcnow(),
+                            last_sync_at=local_now(),
                             last_sync_count=synced_count,
                             last_sync_errors=0
                         )
@@ -328,10 +329,15 @@ async def _sync_emails_async():
                     else:
                         logger.info(f"Synced {synced_count} emails from {mailbox}")
 
-                    # Queue analysis for newly synced emails
                     if synced_count > 0:
-                        analyze_recent_emails.delay(mailbox, user_id)
+                        # Only analyze when there are actually new emails
+                        analyze_recent_emails.apply_async(
+                            args=[mailbox, user_id],
+                            queue="low_priority",
+                            expires=300,
+                        )
 
+                    if synced_count > 0:
                         # Track in unified context changes
                         try:
                             from app.services.context_writer import append_change
@@ -345,7 +351,7 @@ async def _sync_emails_async():
                     continue
 
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": local_now().isoformat(),
             "emails_synced": total_synced,
             "read_status_updated": total_read_updated,
             "errors": total_errors,
@@ -418,7 +424,26 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     Email.analyzed_at.is_(None)
                 ).order_by(Email.received_at.desc()).limit(50)
             )
-            emails = result.scalars().all()
+            emails = list(result.scalars().all())
+
+            # Also retry emails that were analyzed but may have missed meetings:
+            # analyzed, no calendar event, received in the last 7 days, not already
+            # flagged as has_meeting=True (those succeeded but event creation failed)
+            from sqlalchemy import and_, or_
+            retry_result = await db.execute(
+                select(Email).where(
+                    Email.mailbox == mailbox,
+                    Email.user_id == user_id,
+                    Email.analyzed_at.isnot(None),
+                    Email.calendar_event_id.is_(None),
+                    or_(Email.has_meeting.is_(None), Email.has_meeting == False),
+                    Email.received_at >= local_now() - timedelta(days=7),
+                ).order_by(Email.received_at.desc()).limit(20)
+            )
+            retry_emails = retry_result.scalars().all()
+            if retry_emails:
+                logger.info(f"Retrying meeting detection for {len(retry_emails)} previously-analyzed emails")
+                emails.extend(retry_emails)
 
             notification_service = get_notification_service()
 
@@ -447,7 +472,7 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     email.importance_score = analysis["importance_score"]
                     email.summary = analysis["summary"]
                     email.action_required = analysis["action_required"]
-                    email.analyzed_at = datetime.utcnow()
+                    email.analyzed_at = local_now()
                     email.has_meeting = analysis.get("has_meeting", False)
 
                     # Create calendar event if this is a meeting email
@@ -458,7 +483,7 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                             )
                             if event_id:
                                 email.calendar_event_id = event_id
-                                email.calendar_event_created_at = datetime.utcnow()
+                                email.calendar_event_created_at = local_now()
                                 source_type = "ICS attachment" if ics_meeting_info else "email content"
                                 logger.info(f"Created calendar event {event_id} from {source_type}: {email.subject}")
                         except Exception as e:
@@ -504,7 +529,7 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                             url=f"https://sara.avery.cloud/email/{email.id}"
                         )
                         email.notification_sent = True
-                        email.notification_sent_at = datetime.utcnow()
+                        email.notification_sent_at = local_now()
                         notifications_sent += 1
 
                     analyzed_count += 1
@@ -798,6 +823,28 @@ def _parse_ics_datetime(dt_str: str) -> Optional[datetime]:
         return None
 
 
+def _normalize_meeting_title(title: str) -> str:
+    """Normalize a meeting title for dedup comparison.
+
+    Strips common prefixes like 'Updated invitation:', 'Re:', 'Fwd:' and
+    trailing participants/dates so the core meeting name is compared.
+    """
+    t = title.lower().strip()
+    for prefix in ["updated invitation:", "invitation:", "accepted:", "declined:",
+                    "tentative:", "canceled:", "cancelled:", "re:", "fwd:", "fw:"]:
+        if t.startswith(prefix):
+            t = t[len(prefix):].strip()
+    # Strip trailing email-style annotations like "@ Mon Mar 2..."
+    at_idx = t.find(" @ ")
+    if at_idx > 0:
+        t = t[:at_idx].strip()
+    # Strip trailing parenthesized emails like "(devadmin@riskninja.ai)"
+    paren_idx = t.rfind(" (")
+    if paren_idx > 0 and t.endswith(")"):
+        t = t[:paren_idx].strip()
+    return t
+
+
 async def _create_calendar_event_from_email(
     db,
     user_id: str,
@@ -829,26 +876,46 @@ async def _create_calendar_event_from_email(
             logger.warning(f"No start_time in meeting_info for email: {email.subject}")
             return None
 
-        # Parse datetime strings
-        try:
-            start_time = dateutil_parser.parse(start_time_str)
-            # Ensure timezone-aware, convert to local, strip tzinfo for naive storage
-            if start_time.tzinfo is None:
-                start_time = start_time.replace(tzinfo=USER_TIMEZONE)
-            start_time = start_time.astimezone(USER_TIMEZONE).replace(tzinfo=None)
-        except Exception as e:
-            logger.warning(f"Failed to parse start_time '{start_time_str}': {e}")
+        # Parse datetime strings.
+        #
+        # NOTE: The LLM is instructed to emit naive local (Eastern) times. ICS
+        # attachments DO carry real timezone info and go through a separate
+        # path (_parse_ics_content) that already converts properly, so by the
+        # time meeting_info gets here from the LLM path, any offset present is
+        # almost certainly the LLM hallucinating "-05:00" from a stale prompt
+        # example — which silently shifts the wall-clock time by an hour
+        # whenever DST is in effect. To avoid that class of bug, we treat the
+        # LLM's datetime as a wall-clock string: strip any tzinfo and re-stamp
+        # with the user's current Eastern timezone (DST-aware via ZoneInfo).
+        is_from_ics = (meeting_info.get("source") == "ics_attachment")
+
+        def _parse_meeting_dt(value: str) -> Optional[datetime]:
+            try:
+                dt = dateutil_parser.parse(value)
+            except Exception as exc:
+                logger.warning(f"Failed to parse meeting datetime '{value}': {exc}")
+                return None
+            if is_from_ics:
+                # ICS path is trusted — keep its tz, normalize to ET, drop tz.
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=USER_TIMEZONE)
+                return dt.astimezone(USER_TIMEZONE).replace(tzinfo=None)
+            # LLM path — discard any offset and treat as local Eastern wall time.
+            if dt.tzinfo is not None:
+                logger.info(
+                    f"Stripping LLM-supplied offset {dt.tzinfo} from '{value}' "
+                    f"and treating as local Eastern (DST-aware)"
+                )
+                dt = dt.replace(tzinfo=None)
+            return dt
+
+        start_time = _parse_meeting_dt(start_time_str)
+        if start_time is None:
             return None
 
         # End time - default to 1 hour after start if not provided
         if end_time_str:
-            try:
-                end_time = dateutil_parser.parse(end_time_str)
-                if end_time.tzinfo is None:
-                    end_time = end_time.replace(tzinfo=USER_TIMEZONE)
-                end_time = end_time.astimezone(USER_TIMEZONE).replace(tzinfo=None)
-            except:
-                end_time = start_time + timedelta(hours=1)
+            end_time = _parse_meeting_dt(end_time_str) or (start_time + timedelta(hours=1))
         else:
             end_time = start_time + timedelta(hours=1)
 
@@ -869,29 +936,64 @@ async def _create_calendar_event_from_email(
 
         description = "\n".join(description_parts)
 
-        # Deduplicate: check for existing event with same title+start_time (or close title match)
-        from sqlalchemy import select, and_
+        # --- Dedup Strategy ---
+        # 1. Check if another email in the same conversation already created an event
+        # 2. Check for existing events with similar title on the same day
+        from sqlalchemy import select, and_, func
+        from app.models.email import Email as EmailModel
+
+        # Strategy 1: conversation-based dedup (updated invites share conversation_id)
+        if email.conversation_id:
+            thread_emails = (await db.execute(
+                select(EmailModel).where(
+                    EmailModel.conversation_id == email.conversation_id,
+                    EmailModel.calendar_event_id.isnot(None),
+                    EmailModel.id != email.id,
+                )
+            )).scalars().all()
+
+            for thread_email in thread_emails:
+                # Found a sibling email that already created an event — update it
+                existing_event = (await db.execute(
+                    select(CalendarEvent).where(
+                        CalendarEvent.id == thread_email.calendar_event_id,
+                    )
+                )).scalar_one_or_none()
+                if existing_event:
+                    existing_event.start_time = start_time
+                    existing_event.end_time = end_time
+                    existing_event.title = title
+                    existing_event.location = meeting_info.get("location") or existing_event.location
+                    existing_event.description = description[:2000]
+                    existing_event.updated_at = local_now()
+                    await db.flush()
+                    logger.info(f"Updated calendar event {existing_event.id} from conversation thread: {title}")
+                    return existing_event.id
+
+        # Strategy 2: title+date dedup (same day, similar title)
+        day_start = start_time.replace(hour=0, minute=0, second=0)
+        day_end = day_start + timedelta(days=1)
         existing = (await db.execute(
             select(CalendarEvent).where(and_(
                 CalendarEvent.user_id == user_id,
-                CalendarEvent.start_time == start_time,
+                CalendarEvent.start_time >= day_start,
+                CalendarEvent.start_time < day_end,
                 CalendarEvent.source == "email_sync",
             ))
         )).scalars().all()
 
-        # Check if any existing event has a matching title
+        new_title_norm = _normalize_meeting_title(title)
         for ex in existing:
-            # Normalize for comparison (strip "Updated invitation:" prefix etc.)
-            ex_title_norm = ex.title.lower().strip()
-            new_title_norm = title.lower().strip()
+            ex_title_norm = _normalize_meeting_title(ex.title)
             if ex_title_norm == new_title_norm or ex_title_norm in new_title_norm or new_title_norm in ex_title_norm:
-                # Update existing event instead of creating duplicate
+                # Update existing event (time may have changed)
+                ex.start_time = start_time
                 ex.end_time = end_time
                 ex.location = meeting_info.get("location") or ex.location
                 ex.description = description[:2000]
-                ex.updated_at = datetime.utcnow()
+                ex.updated_at = local_now()
                 await db.flush()
-                logger.info(f"Updated existing calendar event {ex.id} instead of creating duplicate: {title}")
+                logger.info(f"Updated existing calendar event {ex.id} (title match): {title}")
                 return ex.id
 
         # Create the calendar event
@@ -940,11 +1042,16 @@ Received: {email.received_at.isoformat()}
 2. importance_score: A float from 0.0 to 1.0 indicating importance (1.0 = critical)
 3. summary: A 1-2 sentence summary of the email's key points
 4. action_required: true if this email requires a response or action, false otherwise
-5. has_meeting: true if this email contains a meeting invitation, scheduling request, or calendar event
+5. has_meeting: true ONLY if this email is a direct meeting invitation or scheduling request where David is a participant. NOT true for: webinars, online events, newsletters mentioning events, marketing emails about conferences, digest emails
 6. meeting_info: If has_meeting is true, provide meeting details as an object:
-   - title: Meeting title/subject
-   - start_time: ISO 8601 datetime string (e.g., "2026-01-29T14:00:00-05:00")
-   - end_time: ISO 8601 datetime string
+   - title: Meeting title/subject (clean, no "Updated invitation:" prefix)
+   - start_time: ISO 8601 LOCAL datetime, NO timezone offset suffix
+     (e.g., "2026-04-06T10:00:00"). Use the wall-clock time as stated in
+     the email body. Do NOT append "Z", "-05:00", "-04:00", or any other
+     offset — the server will apply the user's current Eastern timezone
+     and handle DST correctly. Inventing an offset will cause the
+     resulting calendar event to be off by one hour.
+   - end_time: ISO 8601 LOCAL datetime, NO timezone offset suffix
    - location: Meeting location or video call link (null if not specified)
    - description: Brief description or agenda
 
@@ -955,7 +1062,8 @@ Consider these factors for importance:
 - Internal team updates = medium importance
 - Financial/billing matters = medium-high importance
 - Automated notifications = low importance
-- Meeting invitations = medium-high importance
+- Direct meeting invitations (1-on-1, team calls) = medium-high importance
+- Webinars, online events, mass invitations = low importance (NOT has_meeting)
 
 Email:
 {email_content}
@@ -979,7 +1087,8 @@ Respond ONLY with valid JSON, no markdown or explanation:"""
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.3,
-                    "max_tokens": 300
+                    "max_tokens": 500,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers=headers if headers else None
             )
@@ -988,7 +1097,13 @@ Respond ONLY with valid JSON, no markdown or explanation:"""
                 raise Exception(f"LLM request failed: {response.status_code}")
 
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"] or ""
+            finish_reason = data["choices"][0].get("finish_reason", "unknown")
+
+            # Guard against empty content (thinking mode may consume all tokens)
+            if not content.strip():
+                logger.warning(f"Email analysis LLM returned empty content (finish_reason={finish_reason}), using fallback")
+                return _fallback_analysis(email)
 
             # Parse JSON response
             import json
@@ -1028,6 +1143,7 @@ def _fallback_analysis(email) -> Dict[str, Any]:
     category = "notification"
     importance = 0.3
     has_meeting = False
+    meeting_info = None
 
     # Check for meeting indicators
     meeting_keywords = ["meeting", "invite", "calendar", "schedule", "call", "zoom", "teams", "webex", "appointment"]
@@ -1041,6 +1157,10 @@ def _fallback_analysis(email) -> Dict[str, Any]:
             has_meeting = True
             category = "meeting"
             importance = 0.7
+
+    # If meeting detected, try to extract datetime from body
+    if has_meeting:
+        meeting_info = _extract_meeting_info_fallback(email)
 
     # Check for urgent indicators
     urgent_keywords = ["urgent", "asap", "critical", "deadline", "immediately", "time-sensitive"]
@@ -1077,8 +1197,49 @@ def _fallback_analysis(email) -> Dict[str, Any]:
         "summary": email.body_preview[:200] if email.body_preview else "No preview available",
         "action_required": category in ["urgent", "support"],
         "has_meeting": has_meeting,
-        "meeting_info": None  # Fallback can't extract details
+        "meeting_info": meeting_info,
     }
+
+
+def _extract_meeting_info_fallback(email) -> Optional[Dict[str, Any]]:
+    """Try to extract meeting time from email body using regex patterns."""
+    from dateutil import parser as dateutil_parser
+
+    body = email.body_text or email.body_preview or ""
+    subject = email.subject or ""
+
+    # Common patterns: "January 15, 2026 at 2:00 PM", "2026-01-15T14:00:00",
+    # "When: Monday, March 2, 2026 10:00 AM", "Date: 3/2/2026 Time: 10:00 AM"
+    datetime_patterns = [
+        # "When: <datetime>"
+        r'when:\s*(.+?)(?:\n|$)',
+        # "Date: <date>" followed by optional "Time: <time>"
+        r'date:\s*(.+?)(?:\n|$)',
+        # ISO format
+        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})',
+        # "Month Day, Year at Time"
+        r'(\w+\s+\d{1,2},?\s+\d{4}\s+(?:at\s+)?\d{1,2}:\d{2}\s*(?:AM|PM)?)',
+    ]
+
+    for pattern in datetime_patterns:
+        match = re.search(pattern, body, re.IGNORECASE)
+        if match:
+            try:
+                dt = dateutil_parser.parse(match.group(1).strip(), fuzzy=True)
+                # Assume Eastern timezone if naive
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=USER_TIMEZONE)
+                return {
+                    "title": subject,
+                    "start_time": dt.isoformat(),
+                    "end_time": (dt + timedelta(hours=1)).isoformat(),
+                    "location": None,
+                    "description": f"Auto-detected from email: {subject}",
+                }
+            except (ValueError, OverflowError):
+                continue
+
+    return None
 
 
 @celery_app.task(
@@ -1177,7 +1338,7 @@ async def _download_attachments_async(email_id: str, mailbox: str):
                         minio_client.make_bucket(bucket)
 
                     # Generate storage key
-                    date_prefix = datetime.utcnow().strftime("%Y/%m/%d")
+                    date_prefix = local_now().strftime("%Y/%m/%d")
                     key = f"email-attachments/{date_prefix}/{email_id}/{attachment.filename}"
 
                     # Upload to MinIO
@@ -1192,7 +1353,7 @@ async def _download_attachments_async(email_id: str, mailbox: str):
                     # Update attachment record
                     attachment.minio_bucket = bucket
                     attachment.minio_key = key
-                    attachment.downloaded_at = datetime.utcnow()
+                    attachment.downloaded_at = local_now()
 
                     downloaded_count += 1
                     logger.info(f"Downloaded attachment: {attachment.filename} -> {bucket}/{key}")
@@ -1224,7 +1385,9 @@ SARAS_FINDINGS_FOLDER = "Sara's Findings"
 @celery_app.task(
     name="app.tasks.email_sync.process_riskninja_attachments",
     bind=True,
-    queue="cognitive"
+    queue="low_priority",
+    soft_time_limit=120,
+    time_limit=150,
 )
 def process_riskninja_attachments(self):
     """
@@ -1439,7 +1602,7 @@ async def _process_riskninja_attachments_async():
                     attachment.filed_to_project_id = project_id
                     attachment.filed_to_folder_id = findings_folder.id
                     attachment.filed_to_file_id = project_file.id
-                    attachment.filed_at = datetime.utcnow()
+                    attachment.filed_at = local_now()
                     attachment.filing_analysis = analysis["reason"]
 
                     filed_count += 1
@@ -1532,7 +1695,8 @@ Respond with JSON only:
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 200
+                    "max_tokens": 300,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers=headers if headers else None
             )
@@ -1541,7 +1705,11 @@ Respond with JSON only:
                 raise Exception(f"LLM request failed: {response.status_code}")
 
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"] or ""
+
+            if not content.strip():
+                logger.warning("Attachment analysis LLM returned empty, using fallback")
+                return _fallback_attachment_analysis(filename, content_type, email_subject)
 
             # Parse JSON response
             import json

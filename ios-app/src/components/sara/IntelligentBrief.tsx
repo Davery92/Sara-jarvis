@@ -22,7 +22,6 @@ const EMOTION_EMOJI: Record<string, string> = {
 
 const SECTION_ICONS: Record<string, string> = {
   weather: '☀️',
-  calendar: '📅',
   fitness: '🍽️',
   threads: '💬',
   learning: '📚',
@@ -134,9 +133,11 @@ export default function IntelligentBrief({ collapsed, onToggleCollapse, onAction
       {/* Collapsible sections */}
       <Animated.View style={{ maxHeight, opacity, overflow: 'hidden' }}>
         <View style={styles.sections}>
-          {brief.brief_sections.map((section, i) => (
-            <BriefSectionRow key={`${section.type}-${i}`} section={section} onAction={onAction} />
-          ))}
+          {brief.brief_sections
+            .filter((section) => section.type !== 'calendar')
+            .map((section, i) => (
+              <BriefSectionRow key={`${section.type}-${i}`} section={section} onAction={onAction} />
+            ))}
         </View>
       </Animated.View>
     </View>
@@ -150,13 +151,6 @@ function BriefSectionRow({ section, onAction }: { section: BriefSection; onActio
   let detail = '';
 
   switch (section.type) {
-    case 'calendar': {
-      const count = section.data?.count || section.data?.events?.length || 0;
-      const next = section.data?.next_in_minutes;
-      label = `${count} event${count !== 1 ? 's' : ''}`;
-      detail = next ? `Next in ${next}min` : '';
-      break;
-    }
     case 'fitness': {
       const cal = section.data?.calories_today || 0;
       const goal = section.data?.goal || 2200;
@@ -192,7 +186,6 @@ function BriefSectionRow({ section, onAction }: { section: BriefSection; onActio
       style={styles.sectionRow}
       onPress={() => {
         const messages: Record<string, string> = {
-          calendar: "What's on my calendar today?",
           fitness: "How's my nutrition today?",
           threads: "What threads should I follow up on?",
           learning: "What learning reviews are due?",

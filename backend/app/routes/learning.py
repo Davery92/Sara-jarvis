@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
+from app.core.timezone import now as local_now
 import uuid
 import logging
 import re
@@ -1346,7 +1347,7 @@ async def learning_chat_stream(
         logger = logging.getLogger("app.main_simple")
         logger.info(f"📚 Learning chat: user_id={user_id}, topic_id={request.topic_id}")
 
-        now = datetime.utcnow()
+        now = local_now()
 
         # Get topic context if topic_id provided
         topic_context = ""
@@ -1630,7 +1631,7 @@ async def learning_chat_stream(
                         "role": "assistant",
                         "content": response_content,
                         "importance": 0.7,
-                        "created_at": datetime.utcnow(),
+                        "created_at": local_now(),
                         "meta": json.dumps({"topic_id": request.topic_id} if request.topic_id else {})
                     })
                     db.commit()
@@ -1656,7 +1657,7 @@ async def learning_chat_stream(
                         "type": "final_response",
                         "data": {
                             "content": response_content,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": local_now().isoformat()
                         }
                     })
                     await event_queue.put({"type": "done"})
@@ -1678,7 +1679,7 @@ async def learning_chat_stream(
 
                     except asyncio.TimeoutError:
                         # Send heartbeat to keep connection alive
-                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                        yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': local_now().isoformat()})}\n\n"
                     except Exception as e:
                         logger.error(f"Error in event stream: {e}")
                         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -2107,7 +2108,7 @@ Keep the response concise and actionable."""
             {"url": r.get("url"), "title": r.get("title"), "contribution": "web_search"}
             for r in web_results[:5]
         ]
-        report.completed_at = datetime.utcnow()
+        report.completed_at = local_now()
         db.commit()
 
         return {
@@ -2232,7 +2233,7 @@ async def get_review_queue(
 ):
     """Get concepts due for spaced repetition review"""
     try:
-        now = datetime.utcnow()
+        now = local_now()
 
         due_items = db.query(LearningProgress).filter(
             LearningProgress.user_id == user_id,
@@ -2268,44 +2269,11 @@ async def start_session(
             user_id=user_id,
             topic_id=topic_id,
             session_type=session_type,
-            started_at=datetime.utcnow()
+            started_at=local_now()
         )
         db.add(session)
         db.commit()
         db.refresh(session)
-
-        if settings.temerant_enabled and settings.temerant_auto_ingestion_enabled:
-            try:
-                from app.services.temerant import CharacterService, IngestionService
-
-                character = CharacterService.get_character(db, user_id)
-                if character:
-                    duration_minutes = max(1, int(session.duration_minutes or 0))
-                    default_action = "deep_research" if duration_minutes >= 120 else "study"
-                    quantity = max(1.0, round(duration_minutes / 30.0, 2))
-                    IngestionService.log_external_action(
-                        db=db,
-                        user_id=user_id,
-                        character=character,
-                        source_type="learning",
-                        source_ref_id=session.id,
-                        mapping_ref="session_end",
-                        default_action_type=default_action,
-                        action_label=f"{session.session_type or 'study'} session",
-                        notes=notes,
-                        quantity=quantity,
-                        occurred_at=session.ended_at or datetime.utcnow(),
-                        metadata={
-                            "session_id": session.id,
-                            "topic_id": session.topic_id,
-                            "duration_minutes": duration_minutes,
-                            "session_type": session.session_type,
-                        },
-                    )
-                    db.commit()
-            except Exception:
-                db.rollback()
-                logger.exception("Temerant auto-ingestion failed for learning session end")
 
         return session.to_dict()
     except Exception as e:
@@ -2331,7 +2299,7 @@ async def end_session(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        session.ended_at = datetime.utcnow()
+        session.ended_at = local_now()
         if session.started_at:
             duration = (session.ended_at - session.started_at).total_seconds() / 60
             session.duration_minutes = int(duration)
@@ -2459,7 +2427,7 @@ async def update_curriculum_step(
 
     if update.status == "completed":
         steps[step_index]["status"] = "completed"
-        steps[step_index]["completed_at"] = datetime.utcnow().isoformat()
+        steps[step_index]["completed_at"] = local_now().isoformat()
 
         # Auto-advance: make the next pending step active
         for s in steps[step_index + 1:]:
@@ -2735,7 +2703,7 @@ async def generate_blueprint_guides(
         if not blueprint:
             raise HTTPException(status_code=404, detail="Blueprint not found")
 
-        default_guide_model = getattr(settings, "bg_llm_primary_model", None) or "gpt-oss:20b"
+        default_guide_model = getattr(settings, "bg_llm_primary_model", None) or "Qwen3.5-35B-A3B"
         model = (request.model or default_guide_model).strip() or default_guide_model
         num_ctx = int(request.num_ctx or 16384)
         num_ctx = max(2048, min(num_ctx, 131072))
@@ -2830,7 +2798,7 @@ async def cancel_blueprint_guide_job(
                 "job": job.to_dict(),
             }
 
-        now = datetime.utcnow()
+        now = local_now()
         if job.status == "queued":
             job.status = "cancelled"
             job.current_step = "Cancelled before start"
@@ -2979,7 +2947,7 @@ async def generate_blueprint_lessons(
         if not blueprint:
             raise HTTPException(status_code=404, detail="Blueprint not found")
 
-        default_lesson_model = getattr(settings, "bg_llm_primary_model", None) or "gpt-oss:120b-32k"
+        default_lesson_model = getattr(settings, "bg_llm_primary_model", None) or "Qwen3.5-122B-A10B"
         model = (request.model or default_lesson_model).strip() or default_lesson_model
         num_ctx = int(request.num_ctx or 49152)
         # Keep lesson generation under model-stable context limits.

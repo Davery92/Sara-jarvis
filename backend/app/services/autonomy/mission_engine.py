@@ -408,14 +408,7 @@ class MissionEngine:
                 "error": result.error,
             }
         except ImportError:
-            # Fallback: try UnifiedAgent tool execution
-            try:
-                from app.services.unified_agent import UnifiedAgent
-                agent = UnifiedAgent(user_id)
-                result = await agent._execute_tool(action_name, action_args, db)
-                return result
-            except Exception as e:
-                return {"success": False, "error": f"No executor for {action_name}: {e}"}
+            return {"success": False, "error": f"No executor for {action_name}: primitive executor not available"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

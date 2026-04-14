@@ -36,41 +36,10 @@ class Episode(Base):
     embedding = Column(Vector(settings.embedding_dim), nullable=True)
     rating_boost = Column(Float, nullable=True)
     exploration_bonus = Column(Float, nullable=True)
+    recall_relevance_ema = Column(Float, default=0.5)  # EMA of recall usefulness (0=always irrelevant, 1=always used)
     
     # Relationships
     user = relationship("User")
-    memory_vectors = relationship("MemoryVector", back_populates="episode", cascade="all, delete-orphan")
-    
+
     def __repr__(self):
         return f"<Episode(source='{self.source}', role='{self.role}', content='{self.content[:30]}...')>"
-
-
-class MemoryVector(Base):
-    __tablename__ = "memory_vector"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    text = Column(Text, nullable=False)
-    embedding = Column(Vector(settings.embedding_dim), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    # Relationships
-    episode = relationship("Episode", back_populates="memory_vectors")
-    
-    def __repr__(self):
-        return f"<MemoryVector(episode_id='{self.episode_id}', chunk_index={self.chunk_index})>"
-
-
-class MemoryHot(Base):
-    __tablename__ = "memory_hot"
-
-    episode_id = Column(String, ForeignKey("episode.id", ondelete="CASCADE"), primary_key=True)
-    last_accessed = Column(DateTime(timezone=True), server_default=func.now())
-    accesses = Column(Integer, default=1)
-    
-    # Relationships
-    episode = relationship("Episode")
-    
-    def __repr__(self):
-        return f"<MemoryHot(episode_id='{self.episode_id}', accesses={self.accesses})>"

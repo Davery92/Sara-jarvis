@@ -139,13 +139,52 @@ def get_recovery_factor(recovery_data: Optional[Dict]) -> Tuple[float, str]:
     return factor, reason
 
 
+def get_deload_state(db: Session, user_id: str, on_date: date) -> Dict:
+    """
+    Determine whether the given date falls in a deload week of the user's active phase.
+
+    A phase has an optional `deload_week` (1-indexed week within the phase). If today's
+    week-of-phase matches that, we return is_deload=True along with the phase context.
+
+    Returns a dict: {is_deload: bool, phase_id, phase_name, week_of_phase, deload_week}
+    """
+    row = db.execute(text("""
+        SELECT id, name, start_date, end_date, duration_weeks, deload_week
+        FROM fitness_phase
+        WHERE user_id = :user_id
+          AND start_date IS NOT NULL
+          AND :d >= start_date
+          AND (end_date IS NULL OR :d <= end_date)
+        ORDER BY start_date DESC
+        LIMIT 1
+    """), {"user_id": user_id, "d": on_date}).fetchone()
+
+    if not row:
+        return {"is_deload": False, "phase_id": None, "phase_name": None,
+                "week_of_phase": None, "deload_week": None}
+
+    phase = dict(row._mapping)
+    week_of_phase = ((on_date - phase["start_date"]).days // 7) + 1
+    deload_week = phase.get("deload_week")
+    is_deload = bool(deload_week and week_of_phase == int(deload_week))
+
+    return {
+        "is_deload": is_deload,
+        "phase_id": phase["id"],
+        "phase_name": phase["name"],
+        "week_of_phase": week_of_phase,
+        "deload_week": deload_week,
+    }
+
+
 def suggest_weight(
     db: Session,
     user_id: str,
     exercise_name: str,
     target_reps: int,
     recovery_data: Optional[Dict] = None,
-    starting_weight: Optional[float] = None
+    starting_weight: Optional[float] = None,
+    is_deload: bool = False,
 ) -> Dict:
     """
     Suggest weight for next set based on progressive overload principles
@@ -214,6 +253,11 @@ def suggest_weight(
     # Add recovery reasoning
     if recovery_factor != 1.0:
         reasoning_parts.append(recovery_reason)
+
+    # Deload override — drops to 60% regardless of other adjustments
+    if is_deload:
+        suggested = base_weight * 0.6
+        reasoning_parts = ["DELOAD WEEK — 60% of working weight, halve sets"]
 
     # Round to nearest 2.5 lbs (or 5 lbs for heavy weights)
     if suggested >= 100:

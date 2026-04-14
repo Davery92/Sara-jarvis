@@ -106,8 +106,8 @@ The window will appear in the user's workspace canvas."""
             "properties": {
                 "window_type": {
                     "type": "string",
-                    "enum": ["notes", "chat", "fitness", "calendar", "tasks", "intelligence", "settings", "projects", "timers", "research", "email", "documents", "temerant"],
-                    "description": "Type of window to open: 'notes' for notes browser, 'chat' for chat, 'fitness' for fitness tracking, 'calendar' for calendar, 'tasks' for task list, 'intelligence' for intelligence reports, 'settings' for settings, 'projects' for project tracker, 'timers' for timers, 'research' for web research, 'email' for inbox, 'documents' for uploaded docs, 'temerant' for the solo RPG habit system"
+                    "enum": ["notes", "chat", "fitness", "calendar", "tasks", "intelligence", "settings", "projects", "timers", "research", "email", "documents"],
+                    "description": "Type of window to open: 'notes' for notes browser, 'chat' for chat, 'fitness' for fitness tracking, 'calendar' for calendar, 'tasks' for task list, 'intelligence' for intelligence reports, 'settings' for settings, 'projects' for project tracker, 'timers' for timers, 'research' for web research, 'email' for inbox, 'documents' for uploaded docs"
                 },
                 "title": {
                     "type": "string",
@@ -148,7 +148,6 @@ The window will appear in the user's workspace canvas."""
             "research": "Research",
             "email": "Email",
             "documents": "Documents",
-            "temerant": "Temerant",
         }
 
         window_title = title or default_titles.get(window_type, window_type.title())

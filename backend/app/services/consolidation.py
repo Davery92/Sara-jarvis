@@ -169,7 +169,7 @@ class ConsolidationEngine:
                 # Recent deliberation/agent run logs
                 try:
                     rows = await db.execute(text("""
-                        SELECT source, thought, handoff_note, watching_for, actions_taken, run_at
+                        SELECT source, context_summary, handoff_note, watching_for, actions_taken, run_at
                         FROM agent_run_log
                         WHERE user_id = :uid AND run_at >= :since
                         ORDER BY run_at DESC LIMIT 20
@@ -177,7 +177,7 @@ class ConsolidationEngine:
                     for row in rows.fetchall():
                         context["deliberation_history"].append({
                             "source": row.source,
-                            "thought": row.thought[:300] if row.thought else "",
+                            "thought": row.context_summary[:300] if row.context_summary else "",
                             "handoff": row.handoff_note[:200] if row.handoff_note else "",
                             "watching": row.watching_for[:100] if row.watching_for else "",
                             "at": row.run_at.isoformat() if row.run_at else "",
@@ -274,7 +274,7 @@ class ConsolidationEngine:
                     topics_since = datetime.now(timezone.utc) - timedelta(days=14)
                     rows = await db.execute(text("""
                         SELECT content, created_at
-                        FROM episodes
+                        FROM episode
                         WHERE user_id = :uid
                           AND created_at >= :since
                           AND role = 'user'
@@ -293,6 +293,26 @@ class ConsolidationEngine:
             logger.error(f"[Consolidation] Context gathering failed: {e}")
         finally:
             await engine.dispose()
+
+        # Gather calendar patterns
+        context["calendar_patterns"] = []
+        try:
+            from app.services.calendar_intelligence import extract_patterns, sync_patterns_to_pkg
+            patterns = await extract_patterns(user_id, lookback_days=90)
+            for p in patterns:
+                context["calendar_patterns"].append({
+                    "event": p["title_pattern"],
+                    "day": p["day_of_week"],
+                    "time": f"{p['typical_hour']}:00",
+                    "category": p["category"],
+                    "participant": p["participant"],
+                    "occurrences": p["occurrences"],
+                })
+            # Sync detected patterns to PKG as routines
+            if patterns:
+                await sync_patterns_to_pkg(user_id, patterns)
+        except Exception as e:
+            logger.debug(f"[Consolidation] Calendar pattern query failed: {e}")
 
         # Gather PKG interests (non-async, Neo4j driver)
         try:
@@ -376,6 +396,15 @@ Respond with ONLY valid JSON:
             times = i.get("times_confirmed", 0)
             interests_text += f"\n- {i['topic']} (confidence: {conf:.1f}, confirmed {times}x)"
 
+        # Format calendar patterns
+        calendar_text = ""
+        for cp in context.get("calendar_patterns", []):
+            who = f" ({cp['participant']})" if cp["participant"] != "unknown" else ""
+            calendar_text += (
+                f"\n- {cp['event']}: {cp['day']}s @ {cp['time']} "
+                f"[{cp['category']}{who}] ({cp['occurrences']} occurrences)"
+            )
+
         # Summarize recent chat topics (compact)
         chat_topics_text = ""
         topics = context.get("recent_chat_topics", [])
@@ -400,6 +429,9 @@ Habits: {memory.today_habit_status or 'unknown'}
 
 # PKG Interests (David's Known Interests)
 {interests_text or 'No interests recorded yet.'}
+
+# Calendar Patterns (Recurring Events)
+{calendar_text or 'No recurring patterns detected.'}
 
 # Recent Conversation Topics (Last 2 Weeks)
 {chat_topics_text or 'No recent conversations.'}
@@ -548,14 +580,13 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
                 async with log_sess() as db:
                     await db.execute(text("""
                         INSERT INTO agent_run_log
-                        (id, user_id, source, run_at, duration_seconds, thought,
+                        (user_id, source, run_at, run_duration_ms, context_summary,
                          handoff_note, watching_for, actions_taken, created_at)
-                        VALUES (:id, :uid, 'consolidation_research', NOW(), 0, :thought,
+                        VALUES (:uid, 'consolidation_research', NOW(), 0, :context_summary,
                                 NULL, NULL, :actions, NOW())
                     """), {
-                        "id": str(uuid.uuid4()),
                         "uid": user_id,
-                        "thought": f"Self-directed research dispatched: {topic}"[:2000],
+                        "context_summary": f"Self-directed research dispatched: {topic}"[:2000],
                         "actions": json.dumps({
                             "action": "research_dispatched",
                             "task_id": result.get("task_id", "unknown"),
@@ -1022,6 +1053,25 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
             except Exception as e:
                 logger.debug(f"[Consolidation] Research dispatch failed: {e}")
 
+            # Also create ACS interest nodes from proposals so they flow into exploration
+            try:
+                from app.services.acs.interest_graph import InterestGraph
+                graph = InterestGraph()
+                for proposal in result.research_proposals[:2]:
+                    await graph.add_node(
+                        user_id=user_id,
+                        label=proposal[:100],
+                        description=f"Research proposal from consolidation: {proposal}",
+                        source="consolidation_proposal",
+                        fascination=0.6,
+                    )
+                logger.info(
+                    f"[Consolidation] Created {min(len(result.research_proposals), 2)} "
+                    f"interest nodes from research proposals"
+                )
+            except Exception as e:
+                logger.debug(f"[Consolidation] Interest node creation from proposals failed: {e}")
+
         # Write agent_run_log
         try:
             database_url = os.getenv("DATABASE_URL", "")
@@ -1037,15 +1087,14 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
             async with sess() as db:
                 await db.execute(text("""
                     INSERT INTO agent_run_log
-                    (id, user_id, source, run_at, duration_seconds, thought,
+                    (user_id, source, run_at, run_duration_ms, context_summary,
                      handoff_note, watching_for, created_at)
-                    VALUES (:id, :uid, 'consolidation', NOW(), :duration, :thought,
+                    VALUES (:uid, 'consolidation', NOW(), :duration_ms, :context_summary,
                             :handoff, :watching, NOW())
                 """), {
-                    "id": str(uuid.uuid4()),
                     "uid": user_id,
-                    "duration": result.duration_seconds,
-                    "thought": result.journal_entry[:2000] if result.journal_entry else None,
+                    "duration_ms": int((result.duration_seconds or 0) * 1000),
+                    "context_summary": result.journal_entry[:2000] if result.journal_entry else None,
                     "handoff": json.dumps(result.patterns_noticed)[:1000],
                     "watching": json.dumps(result.calibration_notes)[:500],
                 })

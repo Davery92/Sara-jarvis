@@ -31,10 +31,12 @@ logger = logging.getLogger(__name__)
 
 USER_TZ = ZoneInfo("America/New_York")
 
-# Deliberation thresholds
-SALIENCE_THRESHOLD = 2.0  # accumulated salience needed to trigger deliberation
+# Deliberation thresholds. SALIENCE_THRESHOLD and MAX_DELIBERATION_GAP_HOURS
+# are runtime-overridable via tunable_setting (`acs.salience_threshold`,
+# `acs.max_deliberation_gap_hours`) — these constants are fallback defaults.
+SALIENCE_THRESHOLD = 1.5  # accumulated salience needed to trigger deliberation
 MIN_DELIBERATION_GAP_MINUTES = 20  # rate limit between deliberations
-MAX_DELIBERATION_GAP_HOURS = 2  # force deliberation if idle this long (waking hours)
+MAX_DELIBERATION_GAP_HOURS = 1.5  # force deliberation if idle this long (waking hours)
 OBSERVATION_FLOOR = 0.3  # events below this don't become observations
 NIGHT_HOURS = (1, 5)  # 1 AM - 5 AM: no deliberation unless critical
 
@@ -268,18 +270,21 @@ class SalienceScorer:
             except (ValueError, TypeError):
                 pass
 
-        # Check accumulated salience threshold
+        # Check accumulated salience threshold (runtime-tunable)
+        from app.services.tunables import get_tunable_float
+        salience_thresh = get_tunable_float("acs.salience_threshold", SALIENCE_THRESHOLD)
         accumulated = await get_accumulated_salience(user_id)
-        if accumulated >= SALIENCE_THRESHOLD:
+        if accumulated >= salience_thresh:
             return True
 
-        # Force deliberation if too long since last one (waking hours)
+        # Force deliberation if too long since last one (waking hours, runtime-tunable)
         if 6 <= now.hour <= 22:
+            max_gap = get_tunable_float("acs.max_deliberation_gap_hours", MAX_DELIBERATION_GAP_HOURS)
             if memory.sara_last_deliberation_at:
                 try:
                     last_delib = _parse_utc_iso(memory.sara_last_deliberation_at)
                     hours_since = (datetime.now(timezone.utc) - last_delib).total_seconds() / 3600
-                    if hours_since >= MAX_DELIBERATION_GAP_HOURS:
+                    if hours_since >= max_gap:
                         return True
                 except (ValueError, TypeError):
                     return True  # can't parse = probably stale, deliberate

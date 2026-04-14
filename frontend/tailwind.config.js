@@ -28,7 +28,16 @@ export default {
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
-      }
+      },
+      animation: {
+        'pulse-slow': 'pulse-slow 3s ease-in-out infinite',
+      },
+      keyframes: {
+        'pulse-slow': {
+          '0%, 100%': { borderColor: 'rgba(249, 115, 22, 0.4)' },
+          '50%': { borderColor: 'rgba(249, 115, 22, 0.15)' },
+        },
+      },
     },
   },
   plugins: [],

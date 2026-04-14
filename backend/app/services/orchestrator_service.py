@@ -22,12 +22,13 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Ollama configuration
-ORCHESTRATOR_OLLAMA_URL = "http://100.104.68.115:11434"
-ORCHESTRATOR_MODEL = "gpt-oss:20b"
+# Ollama configuration — centralized
+from app.core.llm_config import llm_config as _llm_cfg
+ORCHESTRATOR_OLLAMA_URL = _llm_cfg.primary_url.replace('/v1', '')
+ORCHESTRATOR_MODEL = _llm_cfg.fast_model
 
-WORKER_OLLAMA_URL = "http://100.104.68.115:11434"
-WORKER_MODEL = "gpt-oss:20b"
+WORKER_OLLAMA_URL = _llm_cfg.primary_url.replace('/v1', '')
+WORKER_MODEL = _llm_cfg.fast_model
 
 # Tools available to the orchestrator
 ORCHESTRATOR_TOOLS = [

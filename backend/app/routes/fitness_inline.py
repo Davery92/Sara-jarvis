@@ -1,12 +1,11 @@
-"""Inline fitness stub/proxy routes extracted from main_simple.py.
+"""Recovery log CRUD routes extracted from main_simple.py.
 
-These are lightweight fitness endpoints (stubs and recovery log CRUD)
-separate from the full fitness routes in routes/fitness.py.
+Food/workout stubs that were here have been removed — the iOS client
+uses the real /api/fitness/* endpoints in routes/fitness.py, not these.
 """
 
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
@@ -18,68 +17,6 @@ from app.models.user import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-@router.get("/documents/categories")
-async def get_document_categories(current_user: User = Depends(get_current_user)):
-    """Get all unique document categories"""
-    return []
-
-
-@router.get("/fitness/food")
-async def get_fitness_food(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness food logs"""
-    return []
-
-
-@router.post("/fitness/food")
-async def create_fitness_food(
-    food_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness food log"""
-    return {"id": "1", "message": "Food log created", **food_data}
-
-
-@router.delete("/fitness/food/{id}")
-async def delete_fitness_food(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness food log"""
-    return {"message": "Food log deleted"}
-
-
-@router.get("/fitness/workouts")
-async def get_fitness_workouts(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness workouts"""
-    return []
-
-
-@router.post("/fitness/workouts")
-async def create_fitness_workout(
-    workout_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness workout"""
-    return {"id": "1", "message": "Workout created", **workout_data}
-
-
-@router.delete("/fitness/workouts/{id}")
-async def delete_fitness_workout(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness workout"""
-    return {"message": "Workout deleted"}
 
 
 @router.get("/fitness/recovery")
@@ -229,17 +166,3 @@ async def delete_fitness_recovery(
         return {"message": "Recovery log deleted"}
     finally:
         db.close()
-
-
-@router.get("/fitness/summary")
-async def get_fitness_summary(date: str = None, current_user: User = Depends(get_current_user)):
-    """Get fitness summary for a specific date"""
-    from datetime import datetime
-    if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
-    return {
-        "date": date,
-        "calories_consumed": 0, "calories_burned": 0,
-        "workouts_completed": 0, "habits_completed": 0,
-        "recovery_score": 0, "notes": "No data available for this date"
-    }

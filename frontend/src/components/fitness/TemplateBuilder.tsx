@@ -18,7 +18,14 @@ interface Exercise {
   sets: number
   reps: string
   rpe_target: number
+  rest_seconds?: number
   starting_weight?: number
+  notes?: string
+  // Advanced execution markers
+  metric_type?: 'reps' | 'time_seconds'
+  is_per_side?: boolean
+  superset_group?: string | null
+  set_technique?: 'drop_set' | 'rest_pause' | 'amrap' | 'myo_reps' | null
 }
 
 interface Phase {
@@ -42,7 +49,7 @@ export default function TemplateBuilder() {
   const [phaseId, setPhaseId] = useState('')
   const [scheduledDays, setScheduledDays] = useState<string[]>([])
   const [exercises, setExercises] = useState<Exercise[]>([
-    { name: '', sets: 3, reps: '8-10', rpe_target: 7, starting_weight: undefined }
+    { name: '', sets: 3, reps: '8-10', rpe_target: 7, rest_seconds: 90, starting_weight: undefined, notes: '', metric_type: 'reps', is_per_side: false, superset_group: null, set_technique: null }
   ])
   const [notes, setNotes] = useState('')
 
@@ -84,7 +91,7 @@ export default function TemplateBuilder() {
     setName('')
     setPhaseId('')
     setScheduledDays([])
-    setExercises([{ name: '', sets: 3, reps: '8-10', rpe_target: 7, starting_weight: undefined }])
+    setExercises([{ name: '', sets: 3, reps: '8-10', rpe_target: 7, rest_seconds: 90, starting_weight: undefined, notes: '', metric_type: 'reps', is_per_side: false, superset_group: null, set_technique: null }])
     setNotes('')
     setShowModal(true)
   }
@@ -94,7 +101,7 @@ export default function TemplateBuilder() {
     setName(template.name)
     setPhaseId(template.phase_id || '')
     setScheduledDays(template.scheduled_days)
-    setExercises(template.exercises.length > 0 ? template.exercises : [{ name: '', sets: 3, reps: '8-10', rpe_target: 7, starting_weight: undefined }])
+    setExercises(template.exercises.length > 0 ? template.exercises : [{ name: '', sets: 3, reps: '8-10', rpe_target: 7, rest_seconds: 90, starting_weight: undefined, notes: '', metric_type: 'reps', is_per_side: false, superset_group: null, set_technique: null }])
     setNotes(template.notes || '')
     setShowModal(true)
   }
@@ -113,7 +120,7 @@ export default function TemplateBuilder() {
   }
 
   const addExercise = () => {
-    setExercises([...exercises, { name: '', sets: 3, reps: '8-10', rpe_target: 7, starting_weight: undefined }])
+    setExercises([...exercises, { name: '', sets: 3, reps: '8-10', rpe_target: 7, rest_seconds: 90, starting_weight: undefined, notes: '', metric_type: 'reps', is_per_side: false, superset_group: null, set_technique: null }])
   }
 
   const removeExercise = (index: number) => {
@@ -438,6 +445,66 @@ export default function TemplateBuilder() {
                                   min="0"
                                 />
                               </div>
+                            </div>
+                            {/* Advanced markers */}
+                            <div className="grid grid-cols-4 gap-3 mt-3">
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Metric</label>
+                                <select
+                                  value={ex.metric_type || 'reps'}
+                                  onChange={(e) => updateExercise(idx, 'metric_type', e.target.value as any)}
+                                  className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-blue-500 focus:outline-none"
+                                >
+                                  <option value="reps">Reps</option>
+                                  <option value="time_seconds">Seconds (hold)</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Per side?</label>
+                                <select
+                                  value={ex.is_per_side ? '1' : '0'}
+                                  onChange={(e) => updateExercise(idx, 'is_per_side', e.target.value === '1')}
+                                  className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-blue-500 focus:outline-none"
+                                >
+                                  <option value="0">No</option>
+                                  <option value="1">Yes (per leg/arm)</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Superset group</label>
+                                <input
+                                  type="text"
+                                  value={ex.superset_group || ''}
+                                  onChange={(e) => updateExercise(idx, 'superset_group', e.target.value || null)}
+                                  className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-blue-500 focus:outline-none"
+                                  placeholder="A, B, …"
+                                  maxLength={10}
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Last-set technique</label>
+                                <select
+                                  value={ex.set_technique || ''}
+                                  onChange={(e) => updateExercise(idx, 'set_technique', (e.target.value || null) as any)}
+                                  className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-blue-500 focus:outline-none"
+                                >
+                                  <option value="">(none)</option>
+                                  <option value="drop_set">Drop set</option>
+                                  <option value="rest_pause">Rest-pause</option>
+                                  <option value="amrap">AMRAP</option>
+                                  <option value="myo_reps">Myo-reps</option>
+                                </select>
+                              </div>
+                            </div>
+                            <div className="mt-3">
+                              <label className="block text-xs text-gray-400 mb-1">Exercise notes</label>
+                              <input
+                                type="text"
+                                value={ex.notes || ''}
+                                onChange={(e) => updateExercise(idx, 'notes', e.target.value)}
+                                className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-blue-500 focus:outline-none"
+                                placeholder="Form cue, tempo, etc."
+                              />
                             </div>
                           </div>
                           {exercises.length > 1 && (

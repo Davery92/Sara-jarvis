@@ -12,33 +12,40 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     ai_provider: str = "local"  # Options: local, gemini, openai, claude, codex, custom
-    openai_base_url: str = "http://100.104.68.115:11434/v1"
-    openai_model: str = "gpt-oss:20b"
+    openai_base_url: str = "http://100.104.68.115:8080/v1"
+    openai_model: str = "Qwen3.5-122B-A10B"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
-    embedding_base_url: str = "http://10.185.1.8:11434"
+    embedding_base_url: str = "http://embeddings:8100"
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
 
     # LLM Failover Configuration
-    llm_primary_url: str = "http://100.104.68.115:11434/v1"
-    llm_fallback_url: str = "http://10.185.1.8:11434/v1"
-    llm_fallback_model: str = "gpt-oss:latest"  # Model available on fallback endpoint
+    llm_primary_url: str = "http://100.104.68.115:8080/v1"
+    llm_fallback_url: str = "http://10.185.1.8:8686/v1"
+    llm_fallback_model: str = "Qwen3.5-35B-A3B"
     llm_request_timeout: float = 60.0  # Timeout for LLM requests (120B model needs time)
     llm_health_check_interval: int = 30  # seconds between health checks
     llm_health_check_timeout: float = 5.0  # timeout for health check requests
     llm_recovery_checks_required: int = 3  # successful checks to mark as healthy
 
     # Background LLM Configuration (separate from chat - always uses local models)
-    bg_llm_primary_url: str = "http://100.104.68.115:11434/v1"
-    bg_llm_primary_model: str = "gpt-oss:120b-32k"
-    bg_llm_fallback_url: str = "http://10.185.1.8:11434/v1"
-    bg_llm_fallback_model: str = "gpt-oss:20b"
+    bg_llm_primary_url: str = "http://100.104.68.115:8080/v1"
+    bg_llm_primary_model: str = "Qwen3.5-122B-A10B"
+    bg_llm_fallback_url: str = "http://10.185.1.8:8686/v1"
+    bg_llm_fallback_model: str = "Qwen3.5-35B-A3B"
     bg_llm_request_timeout: float = 180.0
     bg_llm_connect_timeout: float = 6.0
     bg_llm_num_ctx: int = 32768
+    bg_llm_fallback_max_tokens: int = 24000  # Max input tokens for fallback model (leave headroom from 32k window)
     learning_guide_num_ctx: int = 32768
+
+    # Research Executor LLM Configuration (dedicated Qwen3.5-27B on 10.185.1.8)
+    research_llm_url: str = "http://10.185.1.8:8686/v1"
+    research_llm_model: str = "Qwen3.5-27B"
+    research_llm_timeout: float = 300.0
+    research_llm_max_tokens: int = 4096
     learning_lesson_num_ctx: int = 49152
     learning_lesson_request_timeout: float = 300.0
 
@@ -130,15 +137,6 @@ class Settings(BaseSettings):
     autonomy_attention_enabled: bool = False       # Phase 2: attention queue for deferred items
     autonomy_missions_enabled: bool = True         # Phase 2: mission engine
     autonomy_policy_candidates_enabled: bool = False  # Phase 3: dream→policy candidates
-    temerant_enabled: bool = True  # Temerant RPG surface rollout flag
-    temerant_oracle_enabled: bool = True  # Enables oracle roll/event mechanics
-    temerant_narrative_enabled: bool = True  # Enables narrative/journal generation features
-    temerant_auto_ingestion_enabled: bool = False  # Enables passive ingestion from habits/learning/fitness
-    temerant_rpg_enabled: bool = True  # Enables separate scene-based Temerant RPG
-    temerant_rpg_narrative_enabled: bool = True  # Enables narrative generation for separate RPG
-    temerant_rpg_model: str = "gpt-oss:120b-32k"  # Dedicated GM model for scene-based RPG
-    temerant_rpg_num_ctx: int = 32768  # Dedicated context window for scene-based RPG narration
-
     # Autonomy rollout thresholds (used by /autonomy/rollout/summary evaluation)
     autonomy_rollout_min_runs_for_eval: int = 10
     autonomy_rollout_max_fallback_rate: float = 0.25
@@ -147,6 +145,40 @@ class Settings(BaseSettings):
     autonomy_rollout_max_attention_backlog_ratio: float = 0.70
     autonomy_rollout_max_mission_failure_rate: float = 0.20
     autonomy_rollout_max_mission_nonterminal_ratio: float = 0.70
+
+    # Proxmox Dynamic Container Provisioning
+    proxmox_api_url: str = "https://10.185.1.203:8006/api2/json"
+    proxmox_node: str = "sara-node"
+    proxmox_token_id: str = "sara@pve!api-token"
+    proxmox_token_secret: str = ""  # from .env: PROXMOX_TOKEN_SECRET
+    proxmox_verify_ssl: bool = False
+    proxmox_ssh_public_key_path: str = "~/.ssh/sara_agent.pub"
+    proxmox_vmid_range_start: int = 200
+    proxmox_vmid_range_end: int = 299
+    proxmox_max_containers: int = 4
+    proxmox_max_cores: int = 8
+    proxmox_max_memory_mb: int = 16384
+    proxmox_default_storage: str = "local-lvm"
+
+    # GPU compute host — accessible from containers for training/inference
+    gpu_host: str = "10.185.1.8"
+    gpu_host_user: str = "david"
+    gpu_host_ssh_key: str = "~/.ssh/sara_agent"
+    gpu_host_llm_url: str = "http://10.185.1.8:8686/v1"
+    gpu_host_llm_model: str = "Qwen3.5-35B-A3B"
+
+    # ACS v2 Feature Flags
+    acs_v2_enabled: bool = True                     # Master toggle for all v2 features
+    acs_v2_max_session_minutes: int = 360           # Hard ceiling (6 hours)
+    acs_v2_min_session_minutes: int = 15            # Hard floor
+    acs_v2_low_engagement_threshold: float = 0.3
+    acs_v2_low_engagement_streak: int = 3           # Consecutive low turns before early end
+    acs_v2_decay_half_life_days: int = 7            # Fascination half-life
+    acs_v2_similarity_dedup_threshold: float = 0.85 # Cosine threshold for node dedup
+    acs_v2_bridge_threshold: float = 0.78           # Cosine threshold for bridge opportunities
+    acs_v2_max_context_nodes: int = 15              # Max interest nodes in prompt context
+    acs_v2_mode_max_repeat: int = 2                 # Don't pick same mode 2x in a row
+    acs_execution_ratio: float = 0.7              # Fraction of sessions dedicated to plan execution vs free
 
     class Config:
         env_file = ".env"

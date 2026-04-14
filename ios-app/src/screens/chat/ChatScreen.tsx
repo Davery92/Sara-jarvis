@@ -186,6 +186,41 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     navigation.setParams({ heartbeat: undefined });
   }, [route?.params?.heartbeat, navigation]);
 
+  // Handle task chat inject — backend persisted result to conversation, reload it
+  useEffect(() => {
+    if (!route || !navigation) return;
+    const taskInject = route.params?.taskInject as { taskId: string; conversationId?: string; noteId?: string } | undefined;
+    if (!taskInject) return;
+
+    console.log('[Chat] Task inject received, reloading conversation:', taskInject);
+    navigation.setParams({ taskInject: undefined });
+
+    // Reload conversation history to pick up the new episode
+    const reloadConversation = async () => {
+      try {
+        const cid = taskInject.conversationId || conversationId;
+        if (!cid) return;
+        const messagesResponse = await apiClient.get(
+          `/api/conversations/${cid}/messages?limit=100`
+        );
+        const messagesData = messagesResponse as any;
+        if (messagesData && messagesData.length > 0) {
+          const loadedMessages: Message[] = messagesData.map((ep: any) => ({
+            id: ep.id,
+            role: ep.role,
+            content: ep.content,
+            created_at: ep.created_at,
+            episode_id: ep.id,
+          }));
+          setMessages(loadedMessages);
+        }
+      } catch (error) {
+        console.error('[Chat] Error reloading after task inject:', error);
+      }
+    };
+    reloadConversation();
+  }, [route?.params?.taskInject, navigation]);
+
   // Load conversation history on mount
   useEffect(() => {
     const loadConversationHistory = async () => {

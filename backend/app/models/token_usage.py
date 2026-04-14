@@ -14,7 +14,7 @@ class TokenUsage(Base):
 
     # Request metadata
     endpoint = Column(String(255), nullable=False)  # e.g., '/chat', '/fitness/conversational'
-    model = Column(String(100), nullable=False)  # e.g., 'gpt-oss:120b'
+    model = Column(String(100), nullable=False)  # e.g., 'Qwen3.5-122B-A10B'
     operation_type = Column(String(50), nullable=False)  # 'chat', 'embedding', 'tool_call'
 
     # Token counts

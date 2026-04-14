@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime, timedelta
+from app.core.timezone import now as local_now
 import json
 import logging
 from app.services.event_bus import EventSubscriber, Event, EventType
@@ -41,7 +42,7 @@ class LifeOSContextAggregator:
             "stress_level": await self._estimate_stress_level(user_id),
             "mood_profile": await self._build_mood_profile(user_id),
             "energy_level": await self._estimate_energy_level(user_id),
-            "updated_at": datetime.utcnow().isoformat()
+            "updated_at": local_now().isoformat()
         }
 
         return context

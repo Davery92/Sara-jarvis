@@ -33,6 +33,7 @@ export type RootStackParamList = {
   WorkoutMode: {
     templateId?: string;  // If provided, starts workout with this template
   } | undefined;
+  DailyPlan: undefined;
 };
 
 // Auth Stack Navigator

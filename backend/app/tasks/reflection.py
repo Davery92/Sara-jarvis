@@ -126,8 +126,6 @@ async def _assess_proposal_async(proposal_id: int):
     from sqlalchemy import text
     import os
 
-    from app.services.karma import get_karma_service, KarmaEvent
-
     database_url = os.getenv("DATABASE_URL")
 
     if database_url.startswith("postgresql://"):
@@ -145,7 +143,7 @@ async def _assess_proposal_async(proposal_id: int):
             # Get proposal details
             result = await db.execute(
                 text("""
-                    SELECT status, target_agent, karma_state_at_implementation
+                    SELECT status, target_agent
                     FROM prompt_proposals
                     WHERE proposal_id = :proposal_id
                 """),
@@ -162,65 +160,26 @@ async def _assess_proposal_async(proposal_id: int):
                     "proposal_status": row[0],
                 }
 
-            target_agent = row[1]
-            karma_at_impl = row[2] or {}
+            # Mark as assessed (no karma scoring)
+            assessment = "neutral"
 
-            # Get current karma
-            karma_service = await get_karma_service(db)
-            current_karma = await karma_service.get_agent_karma(target_agent)
-
-            if not current_karma:
-                return {"status": "error", "reason": "Agent not found"}
-
-            # Calculate delta
-            old_score = karma_at_impl.get("composite_score", 50)
-            new_score = current_karma.composite_score
-            delta = new_score - old_score
-
-            # Determine assessment
-            if delta > 2:
-                assessment = "improvement"
-                reflection_delta = 2.0
-            elif delta < -2:
-                assessment = "regression"
-                reflection_delta = -3.0
-                logger.warning(f"Proposal {proposal_id} may have caused regression")
-            else:
-                assessment = "neutral"
-                reflection_delta = 0
-
-            # Update proposal
             await db.execute(
                 text("""
                     UPDATE prompt_proposals
-                    SET outcome_assessment = :assessment,
-                        outcome_karma_delta = :delta
+                    SET outcome_assessment = :assessment
                     WHERE proposal_id = :proposal_id
                 """),
                 {
                     "proposal_id": proposal_id,
                     "assessment": assessment,
-                    "delta": delta,
                 }
             )
-
-            # Adjust reflection karma
-            if reflection_delta != 0:
-                await karma_service.record_event(KarmaEvent(
-                    agent_id="reflection",
-                    dimension_name="insight_quality",
-                    delta=reflection_delta,
-                    reason=f"Proposal {proposal_id} assessment: {assessment} (delta={delta:.1f})",
-                    evidence_type="proposal_outcome",
-                    evidence_ids=[str(proposal_id)],
-                ))
 
             await db.commit()
 
             return {
                 "status": "assessed",
                 "assessment": assessment,
-                "karma_delta": delta,
             }
     finally:
         await engine.dispose()

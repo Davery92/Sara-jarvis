@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { APP_CONFIG } from '../config'
+import { BackgroundTaskDetailDrawer } from './BackgroundTaskDetailDrawer'
 
 interface BackgroundTask {
   id: string
@@ -25,6 +26,7 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
   const [tasks, setTasks] = useState<BackgroundTask[]>([])
   const [isExpanded, setIsExpanded] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
   // Fetch tasks
@@ -149,9 +151,13 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
               <div className="px-4 py-2">
                 <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Active</p>
                 {activeTasks.map(task => (
-                  <div
+                  <button
                     key={task.id}
-                    className="py-2 border-b border-gray-700/50 last:border-0"
+                    onClick={() => {
+                      setSelectedTaskId(task.id)
+                      setIsExpanded(false)
+                    }}
+                    className="w-full text-left py-2 border-b border-gray-700/50 last:border-0 cursor-pointer hover:bg-gray-700/40 rounded px-1 -mx-1 transition-colors"
                   >
                     <div className="flex items-start gap-2">
                       <span className={`material-icons text-sm ${getStatusColor(task.status)} ${task.status === 'running' ? 'animate-spin' : ''}`}>
@@ -161,12 +167,15 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
                         <p className="text-sm text-gray-200 truncate">
                           {truncateQuery(task.original_query)}
                         </p>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          Started {formatTime(task.started_at || task.created_at)}
-                        </p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <p className="text-xs text-gray-500">
+                            Started {formatTime(task.started_at || task.created_at)}
+                          </p>
+                          <span className="text-xs text-blue-400">Watch live</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -176,18 +185,13 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
               <div className="px-4 py-2 bg-gray-850">
                 <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Recent</p>
                 {recentTasks.slice(0, 5).map(task => (
-                  <div
+                  <button
                     key={task.id}
                     onClick={() => {
-                      if (task.status === 'completed' && task.result_note_id && onNavigateToWorkspace) {
-                        onNavigateToWorkspace(task.result_note_id)
-                        setIsExpanded(false)
-                      }
+                      setSelectedTaskId(task.id)
+                      setIsExpanded(false)
                     }}
-                    className={`
-                      py-2 border-b border-gray-700/50 last:border-0
-                      ${task.status === 'completed' && task.result_note_id ? 'cursor-pointer hover:bg-gray-700/50' : ''}
-                    `}
+                    className="w-full text-left py-2 border-b border-gray-700/50 last:border-0 cursor-pointer hover:bg-gray-700/40 rounded px-1 -mx-1 transition-colors"
                   >
                     <div className="flex items-start gap-2">
                       <span className={`material-icons text-sm ${getStatusColor(task.status)}`}>
@@ -201,8 +205,8 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
                           <p className="text-xs text-gray-500">
                             {formatTime(task.completed_at || task.created_at)}
                           </p>
-                          {task.status === 'completed' && task.result_note_id && (
-                            <span className="text-xs text-green-500">View result</span>
+                          {task.status === 'completed' && (
+                            <span className="text-xs text-green-500">View log</span>
                           )}
                           {task.status === 'failed' && (
                             <span className="text-xs text-red-400 truncate max-w-32">
@@ -212,7 +216,7 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -248,6 +252,15 @@ export const BackgroundTasksIndicator: React.FC<BackgroundTasksIndicatorProps> =
             </div>
           )}
         </div>
+      )}
+
+      {/* Live execution log drawer */}
+      {selectedTaskId && (
+        <BackgroundTaskDetailDrawer
+          taskId={selectedTaskId}
+          onClose={() => setSelectedTaskId(null)}
+          onOpenNote={onNavigateToWorkspace}
+        />
       )}
     </div>
   )

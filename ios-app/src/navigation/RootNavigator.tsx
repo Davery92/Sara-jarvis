@@ -13,6 +13,7 @@ import NoteEditorScreen from '../screens/notes/NoteEditorScreen';
 import NutritionGoalsFormScreen from '../screens/fitness/NutritionGoalsFormScreen';
 import RecipeFormScreen from '../screens/recipes/RecipeFormScreen';
 import WorkoutModeScreen from '../screens/fitness/WorkoutModeScreen';
+import DailyPlanScreen from '../screens/sara/DailyPlanScreen';
 import { RootStackParamList } from '../types/navigation';
 import { colors } from '../styles/theme';
 import { navigationRef, onNavigatorReady } from '../services/navigation';
@@ -110,6 +111,15 @@ export default function RootNavigator() {
                 presentation: 'fullScreenModal',
                 headerShown: false,
                 gestureEnabled: false,  // Prevent accidental swipe-to-close
+              }}
+            />
+            <Stack.Screen
+              name="DailyPlan"
+              component={DailyPlanScreen}
+              options={{
+                title: "Sara's Daily Plan",
+                headerStyle: { backgroundColor: colors.background },
+                headerTintColor: colors.text,
               }}
             />
           </>

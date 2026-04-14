@@ -14,7 +14,9 @@ export interface Note {
   id: string;
   title: string;
   content: string;
-  folder_id?: string;
+  folder_id?: string | null;
+  tags: string[];
+  starred: boolean;
   created_at: string;
   updated_at: string;
 }

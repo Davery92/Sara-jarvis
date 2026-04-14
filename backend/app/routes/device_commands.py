@@ -5,10 +5,14 @@ WebSocket and HTTP endpoints for cross-device command routing
 import logging
 from datetime import datetime
 from typing import Optional, List
+import secrets
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from app.core.timezone import now as local_now
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.core.auth import verify_token
 from app.core.deps import get_current_user
@@ -161,7 +165,7 @@ async def device_websocket(
                 # Acknowledge heartbeat
                 await websocket.send_json({
                     "type": "heartbeat_ack",
-                    "server_time": datetime.utcnow().isoformat()
+                    "server_time": local_now().isoformat()
                 })
 
             elif msg_type == "command_result":
@@ -352,39 +356,123 @@ async def get_active_device(
 
 @router.post("/register")
 async def register_device(
-    device_id: str,
-    hostname: str,
-    platform: str,
+    request: Request,
+    payload: Optional[dict] = Body(default=None),
+    device_id: Optional[str] = None,
+    hostname: Optional[str] = None,
+    platform: Optional[str] = None,
     os_version: Optional[str] = None,
     agent_version: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Register a new device or update existing registration.
-    Called by desktop agents on startup.
-    """
-    user_id = current_user.id
+    Unified device registration endpoint.
 
-    machine = await machine_registry_service.register_machine(
-        db=db,
-        user_id=user_id,
-        device_id=device_id,
-        hostname=hostname,
-        platform=platform,
-        os_version=os_version,
-        capabilities=["screenshot", "wake_word", "commands"],
-        agent_version=agent_version
+    Supports both:
+    - Desktop/headless agents (query params): device_id, hostname, platform
+    - Pi dashboard (JSON body): device_name/device_type -> returns device_token
+    """
+    body = payload or {}
+    user_id = str(current_user.id)
+
+    resolved_device_id = device_id or body.get("device_id")
+    resolved_hostname = hostname or body.get("hostname")
+    resolved_platform = platform or body.get("platform")
+
+    # Desktop/headless agent flow
+    if resolved_device_id and resolved_hostname and resolved_platform:
+        machine = await machine_registry_service.register_machine(
+            db=db,
+            user_id=user_id,
+            device_id=resolved_device_id,
+            hostname=resolved_hostname,
+            platform=resolved_platform,
+            os_version=os_version,
+            capabilities=["screenshot", "wake_word", "commands"],
+            agent_version=agent_version,
+        )
+
+        return {
+            "success": True,
+            "machine_id": machine.id,
+            "device_id": machine.device_id,
+            "config": {
+                "screenshot_enabled": machine.screenshot_enabled,
+                "screenshot_interval_seconds": machine.screenshot_interval_seconds,
+                # Used by headless agent if provided by server
+                "heartbeat_interval": 30,
+                "metrics_interval": 60,
+            },
+        }
+
+    # Pi dashboard flow (requires JSON body contract)
+    pi_payload = bool(body.get("device_name") or body.get("device_type"))
+    if not pi_payload:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either device_id/hostname/platform or device_name/device_type",
+        )
+
+    device_name = (body.get("device_name") or request.headers.get("X-Device-Name") or "Unknown Device").strip()
+    device_type = str(body.get("device_type") or "pi_dashboard").strip() or "pi_dashboard"
+
+    # Reuse existing token for same user+device_name to avoid token churn.
+    existing = db.execute(
+        text(
+            """
+            SELECT id, device_token
+            FROM device_registration
+            WHERE user_id = :user_id
+              AND device_name = :device_name
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"user_id": user_id, "device_name": device_name},
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            text(
+                """
+                UPDATE device_registration
+                SET last_seen = NOW(), device_type = :device_type
+                WHERE id = :id
+                """
+            ),
+            {"id": existing.id, "device_type": device_type},
+        )
+        db.commit()
+        return {
+            "device_id": existing.id,
+            "device_token": existing.device_token,
+            "message": "Device already registered. Returning existing token.",
+        }
+
+    device_token = secrets.token_urlsafe(32)
+    token_id = str(uuid.uuid4())
+    db.execute(
+        text(
+            """
+            INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
+            VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
+            """
+        ),
+        {
+            "id": token_id,
+            "user_id": user_id,
+            "device_name": device_name,
+            "device_token": device_token,
+            "device_type": device_type,
+        },
     )
+    db.commit()
 
     return {
-        "success": True,
-        "machine_id": machine.id,
-        "device_id": machine.device_id,
-        "config": {
-            "screenshot_enabled": machine.screenshot_enabled,
-            "screenshot_interval_seconds": machine.screenshot_interval_seconds
-        }
+        "device_id": token_id,
+        "device_token": device_token,
+        "message": "Device registered. Store this token securely.",
     }
 
 
@@ -407,7 +495,7 @@ async def device_heartbeat(
 
     return HeartbeatResponse(
         acknowledged=True,
-        server_time=datetime.utcnow(),
+        server_time=local_now(),
         screenshot_interval=machine.screenshot_interval_seconds
     )
 

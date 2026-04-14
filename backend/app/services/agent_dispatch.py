@@ -1,28 +1,434 @@
 """
-Agent Dispatch Service — Multi-mode task execution with session tracking.
+Agent Dispatch Service — Task execution via Claude Code on the VM.
 
-Modes:
-- auto: Classify task and route to internal tools or sandbox VM
-- dispatch: SSH to remote VM, run Claude Code agent, track session_id
-- internal: Use Sara's internal tool registry (email, calendar, memory, etc.)
-- self_orchestrate: Use existing OrchestratorService with SSH context
+All background agent tasks are dispatched to the VM (sara@10.185.1.176)
+where Claude Code runs with Qwen3.5-122B. The VM has shell access, PDF
+reading, multimodal vision, and web research capabilities.
+
+Falls back to InternalToolAgent if the VM is unreachable.
 """
 
 import asyncio
 import json
 import logging
+import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
+import redis.asyncio as aioredis
 from sqlalchemy.orm import Session
 
+import shlex
+
+from app.core.timezone import now as local_now
 from app.services.event_bus import event_bus, EventType, Event
-from app.services.vm_bridge import VMBridge, VMConfig, get_vm_config_from_settings
+from app.services.vm_bridge import VMBridge, VMConfig, VMConnectionStatus, get_vm_config_from_settings
 
 logger = logging.getLogger(__name__)
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+DISPATCH_LIVE_CHANNEL = "sara:dispatch:live:{task_id}"
+
+
+async def _publish_dispatch_event(task_id: str, entry: dict):
+    """Publish a live execution event to the dispatch SSE channel."""
+    try:
+        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        try:
+            channel = DISPATCH_LIVE_CHANNEL.format(task_id=task_id)
+            payload = json.dumps(entry, default=str)
+            await r.publish(channel, payload)
+        finally:
+            await r.close()
+    except Exception as e:
+        logger.warning(f"[dispatch] Redis publish failed: {e}")
+
+# Working directory on the sandbox VM
+DISPATCH_WORKING_DIR = "~/sandbox"
+
+
+def _resolve_vm_path(path: str, working_dir: str, username: str = "sara") -> str:
+    """Resolve a path argument from the dispatch LLM into a concrete VM path.
+
+    The dispatch tools (write_file, read_file) used to do
+    `if not path.startswith("/"): path = f"{working_dir}/{path}"`
+    which combined with `shlex.quote` produced literal `~/sandbox/~/sandbox/...`
+    paths whenever the LLM passed a tilde-prefixed path. SSH single-quotes
+    suppress shell tilde expansion, so the file got written to the wrong place
+    on the VM.
+
+    This helper normalizes once, before quoting:
+      - `~/foo`        → `/home/{username}/foo`
+      - `~`            → `/home/{username}`
+      - `/abs/path`    → unchanged
+      - `relative`     → `{resolved working_dir}/relative`
+
+    `working_dir` itself is also resolved if it's tilde-prefixed.
+    """
+    home = f"/home/{username}"
+    if path == "~":
+        return home
+    if path.startswith("~/"):
+        return home + path[1:]
+    if path.startswith("/"):
+        return path
+    # Relative — anchor against the (possibly tilde-prefixed) working dir
+    base = working_dir or ""
+    if base == "~":
+        base = home
+    elif base.startswith("~/"):
+        base = home + base[1:]
+    return f"{base.rstrip('/')}/{path}" if base else path
+
+# Tool definitions for the dispatch LLM loop (same pattern as ACS session_manager)
+DISPATCH_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Execute a shell command on the sandbox VM. You have full access "
+                "to bash, Python, git, Docker, curl, etc. "
+                f"Working directory: {DISPATCH_WORKING_DIR}/"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file on the sandbox VM",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            f"File path (relative to {DISPATCH_WORKING_DIR}/ or absolute)"
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content to write",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the sandbox VM",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to read",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web using SearXNG. Use this to look up documentation, "
+                "troubleshoot errors, find API references, or research how to do things. "
+                "Returns top results with titles, URLs, and snippets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_complete",
+            "description": (
+                "Signal that the task is complete. Call this when you have finished "
+                "all steps of the task. Provide a summary of what was accomplished."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Summary of what was done and the result",
+                    },
+                    "success": {
+                        "type": "boolean",
+                        "description": "Whether the task completed successfully",
+                    },
+                },
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+
+async def _execute_dispatch_tool(
+    bridge: VMBridge, name: str, args: dict, working_dir: str,
+) -> str:
+    """Execute a dispatch tool call via VMBridge."""
+    try:
+        if name == "run_command":
+            command = args.get("command", "")
+            if not command.strip():
+                return "Error: empty command"
+            result = await bridge.execute_command(
+                f"cd {working_dir} && {command}", timeout=120,
+            )
+            if result.timed_out:
+                return "Command timed out after 120s"
+            output = result.stdout
+            if result.stderr:
+                output += f"\nSTDERR: {result.stderr}"
+            if result.exit_code != 0:
+                output += f"\n(exit code {result.exit_code})"
+            return output[:10000] or "(no output)"
+
+        elif name == "write_file":
+            raw_path = args.get("path", "")
+            content = args.get("content", "")
+            if not raw_path:
+                return "Error: no path provided"
+            path = _resolve_vm_path(raw_path, working_dir, bridge.config.username)
+            marker = "SARA_EOF_MARKER"
+            escaped_content = content.replace("\\", "\\\\")
+            cmd = (
+                f"mkdir -p $(dirname {shlex.quote(path)}) && "
+                f"cat > {shlex.quote(path)} << '{marker}'\n{escaped_content}\n{marker}"
+            )
+            result = await bridge.execute_command(cmd, timeout=30)
+            if result.exit_code != 0:
+                return f"Error writing file: {result.stderr}"
+            return f"Wrote {len(content)} bytes to {path}"
+
+        elif name == "read_file":
+            raw_path = args.get("path", "")
+            if not raw_path:
+                return "Error: no path provided"
+            path = _resolve_vm_path(raw_path, working_dir, bridge.config.username)
+            result = await bridge.execute_command(
+                f"cat {shlex.quote(path)}", timeout=30,
+            )
+            if result.exit_code != 0:
+                return f"Error reading file: {result.stderr}"
+            return result.stdout[:10000] or "(empty file)"
+
+        elif name == "web_search":
+            query = args.get("query", "")
+            if not query:
+                return "Error: no query provided"
+            max_results = int(args.get("max_results", 5))
+            try:
+                from app.services.search_service import search_service
+                result = await search_service.web_search(
+                    query=query, max_results=max_results,
+                )
+                results = result.get("results", [])
+                lines = [f"Web search: '{query}' — {len(results)} results\n"]
+                for i, r in enumerate(results[:max_results], 1):
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    snippet = r.get("snippet", "")[:300]
+                    lines.append(f"{i}. {title}\n   {url}\n   {snippet}\n")
+                return "\n".join(lines) or "No results found"
+            except Exception as e:
+                return f"Web search error: {e}"
+
+        elif name == "report_complete":
+            summary = args.get("summary", "Task complete")
+            return f"__TASK_COMPLETE__:{summary}"
+
+        else:
+            return f"Unknown tool: {name}"
+
+    except Exception as e:
+        logger.error(f"[dispatch] Tool execution error ({name}): {e}")
+        return f"Tool execution error: {e}"
+
+
+async def _dispatch_llm_call(
+    messages: list[dict],
+    model: str | None = None,
+    tools: list[dict] | None = None,
+    max_retries: int = 3,
+) -> dict:
+    """Call the background LLM with tool definitions and retry on transient errors."""
+    from app.core.llm import BackgroundLLMClient
+    import httpx
+
+    client = BackgroundLLMClient()
+    extra_body = {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    if tools:
+        extra_body["tools"] = tools
+        extra_body["tool_choice"] = "auto"
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return await client.chat_completion(
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4096,
+                model=model,
+                request_timeout=300.0,
+                allow_during_lesson_generation=True,
+                allow_fallback=(attempt == 0),  # only try fallback on first attempt
+                extra_body=extra_body,
+            )
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
+            last_error = e
+            wait = 10 * (attempt + 1)
+            logger.warning(f"[dispatch] LLM call failed (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait}s")
+            await asyncio.sleep(wait)
+
+    raise last_error
+
+
+async def _dispatch_llm_loop(
+    messages: list[dict],
+    model: str | None,
+    tools: list[dict],
+    bridge: VMBridge,
+    working_dir: str,
+    max_rounds: int = 50,
+    task_id: str | None = None,
+) -> tuple[str, bool, list[dict]]:
+    """Multi-round LLM tool-use loop. Returns (output, success, execution_log).
+
+    Stops when:
+    - The LLM calls report_complete
+    - The LLM returns a text response with no tool calls
+    - max_rounds is exceeded
+    """
+    rounds = 0
+    execution_log: list[dict] = []
+
+    while rounds < max_rounds:
+
+        result = await _dispatch_llm_call(messages, model=model, tools=tools)
+
+        choices = result.get("choices", [])
+        if not choices:
+            return f"LLM returned no choices: {result}", False, execution_log
+
+        msg = choices[0].get("message", {})
+        tool_calls = msg.get("tool_calls")
+
+        if not tool_calls:
+            # Final text response — no more tool calls
+            content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
+            final_text = content or "Task completed (no output)"
+            entry = {
+                "type": "llm_response",
+                "ts": local_now().isoformat(),
+                "round": rounds,
+                "content": final_text[:10000],
+            }
+            execution_log.append(entry)
+            if task_id:
+                await _publish_dispatch_event(task_id, entry)
+            return final_text, True, execution_log
+
+        # Log LLM reasoning/content if present
+        llm_content = msg.get("content") or ""
+        if llm_content.strip():
+            entry = {
+                "type": "llm_response",
+                "ts": local_now().isoformat(),
+                "round": rounds,
+                "content": llm_content[:10000],
+            }
+            execution_log.append(entry)
+            if task_id:
+                await _publish_dispatch_event(task_id, entry)
+
+        # Append assistant message with tool calls
+        assistant_msg = {"role": "assistant", "content": llm_content}
+        assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        # Execute each tool call
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            tool_name = fn.get("name", "")
+            try:
+                tool_args = json.loads(fn.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            logger.info(f"[dispatch] Tool call: {tool_name}({json.dumps(tool_args)[:200]})")
+
+            tool_start = time.monotonic()
+            output = await _execute_dispatch_tool(bridge, tool_name, tool_args, working_dir)
+            tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+
+            # Log tool call
+            entry = {
+                "type": "tool_call",
+                "ts": local_now().isoformat(),
+                "round": rounds,
+                "tool": tool_name,
+                "args": tool_args,
+                "result": output[:10000],
+                "duration_ms": tool_duration_ms,
+            }
+            execution_log.append(entry)
+            if task_id:
+                await _publish_dispatch_event(task_id, entry)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", str(uuid.uuid4())),
+                "content": output,
+            })
+
+            # Check for report_complete signal
+            if output.startswith("__TASK_COMPLETE__:"):
+                summary = output[len("__TASK_COMPLETE__:"):]
+                success = tool_args.get("success", True)
+                return summary, success, execution_log
+
+        rounds += 1
+
+    return "(Maximum tool-call rounds reached)", False, execution_log
 
 CLASSIFIER_PROMPT = """Classify this task into one of two execution modes.
 
@@ -76,12 +482,13 @@ class AgentDispatchService:
 
         Returns (mode, reason, categories) tuple.
         """
+        from app.core.llm_config import llm_config
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    "http://100.104.68.115:11434/v1/chat/completions",
+                    f"{llm_config.fast_model_url}/chat/completions",
                     json={
-                        "model": "gpt-oss:20b",
+                        "model": llm_config.fast_model,
                         "messages": [
                             {"role": "user", "content": CLASSIFIER_PROMPT + task_description},
                         ],
@@ -110,7 +517,8 @@ class AgentDispatchService:
 
             # Validate categories
             valid_cats = {"email", "time", "notes", "memory", "web",
-                          "personal_knowledge", "home", "fitness", "learning", "inbox"}
+                          "personal_knowledge", "home", "fitness", "learning", "inbox",
+                          "shell"}
             categories = [c for c in categories if c in valid_cats]
 
             logger.info(f"[dispatch] Task classified as '{mode}', categories={categories}: {reason}")
@@ -127,7 +535,6 @@ class AgentDispatchService:
         task_description: str,
         mode: str = "auto",
         working_directory: Optional[str] = None,
-        timeout: int = 600,
         notify_on_complete: bool = False,
     ) -> dict:
         """Dispatch a task to the appropriate execution mode.
@@ -143,34 +550,25 @@ class AgentDispatchService:
         from app.models.background_task import BackgroundTask
         from app.models.mission import Mission, MissionStep
 
-        # Auto-classify if needed
+        # Classify task for metadata (categories help with fallback routing)
         classified_mode = None
         classification_reason = None
         classified_categories = None
-        if mode == "auto":
+        try:
             classified_mode, classification_reason, classified_categories = await self._classify_task(task_description)
-            # Map classifier result to execution mode
-            mode = "internal" if classified_mode == "internal" else "dispatch"
-            # If classification succeeded as internal but returned no categories, infer them
-            if mode == "internal" and not classified_categories:
-                classified_categories = self._infer_categories(task_description)
-            logger.info(f"[dispatch] Auto-classified '{task_description[:60]}' → {mode} categories={classified_categories}")
-        elif mode == "internal":
-            # Mode forced to internal — still classify to get relevant categories
-            # so we don't load all 80+ tools
-            _, classification_reason, classified_categories = await self._classify_task(task_description)
-            classified_mode = "internal"
-            # If classification failed (empty categories), infer from task text
             if not classified_categories:
                 classified_categories = self._infer_categories(task_description)
-            logger.info(f"[dispatch] Forced internal, classified categories={classified_categories}")
+            logger.info(
+                f"[dispatch] Classified '{task_description[:60]}' "
+                f"→ {classified_mode}, categories={classified_categories}"
+            )
+        except Exception as e:
+            logger.warning(f"[dispatch] Classification failed: {e}")
+            classified_categories = self._infer_categories(task_description)
 
-        if mode == "internal":
-            task_type = "internal_agent"
-        elif mode == "dispatch":
-            task_type = "vm_agent"
-        else:
-            task_type = "self_orchestrate"
+        # All tasks go to VM via claude -p (falls back to internal if VM unreachable)
+        mode = "vm_claude"
+        task_type = "vm_claude_agent"
 
         # Find relevant skills from past successful tasks
         relevant_skills = self._find_relevant_skills(db, user_id, task_description)
@@ -181,11 +579,10 @@ class AgentDispatchService:
         task_metadata = {
             "mode": mode,
             "working_directory": working_directory,
-            "timeout": timeout,
             "created_by": "agent_dispatch",
             "mission_id": None,  # set after mission is created
             "notify_on_complete": notify_on_complete,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": local_now().isoformat(),
         }
         if used_skill_ids:
             task_metadata["used_skill_ids"] = used_skill_ids
@@ -206,18 +603,11 @@ class AgentDispatchService:
         db.add(task)
 
         # Create a Mission for frontend tracking
-        if mode == "internal":
-            steps = [
-                {"action": "classify", "desc": "Determine execution mode"},
-                {"action": "execute", "desc": "Run internal tools"},
-                {"action": "report", "desc": "Compile results"},
-            ]
-        else:
-            steps = [
-                {"action": "connect", "desc": "Connect to sandbox VM"},
-                {"action": "execute", "desc": "Run agent task"},
-                {"action": "report", "desc": "Collect results"},
-            ]
+        steps = [
+            {"action": "connect", "desc": "Connect to agent VM"},
+            {"action": "execute", "desc": "Run Claude Code agent"},
+            {"action": "report", "desc": "Compile results"},
+        ]
 
         mission = Mission(
             user_id=user_id,
@@ -250,21 +640,38 @@ class AgentDispatchService:
 
         db.commit()
 
-        # Launch async execution
-        if mode == "internal":
-            coro = self._run_internal_mode(
-                task_id, mission_id, user_id, task_description, timeout,
-                categories=classified_categories,
+        # Create ACS plan item so Sara's autonomous sessions prioritize David's request
+        try:
+            from app.models.acs_plan_item import ACSPlanItem
+            from datetime import date
+            plan_item = ACSPlanItem(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                plan_date=date.today(),
+                title=task_description[:200],
+                description=task_description,
+                success_criteria=f"Complete David's request: {task_description[:200]}",
+                priority=90,
+                source="david_chat",
+                source_ref=task_id,
+                cognitive_mode="execution",
             )
-        elif mode == "dispatch":
-            coro = self._run_dispatch_mode(
-                task_id, mission_id, user_id, task_description,
-                working_directory, timeout,
-            )
-        else:
-            coro = self._run_self_orchestrate_mode(
-                task_id, mission_id, user_id, task_description, timeout,
-            )
+            db.add(plan_item)
+            db.commit()
+        except Exception as e:
+            logger.debug(f"[dispatch] ACS plan item creation failed (non-critical): {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        # Launch async execution — VM primary, internal fallback
+        skill_context = task_metadata.get("skill_context", "")
+        coro = self._run_vm_claude_mode(
+            task_id, mission_id, user_id, task_description,
+            skill_context=skill_context,
+            fallback_categories=classified_categories,
+        )
 
         async_task = asyncio.create_task(coro)
         async_task.add_done_callback(self._task_done_callback)
@@ -280,7 +687,7 @@ class AgentDispatchService:
             "status": "pending",
             "mode": mode,
             "classified_mode": classified_mode,
-            "message": f"Task dispatched ({mode} mode)",
+            "message": "Task dispatched to VM agent",
         }
 
     async def retry_task(
@@ -308,8 +715,6 @@ class AgentDispatchService:
         meta = task.task_metadata or {}
         mode = meta.get("mode", "dispatch")
         working_directory = meta.get("working_directory")
-        timeout = meta.get("timeout", 600)
-
         # Mark old task as superseded
         task.status = "superseded"
         meta["superseded_by"] = None  # will be filled after dispatch
@@ -328,7 +733,6 @@ class AgentDispatchService:
             task_description=task.original_query,
             mode=mode,
             working_directory=working_directory,
-            timeout=timeout,
         )
 
         # Link old → new
@@ -338,6 +742,60 @@ class AgentDispatchService:
 
         result["retried_from"] = task_id
         return result
+
+    async def cancel_task(
+        self,
+        db: Session,
+        task_id: str,
+        user_id: str,
+    ) -> dict:
+        """Cancel a running or pending agent task."""
+        from app.models.background_task import BackgroundTask
+        from app.models.mission import Mission
+
+        task = db.query(BackgroundTask).filter(
+            BackgroundTask.id == task_id,
+            BackgroundTask.user_id == user_id,
+        ).first()
+        if not task:
+            return {"error": "Task not found", "task_id": task_id}
+
+        if task.status not in ("running", "pending"):
+            return {"error": f"Task is {task.status}, not cancellable", "task_id": task_id}
+
+        # Cancel the asyncio task if it's running
+        if task_id in self._running_tasks:
+            async_task = self._running_tasks[task_id]
+            if not async_task.done():
+                async_task.cancel()
+                logger.info(f"[dispatch] Cancelled asyncio task for {task_id}")
+            self._running_tasks.pop(task_id, None)
+
+        # Update task status
+        task.status = "cancelled"
+        meta = task.task_metadata or {}
+        meta["cancelled_at"] = local_now().isoformat()
+        meta["cancel_reason"] = "user_request"
+        task.task_metadata = {**meta}
+
+        # Cancel the associated mission
+        mission_id = meta.get("mission_id")
+        if mission_id:
+            mission = db.query(Mission).filter(Mission.id == mission_id).first()
+            if mission and mission.state in ("running", "pending"):
+                mission.state = "cancelled"
+                mission.completed_at = local_now()
+
+        db.commit()
+
+        # Publish cancellation event for SSE
+        await _publish_dispatch_event(task_id, {
+            "type": "cancelled",
+            "ts": local_now().isoformat(),
+        })
+
+        logger.info(f"[dispatch] Task {task_id} cancelled by user")
+        return {"status": "cancelled", "task_id": task_id}
 
     async def retry_mission(
         self,
@@ -380,7 +838,7 @@ class AgentDispatchService:
         orphaned = (
             db.query(BackgroundTask)
             .filter(
-                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent"]),
+                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent"]),
                 BackgroundTask.status.in_(["running", "pending"]),
             )
             .all()
@@ -397,7 +855,7 @@ class AgentDispatchService:
             task.status = "failed"
             meta = task.task_metadata or {}
             meta["error"] = "Task abandoned by server restart"
-            meta["recovered_at"] = datetime.utcnow().isoformat()
+            meta["recovered_at"] = local_now().isoformat()
             task.task_metadata = {**meta}
 
             # Also fail the associated mission
@@ -406,7 +864,7 @@ class AgentDispatchService:
                 mission = db.query(Mission).filter(Mission.id == mission_id).first()
                 if mission and mission.state in ("running", "pending"):
                     mission.state = "failed"
-                    mission.completed_at = datetime.utcnow()
+                    mission.completed_at = local_now()
 
             recovered += 1
 
@@ -465,14 +923,14 @@ class AgentDispatchService:
 
             meta["orchestrator_messages"] = result.get("messages", [])
             meta["active_sessions"] = orchestrator.active_sessions
-            meta["last_resume_at"] = datetime.utcnow().isoformat()
+            meta["last_resume_at"] = local_now().isoformat()
 
             if result["status"] == "needs_clarification":
                 task.status = "needs_clarification"
                 task.clarification_question = result.get("question", "")[:500]
             elif result["status"] == "completed":
                 task.status = "completed"
-                task.completed_at = datetime.utcnow()
+                task.completed_at = local_now()
                 meta["output"] = result.get("summary", "")[:5000]
                 meta["artifacts"] = result.get("artifacts", [])
                 if mission_id:
@@ -503,13 +961,13 @@ class AgentDispatchService:
         result = await bridge.resume_claude_session(
             session_id=session_id,
             instruction=instruction,
-            timeout=meta.get("timeout", 600),
+            timeout=1800,
             working_dir=meta.get("working_directory"),
         )
 
         # Update metadata with latest output
         meta["last_resume_output"] = result.output[:3000]
-        meta["last_resume_at"] = datetime.utcnow().isoformat()
+        meta["last_resume_at"] = local_now().isoformat()
         task.task_metadata = {**meta}
 
         if result.success:
@@ -519,7 +977,7 @@ class AgentDispatchService:
                 task.clarification_question = result.output[:500]
             else:
                 task.status = "completed"
-                task.completed_at = datetime.utcnow()
+                task.completed_at = local_now()
         else:
             task.status = "failed"
 
@@ -592,12 +1050,12 @@ class AgentDispatchService:
         from app.models.mission import Mission
 
         # Auto-expire stuck tasks (> 4 hours in needs_clarification or running)
-        cutoff = datetime.utcnow() - timedelta(hours=4)
+        cutoff = local_now() - timedelta(hours=4)
         stuck_tasks = (
             db.query(BackgroundTask)
             .filter(
                 BackgroundTask.user_id == user_id,
-                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent"]),
+                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent"]),
                 BackgroundTask.status.in_(["needs_clarification", "running"]),
                 BackgroundTask.updated_at < cutoff,
             )
@@ -609,7 +1067,7 @@ class AgentDispatchService:
             t.status = "failed"
             meta = t.task_metadata or {}
             meta["error"] = f"Auto-expired: stuck in {original_status} for >4 hours"
-            meta["auto_expired_at"] = datetime.utcnow().isoformat()
+            meta["auto_expired_at"] = local_now().isoformat()
             t.task_metadata = {**meta}
             # Also fail the associated mission
             mission_id = meta.get("mission_id")
@@ -617,7 +1075,7 @@ class AgentDispatchService:
                 mission = db.query(Mission).filter(Mission.id == mission_id).first()
                 if mission and mission.state in ("running", "pending"):
                     mission.state = "failed"
-                    mission.completed_at = datetime.utcnow()
+                    mission.completed_at = local_now()
         if stuck_tasks:
             db.commit()
 
@@ -625,7 +1083,7 @@ class AgentDispatchService:
             db.query(BackgroundTask)
             .filter(
                 BackgroundTask.user_id == user_id,
-                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent"]),
+                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent"]),
             )
             .order_by(BackgroundTask.created_at.desc())
             .limit(limit)
@@ -663,7 +1121,6 @@ class AgentDispatchService:
         user_id: str,
         task_description: str,
         working_directory: Optional[str],
-        timeout: int,
     ):
         """Execute task on VM via GLM orchestrator → Claude Code agents."""
         from app.main_simple import SessionLocal
@@ -683,6 +1140,8 @@ class AgentDispatchService:
             # Step 0: Connect to VM
             self._update_mission_step(db, mission_id, 0, "running")
             task.status = "running"
+            if task.started_at is None:
+                task.started_at = local_now()
             db.commit()
             await self._emit_progress(user_id, task_id, "running",
                                       summary="Connecting to sandbox VM...")
@@ -691,6 +1150,7 @@ class AgentDispatchService:
             if status.value != "connected":
                 self._update_mission_step(db, mission_id, 0, "failed",
                                           error=f"VM {status.value}")
+                self._update_mission_state(db, mission_id, "failed")
                 task.status = "failed"
                 task.task_metadata = {
                     **(task.task_metadata or {}),
@@ -742,6 +1202,7 @@ class AgentDispatchService:
             if result["status"] == "failed":
                 self._update_mission_step(db, mission_id, 1, "failed",
                                           error=result.get("error", "")[:500])
+                self._update_mission_state(db, mission_id, "failed")
                 task.status = "failed"
                 meta["error"] = result.get("error", "Unknown error")
                 task.task_metadata = {**meta}
@@ -766,17 +1227,15 @@ class AgentDispatchService:
             artifacts = result.get("artifacts", [])
 
             task.status = "completed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = local_now()
             meta["output"] = summary[:5000]
             meta["artifacts"] = artifacts
             task.task_metadata = {**meta}
 
-            # Create result note
-            note_content = summary
-            if artifacts:
-                note_content += "\n\n**Artifacts:**\n" + "\n".join(f"- `{a}`" for a in artifacts)
+            # Create result note + pull VM artifacts into notes
             note_id = await self._create_result_note(
-                db, user_id, task_description, note_content,
+                db, user_id, task_description, summary,
+                artifacts=artifacts,
             )
             if note_id:
                 task.result_note_id = note_id
@@ -795,7 +1254,7 @@ class AgentDispatchService:
             if started_at:
                 try:
                     start_dt = datetime.fromisoformat(started_at)
-                    elapsed = (datetime.utcnow() - start_dt).total_seconds()
+                    elapsed = (local_now() - start_dt).total_seconds()
                 except (ValueError, TypeError):
                     elapsed = 60.0  # assume non-trivial if we can't tell
 
@@ -809,6 +1268,9 @@ class AgentDispatchService:
                 elapsed_seconds=elapsed,
             ))
 
+            await self._deliver_result_to_user(
+                db, user_id, task_id, task_description, summary, note_id,
+            )
             await self._emit_progress(user_id, task_id, "completed",
                                       summary=summary[:200])
             await self._notify(user_id, task_id, "completed",
@@ -830,7 +1292,8 @@ class AgentDispatchService:
                             **(task.task_metadata or {}),
                             "error": str(e),
                         }
-                        db.commit()
+                    self._update_mission_state(db, mission_id, "failed")
+                    db.commit()
             except Exception as inner_e:
                 logger.error(f"[dispatch] Failed to update task status: {inner_e}")
         finally:
@@ -844,7 +1307,6 @@ class AgentDispatchService:
         mission_id: str,
         user_id: str,
         task_description: str,
-        timeout: int,
         categories: list = None,
     ):
         """Execute task using Sara's internal tool registry."""
@@ -864,6 +1326,8 @@ class AgentDispatchService:
             # Step 0: Classify (already done, mark complete)
             self._update_mission_step(db, mission_id, 0, "done")
             task.status = "running"
+            if task.started_at is None:
+                task.started_at = local_now()
             self._update_mission_state(db, mission_id, "running")
             db.commit()
             await self._emit_progress(user_id, task_id, "running",
@@ -898,6 +1362,7 @@ class AgentDispatchService:
             if result["status"] == "failed":
                 self._update_mission_step(db, mission_id, 1, "failed",
                                           error=result.get("error", "")[:500])
+                self._update_mission_state(db, mission_id, "failed")
                 task.status = "failed"
                 meta["error"] = result.get("error", "Unknown error")
                 task.task_metadata = {**meta}
@@ -923,7 +1388,7 @@ class AgentDispatchService:
             found_items = result.get("found_items", [])
 
             task.status = "completed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = local_now()
             meta["output"] = summary[:5000]
             meta["artifacts"] = artifacts
             if found_items:
@@ -954,7 +1419,7 @@ class AgentDispatchService:
             if started_at:
                 try:
                     start_dt = datetime.fromisoformat(started_at)
-                    elapsed = (datetime.utcnow() - start_dt).total_seconds()
+                    elapsed = (local_now() - start_dt).total_seconds()
                 except (ValueError, TypeError):
                     elapsed = 60.0  # assume non-trivial if we can't tell
 
@@ -968,6 +1433,9 @@ class AgentDispatchService:
                 elapsed_seconds=elapsed,
             ))
 
+            await self._deliver_result_to_user(
+                db, user_id, task_id, task_description, summary, note_id,
+            )
             await self._emit_progress(user_id, task_id, "completed",
                                       summary=summary[:200])
             await self._notify(user_id, task_id, "completed",
@@ -989,7 +1457,210 @@ class AgentDispatchService:
                             **(task.task_metadata or {}),
                             "error": str(e),
                         }
-                        db.commit()
+                    self._update_mission_state(db, mission_id, "failed")
+                    db.commit()
+            except Exception as inner_e:
+                logger.error(f"[dispatch] Failed to update task status: {inner_e}")
+        finally:
+            if db:
+                db.close()
+            self._running_tasks.pop(task_id, None)
+
+    # ── VM LLM tool-use execution ───────────────────────────────────
+
+    async def _run_vm_claude_mode(
+        self,
+        task_id: str,
+        mission_id: str,
+        user_id: str,
+        task_description: str,
+        skill_context: str = "",
+        fallback_categories: list = None,
+    ):
+        """Execute task on VM via LLM tool-use loop.
+
+        The LLM (Qwen via BackgroundLLMClient) gets tool definitions for shell
+        execution, file read/write on the sandbox VM (via VMBridge). Falls back
+        to InternalToolAgent if the VM is unreachable.
+        """
+        from app.main_simple import SessionLocal
+
+        logger.info(f"[dispatch] Starting VM LLM tool-use mode for task {task_id}")
+        db = None
+        try:
+            db = SessionLocal()
+            task = self._get_task(db, task_id)
+            if not task:
+                return
+
+            notify_on_complete = (task.task_metadata or {}).get("notify_on_complete", False)
+
+            # Step 0: Connect to VM
+            self._update_mission_step(db, mission_id, 0, "running")
+            task.status = "running"
+            if task.started_at is None:
+                task.started_at = local_now()
+            self._update_mission_state(db, mission_id, "running")
+            db.commit()
+            await self._emit_progress(user_id, task_id, "running",
+                                      summary="Connecting to agent VM...")
+
+            bridge = self._get_bridge(db, user_id)
+            vm_status = await bridge.test_connection()
+
+            if vm_status != VMConnectionStatus.CONNECTED:
+                # Fall back to internal mode
+                logger.warning(f"[dispatch] VM {vm_status.value}, falling back to internal mode for task {task_id}")
+                self._update_mission_step(db, mission_id, 0, "done",
+                                          result_data={"note": f"VM {vm_status.value}, using internal fallback"})
+                db.commit()
+                db.close()
+                db = None
+                await self._emit_progress(user_id, task_id, "running",
+                                          summary="VM unreachable — running with internal tools...")
+                categories = list(set((fallback_categories or []) + ["shell", "web"]))
+                await self._run_internal_mode(
+                    task_id, mission_id, user_id, task_description,
+                    categories=categories,
+                )
+                return
+
+            self._update_mission_step(db, mission_id, 0, "done")
+            db.commit()
+
+            # Step 1: Execute via LLM tool-use loop on VM
+            self._update_mission_step(db, mission_id, 1, "running")
+            await self._emit_progress(user_id, task_id, "running",
+                                      summary="Running agent on VM...")
+
+            # Build prompt with optional skill context
+            prompt = task_description
+            if skill_context:
+                prompt += "\n\n" + skill_context
+
+            working_dir = DISPATCH_WORKING_DIR
+            system_prompt = (
+                f"You are Sara, an AI assistant with shell access to a sandbox VM.\n"
+                f"Working directory: {working_dir}\n\n"
+                f"You have tools to run shell commands, read/write files on the VM.\n"
+                f"Complete the task below. When finished, call report_complete with a summary.\n"
+                f"If a command fails, try to diagnose and fix the issue.\n"
+                f"Do not give up without trying at least a few approaches."
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+
+            output, success, execution_log = await _dispatch_llm_loop(
+                messages, model=None, tools=DISPATCH_TOOLS,
+                bridge=bridge, working_dir=working_dir,
+                max_rounds=50,
+                task_id=task_id,
+            )
+
+            meta = task.task_metadata or {}
+            meta["execution_log"] = execution_log
+
+            if not success:
+                self._update_mission_step(db, mission_id, 1, "failed",
+                                          error=output[:500])
+                self._update_mission_state(db, mission_id, "failed")
+                task.status = "failed"
+                meta["error"] = output[:5000]
+                task.task_metadata = {**meta}
+                db.commit()
+                used_skill_ids = meta.get("used_skill_ids", [])
+                self._track_skill_usage(db, used_skill_ids, succeeded=False)
+                await self._emit_progress(user_id, task_id, "failed",
+                                          summary=output[:200])
+                await self._notify(user_id, task_id, "failed",
+                                   f"Agent task failed: {output[:200]}")
+                return
+
+            # Completed
+            self._update_mission_step(db, mission_id, 1, "done",
+                                      result_data={"summary": output[:1000]})
+
+            # Step 2: Report
+            self._update_mission_step(db, mission_id, 2, "running")
+
+            summary = output or "Task completed"
+
+            task.status = "completed"
+            task.completed_at = local_now()
+            meta["output"] = summary[:5000]
+            task.task_metadata = {**meta}
+
+            # Extract file paths from output for artifact pull
+            artifacts = self._extract_file_paths(summary, execution_log)
+
+            # Create result note + pull VM artifacts into notes
+            note_id = await self._create_result_note(
+                db, user_id, task_description, summary,
+                artifacts=artifacts,
+            )
+            if note_id:
+                task.result_note_id = note_id
+
+            if artifacts:
+                meta["artifacts"] = artifacts
+                task.task_metadata = {**meta}
+
+            self._update_mission_step(db, mission_id, 2, "done")
+            self._update_mission_state(db, mission_id, "done")
+            db.commit()
+
+            # Track skill usage
+            used_skill_ids = meta.get("used_skill_ids", [])
+            self._track_skill_usage(db, used_skill_ids, succeeded=True)
+
+            # Extract skill recipe (fire-and-forget)
+            started_at = meta.get("started_at")
+            elapsed = 0.0
+            if started_at:
+                try:
+                    start_dt = datetime.fromisoformat(started_at)
+                    elapsed = (local_now() - start_dt).total_seconds()
+                except (ValueError, TypeError):
+                    elapsed = 60.0
+
+            asyncio.create_task(self._extract_skill_recipe(
+                db=SessionLocal(),
+                user_id=user_id,
+                task_id=task_id,
+                task_description=task_description,
+                output=summary,
+                mode="vm_claude",
+                elapsed_seconds=elapsed,
+            ))
+
+            await self._deliver_result_to_user(
+                db, user_id, task_id, task_description, summary, note_id,
+            )
+            await self._emit_progress(user_id, task_id, "completed",
+                                      summary=summary[:200])
+            await self._notify(user_id, task_id, "completed",
+                               f"Agent task completed: {task_description[:100]}")
+            await self._notify_completion(user_id, task_id, task_description,
+                                          summary, notify_on_complete)
+
+        except Exception as e:
+            logger.exception(f"[dispatch] VM claude mode failed for task {task_id}: {e}")
+            await self._emit_progress(user_id, task_id, "failed",
+                                      summary=str(e)[:200])
+            try:
+                if db:
+                    db.rollback()
+                    task = self._get_task(db, task_id)
+                    if task:
+                        task.status = "failed"
+                        task.task_metadata = {
+                            **(task.task_metadata or {}),
+                            "error": str(e),
+                        }
+                    self._update_mission_state(db, mission_id, "failed")
+                    db.commit()
             except Exception as inner_e:
                 logger.error(f"[dispatch] Failed to update task status: {inner_e}")
         finally:
@@ -1003,7 +1674,6 @@ class AgentDispatchService:
         mission_id: str,
         user_id: str,
         task_description: str,
-        timeout: int,
     ):
         """Execute task using the existing OrchestratorService with SSH context."""
         from app.main_simple import SessionLocal
@@ -1053,9 +1723,9 @@ class AgentDispatchService:
         if step:
             step.status = status
             if status == "running":
-                step.started_at = datetime.utcnow()
+                step.started_at = local_now()
             if status in ("done", "failed"):
-                step.completed_at = datetime.utcnow()
+                step.completed_at = local_now()
             if error:
                 step.error_message = error
             if result_data:
@@ -1078,7 +1748,7 @@ class AgentDispatchService:
         if mission:
             mission.state = state
             if state == "done":
-                mission.completed_at = datetime.utcnow()
+                mission.completed_at = local_now()
             db.commit()
 
     @staticmethod
@@ -1102,8 +1772,11 @@ class AgentDispatchService:
             cats.append("fitness")
         if any(w in text for w in ["learn", "study", "course", "topic"]):
             cats.append("learning")
-        # Default to email if nothing matched (most common agent task)
-        return cats if cats else ["email"]
+        if any(w in text for w in ["run", "script", "code", "command", "compile", "build",
+                                    "install", "execute", "shell", "bash", "python", "write a"]):
+            cats.append("shell")
+        # Default to web + shell if nothing matched (versatile fallback)
+        return cats if cats else ["web", "shell"]
 
     def _looks_like_question(self, text: str) -> bool:
         """Heuristic: does the agent output look like it's asking a question?"""
@@ -1115,23 +1788,199 @@ class AgentDispatchService:
                                "which option", "do you want", "shall i"]
         return any(ind in last_lines for ind in question_indicators)
 
+    # File extensions worth pulling from the VM into notes
+    _INLINEABLE_EXTENSIONS = {
+        ".md", ".txt", ".py", ".csv", ".json", ".yaml", ".yml",
+        ".sh", ".html", ".xml", ".toml", ".cfg", ".ini", ".log",
+        ".rs", ".go", ".js", ".ts", ".sql", ".r", ".tex",
+    }
+    _MAX_INLINE_SIZE = 100_000  # 100 KB per file
+
+    async def _pull_vm_artifacts(
+        self, artifacts: List[str], folder_id: Optional[str],
+        user_id: str, db: Session,
+    ) -> List[str]:
+        """Pull text artifacts from the VM and save each as a separate note.
+
+        Returns list of note IDs created.
+        """
+        if not artifacts:
+            return []
+
+        from app.models.note import Note
+
+        bridge = VMBridge()
+        try:
+            status = await bridge.test_connection()
+            if status != VMConnectionStatus.CONNECTED:
+                logger.warning("VM not reachable for artifact pull")
+                return []
+        except Exception:
+            return []
+
+        # Resolve tilde-prefixed paths and dedupe — _extract_file_paths can
+        # legitimately produce both `~/sandbox/foo.md` and the absolute form
+        # for the same file (e.g. when the LLM tried both during recovery).
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for raw in artifacts:
+            r = _resolve_vm_path(raw, DISPATCH_WORKING_DIR, bridge.config.username)
+            if r not in seen:
+                seen.add(r)
+                resolved.append(r)
+
+        created_ids = []
+        for path in resolved:
+            try:
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in self._INLINEABLE_EXTENSIONS:
+                    continue
+
+                # Check file size first
+                size_result = await bridge.execute_command(
+                    f"stat -c%s {shlex.quote(path)} 2>/dev/null || echo 0",
+                    timeout=10,
+                )
+                size_str = (size_result.stdout if hasattr(size_result, 'stdout')
+                            else size_result.output if hasattr(size_result, 'output')
+                            else str(size_result)).strip()
+                try:
+                    size = int(size_str)
+                except (ValueError, TypeError):
+                    size = 0
+                if size == 0 or size > self._MAX_INLINE_SIZE:
+                    continue
+
+                # Read file content
+                result = await bridge.execute_command(
+                    f"cat {shlex.quote(path)}", timeout=30,
+                )
+                content = (result.stdout if hasattr(result, 'stdout')
+                           else result.output if hasattr(result, 'output')
+                           else str(result))
+                if not content or not content.strip():
+                    continue
+
+                # Derive title from filename
+                basename = os.path.basename(path)
+                title = os.path.splitext(basename)[0].replace("-", " ").replace("_", " ").title()
+
+                # Wrap non-markdown in code block
+                if ext != ".md":
+                    content = f"```{ext.lstrip('.')}\n{content}\n```"
+
+                note_id = str(uuid.uuid4())
+                note = Note(
+                    id=note_id,
+                    user_id=user_id,
+                    title=title,
+                    content=content,
+                    folder_id=folder_id,
+                )
+                db.add(note)
+                created_ids.append(note_id)
+                logger.info(f"Pulled VM artifact into note: {basename} → {note_id[:8]}")
+
+            except Exception as e:
+                logger.debug(f"Failed to pull artifact {path}: {e}")
+
+        if created_ids:
+            try:
+                db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to commit artifact notes: {e}")
+                db.rollback()
+                return []
+
+        return created_ids
+
+    @staticmethod
+    def _extract_file_paths(summary: str, execution_log: list = None) -> List[str]:
+        """Extract VM file paths from agent output and execution log."""
+        paths = set()
+
+        # Common VM paths pattern: ~/sandbox/..., /home/sara/...
+        path_pattern = re.compile(
+            r'(?:~/sandbox/[\w./_-]+|/home/sara/[\w./_-]+)'
+        )
+
+        # Scan summary text
+        for match in path_pattern.finditer(summary or ""):
+            p = match.group(0)
+            # Only include files (must have extension)
+            if '.' in os.path.basename(p):
+                paths.add(p)
+
+        # Scan execution log for write_file calls
+        for entry in (execution_log or []):
+            if isinstance(entry, dict):
+                tool = entry.get("tool", "")
+                args = entry.get("args", {})
+                if tool == "write_file" and "path" in args:
+                    paths.add(args["path"])
+                # Also check command outputs mentioning file creation
+                output_text = entry.get("output", "")
+                for match in path_pattern.finditer(output_text):
+                    p = match.group(0)
+                    if '.' in os.path.basename(p):
+                        paths.add(p)
+
+        return list(paths)
+
     async def _create_result_note(
         self, db: Session, user_id: str, task_description: str, output: str,
+        artifacts: List[str] = None,
     ) -> Optional[str]:
-        """Create a note in the Agent Workspace folder with the task result."""
+        """Create a note in the Agent Workspace folder with the task result.
+
+        If artifacts (VM file paths) are provided, pulls readable files from
+        the VM and saves them as separate linked notes.
+        """
         try:
             from app.services.background_task_service import background_task_service
 
             folder = await background_task_service._ensure_workspace_folder(db, user_id)
             from app.models.note import Note
 
+            folder_id = folder.id if folder else None
+
+            # Pull VM artifacts into notes
+            artifact_note_ids = await self._pull_vm_artifacts(
+                artifacts or [], folder_id, user_id, db,
+            )
+
+            # Build a prominent header that surfaces produced documents above
+            # the LLM's summary. The previous layout buried these wikilinks at
+            # the very bottom under a small "Research Documents:" subheading,
+            # which made the note feel "lackluster" — users skimmed the summary
+            # and missed that the full deliverable was sitting in a linked note.
+            files_header = ""
+            if artifact_note_ids:
+                artifact_notes = db.query(Note).filter(
+                    Note.id.in_(artifact_note_ids)
+                ).all()
+                if artifact_notes:
+                    if len(artifact_notes) == 1:
+                        files_header = (
+                            f"📄 **Full document:** [[{artifact_notes[0].title}]]\n\n"
+                        )
+                    else:
+                        links = "\n".join(f"- [[{n.title}]]" for n in artifact_notes)
+                        files_header = f"📄 **Files produced:**\n{links}\n\n"
+
             note_id = str(uuid.uuid4())
             note = Note(
                 id=note_id,
                 user_id=user_id,
                 title=f"Agent Result: {task_description[:80]}",
-                content=f"# Agent Task Result\n\n**Task:** {task_description}\n\n---\n\n{output}",
-                folder_id=folder.id if folder else None,
+                content=(
+                    f"# Agent Task Result\n\n"
+                    f"{files_header}"
+                    f"**Task:** {task_description}\n\n"
+                    f"---\n\n"
+                    f"{output}"
+                ),
+                folder_id=folder_id,
             )
             db.add(note)
             db.commit()
@@ -1157,6 +2006,54 @@ class AgentDispatchService:
             ))
         except Exception as e:
             logger.debug(f"[dispatch] Failed to emit progress event: {e}")
+
+    async def _deliver_result_to_user(
+        self, db, user_id: str, task_id: str,
+        task_description: str, summary: str, note_id: Optional[str],
+    ):
+        """Push task result to both chat delivery and attention inbox."""
+        # 1. Real-time chat injection / push notification
+        try:
+            from app.services.task_result_delivery import deliver_task_result
+            await deliver_task_result(
+                user_id=user_id,
+                task_id=task_id,
+                task_query=task_description,
+                result_note_id=note_id,
+                result_note_title=f"Agent: {task_description[:80]}",
+                result_summary=summary[:2000],
+                db=db,
+            )
+        except Exception as e:
+            logger.warning(f"[dispatch] Chat delivery failed for task {task_id}: {e}")
+
+        # 2. Attention inbox item for async discovery
+        try:
+            from app.services.autonomy.attention_queue import AttentionQueueService
+            attention = AttentionQueueService()
+            await attention.create_item(
+                db=db,
+                user_id=user_id,
+                title=f"Agent complete: {task_description[:60]}",
+                body=summary[:500],
+                category="agent_task",
+                priority="normal",
+                source="agent_dispatch",
+                dedupe_key=f"agent_task:{task_id}",
+                payload={
+                    "task_id": task_id,
+                    "note_id": note_id,
+                    "actions": [
+                        {"type": "chat", "label": "Discuss",
+                         "data": {"prefill": f"Tell me about: {task_description[:60]}"}},
+                        {"type": "navigate", "label": "View Note",
+                         "data": {"screen": "notes", "note_id": note_id}},
+                        {"type": "complete", "label": "Dismiss"},
+                    ],
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[dispatch] Attention item failed for task {task_id}: {e}")
 
     async def _notify_completion(
         self, user_id: str, task_id: str, task_description: str,
@@ -1220,6 +2117,8 @@ class AgentDispatchService:
             result["working_directory"] = meta.get("working_directory")
             result["exit_code"] = meta.get("exit_code")
             result["found_items"] = meta.get("found_items", [])
+            result["execution_log"] = meta.get("execution_log", [])
+            result["error"] = meta.get("error")
         return result
 
     # ── Skill Learning ────────────────────────────────────────────────

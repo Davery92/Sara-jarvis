@@ -158,6 +158,62 @@ def system_heartbeat(self) -> Dict[str, Any]:
             "message": f"Working memory check warning: {str(e)}"
         }
 
+    # Check LLM endpoints
+    try:
+        import httpx
+        llm_primary = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1")
+        llm_fallback = os.getenv("FAST_MODEL_URL", "http://10.185.1.8:8686/v1")
+        for name, url in [("llm_primary", llm_primary), ("llm_fallback", llm_fallback)]:
+            try:
+                resp = httpx.get(f"{url}/models", timeout=5.0)
+                health_report["checks"][name] = {
+                    "status": HealthStatus.HEALTHY if resp.status_code == 200 else HealthStatus.WARNING,
+                    "message": f"{url} status={resp.status_code}"
+                }
+            except Exception as e:
+                health_report["checks"][name] = {
+                    "status": HealthStatus.ERROR,
+                    "message": f"{url} unreachable: {str(e)[:100]}"
+                }
+    except Exception as e:
+        health_report["checks"]["llm_primary"] = {"status": HealthStatus.WARNING, "message": f"LLM check skipped: {e}"}
+
+    # Check embedding service
+    try:
+        import httpx
+        embed_url = os.getenv("EMBEDDING_BASE_URL", "http://embeddings:8100")
+        resp = httpx.get(f"{embed_url}/health", timeout=5.0)
+        health_report["checks"]["embeddings"] = {
+            "status": HealthStatus.HEALTHY if resp.status_code == 200 else HealthStatus.WARNING,
+            "message": f"Embedding service status={resp.status_code}"
+        }
+    except Exception as e:
+        health_report["checks"]["embeddings"] = {
+            "status": HealthStatus.ERROR,
+            "message": f"Embedding service unreachable: {str(e)[:100]}"
+        }
+
+    # Check Celery queue depths
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        r = redis.from_url(redis_url)
+        queues = ["critical", "cognitive", "health", "input", "maintenance", "low_priority", "reflection", "acs"]
+        queue_depths = {}
+        for q in queues:
+            depth = r.llen(q)
+            queue_depths[q] = depth
+        max_depth = max(queue_depths.values()) if queue_depths else 0
+        health_report["checks"]["queue_depths"] = {
+            "status": HealthStatus.WARNING if max_depth > 50 else HealthStatus.HEALTHY,
+            "message": f"Max queue depth: {max_depth}",
+            "details": queue_depths
+        }
+    except Exception as e:
+        health_report["checks"]["queue_depths"] = {
+            "status": HealthStatus.WARNING,
+            "message": f"Queue depth check failed: {str(e)[:100]}"
+        }
+
     # Determine overall status
     statuses = [check["status"] for check in health_report["checks"].values()]
     if HealthStatus.CRITICAL in statuses:
@@ -174,10 +230,55 @@ def system_heartbeat(self) -> Dict[str, Any]:
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
         r = redis.from_url(redis_url)
         import json
-        r.setex("system:health_status", 600, json.dumps(health_report))
+        r.setex("system:health_status", 600, json.dumps(health_report, default=str))
     except Exception as e:
         logger.warning(f"Failed to store health status: {e}")
+
+    # Alert on error/critical — push notification to David
+    if health_report["overall_status"] in (HealthStatus.ERROR, HealthStatus.CRITICAL):
+        failed_checks = [
+            name for name, check in health_report["checks"].items()
+            if check["status"] in (HealthStatus.ERROR, HealthStatus.CRITICAL)
+        ]
+        _send_health_alert(failed_checks, health_report["overall_status"])
 
     logger.info(f"System heartbeat: {health_report['overall_status']}")
 
     return health_report
+
+
+def _send_health_alert(failed_checks: list, severity: str):
+    """Send push notification for health failures."""
+    import asyncio
+    try:
+        from app.services.unified_notification import send_notification
+        solo_user_id = os.getenv("SOLO_USER_ID", "")
+        if not solo_user_id:
+            return
+
+        title = f"System health: {severity.upper()}"
+        message = f"Failed checks: {', '.join(failed_checks)}"
+
+        async def _send():
+            await send_notification(
+                user_id=solo_user_id,
+                title=title,
+                message=message,
+                priority="urgent" if severity == HealthStatus.CRITICAL else "high",
+                category="system_health",
+                topic=f"health:{','.join(sorted(failed_checks))}",
+                source="health_monitor",
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(_send())
+            else:
+                loop.run_until_complete(_send())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_send())
+            loop.close()
+    except Exception as e:
+        logger.warning(f"Failed to send health alert: {e}")

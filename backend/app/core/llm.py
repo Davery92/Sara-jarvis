@@ -209,15 +209,20 @@ class LLMClientWithFailover:
 
     async def _health_check_loop(self):
         """Background loop for periodic health checks on primary endpoint"""
-        while self._running:
-            try:
-                await self._check_primary_health()
-                await asyncio.sleep(self.health_check_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Health check loop error: {e}")
-                await asyncio.sleep(self.health_check_interval)
+        # Reuse a single client to avoid connection churn
+        self._health_client = httpx.AsyncClient(timeout=self.health_check_timeout)
+        try:
+            while self._running:
+                try:
+                    await self._check_primary_health()
+                    await asyncio.sleep(self.health_check_interval)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Health check loop error: {e}")
+                    await asyncio.sleep(self.health_check_interval)
+        finally:
+            await self._health_client.aclose()
 
     async def _check_primary_health(self):
         """Check primary endpoint health via /v1/models endpoint"""
@@ -225,13 +230,11 @@ class LLMClientWithFailover:
         previous_state = self.primary_status.state
 
         try:
-            # Use a separate client with short timeout for health checks
-            async with httpx.AsyncClient(timeout=self.health_check_timeout) as client:
-                response = await client.get(
-                    f"{self.primary_url}/models",
-                    headers=self._get_headers(self.primary_url)
-                )
-                response.raise_for_status()
+            response = await self._health_client.get(
+                f"{self.primary_url}/models",
+                headers=self._get_headers(self.primary_url)
+            )
+            response.raise_for_status()
 
             # Success
             self.primary_status.consecutive_failures = 0
@@ -758,6 +761,149 @@ class BackgroundLLMClient:
         self.request_timeout = max(10.0, float(request_timeout))
         self.connect_timeout = max(1.0, float(connect_timeout))
         self.default_num_ctx = max(2048, int(num_ctx))
+        self.fallback_max_tokens = int(getattr(settings, 'bg_llm_fallback_max_tokens', 24000))
+
+        # Circuit breaker state
+        self._consecutive_primary_failures = 0
+        self._primary_degraded = False
+        self._primary_degraded_until: Optional[float] = None
+        self._total_requests = 0
+        self._total_failures = 0
+        self._failover_events = 0
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Rough token estimate: ~4 chars per token for English text."""
+        return len(text) // 4
+
+    def _truncate_messages_for_fallback(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Truncate message history to fit within the fallback model's context window.
+
+        Strategy:
+        - Always keep the system prompt (first message)
+        - Always keep the last 6 messages (recent context)
+        - In the middle section, prioritize "high-value" messages:
+          tool results, plan item context, and assistant messages with
+          tool_calls — these contain the actual work product
+        - Drop low-value middle messages oldest-first
+        - If still over budget, truncate the system prompt itself
+        """
+        max_tokens = self.fallback_max_tokens
+
+        def msg_tokens(msg: Dict[str, Any]) -> int:
+            content = msg.get("content") or ""
+            tc = msg.get("tool_calls")
+            tc_text = json.dumps(tc) if tc else ""
+            return self._estimate_tokens(content + tc_text)
+
+        def is_high_value(msg: Dict[str, Any]) -> bool:
+            """Identify messages that carry critical execution context."""
+            role = msg.get("role", "")
+            content = msg.get("content") or ""
+
+            # Tool results contain actual command output / work product
+            if role == "tool":
+                return True
+
+            # Assistant messages with tool_calls show what Sara did
+            if role == "assistant" and msg.get("tool_calls"):
+                return True
+
+            # Messages referencing plan items or execution context
+            if any(kw in content.lower() for kw in (
+                "plan item", "success criteria", "complete_plan_item",
+                "block_plan_item", "execution session",
+            )):
+                return True
+
+            return False
+
+        total = sum(msg_tokens(m) for m in messages)
+        if total <= max_tokens:
+            return messages
+
+        logger.warning(
+            f"Fallback context truncation: {total} estimated tokens > "
+            f"{max_tokens} limit, trimming message history"
+        )
+
+        if not messages:
+            return messages
+
+        # Separate: system prompt, middle messages, recent tail
+        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        start_idx = 1 if system_msg else 0
+        tail_count = min(6, len(messages) - start_idx)
+        middle = messages[start_idx: len(messages) - tail_count] if tail_count > 0 else messages[start_idx:]
+        tail = messages[len(messages) - tail_count:] if tail_count > 0 else []
+
+        # Calculate token budget for middle section
+        system_tokens = msg_tokens(system_msg) if system_msg else 0
+        tail_tokens = sum(msg_tokens(m) for m in tail)
+        middle_budget = max_tokens - system_tokens - tail_tokens
+
+        if middle_budget <= 0:
+            # System + tail already exceeds budget — truncate system prompt
+            if system_msg:
+                system_content = system_msg.get("content", "")
+                available = max_tokens - tail_tokens - 500
+                if available > 0:
+                    char_limit = available * 4
+                    truncated_system = system_content[:char_limit] + "\n\n[System prompt truncated for context limits]"
+                    result = [{"role": "system", "content": truncated_system}] + tail
+                else:
+                    result = tail
+                logger.warning(
+                    f"Fallback truncation: system+tail exceeds budget, "
+                    f"truncated system prompt to ~{available} tokens"
+                )
+                return result
+            return tail
+
+        # Two-pass selection: high-value messages first, then recent low-value
+        high_value = [(i, m) for i, m in enumerate(middle) if is_high_value(m)]
+        low_value = [(i, m) for i, m in enumerate(middle) if not is_high_value(m)]
+
+        kept_indices = set()
+        running_tokens = 0
+
+        # Pass 1: keep high-value messages (most recent first)
+        for i, msg in reversed(high_value):
+            mt = msg_tokens(msg)
+            if running_tokens + mt <= middle_budget:
+                kept_indices.add(i)
+                running_tokens += mt
+
+        # Pass 2: fill remaining budget with low-value messages (most recent first)
+        for i, msg in reversed(low_value):
+            mt = msg_tokens(msg)
+            if running_tokens + mt <= middle_budget:
+                kept_indices.add(i)
+                running_tokens += mt
+
+        kept_middle = [m for i, m in enumerate(middle) if i in kept_indices]
+        dropped = len(middle) - len(kept_middle)
+        hv_kept = sum(1 for i, _ in high_value if i in kept_indices)
+
+        result = []
+        if system_msg:
+            result.append(system_msg)
+        if dropped > 0:
+            result.append({
+                "role": "user",
+                "content": f"[{dropped} earlier messages trimmed for context limits]",
+            })
+        result.extend(kept_middle)
+        result.extend(tail)
+
+        new_total = sum(msg_tokens(m) for m in result)
+        logger.info(
+            f"Fallback truncation complete: {total} → {new_total} estimated tokens, "
+            f"dropped {dropped} middle messages (kept {hv_kept} high-value)"
+        )
+        return result
 
     async def _ensure_started(self):
         """Initialize HTTP clients if not already started"""
@@ -780,6 +926,19 @@ class BackgroundLLMClient:
             f"timeouts(connect={self.connect_timeout}s, request={self.request_timeout}s)"
         )
 
+    async def _reset_clients(self):
+        """Tear down and recreate HTTP clients to recover from stale connections."""
+        try:
+            if self._primary_client:
+                await self._primary_client.aclose()
+            if self._fallback_client:
+                await self._fallback_client.aclose()
+        except Exception:
+            pass
+        self._started = False
+        await self._ensure_started()
+        logger.info("Background LLM HTTP clients reset")
+
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -790,6 +949,7 @@ class BackgroundLLMClient:
         allow_during_lesson_generation: bool = False,
         allow_fallback: bool = True,
         request_timeout: Optional[float] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Send chat completion with simple failover for background tasks.
@@ -820,46 +980,89 @@ class BackgroundLLMClient:
             merged_options["num_ctx"] = self.default_num_ctx
         if merged_options:
             payload["options"] = merged_options
+        if extra_body:
+            payload.update(extra_body)
 
-        try:
-            logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
-            result = await self._request_chat_with_compat(
-                client=self._primary_client,
-                payload=payload,
-                endpoint_url=self.primary_url,
-                request_timeout=req_timeout,
-            )
-            logger.debug(f"Background LLM request successful via primary endpoint")
-            return result
+        self._total_requests += 1
 
-        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
-            if not allow_fallback:
-                logger.warning(
-                    f"Background LLM primary request failed with fallback disabled: {e}"
-                )
-                raise
+        # Circuit breaker: check if primary is degraded
+        import time as _time
+        _skip_primary = False
+        if self._primary_degraded and self._primary_degraded_until:
+            if _time.time() < self._primary_degraded_until:
+                _skip_primary = True
+            else:
+                # Recovery window — try primary again
+                self._primary_degraded = False
+                self._primary_degraded_until = None
+                self._consecutive_primary_failures = 0
+                logger.info("Background LLM: primary recovery window, attempting primary again")
 
-            logger.warning(f"Background LLM primary request failed: {e}, trying fallback")
-
-            # Try fallback
+        if not _skip_primary:
             try:
-                fallback_model = self.fallback_model if model in (None, self.primary_model) else model
-                fallback_payload = {
-                    **payload,
-                    "model": fallback_model,
-                }
-                logger.debug(f"Background LLM failover to {self.fallback_url} with model {self.fallback_model}")
+                logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
                 result = await self._request_chat_with_compat(
-                    client=self._fallback_client,
-                    payload=fallback_payload,
-                    endpoint_url=self.fallback_url,
+                    client=self._primary_client,
+                    payload=payload,
+                    endpoint_url=self.primary_url,
                     request_timeout=req_timeout,
                 )
-                logger.info(f"Background LLM failover to {self.fallback_url} successful")
+                # Success — reset failure counter
+                self._consecutive_primary_failures = 0
+                if self._primary_degraded:
+                    self._primary_degraded = False
+                    logger.info("Background LLM: primary recovered")
                 return result
-            except Exception as fallback_error:
-                logger.error(f"Background LLM fallback also failed: {fallback_error}")
-                raise
+
+            except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
+                self._consecutive_primary_failures += 1
+                self._total_failures += 1
+
+                if isinstance(e, httpx.ConnectError):
+                    logger.warning(f"Connection error on primary, resetting HTTP clients: {e}")
+                    await self._reset_clients()
+
+                # Trip circuit breaker after 3 consecutive failures
+                if self._consecutive_primary_failures >= 3 and not self._primary_degraded:
+                    self._primary_degraded = True
+                    self._primary_degraded_until = _time.time() + 300  # 5 min cooldown
+                    self._failover_events += 1
+                    logger.warning(
+                        f"Background LLM: primary degraded after {self._consecutive_primary_failures} "
+                        f"failures, routing to fallback for 5 min"
+                    )
+
+                if not allow_fallback:
+                    logger.warning(f"Background LLM primary failed with fallback disabled: {e}")
+                    raise
+
+                logger.warning(f"Background LLM primary failed: {e}, trying fallback")
+        else:
+            logger.debug("Background LLM: skipping degraded primary, going straight to fallback")
+
+        # Try fallback — truncate messages to fit smaller context window
+        try:
+            fallback_model = self.fallback_model if model in (None, self.primary_model) else model
+            truncated_messages = self._truncate_messages_for_fallback(
+                payload.get("messages", [])
+            )
+            fallback_payload = {
+                **payload,
+                "model": fallback_model,
+                "messages": truncated_messages,
+            }
+            result = await self._request_chat_with_compat(
+                client=self._fallback_client,
+                payload=fallback_payload,
+                endpoint_url=self.fallback_url,
+                request_timeout=req_timeout,
+            )
+            logger.info(f"Background LLM failover to {self.fallback_url} successful")
+            return result
+        except Exception as fallback_error:
+            self._total_failures += 1
+            logger.error(f"Background LLM fallback also failed: {fallback_error}")
+            raise
 
     async def _request_chat_with_compat(
         self,
@@ -1018,7 +1221,7 @@ class BackgroundLLMClient:
             )
 
     def get_status(self) -> Dict[str, Any]:
-        """Get current configuration status"""
+        """Get current configuration and circuit breaker status."""
         return {
             "primary_url": self.primary_url,
             "primary_model": self.primary_model,
@@ -1027,7 +1230,12 @@ class BackgroundLLMClient:
             "request_timeout": self.request_timeout,
             "connect_timeout": self.connect_timeout,
             "num_ctx": self.default_num_ctx,
-            "started": self._started
+            "started": self._started,
+            "primary_degraded": self._primary_degraded,
+            "consecutive_primary_failures": self._consecutive_primary_failures,
+            "total_requests": self._total_requests,
+            "total_failures": self._total_failures,
+            "failover_events": self._failover_events,
         }
 
 

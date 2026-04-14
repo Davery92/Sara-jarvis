@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import logging
 from app.tools.base import BaseTool, ToolResult
 from app.models.note import Note
 from app.services.embeddings import get_embedding
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 class NotesCreateTool(BaseTool):
@@ -68,7 +71,16 @@ class NotesCreateTool(BaseTool):
             db.add(note)
             db.commit()
             db.refresh(note)
-            
+
+            # Detect connections (wiki links + semantic neighbors)
+            try:
+                from app.services.note_connector import process_note_connections_sync
+                await process_note_connections_sync(
+                    str(note.id), user_id, title, content, db
+                )
+            except Exception as conn_err:
+                logger.warning(f"Connection detection failed for new note: {conn_err}")
+
             return ToolResult(
                 success=True,
                 data={
@@ -319,7 +331,16 @@ class NotesEditTool(BaseTool):
             note.updated_at = datetime.now(timezone.utc)
             
             db.commit()
-            
+
+            # Re-detect connections after edit
+            try:
+                from app.services.note_connector import process_note_connections_sync
+                await process_note_connections_sync(
+                    str(note.id), user_id, note.title or "", note.content or "", db
+                )
+            except Exception as conn_err:
+                logger.warning(f"Connection detection failed for edited note: {conn_err}")
+
             return ToolResult(
                 success=True,
                 data={
@@ -330,7 +351,7 @@ class NotesEditTool(BaseTool):
                 },
                 message=f"Updated note: {note.title or 'Untitled'}"
             )
-            
+
         except Exception as e:
             db.rollback()
             return ToolResult(
@@ -500,5 +521,251 @@ class NotesListTool(BaseTool):
                 success=False,
                 message=f"Failed to list notes: {str(e)}"
             )
+        finally:
+            db.close()
+
+
+class NotesFindSimilarTool(BaseTool):
+    """Tool for finding semantically similar notes."""
+
+    @property
+    def name(self) -> str:
+        return "find_similar_notes"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Find notes that are semantically similar, useful for discovering "
+            "redundancy or connections. Excludes journal entries."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "string",
+                    "description": "Optional: find notes similar to this specific note",
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": "Minimum similarity (0.0-1.0, default 0.78)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 10)",
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        note_id = kwargs.get("note_id")
+        threshold = kwargs.get("threshold", 0.78)
+        limit = kwargs.get("limit", 10)
+
+        db = next(get_db())
+        try:
+            if note_id:
+                result = db.execute(
+                    text("""
+                        SELECT n2.id, n2.title, LEFT(n2.content, 200) AS preview,
+                               1 - (n1.embedding <=> n2.embedding) AS similarity
+                        FROM note n1
+                        JOIN note n2 ON n2.user_id = n1.user_id
+                            AND n2.id != n1.id
+                            AND n2.embedding IS NOT NULL
+                            AND n2.title NOT LIKE 'Sara''s Journal%%'
+                        WHERE n1.id = :nid AND n1.embedding IS NOT NULL
+                          AND 1 - (n1.embedding <=> n2.embedding) > :threshold
+                        ORDER BY similarity DESC
+                        LIMIT :lim
+                    """),
+                    {"nid": note_id, "threshold": threshold, "lim": limit},
+                )
+                notes = [
+                    {
+                        "note_id": str(r[0]),
+                        "title": r[1],
+                        "content_preview": r[2],
+                        "similarity": round(float(r[3]), 3),
+                    }
+                    for r in result.fetchall()
+                ]
+            else:
+                result = db.execute(
+                    text("""
+                        SELECT n1.id, n1.title, LEFT(n1.content, 200),
+                               n2.id, n2.title, LEFT(n2.content, 200),
+                               1 - (n1.embedding <=> n2.embedding) AS similarity
+                        FROM note n1
+                        JOIN note n2 ON n2.user_id = n1.user_id
+                            AND n2.id > n1.id
+                            AND n2.embedding IS NOT NULL
+                            AND n2.title NOT LIKE 'Sara''s Journal%%'
+                        WHERE n1.user_id = :uid
+                          AND n1.embedding IS NOT NULL
+                          AND n1.title NOT LIKE 'Sara''s Journal%%'
+                          AND 1 - (n1.embedding <=> n2.embedding) > :threshold
+                        ORDER BY similarity DESC
+                        LIMIT :lim
+                    """),
+                    {"uid": user_id, "threshold": threshold, "lim": limit},
+                )
+                notes = [
+                    {
+                        "note_a": {"note_id": str(r[0]), "title": r[1], "preview": r[2]},
+                        "note_b": {"note_id": str(r[3]), "title": r[4], "preview": r[5]},
+                        "similarity": round(float(r[6]), 3),
+                    }
+                    for r in result.fetchall()
+                ]
+
+            return ToolResult(
+                success=True,
+                data={"results": notes, "total": len(notes)},
+                message=f"Found {len(notes)} similar note{'s' if len(notes) != 1 else ''} (threshold={threshold})",
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to find similar notes: {e}")
+        finally:
+            db.close()
+
+
+class NotesMergeTool(BaseTool):
+    """Tool for merging two overlapping notes into one."""
+
+    @property
+    def name(self) -> str:
+        return "merge_notes"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Merge two overlapping notes. Transfers connections from source to target, "
+            "deletes source, updates target with synthesized content."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target_note_id": {
+                    "type": "string",
+                    "description": "The note to keep (updated with merged content)",
+                },
+                "source_note_id": {
+                    "type": "string",
+                    "description": "The note to merge in and delete",
+                },
+                "merged_title": {
+                    "type": "string",
+                    "description": "Optional new title for the merged note",
+                },
+                "merged_content": {
+                    "type": "string",
+                    "description": "Synthesized content combining both notes",
+                },
+            },
+            "required": ["target_note_id", "source_note_id", "merged_content"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        target_id = kwargs.get("target_note_id", "")
+        source_id = kwargs.get("source_note_id", "")
+        merged_title = kwargs.get("merged_title")
+        merged_content = kwargs.get("merged_content", "")
+
+        if not target_id or not source_id or not merged_content:
+            return ToolResult(
+                success=False,
+                message="target_note_id, source_note_id, and merged_content are required",
+            )
+
+        db = next(get_db())
+        try:
+            # Verify both notes exist
+            target = db.query(Note).filter(Note.id == target_id, Note.user_id == user_id).first()
+            source = db.query(Note).filter(Note.id == source_id, Note.user_id == user_id).first()
+            if not target:
+                return ToolResult(success=False, message=f"Target note {target_id} not found")
+            if not source:
+                # Source already deleted (likely merged in a previous call) — skip gracefully
+                return ToolResult(
+                    success=True,
+                    message=f"Source note {source_id} already deleted or merged — nothing to do. Move on to the next pair.",
+                )
+
+            source_title = source.title
+
+            # Transfer connections from source to target
+            db.execute(
+                text("""
+                    UPDATE note_connection
+                    SET source_note_id = :tid, updated_at = NOW()
+                    WHERE source_note_id = :sid AND user_id = :uid
+                      AND target_note_id != :tid
+                      AND NOT EXISTS (
+                          SELECT 1 FROM note_connection nc2
+                          WHERE nc2.source_note_id = :tid
+                            AND nc2.target_note_id = note_connection.target_note_id
+                            AND nc2.connection_type = note_connection.connection_type
+                      )
+                """),
+                {"tid": target_id, "sid": source_id, "uid": user_id},
+            )
+            db.execute(
+                text("""
+                    UPDATE note_connection
+                    SET target_note_id = :tid, updated_at = NOW()
+                    WHERE target_note_id = :sid AND user_id = :uid
+                      AND source_note_id != :tid
+                      AND NOT EXISTS (
+                          SELECT 1 FROM note_connection nc2
+                          WHERE nc2.target_note_id = :tid
+                            AND nc2.source_note_id = note_connection.source_note_id
+                            AND nc2.connection_type = note_connection.connection_type
+                      )
+                """),
+                {"tid": target_id, "sid": source_id, "uid": user_id},
+            )
+
+            # Delete source note
+            db.delete(source)
+
+            # Update target
+            if merged_title:
+                target.title = merged_title
+            target.content = merged_content
+            target.updated_at = datetime.now(timezone.utc)
+
+            # Re-embed
+            full_text = f"{target.title}\n{merged_content}" if target.title else merged_content
+            target.embedding = await get_embedding(full_text)
+
+            db.commit()
+
+            # Detect new connections
+            try:
+                from app.services.note_connector import process_note_connections_sync
+                await process_note_connections_sync(
+                    target_id, user_id, target.title or "", merged_content, db
+                )
+            except Exception as e:
+                logger.warning(f"Connection detection after merge failed: {e}")
+
+            return ToolResult(
+                success=True,
+                data={
+                    "merged_note_id": target_id,
+                    "title": target.title,
+                    "deleted_source": source_title,
+                },
+                message=f"Merged '{source_title}' into '{target.title}'",
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to merge notes: {e}")
         finally:
             db.close()

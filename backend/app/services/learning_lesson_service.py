@@ -32,7 +32,7 @@ from app.services.learning_source_service import learning_source_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LESSON_MODEL = "gpt-oss:120b-32k"
+DEFAULT_LESSON_MODEL = "Qwen3.5-122B-A10B"
 
 
 class JobCancelledError(Exception):

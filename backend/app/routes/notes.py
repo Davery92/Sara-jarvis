@@ -21,6 +21,45 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/notes", tags=["Notes"])
 
 
+def normalize_note_tags(tags: Optional[List[str]]) -> List[str]:
+    """Trim, dedupe, and cap note tags for consistent storage."""
+    if not tags:
+        return []
+
+    normalized = []
+    seen = set()
+
+    for raw_tag in tags:
+        if raw_tag is None:
+            continue
+
+        tag = str(raw_tag).strip().lower()
+        if not tag or tag in seen:
+            continue
+
+        seen.add(tag)
+        normalized.append(tag[:48])
+
+        if len(normalized) >= 20:
+            break
+
+    return normalized
+
+
+def serialize_note(note: Note, include_user_id: bool = False) -> NoteResponse:
+    return NoteResponse(
+        id=note.id,
+        title=note.title,
+        content=note.content,
+        folder_id=note.folder_id,
+        tags=normalize_note_tags(note.tags),
+        starred=bool(note.starred),
+        user_id=note.user_id if include_user_id else None,
+        created_at=note.created_at.isoformat(),
+        updated_at=note.updated_at.isoformat(),
+    )
+
+
 @router.get("", response_model=List[NoteResponse])
 async def list_notes(
     folder_id: Optional[str] = None,
@@ -42,19 +81,9 @@ async def list_notes(
         else:
             query = query.filter(Note.folder_id == folder_id)
 
-    notes = query.order_by(Note.updated_at.desc()).limit(100).all()
+    notes = query.order_by(Note.updated_at.desc()).limit(500).all()
 
-    return [
-        NoteResponse(
-            id=note.id,
-            title=note.title,
-            content=note.content,
-            folder_id=note.folder_id,
-            created_at=note.created_at.isoformat(),
-            updated_at=note.updated_at.isoformat()
-        )
-        for note in notes
-    ]
+    return [serialize_note(note) for note in notes]
 
 
 @router.post("", response_model=NoteResponse)
@@ -103,20 +132,25 @@ async def create_note(
         user_id=current_user.id,
         title=note_data.title,
         content=note_data.content,
-        folder_id=note_data.folder_id
+        folder_id=note_data.folder_id,
+        tags=normalize_note_tags(note_data.tags),
+        starred=bool(note_data.starred),
     )
     db.add(note)
     db.commit()
     db.refresh(note)
 
-    return NoteResponse(
-        id=note.id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
+    return serialize_note(note)
+
+
+@router.post("/admin/backfill-connections")
+async def backfill_note_connections(
+    current_user: User = Depends(get_current_user),
+):
+    """Trigger a backfill of embeddings and connections for all user notes."""
+    from app.tasks.notes import backfill_note_connections as backfill_task
+    backfill_task.delay(current_user.id)
+    return {"message": "Backfill task queued", "user_id": current_user.id}
 
 
 @router.get("/graph-data")
@@ -135,6 +169,8 @@ async def get_notes_graph_data(
                 "title": note.title,
                 "content": note.content[:200] + "..." if len(note.content) > 200 else note.content,
                 "type": "note",
+                "tags": normalize_note_tags(note.tags),
+                "starred": bool(note.starred),
                 "created_at": note.created_at.isoformat(),
                 "updated_at": note.updated_at.isoformat()
             }
@@ -165,15 +201,7 @@ async def get_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    return NoteResponse(
-        id=note.id,
-        user_id=note.user_id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
+    return serialize_note(note, include_user_id=True)
 
 
 @router.put("/{note_id}", response_model=NoteResponse)
@@ -222,18 +250,15 @@ async def update_note(
     note.title = note_data.title
     note.content = note_data.content
     note.folder_id = note_data.folder_id
+    if note_data.tags is not None:
+        note.tags = normalize_note_tags(note_data.tags)
+    if note_data.starred is not None:
+        note.starred = bool(note_data.starred)
     note.updated_at = datetime.now()
     db.commit()
     db.refresh(note)
 
-    return NoteResponse(
-        id=note.id,
-        title=note.title,
-        content=note.content,
-        folder_id=note.folder_id,
-        created_at=note.created_at.isoformat(),
-        updated_at=note.updated_at.isoformat()
-    )
+    return serialize_note(note)
 
 
 @router.delete("/{note_id}")

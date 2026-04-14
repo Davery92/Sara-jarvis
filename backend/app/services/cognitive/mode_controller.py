@@ -16,6 +16,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+from app.core.timezone import now as local_now
 from enum import Enum
 
 import redis
@@ -110,7 +111,7 @@ class ModeController:
 
             duration_seconds = None
             if entered_at:
-                duration_seconds = (datetime.utcnow() - entered_at).total_seconds()
+                duration_seconds = (local_now() - entered_at).total_seconds()
 
             return {
                 "mode": mode.value,
@@ -163,7 +164,7 @@ class ModeController:
                     )
                 return False
 
-            now = datetime.utcnow()
+            now = local_now()
 
             # Set mode state atomically
             pipe = self.redis.pipeline()
@@ -207,7 +208,7 @@ class ModeController:
             message = json.dumps({
                 "mode": mode.value,
                 "reason": reason,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "metadata": metadata or {}
             })
             self.redis.publish(channel, message)

@@ -1,4 +1,4 @@
-import type { WindowType, WindowData, NoteWindowData, ChatWindowData, LearningWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData, EmailWindowData, DocumentsWindowData, AutomationWindowData, PKGWindowData, IntelligenceWindowData, TemerantWindowData } from '../types'
+import type { WindowType, WindowData, NoteWindowData, ChatWindowData, LearningWindowData, FitnessWindowData, ProjectsWindowData, TimersWindowData, SettingsWindowData, FileViewerWindowData, ModelViewerWindowData, ResearchWindowData, ReportWindowData, EmailWindowData, DocumentsWindowData, AutomationWindowData, PKGWindowData, IntelligenceWindowData } from '../types'
 import NoteContent from './windows/NoteContent'
 import ChatContent from './windows/ChatContent'
 import LearningContent from './windows/LearningContent'
@@ -15,8 +15,6 @@ import DocumentsContent from './windows/DocumentsContent'
 import AutomationContent from './windows/AutomationContent'
 import PKGContent from './windows/PKGContent'
 import IntelligenceContent from './windows/IntelligenceContent'
-import TemerantContent from './windows/TemerantContent'
-
 interface WindowContentProps {
   type: WindowType
   data: WindowData
@@ -57,8 +55,6 @@ export function WindowContent({ type, data, windowId }: WindowContentProps) {
       return <PKGContent data={data as PKGWindowData} windowId={windowId} />
     case 'intelligence':
       return <IntelligenceContent data={data as IntelligenceWindowData} windowId={windowId} />
-    case 'temerant':
-      return <TemerantContent data={data as TemerantWindowData} windowId={windowId} />
     default:
       return (
         <div className="flex items-center justify-center h-full text-canvas-muted">

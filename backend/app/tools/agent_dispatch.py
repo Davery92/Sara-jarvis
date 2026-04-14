@@ -2,7 +2,7 @@
 Agent Dispatch Tools — LLM tools for dispatching tasks to VM agents.
 
 Tools:
-- dispatch_agent_task: Send a task to the sandbox VM
+- dispatch_agent_task: Send a task to the sandbox agent
 - dispatch_and_monitor: Dispatch + auto-notify David on completion
 - get_agent_status: Check status of VM agent tasks
 - resume_agent_session: Send follow-up to an agent session
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class DispatchAgentTaskTool(BaseTool):
-    """Dispatch a task to the sandbox VM agent."""
+    """Dispatch a task to the sandbox agent."""
 
     @property
     def name(self) -> str:
@@ -33,9 +33,9 @@ class DispatchAgentTaskTool(BaseTool):
             "involving David's data: searching emails, reading emails, finding attachments, "
             "checking calendar, searching notes, querying memory, home control, fitness data, "
             "or any multi-step work with Sara's internal systems. Also use for code execution "
-            "and system admin tasks on the sandbox VM. "
+            "and system admin tasks in the sandbox agent. "
             "In 'auto' mode (default), the system routes automatically: internal data tasks "
-            "use Sara's tools directly; code/system tasks use the sandbox VM. "
+            "use Sara's tools directly; code/system tasks use the sandbox agent. "
             "ALWAYS use this tool (not handoff_to_agents) for email, calendar, notes, "
             "and memory tasks."
         )
@@ -51,13 +51,13 @@ class DispatchAgentTaskTool(BaseTool):
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["auto", "dispatch", "internal"],
-                    "description": "auto = intelligently route (default); dispatch = sandbox VM; internal = Sara's internal tools",
+                    "enum": ["auto", "dispatch", "sandbox", "internal"],
+                    "description": "auto = intelligently route (default); dispatch/sandbox = sandbox agent; internal = Sara's internal tools",
                     "default": "auto",
                 },
                 "working_directory": {
                     "type": "string",
-                    "description": "Working directory on the VM (optional, e.g. ~/projects/myapp)",
+                    "description": "Working directory for sandbox execution (optional, e.g. ~/projects/myapp)",
                 },
             },
             "required": ["task_description"],
@@ -346,13 +346,13 @@ class DispatchAndMonitorTool(BaseTool):
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["auto", "dispatch", "internal"],
-                    "description": "auto = intelligently route (default); dispatch = sandbox VM; internal = Sara's internal tools",
+                    "enum": ["auto", "dispatch", "sandbox", "internal"],
+                    "description": "auto = intelligently route (default); dispatch/sandbox = sandbox agent; internal = Sara's internal tools",
                     "default": "auto",
                 },
                 "working_directory": {
                     "type": "string",
-                    "description": "Working directory on the VM (optional, for code tasks)",
+                    "description": "Working directory for sandbox execution (optional, for code tasks)",
                 },
             },
             "required": ["task_description"],
@@ -395,6 +395,65 @@ class DispatchAndMonitorTool(BaseTool):
             return ToolResult(success=False, message=f"Failed to dispatch: {str(e)}")
 
 
+class CancelAgentTaskTool(BaseTool):
+    """Cancel a running or pending agent task."""
+
+    @property
+    def name(self) -> str:
+        return "cancel_agent_task"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Cancel a running or pending background agent task. Use this when David "
+            "asks to stop/cancel/abort a background task, or when you determine a task "
+            "is stuck, redundant, or no longer needed."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID to cancel. Use get_agent_status to find task IDs.",
+                },
+            },
+            "required": ["task_id"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        task_id = kwargs.get("task_id", "")
+
+        if not task_id:
+            return ToolResult(success=False, message="task_id is required")
+
+        try:
+            from app.main_simple import SessionLocal
+            from app.services.agent_dispatch import agent_dispatch_service
+
+            db = SessionLocal()
+            try:
+                result = await agent_dispatch_service.cancel_task(
+                    db=db,
+                    task_id=task_id,
+                    user_id=str(user_id),
+                )
+                if "error" in result:
+                    return ToolResult(success=False, message=result["error"])
+                return ToolResult(
+                    success=True,
+                    message=f"Task {task_id} cancelled.",
+                    data=result,
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Error cancelling agent task: {e}")
+            return ToolResult(success=False, message=f"Failed: {str(e)}")
+
+
 # Export list for registry
 AGENT_DISPATCH_TOOLS = [
     DispatchAgentTaskTool(),
@@ -402,4 +461,5 @@ AGENT_DISPATCH_TOOLS = [
     GetAgentStatusTool(),
     ResumeAgentSessionTool(),
     SubmitCandidateSkillTool(),
+    CancelAgentTaskTool(),
 ]

@@ -18,9 +18,10 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Local LLM for workout coaching
-WORKOUT_LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-WORKOUT_LLM_MODEL = os.getenv("WORKOUT_LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-oss:20b"))
+# Local LLM for workout coaching — centralized config
+from app.core.llm_config import llm_config as _llm_cfg
+WORKOUT_LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", _llm_cfg.primary_url)
+WORKOUT_LLM_MODEL = os.getenv("WORKOUT_LLM_MODEL", os.getenv("OPENAI_MODEL", _llm_cfg.fast_model))
 
 
 class WorkoutSessionService:
@@ -60,7 +61,16 @@ class WorkoutSessionService:
                 raise ValueError(f"Template {template_id} not found")
 
             template = dict(template_row._mapping)
-            exercises = json.loads(template.get("exercises", "[]"))
+            raw_ex = template.get("exercises") or "[]"
+            if isinstance(raw_ex, str):
+                exercises = json.loads(raw_ex)
+            else:
+                exercises = raw_ex or []
+
+            # Determine deload state for today (used to scale sets + suggested weights below)
+            from app.services.progressive_overload import get_deload_state
+            deload = get_deload_state(db=db, user_id=user_id, on_date=date.today())
+            is_deload = deload["is_deload"]
 
             # 3. Calculate weight suggestions for each exercise (reuse workout_suggest logic)
             exercise_snapshots = []
@@ -70,6 +80,12 @@ class WorkoutSessionService:
                 target_reps = exercise_spec.get("reps", "8-10")
                 target_rpe = exercise_spec.get("rpe_target", 7)
                 rest_seconds = exercise_spec.get("rest_seconds", 120)
+                # Advanced execution markers (may be absent on legacy templates)
+                metric_type = exercise_spec.get("metric_type", "reps")
+                is_per_side = bool(exercise_spec.get("is_per_side", False))
+                superset_group = exercise_spec.get("superset_group")
+                set_technique = exercise_spec.get("set_technique")
+                exercise_notes = exercise_spec.get("notes")
 
                 # Get last session data for this exercise
                 past_logs = db.execute(text("""
@@ -138,15 +154,32 @@ class WorkoutSessionService:
                 else:
                     progression_note = "First time - start conservative at RPE 7."
 
+                # Apply deload: 60% of suggested weight, halve sets (min 2)
+                effective_sets = target_sets
+                if is_deload:
+                    if suggested_weight is not None:
+                        suggested_weight = round((suggested_weight * 0.6) / 5) * 5
+                    try:
+                        effective_sets = max(2, int(target_sets) // 2)
+                    except (TypeError, ValueError):
+                        effective_sets = target_sets
+                    progression_note = "DELOAD WEEK — 60% of working weight, halved sets. " + (progression_note or "")
+
                 exercise_snapshots.append({
                     "name": exercise_name,
-                    "sets": target_sets,
+                    "sets": effective_sets,
+                    "sets_original": target_sets if is_deload else None,
                     "reps": target_reps,
                     "rpe_target": target_rpe,
                     "rest_seconds": rest_seconds,
+                    "notes": exercise_notes,
+                    "metric_type": metric_type,
+                    "is_per_side": is_per_side,
+                    "superset_group": superset_group,
+                    "set_technique": set_technique,
                     "suggested_weight": suggested_weight,
                     "progression_note": progression_note,
-                    "last_session": last_session_data
+                    "last_session": last_session_data,
                 })
 
             # 4. Create workout snapshot
@@ -155,7 +188,11 @@ class WorkoutSessionService:
                 "template_name": template["name"],
                 "template_notes": template.get("notes"),
                 "exercises": exercise_snapshots,
-                "total_sets": sum(e["sets"] for e in exercise_snapshots)
+                "total_sets": sum(e["sets"] for e in exercise_snapshots),
+                "is_deload": is_deload,
+                "week_of_phase": deload.get("week_of_phase"),
+                "deload_week": deload.get("deload_week"),
+                "phase_name": deload.get("phase_name"),
             }
 
             # 5. Insert into workout table (for workout_log foreign key)

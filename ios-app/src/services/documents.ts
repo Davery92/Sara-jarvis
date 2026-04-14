@@ -108,13 +108,6 @@ class DocumentsService {
   }
 
   /**
-   * Get document categories
-   */
-  async getCategories(): Promise<string[]> {
-    return await apiClient.get<string[]>('/documents/categories');
-  }
-
-  /**
    * Update document metadata
    */
   async updateDocument(
