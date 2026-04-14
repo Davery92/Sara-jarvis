@@ -34,6 +34,18 @@ export const colors = {
     protein: '#3b82f6',
     carbs: '#10b981',
     fats: '#ef4444',
+
+    // Day-type accents — used anywhere we surface training vs rest
+    // day macros/calories (dashboard hero, nutrition header, plan view).
+    // Paired with Ionicons: 'flash' (training) / 'moon' (rest).
+    trainingDay: '#8b5cf6',       // purple — matches webapp training badge
+    trainingDayBg: 'rgba(139, 92, 246, 0.12)',
+    restDay: '#3b82f6',           // blue — matches webapp rest badge
+    restDayBg: 'rgba(59, 130, 246, 0.12)',
+
+    // Plan section accents (parity with webapp PlanView)
+    phaseAccent: 'rgba(59, 130, 246, 0.5)',      // blue for Phase sections
+    nutritionAccent: 'rgba(16, 185, 129, 0.5)',  // green for Nutrition sections
   },
 };
 

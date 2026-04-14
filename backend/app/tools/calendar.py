@@ -178,10 +178,14 @@ class CalendarListTool(BaseTool):
                 if hasattr(event, 'rrule') and event.rrule:
                     event_data["rrule"] = event.rrule
                     event_data["is_recurring"] = True
-                # Include source info for iOS events
+                # Include source/calendar info for iOS events
                 if hasattr(event, 'source') and event.source == 'ios_calendar':
                     event_data["source"] = "ios_calendar"
-                    event_data["ios_calendar_name"] = getattr(event, 'ios_calendar_name', None)
+                    cal_name = getattr(event, 'ios_calendar_name', None)
+                    event_data["calendar_name"] = cal_name
+                    event_data["ios_calendar_name"] = cal_name
+                else:
+                    event_data["calendar_name"] = "Sara"
                 event_list.append(event_data)
             
             return ToolResult(

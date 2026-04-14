@@ -816,22 +816,44 @@ async def _async_load_daily_plan(user_id: str) -> str:
     return "\n".join(parts) if parts else ""
 
 
-async def build_audit_context_block(session_id: str) -> str:
+async def build_audit_context_block(session_id: str, current_turn: int = 0) -> str:
     """
     Render the most recent audit dialogue + resolution as a context block
     that gets prepended to Sara's turn prompt right after she resumes from
     an audit. This is how Sara "remembers" the conversation she just had
     with the auditor.
 
-    Returns "" if there is no recent audit for this session.
+    Returns "" if there is no recent audit for this session, or if the
+    audit is stale (more than AUDIT_CONTEXT_EXPIRY_TURNS turns ago).
     """
     if not session_id:
         return ""
     try:
-        from app.services.acs.auditor import get_recent_audit_for_session
+        from app.services.acs.auditor import get_recent_audit_for_session, AUDIT_CONTEXT_EXPIRY_TURNS
         audit = await get_recent_audit_for_session(session_id)
         if not audit:
             return ""
+
+        # Check staleness: if we know the current turn and the audit was
+        # recorded with a turn number, skip if it's too old. We also check
+        # the timestamp — if the audit is more than 15 minutes old, it's stale.
+        resolved_at = audit.get("resolved_at")
+        if resolved_at:
+            from datetime import datetime, timezone
+            try:
+                if isinstance(resolved_at, str):
+                    from dateutil.parser import parse as parse_dt
+                    resolved_dt = parse_dt(resolved_at)
+                else:
+                    resolved_dt = resolved_at
+                if resolved_dt.tzinfo is None:
+                    resolved_dt = resolved_dt.replace(tzinfo=timezone.utc)
+                age_minutes = (datetime.now(timezone.utc) - resolved_dt).total_seconds() / 60
+                if age_minutes > 15:
+                    return ""
+            except Exception:
+                pass
+
         messages = audit.get("messages") or []
         if not messages:
             return ""

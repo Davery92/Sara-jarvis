@@ -20,8 +20,10 @@ import {
   RecoveryLog,
   HabitStreak,
   Phase,
+  Program,
   WorkoutTemplate,
   NutritionGoals,
+  getEffectiveTargets,
 } from '../../services/fitness';
 import FoodLogItem from '../../components/fitness/FoodLogItem';
 import WorkoutSessionItem from '../../components/fitness/WorkoutSessionItem';
@@ -32,10 +34,11 @@ import FoodLogModal from '../../components/fitness/FoodLogModal';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { Ionicons } from '@expo/vector-icons';
+import Markdown from 'react-native-markdown-display';
 
 type Props = MainTabScreenProps<'Fitness'>;
 
-type ViewMode = 'dashboard' | 'nutrition' | 'workout' | 'recovery' | 'habits' | 'programs';
+type ViewMode = 'dashboard' | 'plan' | 'nutrition' | 'workout' | 'recovery' | 'habits' | 'programs';
 
 export default function FitnessScreen({ navigation }: Props) {
   const { isActive: hasActiveWorkout, startWorkout } = useWorkoutMode();
@@ -63,37 +66,86 @@ export default function FitnessScreen({ navigation }: Props) {
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
   const [nutritionGoals, setNutritionGoals] = useState<NutritionGoals | null>(null);
   const [activePhase, setActivePhase] = useState<Phase | null>(null);
+  const [activeProgram, setActiveProgram] = useState<Program | null>(null);
+  const [todaysTemplates, setTodaysTemplates] = useState<WorkoutTemplate[]>([]);
+  const [planViewMode, setPlanViewMode] = useState<'sections' | 'full'>('sections');
+  const [expandedPlanSections, setExpandedPlanSections] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     loadData();
     loadNutritionGoalsWithPhase();
   }, []);
 
+  // Once we know whether today is a training or rest day (from todaysTemplates),
+  // recompute the effective nutrition targets with that context.
+  const isTrainingDay: boolean | null = (() => {
+    if (!activePhase) return null;
+    // If the phase doesn't actually use day-cycling, training-day state is moot.
+    const cycles =
+      activePhase.calories_training_day != null ||
+      activePhase.calories_rest_day != null ||
+      activePhase.carbs_training_day != null ||
+      activePhase.carbs_rest_day != null ||
+      activePhase.fat_training_day != null ||
+      activePhase.fat_rest_day != null;
+    if (!cycles) return null;
+    return todaysTemplates.length > 0;
+  })();
+
+  useEffect(() => {
+    if (!activePhase) return;
+    setNutritionGoals(prev => getEffectiveTargets(activePhase, isTrainingDay, prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePhase, isTrainingDay]);
+
+  // Derive Phase progress (week X of Y, days remaining)
+  const phaseProgress = (() => {
+    if (!activePhase) return null;
+    const start = activePhase.start_date ? new Date(activePhase.start_date + 'T00:00:00') : null;
+    const end = activePhase.end_date ? new Date(activePhase.end_date + 'T00:00:00') : null;
+    const now = new Date();
+    const totalWeeks = activePhase.duration_weeks ?? (start && end
+      ? Math.max(1, Math.round((end.getTime() - start.getTime()) / (7 * 24 * 3600 * 1000)))
+      : null);
+    const currentWeek = start
+      ? Math.max(1, Math.floor((now.getTime() - start.getTime()) / (7 * 24 * 3600 * 1000)) + 1)
+      : null;
+    const daysRemaining = end
+      ? Math.max(0, Math.ceil((end.getTime() - now.getTime()) / (24 * 3600 * 1000)))
+      : null;
+    return { currentWeek, totalWeeks, daysRemaining };
+  })();
+
   const loadNutritionGoalsWithPhase = async () => {
     try {
-      // First load base goals
-      const goals = await fitnessService.getNutritionGoals();
-      setNutritionGoals(goals);
+      const baseGoals = await fitnessService.getNutritionGoals().catch(() => null);
+      if (baseGoals) setNutritionGoals(baseGoals);
 
-      // Then check for active phase to override
+      // Prefer active program (gives us plan_markdown + phases); fall back to /phases/active
+      let phase: Phase | null = null;
       try {
-        const activePhases = await fitnessService.getActivePhases();
-        if (activePhases.phases && activePhases.phases.length > 0) {
-          const phase = activePhases.phases[0];
-          setActivePhase(phase);
-          // Override goals with phase targets if they exist
-          setNutritionGoals(prev => ({
-            calories: phase.calories_target || prev?.calories || 2000,
-            protein: phase.protein_target || prev?.protein || 150,
-            carbs: phase.carbs_target || prev?.carbs || 200,
-            fats: phase.fat_target || prev?.fats || 70,
-          }));
+        const programResp = await fitnessService.getActiveProgram();
+        if (programResp?.program) setActiveProgram(programResp.program);
+        if (programResp?.phases?.length) {
+          phase = programResp.phases.find(p => p.status === 'active') ?? programResp.phases[0];
         }
-      } catch (phaseError) {
-        console.error('Failed to load active phase:', phaseError);
+      } catch {
+        /* fall through to phase-only fetch */
+      }
+
+      if (!phase) {
+        const activePhases = await fitnessService.getActivePhases().catch(() => ({ phases: [] }));
+        if (activePhases.phases?.length) phase = activePhases.phases[0];
+      }
+
+      if (phase) {
+        setActivePhase(phase);
+        // Use effective targets (training-day aware once we know isTrainingDay).
+        // At this point we don't know yet — caller updates again after loadData.
+        setNutritionGoals(getEffectiveTargets(phase, null, baseGoals));
       }
     } catch (error) {
-      console.error('Failed to load nutrition goals:', error);
+      console.error('Failed to load nutrition goals / active phase:', error);
     }
   };
 
@@ -123,6 +175,7 @@ export default function FitnessScreen({ navigation }: Props) {
       const summary = await fitnessService.getDailySummary(today).catch(() => null);
       const phasesData = await fitnessService.getPhases().catch(() => ({ phases: [] }));
       const templatesData = await fitnessService.getTemplates().catch(() => ({ templates: [] }));
+      const todayTemplatesData = await fitnessService.getTodaysTemplates().catch(() => ({ templates: [] }));
 
       setFoodLogs(food);
       setWorkoutLogs(workouts);
@@ -131,6 +184,7 @@ export default function FitnessScreen({ navigation }: Props) {
       setDailySummary(summary);
       setPhases(phasesData.phases);
       setTemplates(templatesData.templates);
+      setTodaysTemplates(todayTemplatesData.templates || []);
     } catch (error) {
       console.error('Failed to load fitness data:', error);
     } finally {
@@ -308,139 +362,393 @@ export default function FitnessScreen({ navigation }: Props) {
     );
   }
 
-  const renderDashboard = () => (
-    <ScrollView
-      style={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-    >
-      {/* Daily Summary */}
-      <View style={styles.summaryCard}>
-        <Text style={styles.summaryTitle}>Today's Summary</Text>
-        <View style={styles.summaryStats}>
-          <View style={styles.summaryStatItem}>
-            <Text style={styles.summaryStatValue}>
-              {(() => {
-                const today = new Date();
-                const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-                const todaysFoods = (foodLogs || []).filter(log => log.logged_at && getLocalDateString(log.logged_at) === todayStr);
-                return Math.round(todaysFoods.reduce((sum, log) => sum + (log.calories || 0), 0));
-              })()}
-            </Text>
-            <Text style={styles.summaryStatLabel}>Calories</Text>
-          </View>
-          <View style={styles.summaryStatItem}>
-            <Text style={styles.summaryStatValue}>
-              {(() => {
-                const today = new Date();
-                const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-                return (workoutLogs || []).filter(log => log.logged_at && getLocalDateString(log.logged_at) === todayStr).length;
-              })()}
-            </Text>
-            <Text style={styles.summaryStatLabel}>Workouts</Text>
-          </View>
-          <View style={styles.summaryStatItem}>
-            <Text style={styles.summaryStatValue}>
-              {(() => {
-                const today = new Date();
-                const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-                return (foodLogs || []).filter(log => log.logged_at && getLocalDateString(log.logged_at) === todayStr).length;
-              })()}
-            </Text>
-            <Text style={styles.summaryStatLabel}>Meals</Text>
-          </View>
-        </View>
-      </View>
+  const renderDashboard = () => {
+    const todayStr = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })();
+    const todaysFoods = (foodLogs || []).filter(log => log.logged_at && getLocalDateString(log.logged_at) === todayStr);
+    const todaysWorkouts = (workoutLogs || []).filter(log => {
+      const dateStr = log.session_date || (log.created_at && getLocalDateString(log.created_at));
+      return dateStr === todayStr;
+    });
 
-      {/* Quick Actions */}
-      <View style={styles.quickActions}>
-        <TouchableOpacity style={styles.quickActionButton} onPress={handleLogFood}>
-          <Text style={styles.quickActionEmoji}>🍽️</Text>
-          <Text style={styles.quickActionText}>Log Food</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.quickActionButton} onPress={handleLogWorkout}>
-          <Text style={styles.quickActionEmoji}>💪</Text>
-          <Text style={styles.quickActionText}>Log Workout</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.quickActionButton} onPress={handleLogRecovery}>
-          <Text style={styles.quickActionEmoji}>💤</Text>
-          <Text style={styles.quickActionText}>Log Recovery</Text>
-        </TouchableOpacity>
-      </View>
+    const totalCalories = Math.round(todaysFoods.reduce((s, l) => s + (l.calories || 0), 0));
+    const totalProtein = Math.round(todaysFoods.reduce((s, l) => s + (l.protein || 0), 0));
+    const totalCarbs = Math.round(todaysFoods.reduce((s, l) => s + (l.carbs || 0), 0));
+    const totalFats = Math.round(todaysFoods.reduce((s, l) => s + (l.fat || 0), 0));
 
-      {/* Recent Activity Sections */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Recent Food ({foodLogs.length})</Text>
-          <TouchableOpacity onPress={() => setViewMode('food')}>
-            <Text style={styles.seeAllText}>See All</Text>
+    const goals = nutritionGoals ?? { calories: 2000, protein: 150, carbs: 200, fats: 70 };
+    const pct = (v: number, g: number) => (g > 0 ? Math.min(100, Math.round((v / g) * 100)) : 0);
+
+    const hasActivePlan = !!activePhase;
+    const hasWorkoutToday = todaysTemplates.length > 0;
+    const firstTemplate = todaysTemplates[0];
+
+    return (
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={styles.dashboardContent}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+      >
+        {/* Active Phase hero */}
+        {hasActivePlan ? (
+          <TouchableOpacity
+            style={styles.phaseHero}
+            onPress={() => setViewMode('plan')}
+            activeOpacity={0.85}
+          >
+            <View style={styles.phaseHeroHeader}>
+              <View style={{ flex: 1 }}>
+                {activeProgram?.name ? (
+                  <Text style={styles.phaseHeroProgram}>{activeProgram.name}</Text>
+                ) : null}
+                <Text style={styles.phaseHeroName}>{activePhase!.name}</Text>
+                {activePhase!.goal ? (
+                  <Text style={styles.phaseHeroGoal}>{activePhase!.goal}</Text>
+                ) : null}
+              </View>
+              {activePhase!.deload_week ? (
+                <View style={styles.deloadBadge}>
+                  <Text style={styles.deloadBadgeText}>DELOAD</Text>
+                </View>
+              ) : null}
+            </View>
+
+            {phaseProgress && (phaseProgress.currentWeek || phaseProgress.totalWeeks) ? (
+              <View style={styles.phaseProgressRow}>
+                <Text style={styles.phaseProgressText}>
+                  {phaseProgress.currentWeek && phaseProgress.totalWeeks
+                    ? `Week ${Math.min(phaseProgress.currentWeek, phaseProgress.totalWeeks)} of ${phaseProgress.totalWeeks}`
+                    : phaseProgress.currentWeek
+                      ? `Week ${phaseProgress.currentWeek}`
+                      : ''}
+                </Text>
+                {phaseProgress.daysRemaining != null ? (
+                  <Text style={styles.phaseProgressDays}>
+                    {phaseProgress.daysRemaining === 0 ? 'Last day' : `${phaseProgress.daysRemaining}d left`}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+
+            {phaseProgress && phaseProgress.currentWeek && phaseProgress.totalWeeks ? (
+              <View style={styles.phaseProgressBar}>
+                <View
+                  style={[
+                    styles.phaseProgressBarFill,
+                    { width: `${Math.min(100, (phaseProgress.currentWeek / phaseProgress.totalWeeks) * 100)}%` },
+                  ]}
+                />
+              </View>
+            ) : null}
+
+            <Text style={styles.phaseHeroTap}>View plan →</Text>
           </TouchableOpacity>
-        </View>
-        {(foodLogs || []).slice(0, 3).map((log) => (
-          <FoodLogItem key={log.id} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
-        ))}
-        {(!foodLogs || foodLogs.length === 0) && (
-          <Text style={styles.emptyText}>No food logs yet</Text>
+        ) : (
+          <View style={[styles.phaseHero, styles.phaseHeroEmpty]}>
+            <Text style={styles.phaseHeroName}>No active program</Text>
+            <Text style={styles.phaseHeroGoal}>Ask Sara to build a plan, or set one up in Programs.</Text>
+          </View>
         )}
-      </View>
 
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Recent Workouts ({(workoutLogs || []).length})</Text>
-          <TouchableOpacity onPress={() => setViewMode('workout')}>
-            <Text style={styles.seeAllText}>See All</Text>
-          </TouchableOpacity>
+        {/* Today card — training vs rest day */}
+        <View
+          style={[
+            styles.todayCard,
+            isTrainingDay === true && styles.todayCardTraining,
+            isTrainingDay === false && styles.todayCardRest,
+          ]}
+        >
+          <View style={styles.todayHeader}>
+            <Ionicons
+              name={isTrainingDay === true ? 'flash' : isTrainingDay === false ? 'moon' : 'calendar-outline'}
+              size={18}
+              color={
+                isTrainingDay === true
+                  ? colors.fitness.trainingDay
+                  : isTrainingDay === false
+                    ? colors.fitness.restDay
+                    : colors.textSecondary
+              }
+            />
+            <Text style={styles.todayHeaderLabel}>
+              {isTrainingDay === true ? 'Training day' : isTrainingDay === false ? 'Rest day' : 'Today'}
+            </Text>
+          </View>
+
+          {hasWorkoutToday ? (
+            <>
+              <Text style={styles.todayWorkoutName}>{firstTemplate.name}</Text>
+              {firstTemplate.exercises?.length ? (
+                <Text style={styles.todayWorkoutMeta}>{firstTemplate.exercises.length} exercises</Text>
+              ) : null}
+              <TouchableOpacity
+                style={styles.todayStartButton}
+                onPress={() => {
+                  if (hasActiveWorkout) {
+                    navigation.navigate('WorkoutMode' as any);
+                  } else {
+                    handleStartWorkout(firstTemplate.id);
+                  }
+                }}
+              >
+                <Ionicons name={hasActiveWorkout ? 'play' : 'barbell'} size={16} color="#fff" />
+                <Text style={styles.todayStartButtonText}>
+                  {hasActiveWorkout ? 'Resume workout' : 'Start workout'}
+                </Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <Text style={styles.todayEmpty}>
+              {isTrainingDay === false
+                ? 'No workout scheduled — recovery focus.'
+                : 'No workout scheduled for today.'}
+            </Text>
+          )}
         </View>
-        {(workoutLogs || []).slice(0, 3).map((session) => (
-          <WorkoutSessionItem
-            key={session.id}
-            session={session}
-            onPress={handleViewWorkout}
-            onLongPress={handleLongPressWorkout}
-          />
-        ))}
-        {(!workoutLogs || workoutLogs.length === 0) && (
-          <Text style={styles.emptyText}>No workouts logged yet</Text>
-        )}
-      </View>
 
-      {recoveryLogs.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Latest Recovery</Text>
-          <RecoveryCard
-            log={recoveryLogs[0]}
-            onPress={handleEditRecovery}
-            onLongPress={handleDeleteRecovery}
-          />
-        </View>
-      )}
+        {/* Today's macros */}
+        <View style={styles.macrosCard}>
+          <View style={styles.macrosHeader}>
+            <Text style={styles.macrosTitle}>Today's nutrition</Text>
+            <TouchableOpacity onPress={() => setViewMode('nutrition')}>
+              <Text style={styles.seeAllText}>Details →</Text>
+            </TouchableOpacity>
+          </View>
 
-      {/* Habit Streaks */}
-      {habitStreaks.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Habit Streaks</Text>
-          {habitStreaks.map((streak, index) => (
-            <View key={index} style={styles.habitCard}>
-              <Text style={styles.habitName}>{streak.habit_name}</Text>
-              <View style={styles.habitStats}>
-                <View style={styles.habitStat}>
-                  <Text style={styles.habitStatValue}>🔥 {streak.current_streak}</Text>
-                  <Text style={styles.habitStatLabel}>Current</Text>
-                </View>
-                <View style={styles.habitStat}>
-                  <Text style={styles.habitStatValue}>⭐ {streak.longest_streak}</Text>
-                  <Text style={styles.habitStatLabel}>Best</Text>
-                </View>
-                <View style={styles.habitStat}>
-                  <Text style={styles.habitStatValue}>{Math.round(streak.completion_rate * 100)}%</Text>
-                  <Text style={styles.habitStatLabel}>Rate</Text>
-                </View>
+          <View style={styles.caloriesRow}>
+            <Text style={styles.caloriesValue}>{totalCalories}</Text>
+            <Text style={styles.caloriesGoal}> / {goals.calories} kcal</Text>
+          </View>
+          <View style={styles.macroBarTrack}>
+            <View
+              style={[
+                styles.macroBarFill,
+                { width: `${pct(totalCalories, goals.calories)}%`, backgroundColor: colors.fitness.calories },
+              ]}
+            />
+          </View>
+
+          {([
+            { label: 'Protein', value: totalProtein, goal: goals.protein, color: colors.fitness.protein },
+            { label: 'Carbs', value: totalCarbs, goal: goals.carbs, color: colors.fitness.carbs },
+            { label: 'Fats', value: totalFats, goal: goals.fats, color: colors.fitness.fats },
+          ] as const).map(m => (
+            <View key={m.label} style={styles.macroRowCompact}>
+              <View style={styles.macroRowLabels}>
+                <Text style={styles.macroRowLabel}>{m.label}</Text>
+                <Text style={styles.macroRowValue}>{m.value} / {m.goal}g</Text>
+              </View>
+              <View style={styles.macroBarTrack}>
+                <View style={[styles.macroBarFill, { width: `${pct(m.value, m.goal)}%`, backgroundColor: m.color }]} />
               </View>
             </View>
           ))}
         </View>
-      )}
-    </ScrollView>
-  );
+
+        {/* Quick actions */}
+        <View style={styles.quickActions}>
+          <TouchableOpacity style={styles.quickActionButton} onPress={() => handleLogFood()}>
+            <Ionicons name="restaurant-outline" size={22} color={colors.text} />
+            <Text style={styles.quickActionText}>Food</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.quickActionButton} onPress={handleLogWorkout}>
+            <Ionicons name="barbell-outline" size={22} color={colors.text} />
+            <Text style={styles.quickActionText}>Workout</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.quickActionButton} onPress={handleLogRecovery}>
+            <Ionicons name="bed-outline" size={22} color={colors.text} />
+            <Text style={styles.quickActionText}>Recovery</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Recent activity — compact */}
+        {todaysWorkouts.length > 0 || todaysFoods.length > 0 || recoveryLogs.length > 0 ? (
+          <View style={styles.recentSection}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Today's activity</Text>
+            </View>
+            {todaysWorkouts.slice(0, 2).map(session => (
+              <WorkoutSessionItem
+                key={`w-${session.id}`}
+                session={session}
+                onPress={handleViewWorkout}
+                onLongPress={handleLongPressWorkout}
+              />
+            ))}
+            {todaysFoods.slice(0, 3).map(log => (
+              <FoodLogItem key={`f-${log.id}`} log={log} onPress={handleEditFood} onLongPress={handleDeleteFood} />
+            ))}
+            {recoveryLogs.length > 0 &&
+              recoveryLogs[0].log_date === todayStr ? (
+              <RecoveryCard
+                log={recoveryLogs[0]}
+                onPress={handleEditRecovery}
+                onLongPress={handleDeleteRecovery}
+              />
+            ) : null}
+          </View>
+        ) : (
+          <View style={styles.recentSection}>
+            <Text style={styles.emptyText}>Nothing logged today yet.</Text>
+          </View>
+        )}
+      </ScrollView>
+    );
+  };
+
+  const renderPlanView = () => {
+    const markdown = activeProgram?.plan_markdown || null;
+
+    if (!markdown) {
+      return (
+        <ScrollView
+          style={styles.content}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+        >
+          <View style={styles.planEmpty}>
+            <Ionicons name="book-outline" size={48} color={colors.textMuted} />
+            <Text style={styles.planEmptyTitle}>No training plan attached</Text>
+            <Text style={styles.planEmptyBody}>
+              {activeProgram
+                ? `${activeProgram.name} doesn't have a plan document yet. Ask Sara to generate one.`
+                : 'No active program. Set one up in Programs or ask Sara to build a plan.'}
+            </Text>
+          </View>
+        </ScrollView>
+      );
+    }
+
+    // Parse into header + sections (## headings)
+    const lines = markdown.split('\n');
+    const sections: { title: string; content: string }[] = [];
+    const headerLines: string[] = [];
+    let currentTitle = '';
+    let currentLines: string[] = [];
+    let seenFirstSection = false;
+
+    for (const line of lines) {
+      const h2 = line.match(/^##\s+(.+)/);
+      if (h2) {
+        if (seenFirstSection) {
+          sections.push({ title: currentTitle, content: currentLines.join('\n').trim() });
+        }
+        currentTitle = h2[1];
+        currentLines = [];
+        seenFirstSection = true;
+      } else if (seenFirstSection) {
+        currentLines.push(line);
+      } else {
+        headerLines.push(line);
+      }
+    }
+    if (seenFirstSection) {
+      sections.push({ title: currentTitle, content: currentLines.join('\n').trim() });
+    }
+    const headerMd = headerLines.join('\n').trim();
+
+    const toggleSection = (idx: number) => {
+      setExpandedPlanSections(prev => {
+        const next = new Set(prev);
+        if (next.has(idx)) next.delete(idx);
+        else next.add(idx);
+        return next;
+      });
+    };
+
+    const expandAll = () => setExpandedPlanSections(new Set(sections.map((_, i) => i)));
+    const collapseAll = () => setExpandedPlanSections(new Set());
+
+    return (
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={{ paddingBottom: spacing.xxl }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+      >
+        {headerMd ? (
+          <View style={[styles.planFullCard, { marginTop: spacing.md }]}>
+            <Markdown style={planMarkdownStyles}>{headerMd}</Markdown>
+          </View>
+        ) : null}
+
+        <View style={styles.planControls}>
+          <View style={styles.planModeToggle}>
+            <TouchableOpacity
+              style={[styles.planModeButton, planViewMode === 'sections' && styles.planModeButtonActive]}
+              onPress={() => setPlanViewMode('sections')}
+            >
+              <Text
+                style={[styles.planModeButtonText, planViewMode === 'sections' && styles.planModeButtonTextActive]}
+              >
+                Sections
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.planModeButton, planViewMode === 'full' && styles.planModeButtonActive]}
+              onPress={() => setPlanViewMode('full')}
+            >
+              <Text
+                style={[styles.planModeButtonText, planViewMode === 'full' && styles.planModeButtonTextActive]}
+              >
+                Full Plan
+              </Text>
+            </TouchableOpacity>
+          </View>
+          {planViewMode === 'sections' && sections.length > 0 ? (
+            <TouchableOpacity
+              onPress={expandedPlanSections.size === sections.length ? collapseAll : expandAll}
+            >
+              <Text style={styles.planExpandAllText}>
+                {expandedPlanSections.size === sections.length ? 'Collapse all' : 'Expand all'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
+        {planViewMode === 'full' ? (
+          <View style={styles.planFullCard}>
+            <Markdown style={planMarkdownStyles}>{markdown}</Markdown>
+          </View>
+        ) : (
+          sections.map((section, idx) => {
+            const isExpanded = expandedPlanSections.has(idx);
+            const isPhase = section.title.toLowerCase().startsWith('phase');
+            const isNutrition = section.title.toLowerCase().includes('nutrition');
+
+            return (
+              <View
+                key={idx}
+                style={[
+                  styles.planSection,
+                  isPhase && styles.planSectionPhase,
+                  isNutrition && styles.planSectionNutrition,
+                ]}
+              >
+                <TouchableOpacity
+                  style={styles.planSectionHeader}
+                  onPress={() => toggleSection(idx)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name={isExpanded ? 'chevron-down' : 'chevron-forward'}
+                    size={18}
+                    color={colors.textSecondary}
+                  />
+                  <Text style={styles.planSectionTitle}>{section.title}</Text>
+                </TouchableOpacity>
+                {isExpanded ? (
+                  <View style={styles.planSectionBody}>
+                    <Markdown style={planMarkdownStyles}>{section.content}</Markdown>
+                  </View>
+                ) : null}
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+    );
+  };
 
   const renderFoodView = () => (
     <ScrollView
@@ -821,6 +1129,28 @@ export default function FitnessScreen({ navigation }: Props) {
           </TouchableOpacity>
         </View>
 
+        {/* Training/rest day context — only for today, only if phase cycles macros */}
+        {selectedDate === (() => {
+          const d = new Date();
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        })() && isTrainingDay != null ? (
+          <View
+            style={[
+              styles.nutritionDayBadge,
+              isTrainingDay ? styles.nutritionDayBadgeTraining : styles.nutritionDayBadgeRest,
+            ]}
+          >
+            <Ionicons
+              name={isTrainingDay ? 'flash' : 'moon'}
+              size={14}
+              color={isTrainingDay ? colors.fitness.trainingDay : colors.fitness.restDay}
+            />
+            <Text style={styles.nutritionDayBadgeText}>
+              {isTrainingDay ? 'Training-day targets' : 'Rest-day targets'}
+            </Text>
+          </View>
+        ) : null}
+
         <Text style={styles.sectionTitle}>Nutrition</Text>
 
         {/* Calorie Card */}
@@ -1054,13 +1384,26 @@ export default function FitnessScreen({ navigation }: Props) {
       </Modal>
 
       {/* Navigation Tabs */}
-      <View style={styles.tabs}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.tabs}
+        contentContainerStyle={styles.tabsContent}
+      >
         <TouchableOpacity
           style={[styles.tab, viewMode === 'dashboard' && styles.tabActive]}
           onPress={() => setViewMode('dashboard')}
         >
           <Text style={[styles.tabText, viewMode === 'dashboard' && styles.tabTextActive]}>
             Dashboard
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, viewMode === 'plan' && styles.tabActive]}
+          onPress={() => setViewMode('plan')}
+        >
+          <Text style={[styles.tabText, viewMode === 'plan' && styles.tabTextActive]}>
+            Plan
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -1095,10 +1438,11 @@ export default function FitnessScreen({ navigation }: Props) {
             Programs
           </Text>
         </TouchableOpacity>
-      </View>
+      </ScrollView>
 
       {/* Content */}
       {viewMode === 'dashboard' && renderDashboard()}
+      {viewMode === 'plan' && renderPlanView()}
       {viewMode === 'nutrition' && renderNutritionView()}
       {viewMode === 'workout' && renderWorkoutView()}
       {viewMode === 'recovery' && renderRecoveryView()}
@@ -1106,6 +1450,87 @@ export default function FitnessScreen({ navigation }: Props) {
     </SafeAreaView>
   );
 }
+
+const planMarkdownStyles = {
+  body: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    lineHeight: 22,
+  },
+  heading1: {
+    color: colors.text,
+    fontSize: fontSizes.xl,
+    fontWeight: '700' as const,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  heading2: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700' as const,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  heading3: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600' as const,
+    marginTop: spacing.sm,
+    marginBottom: 4,
+  },
+  paragraph: {
+    color: colors.text,
+    marginBottom: spacing.sm,
+  },
+  strong: {
+    color: colors.text,
+    fontWeight: '700' as const,
+  },
+  em: {
+    color: colors.text,
+    fontStyle: 'italic' as const,
+  },
+  bullet_list: {
+    marginBottom: spacing.sm,
+  },
+  ordered_list: {
+    marginBottom: spacing.sm,
+  },
+  list_item: {
+    color: colors.text,
+  },
+  code_inline: {
+    color: colors.primary,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    fontSize: fontSizes.sm,
+    paddingHorizontal: 4,
+    borderRadius: 3,
+  },
+  fence: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    fontSize: fontSizes.xs,
+  },
+  hr: {
+    backgroundColor: colors.border,
+    height: 1,
+    marginVertical: spacing.sm,
+  },
+  table: {
+    borderColor: colors.border,
+  },
+  th: {
+    color: colors.text,
+    fontWeight: '700' as const,
+  },
+  td: {
+    color: colors.text,
+  },
+};
 
 const styles = StyleSheet.create({
   container: {
@@ -1119,15 +1544,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   tabs: {
-    flexDirection: 'row',
     backgroundColor: colors.surface,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    flexGrow: 0,
+    flexShrink: 0,
+    maxHeight: 44,
   },
   tab: {
-    flex: 1,
     paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
     alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: borderRadius.md,
   },
   tabActive: {
@@ -1529,5 +1955,344 @@ const styles = StyleSheet.create({
   todayButtonText: {
     fontSize: fontSizes.lg,
     textAlign: 'center',
+  },
+
+  // --- Dashboard redesign ---
+  tabsContent: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    gap: spacing.xs,
+    alignItems: 'center',
+  },
+  dashboardContent: {
+    padding: spacing.md,
+    paddingBottom: spacing.xxl,
+    gap: spacing.md,
+  },
+
+  // Phase hero card
+  phaseHero: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.fitness.phaseAccent,
+  },
+  phaseHeroEmpty: {
+    borderColor: colors.border,
+    opacity: 0.9,
+  },
+  phaseHeroHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  phaseHeroProgram: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  phaseHeroName: {
+    color: colors.text,
+    fontSize: fontSizes.xl,
+    fontWeight: '700',
+  },
+  phaseHeroGoal: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 2,
+  },
+  phaseHeroTap: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    marginTop: spacing.sm,
+    textAlign: 'right',
+  },
+  deloadBadge: {
+    backgroundColor: colors.warning,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: borderRadius.sm,
+  },
+  deloadBadgeText: {
+    color: '#000',
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  phaseProgressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: spacing.md,
+  },
+  phaseProgressText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  phaseProgressDays: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+  },
+  phaseProgressBar: {
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    marginTop: spacing.xs,
+    overflow: 'hidden',
+  },
+  phaseProgressBarFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+  },
+
+  // Today card
+  todayCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  todayCardTraining: {
+    borderColor: colors.fitness.trainingDay,
+    backgroundColor: colors.fitness.trainingDayBg,
+  },
+  todayCardRest: {
+    borderColor: colors.fitness.restDay,
+    backgroundColor: colors.fitness.restDayBg,
+  },
+  todayHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  todayHeaderLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  todayWorkoutName: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+  },
+  todayWorkoutMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 2,
+  },
+  todayEmpty: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+  },
+  todayStartButton: {
+    marginTop: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.md,
+  },
+  todayStartButtonText: {
+    color: '#fff',
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+  },
+
+  // Macros card
+  macrosCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+  },
+  macrosHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  macrosTitle: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+  },
+  caloriesRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginBottom: spacing.xs,
+  },
+  caloriesValue: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+  },
+  caloriesGoal: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.md,
+  },
+  macroRowCompact: {
+    marginTop: spacing.sm,
+  },
+  macroRowLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  macroRowLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+  },
+  macroRowValue: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  macroBarTrack: {
+    height: 6,
+    backgroundColor: colors.border,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  macroBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+
+  // Recent activity
+  recentSection: {
+    gap: spacing.xs,
+  },
+
+  // Nutrition day-type badge
+  nutritionDayBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    alignSelf: 'flex-start',
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+  },
+  nutritionDayBadgeTraining: {
+    backgroundColor: colors.fitness.trainingDayBg,
+    borderColor: colors.fitness.trainingDay,
+  },
+  nutritionDayBadgeRest: {
+    backgroundColor: colors.fitness.restDayBg,
+    borderColor: colors.fitness.restDay,
+  },
+  nutritionDayBadgeText: {
+    color: colors.text,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+
+  // Plan view
+  planEmpty: {
+    padding: spacing.xl,
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  planEmptyTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+  },
+  planEmptyBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    textAlign: 'center',
+  },
+  planControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.background,
+  },
+  planModeToggle: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  planModeButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.surface,
+  },
+  planModeButtonActive: {
+    backgroundColor: colors.primary,
+  },
+  planModeButtonText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  planModeButtonTextActive: {
+    color: '#fff',
+  },
+  planExpandAllText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  planSection: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
+  },
+  planSectionPhase: {
+    borderColor: colors.fitness.phaseAccent,
+  },
+  planSectionNutrition: {
+    borderColor: colors.fitness.nutritionAccent,
+  },
+  planSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    padding: spacing.md,
+  },
+  planSectionTitle: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+    flex: 1,
+  },
+  planSectionBody: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  planFullCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.md,
   },
 });

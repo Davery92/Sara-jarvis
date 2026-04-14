@@ -2725,13 +2725,29 @@ async def _run_loop(
         # frozen until it resolves — Sara cannot take her next turn until
         # the auditor releases the lock).
         try:
-            await _maybe_run_audit(
+            audit_outcome = await _maybe_run_audit(
                 user_id=user_id,
                 session_id=session_id,
                 turns=turns,
                 transcript=transcript,
                 trigger_kind="watchdog_loop",
             )
+            if audit_outcome == "stopped":
+                await _finalize_session(user_id, session_id, "auditor_stop", turns,
+                                        notes_created, curiosities_explored,
+                                        mode=mode, session_log_id=session_log_id,
+                                        engagement_scores=engagement_scores,
+                                        v2_stats={
+                                            "nodes_created": total_nodes_created,
+                                            "nodes_updated": total_nodes_updated,
+                                            "edges_created": total_edges_created,
+                                            "notes_written": total_notes_written,
+                                            "self_model_updated": self_model_ever_updated,
+                                        },
+                                        transcript=transcript,
+                                        session_memory=session_memory,
+                                        token_usage=total_token_usage)
+                return
         except Exception as e:
             logger.debug(f"Watchdog audit dispatch failed: {e}")
 
@@ -3027,13 +3043,28 @@ async def _run_loop(
             # frozen until it resolves — Sara cannot take her next turn until
             # the auditor releases the lock).
             try:
-                await _maybe_run_audit(
+                audit_outcome = await _maybe_run_audit(
                     user_id=user_id,
                     session_id=session_id,
                     turns=turns,
                     transcript=transcript,
                     trigger_kind="watchdog_loop",
                 )
+                if audit_outcome == "stopped":
+                    await _finalize_session(user_id, session_id, "auditor_stop", turns,
+                                            notes_created, curiosities_explored,
+                                            mode=mode, session_log_id=session_log_id,
+                                            engagement_scores=engagement_scores,
+                                            v2_stats={
+                                                "nodes_created": total_nodes_created,
+                                                "nodes_updated": total_nodes_updated,
+                                                "edges_created": total_edges_created,
+                                                "notes_written": total_notes_written,
+                                                "self_model_updated": self_model_ever_updated,
+                                            },
+                                            transcript=transcript,
+                                            session_memory=session_memory)
+                    return
             except Exception as e:
                 logger.debug(f"Watchdog audit dispatch failed: {e}")
 
@@ -3056,7 +3087,7 @@ async def _run_loop(
                 })
 
             # Sara decides when she's done — no engagement-based early termination.
-            # The only automatic stops are: done signal, chat interrupt, or 180min ceiling.
+            # The only automatic stops are: done signal, chat interrupt, auditor stop, or 180min ceiling.
 
             if _output_signals_done(response):
                 await _finalize_session(user_id, session_id, "completed", turns,
@@ -4054,7 +4085,7 @@ async def _maybe_run_audit(
     transcript,
     trigger_kind: str,
     forced_reason: Optional[str] = None,
-) -> None:
+) -> Optional[str]:
     """
     Evaluate the watchdog rules. If a rule trips (or trigger_kind is forced
     via the periodic auditor), run the audit dialogue inline. The dialogue
@@ -4062,6 +4093,10 @@ async def _maybe_run_audit(
     frozen for the duration. The dialogue itself is in-process — there is
     no Celery hop, no Redis polling — because we're already inside an async
     context that needs to wait synchronously for the resolution.
+
+    Returns the audit outcome ("redirected", "stopped", etc.) or None if
+    no audit was triggered. The caller should check for "stopped" and
+    terminate the session.
     """
     from app.services.acs.watchdog import evaluate as watchdog_evaluate
     from app.services.acs.auditor import (
@@ -4070,7 +4105,15 @@ async def _maybe_run_audit(
         count_session_audits,
         run_dialogue,
         MAX_AUDITS_PER_SESSION,
+        AUDIT_COOLDOWN_TURNS,
     )
+
+    # Post-audit cooldown: skip watchdog for N turns after the last audit
+    # to give Sara a chance to actually act on the directive before re-triggering.
+    if trigger_kind == "watchdog_loop":
+        last_audit_turn = getattr(transcript, "_last_audit_turn", None)
+        if last_audit_turn is not None and (turns - last_audit_turn) < AUDIT_COOLDOWN_TURNS:
+            return None
 
     # If watchdog-driven, evaluate the rules first
     reason = forced_reason
@@ -4078,25 +4121,39 @@ async def _maybe_run_audit(
         recent = transcript.entries[-12:] if hasattr(transcript, "entries") else []
         tripped, reason = watchdog_evaluate(turns, recent)
         if not tripped:
-            return
+            return None
 
     if not reason:
         reason = "(no reason provided)"
 
-    # Respect the per-session audit ceiling
+    # Respect the per-session audit ceiling — if we've hit it, force-stop
+    # the session instead of letting it run unsupervised forever.
     audit_count = await count_session_audits(session_id)
     if audit_count >= MAX_AUDITS_PER_SESSION:
-        logger.info(
+        logger.warning(
             f"Session {session_id[:8]} hit audit ceiling ({MAX_AUDITS_PER_SESSION}); "
-            f"skipping {trigger_kind} ({reason[:80]})"
+            f"force-stopping session. Latest trigger: {reason[:80]}"
         )
-        return
+        try:
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
+            async with async_session() as db:
+                await db.execute(text("""
+                    UPDATE acs_session
+                    SET state = 'pausing',
+                        end_reason = COALESCE(end_reason, 'audit_ceiling')
+                    WHERE id = :sid AND state IN ('autonomous', 'audit_paused')
+                """), {"sid": session_id})
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to force-stop session {session_id[:8]} at audit ceiling: {e}")
+        return "stopped"
 
     # Acquire the lock — this is what makes the session "frozen"
     got_lock = await acquire_audit_lock(session_id)
     if not got_lock:
         logger.info(f"Session {session_id[:8]}: audit lock already held, skipping")
-        return
+        return None
 
     # Mark the session state so the rest of the system knows
     try:
@@ -4112,19 +4169,24 @@ async def _maybe_run_audit(
 
     logger.info(
         f"AUDITOR triggered on session {session_id[:8]}: kind={trigger_kind}, "
-        f"reason={reason[:140]}"
+        f"reason={reason[:140]}, prior_audits={audit_count}"
     )
 
+    outcome = None
     try:
         result = await run_dialogue(
             session_id=session_id,
             user_id=user_id,
             trigger_kind=trigger_kind,
             trigger_reason=reason,
+            prior_audit_count=audit_count,
         )
+        outcome = result.get("outcome")
         logger.info(
-            f"AUDITOR resolved session {session_id[:8]}: outcome={result.get('outcome')}"
+            f"AUDITOR resolved session {session_id[:8]}: outcome={outcome}"
         )
+        # Record the turn at which this audit happened so cooldown works
+        transcript._last_audit_turn = turns
     except Exception as e:
         logger.error(f"AUDITOR dialogue crashed for session {session_id[:8]}: {e}", exc_info=True)
     finally:
@@ -4141,6 +4203,8 @@ async def _maybe_run_audit(
         except Exception:
             pass
         await release_audit_lock(session_id)
+
+    return outcome
 
 
 async def _flush_turn_progress(

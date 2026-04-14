@@ -39,6 +39,8 @@ MAX_DIALOGUE_ROUNDS = 5            # auditor + Sara each speak up to N times
 MAX_AUDITS_PER_SESSION = 3         # ceiling per session
 AUDIT_LOCK_TTL_SECONDS = 6 * 60    # auto-expire if dialogue task crashes
 RECENT_TRANSCRIPT_ENTRIES = 12     # how many recent entries to feed the auditor
+AUDIT_COOLDOWN_TURNS = 5           # skip watchdog for N turns after an audit
+AUDIT_CONTEXT_EXPIRY_TURNS = 4     # stop injecting audit context after N turns
 
 # Sentinel that the auditor emits to signal "I'm done, here's my directive"
 DIRECTIVE_MARKER = "## DIRECTIVE:"
@@ -60,9 +62,16 @@ You are NOT Sara. You are a separate, sharper voice. Be direct. Be honest about 
 
    `## DIRECTIVE: <one or two sentences telling Sara exactly what to do next>`
 
-   Or, as a last resort if Sara's responses indicate she is confused, doubling down on a wrong approach, or the session has clearly run its course:
+   Or, if Sara cannot articulate a genuinely different approach, or the blocker is external and unresolvable, or this is a repeat audit:
 
    `## STOP: <reason for stopping the session>`
+
+{escalation_note}
+
+## When to use STOP vs DIRECTIVE
+- Use DIRECTIVE only if Sara can name a **concrete, different** action she hasn't already tried.
+- Use STOP if: the blocker is external (endpoint down, missing permissions, needs David's input and refuses to use request_human_input), or Sara's proposed "new approach" is substantively the same as what she was doing, or she has no actionable path forward.
+- STOP is not a punishment. It prevents Sara from wasting compute on unproductive loops. A stopped session can always be restarted later when conditions change.
 
 ## What to avoid
 - Being vague ("you might want to consider...")
@@ -70,6 +79,7 @@ You are NOT Sara. You are a separate, sharper voice. Be direct. Be honest about 
 - Asking her what SHE wants to do without providing structure
 - Letting the dialogue drift into theory or meta-discussion. This is operational.
 - Taking more than {max_rounds} rounds. Be efficient.
+- Issuing a DIRECTIVE that is essentially "try harder" or "try again" — that's not a redirect, it's a rubber stamp.
 
 ## Context about Sara
 - She has a `request_human_input` tool that PAUSES the session until David replies. She often forgets she has it. If she's blocked on David's input, the answer is almost always "use that tool."
@@ -77,6 +87,12 @@ You are NOT Sara. You are a separate, sharper voice. Be direct. Be honest about 
 - The GPU cluster endpoint at 10.185.1.8:8686 sometimes goes down for real. Do NOT assume it's reachable. If she reports it down, the right move is to have her *verify* (e.g. `curl -s -m 5 http://10.185.1.8:8686/v1/models`) and, if it really is down, escalate via `request_human_input` rather than spinning on workarounds. Both "wrong test approach" and "endpoint genuinely dead" are real failure modes — don't pre-judge which one.
 - The model loaded on the GPU cluster endpoint changes — she should query `/v1/models` instead of assuming a specific name.
 """
+
+_ESCALATION_NOTE_REPEAT = """## IMPORTANT: This is audit #{audit_number} for this session.
+Prior audits have already redirected Sara, but she looped back into the same pattern. This strongly suggests the blocker is not solvable by redirect alone.
+- If Sara cannot name something **concretely different** from her last few turns, issue `## STOP:`.
+- Do NOT give her another chance to "try one more thing" — that is exactly how loops persist.
+- The bar for DIRECTIVE is much higher on a repeat audit: it must be a genuinely novel approach, not a variation of what she was already doing."""
 
 
 _SARA_INTERRUPT_NOTE = """⚠ AUDITOR INTERRUPT — your session is paused.
@@ -304,6 +320,7 @@ async def run_dialogue(
     trigger_kind: str,
     trigger_reason: str,
     sara_session_context: str = "",
+    prior_audit_count: int = 0,
 ) -> Dict[str, Any]:
     """
     Run an audit dialogue between the auditor and Sara.
@@ -320,7 +337,17 @@ async def run_dialogue(
     recent_entries = await _read_recent_transcript(session_id)
     transcript_text = _format_recent_transcript(recent_entries)
 
-    auditor_system = _AUDITOR_SYSTEM_PROMPT.format(max_rounds=MAX_DIALOGUE_ROUNDS)
+    # On repeat audits, inject escalation language that makes the auditor
+    # much more willing to STOP instead of issuing another toothless redirect.
+    escalation_note = ""
+    if prior_audit_count > 0:
+        escalation_note = _ESCALATION_NOTE_REPEAT.format(
+            audit_number=prior_audit_count + 1,
+        )
+    auditor_system = _AUDITOR_SYSTEM_PROMPT.format(
+        max_rounds=MAX_DIALOGUE_ROUNDS,
+        escalation_note=escalation_note,
+    )
     auditor_opener_user_msg = f"""Trigger: {trigger_kind}
 Reason: {trigger_reason}
 

@@ -195,14 +195,15 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         today_end = today_start.replace(hour=23, minute=59, second=59)
 
         next_event = db.execute(text("""
-            SELECT title, start_time
+            SELECT title, start_time, ios_calendar_name
             FROM calendar_event
             WHERE user_id = :uid AND start_time > :now
             ORDER BY start_time ASC LIMIT 1
         """), {"uid": user_id, "now": now_tz}).fetchone()
 
         if next_event:
-            snapshot.next_event_title = next_event.title
+            cal_label = f" [{next_event.ios_calendar_name}]" if next_event.ios_calendar_name else ""
+            snapshot.next_event_title = f"{next_event.title}{cal_label}"
             delta_min = (next_event.start_time - now_tz).total_seconds() / 60
             snapshot.next_event_minutes_away = int(delta_min)
 

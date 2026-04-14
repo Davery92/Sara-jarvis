@@ -147,7 +147,7 @@ class AnticipationService:
         """Get calendar events in a time range."""
         result = await self.db.execute(
             text("""
-                SELECT id, title, description, start_time, end_time, location
+                SELECT id, title, description, start_time, end_time, location, ios_calendar_name
                 FROM calendar_event
                 WHERE start_time >= :start AND start_time < :end
                 ORDER BY start_time
@@ -164,6 +164,7 @@ class AnticipationService:
                 "start_time": row[3],
                 "end_time": row[4],
                 "location": row[5],
+                "calendar_name": row[6],
             })
 
         return events

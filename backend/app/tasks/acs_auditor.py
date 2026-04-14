@@ -75,11 +75,30 @@ async def _periodic_audit_check_async() -> dict:
         turns = row[3] or 0
         elapsed_min = float(row[4] or 0)
 
-        # Skip if locked or at ceiling
+        # Skip if locked
         if await is_audit_locked(session_id):
             skipped += 1
             continue
-        if await count_session_audits(session_id) >= MAX_AUDITS_PER_SESSION:
+        # At audit ceiling: force-stop the session instead of letting it
+        # run unsupervised. This closes the gap where the periodic task
+        # could bypass the ceiling and let stuck sessions run forever.
+        audit_count = await count_session_audits(session_id)
+        if audit_count >= MAX_AUDITS_PER_SESSION:
+            logger.warning(
+                f"Periodic check: session {session_id[:8]} at audit ceiling "
+                f"({MAX_AUDITS_PER_SESSION}); force-stopping"
+            )
+            try:
+                async with async_session() as db:
+                    await db.execute(text("""
+                        UPDATE acs_session
+                        SET state = 'pausing',
+                            end_reason = COALESCE(end_reason, 'audit_ceiling')
+                        WHERE id = :sid AND state = 'autonomous'
+                    """), {"sid": session_id})
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed to force-stop session {session_id[:8]}: {e}")
             skipped += 1
             continue
 
@@ -158,6 +177,7 @@ REASON: <one sentence>
                 user_id=user_id,
                 trigger_kind="periodic_checkin",
                 trigger_reason=full_reason,
+                prior_audit_count=audit_count,
             )
             audited += 1
         except Exception as e:

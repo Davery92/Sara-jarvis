@@ -6113,7 +6113,7 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
         today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
         events_result = db.execute(text("""
-            SELECT id, title, start_time, end_time, location
+            SELECT id, title, start_time, end_time, location, ios_calendar_name
             FROM calendar_event
             WHERE user_id = :user_id
               AND start_time >= :today_start
@@ -6128,7 +6128,8 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
                 "title": e.title,
                 "start": e.start_time.isoformat() if e.start_time else None,
                 "end": e.end_time.isoformat() if e.end_time else None,
-                "location": e.location
+                "location": e.location,
+                "calendar_name": e.ios_calendar_name
             })
     except Exception as ex:
         logger.warning(f"Failed to get calendar events: {ex}")

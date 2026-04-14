@@ -111,13 +111,85 @@ export interface Phase {
   user_id: string;
   name: string;
   goal?: string;
+  program_id?: string;
+  order_index?: number;
+  duration_weeks?: number;
   parent_phase_id?: string;
   start_date?: string;  // YYYY-MM-DD
   end_date?: string;    // YYYY-MM-DD
   status: 'planned' | 'active' | 'completed' | 'archived';
+
+  // Baseline macro targets (used when training/rest-day variants aren't set)
+  calories_target?: number;
+  protein_target?: number;
+  carbs_target?: number;
+  fat_target?: number;
+
+  // Calorie/macro cycling — training day vs rest day
+  calories_training_day?: number;
+  calories_rest_day?: number;
+  carbs_training_day?: number;
+  carbs_rest_day?: number;
+  fat_training_day?: number;
+  fat_rest_day?: number;
+
+  daily_steps_target?: number;
+  training_days_per_week?: number;
+  deload_week?: boolean;
+
   notes?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface Program {
+  id: string;
+  user_id?: string;
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  is_active?: boolean;
+  notes?: string;
+  plan_markdown?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ActiveProgramResponse {
+  program: Program | null;
+  phases: Phase[];
+}
+
+/**
+ * Resolve the effective macro targets for a phase on a given day.
+ *
+ * Precedence:
+ *   1. Training/rest-day variant (when set and today's training state is known)
+ *   2. Baseline *_target field on the phase
+ *   3. Fallback goals (user's manual NutritionGoals)
+ */
+export function getEffectiveTargets(
+  phase: Phase | null,
+  isTrainingDay: boolean | null,
+  fallback: NutritionGoals | null
+): NutritionGoals {
+  const fb = fallback ?? { calories: 2000, protein: 150, carbs: 200, fats: 70 };
+  if (!phase) return fb;
+
+  const pick = <T,>(training: T | undefined, rest: T | undefined, base: T | undefined, fb: T): T => {
+    if (isTrainingDay === true && training != null) return training;
+    if (isTrainingDay === false && rest != null) return rest;
+    if (base != null) return base;
+    return fb;
+  };
+
+  return {
+    calories: pick(phase.calories_training_day, phase.calories_rest_day, phase.calories_target, fb.calories),
+    protein: phase.protein_target ?? fb.protein,
+    carbs: pick(phase.carbs_training_day, phase.carbs_rest_day, phase.carbs_target, fb.carbs),
+    fats: pick(phase.fat_training_day, phase.fat_rest_day, phase.fat_target, fb.fats),
+  };
 }
 
 export interface CreatePhaseParams {
@@ -511,6 +583,10 @@ class FitnessService {
 
   async getActivePhases(): Promise<{ phases: Phase[] }> {
     return await apiClient.get('/api/fitness/phases/active');
+  }
+
+  async getActiveProgram(): Promise<ActiveProgramResponse> {
+    return await apiClient.get<ActiveProgramResponse>('/api/fitness/programs/active');
   }
 
   async createPhase(params: CreatePhaseParams): Promise<{ success: boolean; phase_id: string; message: string }> {

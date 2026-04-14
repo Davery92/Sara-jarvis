@@ -116,6 +116,7 @@ class CalendarEvent:
     starts_at: str
     ends_at: str
     location: Optional[str] = None
+    calendar_name: Optional[str] = None
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -683,7 +684,7 @@ Synthesized summary:"""
             # doesn't belong in the morning brief schedule. Workouts get
             # surfaced through the dedicated fitness section instead.
             result = db.execute(text("""
-                SELECT title, start_time, end_time, location, all_day
+                SELECT title, start_time, end_time, location, all_day, ios_calendar_name
                 FROM calendar_event
                 WHERE user_id = :user_id
                   AND start_time >= :start_of_day
@@ -708,7 +709,8 @@ Synthesized summary:"""
                     title=row.title,
                     starts_at=row.start_time.strftime("%H:%M") if row.start_time and not row.all_day else ("All day" if row.all_day else ""),
                     ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
-                    location=row.location
+                    location=row.location,
+                    calendar_name=row.ios_calendar_name
                 ))
 
             # Build staleness warning if needed
@@ -732,7 +734,8 @@ Synthesized summary:"""
                 if event.ends_at:
                     time_str += f" - {event.ends_at}"
                 loc_str = f" @ {event.location}" if event.location else ""
-                lines.append(f"- **{time_str}**: {event.title}{loc_str}")
+                cal_str = f" [{event.calendar_name}]" if event.calendar_name else ""
+                lines.append(f"- **{time_str}**: {event.title}{loc_str}{cal_str}")
 
             if stale_warning:
                 lines.append(stale_warning)
