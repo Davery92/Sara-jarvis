@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class ImportanceScore(BaseModel):
     """Calculated importance score with components"""
-    episode_id: int
+    episode_id: str
     base_importance: float
     recency_factor: float
     frequency_factor: float
@@ -97,7 +97,7 @@ class ImportanceScorer:
 
         return count_factor * recency_weight
 
-    async def calculate_popularity_factor(self, episode_id: int) -> float:
+    async def calculate_popularity_factor(self, episode_id: str) -> float:
         """
         Calculate popularity based on cross-references.
         Currently returns 0.0 — memory_references table not yet created.
@@ -136,7 +136,7 @@ class ImportanceScorer:
 
     async def calculate_importance(
         self,
-        episode_id: int,
+        episode_id: str,
         base_importance: float,
         created_at: datetime,
         access_count: int,
@@ -186,7 +186,7 @@ class ImportanceScorer:
             score_date=datetime.utcnow()
         )
 
-    async def rescore_episode(self, episode_id: int) -> Optional[float]:
+    async def rescore_episode(self, episode_id: str) -> Optional[float]:
         """
         Rescore a single episode and update in database
 

@@ -315,7 +315,7 @@ class MemoryService:
 
                 sql = f"""
                     SELECT t.id, t.content, t.role, t.created_at, e.head,
-                           (e.embedding <=> :qvec::vector) AS distance,
+                           (e.embedding <=> CAST(:qvec AS vector)) AS distance,
                            COALESCE(t.salience, 0.5) AS salience
                     FROM memory_embedding e
                     JOIN memory_trace t ON t.id = e.trace_id
@@ -323,7 +323,7 @@ class MemoryService:
                     {head_filter}
                     {time_filter}
                     ORDER BY (
-                        0.65 * (1.0 - (e.embedding <=> :qvec::vector))
+                        0.65 * (1.0 - (e.embedding <=> CAST(:qvec AS vector)))
                       + 0.35 * COALESCE(t.salience, 0.5)
                     ) DESC
                     LIMIT :k

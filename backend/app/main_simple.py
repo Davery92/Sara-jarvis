@@ -8230,7 +8230,10 @@ Respond with ONLY a JSON object:
                 },
             )
             resp.raise_for_status()
-            result_text = resp.json()["choices"][0]["message"]["content"].strip()
+            msg = resp.json()["choices"][0]["message"]
+            result_text = (msg.get("content") or "").strip()
+            if not result_text and msg.get("reasoning_content"):
+                result_text = msg["reasoning_content"].strip()
 
             # Parse JSON response
             import re
@@ -8332,7 +8335,11 @@ Guidelines:
                 },
             )
             resp.raise_for_status()
-            result_text = resp.json()["choices"][0]["message"]["content"].strip()
+            msg = resp.json()["choices"][0]["message"]
+            result_text = (msg.get("content") or "").strip()
+            # Reasoning models may put output in reasoning_content with empty content
+            if not result_text and msg.get("reasoning_content"):
+                result_text = msg["reasoning_content"].strip()
 
             # Extract JSON from response (handle markdown code blocks)
             if "```" in result_text:
@@ -8405,7 +8412,7 @@ Guidelines:
     except json.JSONDecodeError as e:
         logger.warning(f"Batch episode enrichment JSON parse failed: {e}")
     except Exception as e:
-        logger.warning(f"Batch episode enrichment failed (non-critical): {e}")
+        logger.warning(f"Batch episode enrichment failed (non-critical): {type(e).__name__}: {e}")
     finally:
         db.close()
 

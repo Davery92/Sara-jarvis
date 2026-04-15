@@ -1,6 +1,7 @@
 """
 Fitness Tools Module
-Tools for fitness tracking: notes, food logging, workout logging, recovery tracking, templates, and intelligent workout suggestions
+Tools for fitness tracking: notes, food logging, workout logging, recovery tracking,
+templates, programs, phases, and training schedule management.
 """
 from app.tools.fitness.fitness_notes import (
     FitnessNoteCreateTool,
@@ -25,8 +26,18 @@ from app.tools.fitness.recovery_log import (
 )
 from app.tools.fitness.template_tools import (
     TemplateListTool,
-    TemplateGetTool
+    TemplateGetTool,
+    TemplateUpdateTool
 )
+from app.tools.fitness.program_tools import (
+    ProgramListTool,
+    ProgramGetTool,
+    PhaseListTool,
+    PhaseGetTool,
+    PhaseUpdateTool,
+    PhaseActivateTool
+)
+from app.tools.fitness.training_schedule import TrainingScheduleTool
 
 __all__ = [
     # Fitness Notes
@@ -49,4 +60,14 @@ __all__ = [
     # Templates
     "TemplateListTool",
     "TemplateGetTool",
+    "TemplateUpdateTool",
+    # Programs & Phases
+    "ProgramListTool",
+    "ProgramGetTool",
+    "PhaseListTool",
+    "PhaseGetTool",
+    "PhaseUpdateTool",
+    "PhaseActivateTool",
+    # Training Schedule
+    "TrainingScheduleTool",
 ]

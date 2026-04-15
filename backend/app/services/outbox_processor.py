@@ -492,7 +492,11 @@ Return ONLY valid JSON in this exact format, no other text:
                 response.raise_for_status()
                 result = response.json()
 
-                content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                msg = result.get("choices", [{}])[0].get("message", {})
+                content_text = msg.get("content", "") or ""
+                # Reasoning models may put output in reasoning_content with empty content
+                if not content_text.strip() and msg.get("reasoning_content"):
+                    content_text = msg["reasoning_content"]
 
                 if not content_text or not content_text.strip():
                     logger.warning("LLM returned empty content for entity extraction")
@@ -521,7 +525,7 @@ Return ONLY valid JSON in this exact format, no other text:
             logger.warning(f"LLM entity extraction JSON parse failed: {e}, content was: {content_text[:200] if content_text else 'empty'}")
             return {"people": [], "projects": [], "topics": []}
         except Exception as e:
-            logger.warning(f"LLM entity extraction failed: {e}")
+            logger.warning(f"LLM entity extraction failed: {type(e).__name__}: {e}")
             return {"people": [], "projects": [], "topics": []}
 
     # ========================================

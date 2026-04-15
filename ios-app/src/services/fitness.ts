@@ -636,6 +636,25 @@ class FitnessService {
     return await apiClient.put('/api/fitness/goals', goals);
   }
 
+  async getTodayTarget(onDate?: string): Promise<{
+    date: string;
+    is_training_day: boolean;
+    phase: { id: string; name: string } | null;
+    target: { calories: number; protein: number; carbs: number; fat: number } | null;
+  }> {
+    const params = onDate ? `?on_date=${onDate}` : '';
+    return await apiClient.get(`/api/fitness/today-target${params}`);
+  }
+
+  async toggleTrainingDay(targetDate?: string): Promise<{
+    date: string;
+    is_training_day: boolean;
+    action: 'created' | 'removed';
+  }> {
+    const params = targetDate ? `?target_date=${targetDate}` : '';
+    return await apiClient.post(`/api/fitness/toggle-training-day${params}`, {});
+  }
+
   // Workout Sets (for detailed workout logging)
   async getWorkoutSets(startDate?: string, endDate?: string): Promise<{ workouts: WorkoutSet[] }> {
     const params = new URLSearchParams();

@@ -110,6 +110,7 @@ export function navigateToChat(params?: {
   heartbeat?: { title: string; message: string; priority: string };
   inboxItem?: { id: string; title: string };
   taskInject?: { taskId: string; conversationId?: string; noteId?: string };
+  notification?: { id: string; title: string; message: string; category: string; item_type: string };
 }) {
   console.log('[Navigation] navigateToChat called with params:', params);
   navigateToTab('Sara', params);

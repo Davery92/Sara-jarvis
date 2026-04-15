@@ -73,6 +73,15 @@ export type HeartbeatContext = {
   priority: string;  // 'low', 'normal', 'high'
 };
 
+// ACS notification context passed when opening chat from notification screen
+export type NotificationContext = {
+  id: string;
+  title: string;
+  message: string;
+  category: string;
+  item_type: string;  // 'notification' | 'acs_discovery'
+};
+
 // Chat screen params (used by Sara tab)
 export type ChatScreenParams = {
   healthAlert?: HealthAlertContext;
@@ -80,6 +89,7 @@ export type ChatScreenParams = {
   quickReply?: QuickReplyContext;
   heartbeat?: HeartbeatContext;
   inboxItem?: { id: string; title: string };
+  notification?: NotificationContext;
 };
 
 // Main Tab Navigator

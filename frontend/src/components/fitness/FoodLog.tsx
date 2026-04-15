@@ -55,6 +55,25 @@ export default function FoodLog() {
   const [editingEntry, setEditingEntry] = useState<FoodLogEntry | null>(null)
   const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set())
   const [todayTarget, setTodayTarget] = useState<TodayTarget | null>(null)
+  const [togglingTrainingDay, setTogglingTrainingDay] = useState(false)
+
+  const toggleTrainingDay = async () => {
+    setTogglingTrainingDay(true)
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/toggle-training-day`, {
+        method: 'POST',
+        credentials: 'include'
+      })
+      if (response.ok) {
+        // Re-fetch to get updated macros
+        await fetchTodayTarget()
+      }
+    } catch (e) {
+      console.error('Failed to toggle training day:', e)
+    } finally {
+      setTogglingTrainingDay(false)
+    }
+  }
 
   const toggleDay = (date: string) => {
     const newExpanded = new Set(expandedDays)
@@ -152,11 +171,21 @@ export default function FoodLog() {
         }`}>
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div>
-              <div className="text-sm font-semibold text-gray-200">
+              <div className="text-sm font-semibold text-gray-200 flex items-center gap-1">
                 Today's target ·{' '}
-                <span className={todayTarget.is_training_day ? 'text-purple-300' : 'text-blue-300'}>
+                <button
+                  onClick={toggleTrainingDay}
+                  disabled={togglingTrainingDay}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold transition-colors cursor-pointer disabled:opacity-50 ${
+                    todayTarget.is_training_day
+                      ? 'bg-purple-800/40 text-purple-300 hover:bg-purple-700/50 border border-purple-600/40'
+                      : 'bg-blue-800/40 text-blue-300 hover:bg-blue-700/50 border border-blue-600/40'
+                  }`}
+                  title={todayTarget.is_training_day ? 'Click to switch to rest day' : 'Click to switch to training day'}
+                >
                   {todayTarget.is_training_day ? 'TRAINING DAY' : 'REST DAY'}
-                </span>
+                  <span className="text-[10px] opacity-60">↔</span>
+                </button>
                 {todayTarget.is_deload && (
                   <span className="ml-2 px-2 py-0.5 text-xs rounded bg-amber-600/20 text-amber-300">
                     DELOAD

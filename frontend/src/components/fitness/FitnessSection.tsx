@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Dumbbell, Apple, FileText, Activity, Settings, X, Calendar, Heart, RefreshCw, Target, TrendingUp, Trophy, Scale, ChevronDown, ChevronUp, BookOpen, Play, Clock, Zap } from 'lucide-react'
+import { Dumbbell, Apple, FileText, Activity, Settings, X, Calendar, Heart, RefreshCw, Target, TrendingUp, Trophy, Scale, ChevronDown, ChevronUp, BookOpen, Play, Clock, Zap, Moon } from 'lucide-react'
 import FoodLog from './FoodLog'
 import WorkoutLog from './WorkoutLogEnhanced'
 import FitnessNotes from './FitnessNotes'
@@ -1041,6 +1041,8 @@ function FitnessDashboard() {
   const [showWeightModal, setShowWeightModal] = useState(false)
   const [newWeight, setNewWeight] = useState('')
   const [activePhase, setActivePhase] = useState<any>(null)
+  const [isTrainingDay, setIsTrainingDay] = useState<boolean | null>(null)
+  const [togglingTrainingDay, setTogglingTrainingDay] = useState(false)
 
   // Fetch everything on mount
   useEffect(() => {
@@ -1048,6 +1050,7 @@ function FitnessDashboard() {
     const initializeNutrition = async () => {
       await fetchGoals()
       await fetchActivePhase()
+      await fetchTodayTarget()
     }
     initializeNutrition()
 
@@ -1106,6 +1109,55 @@ function FitnessDashboard() {
       }
     } catch (error) {
       console.error('Failed to fetch active phase:', error)
+    }
+  }
+
+  const fetchTodayTarget = async () => {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/today-target`, {
+        credentials: 'include'
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setIsTrainingDay(data.is_training_day)
+        // If phase provides targets, use them
+        if (data.target) {
+          setGoals(prev => ({
+            calories: data.target.calories || prev.calories,
+            protein: data.target.protein || prev.protein,
+            carbs: data.target.carbs || prev.carbs,
+            fats: data.target.fat || prev.fats,
+          }))
+          setEditGoals(prev => ({
+            calories: data.target.calories || prev.calories,
+            protein: data.target.protein || prev.protein,
+            carbs: data.target.carbs || prev.carbs,
+            fats: data.target.fat || prev.fats,
+          }))
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch today target:', error)
+    }
+  }
+
+  const toggleTrainingDay = async () => {
+    setTogglingTrainingDay(true)
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/toggle-training-day`, {
+        method: 'POST',
+        credentials: 'include'
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setIsTrainingDay(data.is_training_day)
+        // Re-fetch targets since macros change with training day state
+        await fetchTodayTarget()
+      }
+    } catch (error) {
+      console.error('Failed to toggle training day:', error)
+    } finally {
+      setTogglingTrainingDay(false)
     }
   }
 
@@ -1259,6 +1311,21 @@ function FitnessDashboard() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {isTrainingDay !== null && (
+                <button
+                  onClick={toggleTrainingDay}
+                  disabled={togglingTrainingDay}
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                    isTrainingDay
+                      ? 'bg-yellow-900/50 text-yellow-300 hover:bg-yellow-800/50 border border-yellow-700/50'
+                      : 'bg-indigo-900/50 text-indigo-300 hover:bg-indigo-800/50 border border-indigo-700/50'
+                  } disabled:opacity-50`}
+                  title={isTrainingDay ? 'Switch to rest day' : 'Switch to training day'}
+                >
+                  {isTrainingDay ? <Zap className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
+                  {isTrainingDay ? 'Training' : 'Rest'}
+                </button>
+              )}
               <button
                 onClick={handleManualRefresh}
                 disabled={isRefreshing}

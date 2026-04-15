@@ -62,6 +62,7 @@ from app.tools.fitness.program_tools import (
     PhaseActivateTool,
     PhaseDeleteTool
 )
+from app.tools.fitness.training_schedule import TrainingScheduleTool
 from app.tools.fitness.workout_suggest import WorkoutSuggestTool
 from app.tools.fitness.summary import FitnessSummaryTool
 from app.tools.fitness.workout_mode import (
@@ -201,6 +202,7 @@ class ToolRegistry:
                 'template_list', 'template_get', 'template_create', 'template_update', 'template_delete',
                 'program_list', 'program_get', 'program_create', 'program_update', 'program_activate', 'program_delete',
                 'phase_list', 'phase_get', 'phase_create', 'phase_update', 'phase_activate', 'phase_delete',
+                'training_schedule',
                 'workout_suggest'
             ]
         },
@@ -450,6 +452,9 @@ class ToolRegistry:
             PhaseUpdateTool(),
             PhaseActivateTool(),
             PhaseDeleteTool(),
+
+            # Training Schedule (swap days, toggle dates)
+            TrainingScheduleTool(),
 
             # Workout Suggestion (intelligent weight recommendations)
             WorkoutSuggestTool(),

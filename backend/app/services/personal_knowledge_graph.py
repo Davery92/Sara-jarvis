@@ -1565,9 +1565,10 @@ class PersonalKnowledgeGraph:
             from sqlalchemy import text as sa_text
             database_url = os.getenv("DATABASE_URL", "")
             if "asyncpg" in database_url:
-                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-            elif "psycopg" in database_url:
-                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+                database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            elif not database_url.startswith("postgresql+psycopg://"):
+                # Ensure we use psycopg (v3) driver, not psycopg2
+                database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
             from sqlalchemy import create_engine
             from sqlalchemy.orm import sessionmaker as sync_sm
@@ -1577,10 +1578,10 @@ class PersonalKnowledgeGraph:
             try:
                 rows = session.execute(sa_text("""
                     SELECT pkg_id, node_type, content_text,
-                           1 - (embedding <=> :query_embedding::vector) as similarity
+                           1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity
                     FROM pkg_embedding
                     WHERE embedding IS NOT NULL
-                    ORDER BY embedding <=> :query_embedding::vector
+                    ORDER BY embedding <=> CAST(:query_embedding AS vector)
                     LIMIT :limit
                 """), {
                     "query_embedding": str(query_embedding),

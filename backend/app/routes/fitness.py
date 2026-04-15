@@ -1766,7 +1766,10 @@ async def fitness_chat(
             FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
             WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
             RecoveryLogCreateTool, RecoveryLogGetTool, RecoveryLogRecentTool,
-            TemplateListTool, TemplateGetTool
+            TemplateListTool, TemplateGetTool, TemplateUpdateTool,
+            ProgramListTool, ProgramGetTool,
+            PhaseListTool, PhaseGetTool, PhaseUpdateTool, PhaseActivateTool,
+            TrainingScheduleTool
         )
         from app.tools.fitness.food_search_log import FoodSearchAndLogTool
 
@@ -1777,7 +1780,10 @@ async def fitness_chat(
             FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
             WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
             RecoveryLogCreateTool(), RecoveryLogGetTool(), RecoveryLogRecentTool(),
-            TemplateListTool(), TemplateGetTool()
+            TemplateListTool(), TemplateGetTool(), TemplateUpdateTool(),
+            ProgramListTool(), ProgramGetTool(),
+            PhaseListTool(), PhaseGetTool(), PhaseUpdateTool(), PhaseActivateTool(),
+            TrainingScheduleTool()
         ]
 
         # Get tool schemas
@@ -1900,7 +1906,10 @@ async def fitness_chat_stream(
             FoodLogCreateTool, FoodLogSearchTool, FoodLogSummaryTool,
             WorkoutListTool, WorkoutLogCreateTool, WorkoutStatsTool,
             RecoveryLogCreateTool, RecoveryLogGetTool, RecoveryLogRecentTool,
-            TemplateListTool, TemplateGetTool
+            TemplateListTool, TemplateGetTool, TemplateUpdateTool,
+            ProgramListTool, ProgramGetTool,
+            PhaseListTool, PhaseGetTool, PhaseUpdateTool, PhaseActivateTool,
+            TrainingScheduleTool
         )
         from app.tools.fitness.food_search_log import FoodSearchAndLogTool
 
@@ -1910,7 +1919,10 @@ async def fitness_chat_stream(
             FoodLogCreateTool(), FoodLogSearchTool(), FoodLogSummaryTool(),
             WorkoutListTool(), WorkoutLogCreateTool(), WorkoutStatsTool(),
             RecoveryLogCreateTool(), RecoveryLogGetTool(), RecoveryLogRecentTool(),
-            TemplateListTool(), TemplateGetTool()
+            TemplateListTool(), TemplateGetTool(), TemplateUpdateTool(),
+            ProgramListTool(), ProgramGetTool(),
+            PhaseListTool(), PhaseGetTool(), PhaseUpdateTool(), PhaseActivateTool(),
+            TrainingScheduleTool()
         ]
 
         tools_schemas = [tool.to_openai_schema() for tool in fitness_tools]
@@ -2926,6 +2938,45 @@ async def get_today_nutrition_target(
         },
         "target": target,
     }
+
+
+@router.post("/toggle-training-day")
+async def toggle_training_day(
+    target_date: Optional[date] = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Toggle a date between training day and rest day.
+    If a workout_session exists for the date, remove it (→ rest day).
+    If none exists, create a placeholder session (→ training day).
+    Returns the new state.
+    """
+    d = target_date or date.today()
+
+    existing = db.execute(text("""
+        SELECT id, template_id, status FROM workout_session
+        WHERE user_id = :uid AND session_date = :d
+        ORDER BY created_at ASC
+    """), {"uid": user_id, "d": d}).fetchall()
+
+    if existing:
+        # Remove all sessions for this date → becomes rest day
+        db.execute(text("""
+            DELETE FROM workout_session
+            WHERE user_id = :uid AND session_date = :d
+        """), {"uid": user_id, "d": d})
+        db.commit()
+        return {"date": d.isoformat(), "is_training_day": False, "action": "removed"}
+    else:
+        # Create a placeholder session → becomes training day
+        session_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO workout_session (id, user_id, session_date, status, created_at, updated_at)
+            VALUES (:id, :uid, :d, 'planned', NOW(), NOW())
+        """), {"id": session_id, "uid": user_id, "d": d})
+        db.commit()
+        return {"date": d.isoformat(), "is_training_day": True, "action": "created", "session_id": session_id}
 
 
 @router.get("/phases/active")

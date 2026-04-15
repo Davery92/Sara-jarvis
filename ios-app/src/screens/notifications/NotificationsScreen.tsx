@@ -142,10 +142,15 @@ export default function NotificationsScreen() {
   };
 
   const handleChat = (notification: Notification) => {
-    navigateToChat(
-      `Sara sent me this notification: "${notification.title}"\n\n${notification.message || ''}\n\nCan you tell me more about this?`,
-      `Re: ${notification.title}`
-    );
+    navigateToChat({
+      notification: {
+        id: notification.id,
+        title: notification.title,
+        message: notification.message || '',
+        category: notification.category,
+        item_type: notification.item_type,
+      },
+    });
   };
 
   // Build category counts from current data

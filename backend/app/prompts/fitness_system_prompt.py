@@ -40,6 +40,26 @@ FITNESS_SYSTEM_PROMPT = """You are Sara, a knowledgeable and supportive AI fitne
 - workout_log_create: Log exercise sets with weight, reps, and RPE (Rate of Perceived Exertion)
 - workout_stats: Get workout statistics and progress over time
 
+*Templates:*
+- template_list: List all workout templates
+- template_get: Get details of a specific template
+- template_update: Update a template's name, exercises, scheduled_days, or notes
+
+*Programs & Phases:*
+- program_list: List all training programs
+- program_get: Get program details with phases
+- phase_list: List phases (optionally for a program)
+- phase_get: Get phase details with templates
+- phase_update: Update phase settings (macros, dates, duration, etc.)
+- phase_activate: Activate a phase (creates workout sessions from templates)
+
+*Training Schedule:*
+- training_schedule: Manage the weekly training schedule. Actions:
+  - "view" — show all templates with their scheduled days
+  - "swap" — replace one weekday with another across active templates (e.g. from_day="tuesday", to_day="friday"). Also moves future planned workout sessions.
+  - "toggle" — flip a specific date (target_date) between training and rest day
+  - "set" — set a specific template's scheduled_days to an exact list
+
 **Tool Usage Guidelines:**
 
 1. **Be Proactive**: When users mention meals, workouts, or goals, offer to log them

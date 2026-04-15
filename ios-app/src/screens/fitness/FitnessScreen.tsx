@@ -70,17 +70,20 @@ export default function FitnessScreen({ navigation }: Props) {
   const [todaysTemplates, setTodaysTemplates] = useState<WorkoutTemplate[]>([]);
   const [planViewMode, setPlanViewMode] = useState<'sections' | 'full'>('sections');
   const [expandedPlanSections, setExpandedPlanSections] = useState<Set<number>>(new Set());
+  const [isTrainingDayFromApi, setIsTrainingDayFromApi] = useState<boolean | null>(null);
+  const [togglingTrainingDay, setTogglingTrainingDay] = useState(false);
 
   useEffect(() => {
     loadData();
     loadNutritionGoalsWithPhase();
+    loadTodayTarget();
   }, []);
 
-  // Once we know whether today is a training or rest day (from todaysTemplates),
-  // recompute the effective nutrition targets with that context.
+  // Training day state: prefer API response, fall back to template-based detection
   const isTrainingDay: boolean | null = (() => {
+    // If the API told us explicitly, use that
+    if (isTrainingDayFromApi !== null) return isTrainingDayFromApi;
     if (!activePhase) return null;
-    // If the phase doesn't actually use day-cycling, training-day state is moot.
     const cycles =
       activePhase.calories_training_day != null ||
       activePhase.calories_rest_day != null ||
@@ -91,6 +94,37 @@ export default function FitnessScreen({ navigation }: Props) {
     if (!cycles) return null;
     return todaysTemplates.length > 0;
   })();
+
+  const loadTodayTarget = async () => {
+    try {
+      const data = await fitnessService.getTodayTarget();
+      setIsTrainingDayFromApi(data.is_training_day);
+      if (data.target) {
+        setNutritionGoals({
+          calories: data.target.calories,
+          protein: data.target.protein,
+          carbs: data.target.carbs,
+          fats: data.target.fat,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to load today target:', error);
+    }
+  };
+
+  const handleToggleTrainingDay = async () => {
+    setTogglingTrainingDay(true);
+    try {
+      const result = await fitnessService.toggleTrainingDay();
+      setIsTrainingDayFromApi(result.is_training_day);
+      // Re-fetch targets since macros change
+      await loadTodayTarget();
+    } catch (error) {
+      console.error('Failed to toggle training day:', error);
+    } finally {
+      setTogglingTrainingDay(false);
+    }
+  };
 
   useEffect(() => {
     if (!activePhase) return;
@@ -475,6 +509,36 @@ export default function FitnessScreen({ navigation }: Props) {
             <Text style={styles.todayHeaderLabel}>
               {isTrainingDay === true ? 'Training day' : isTrainingDay === false ? 'Rest day' : 'Today'}
             </Text>
+            <View style={{ flex: 1 }} />
+            {isTrainingDay !== null && (
+              <TouchableOpacity
+                onPress={handleToggleTrainingDay}
+                disabled={togglingTrainingDay}
+                style={{
+                  paddingHorizontal: 10,
+                  paddingVertical: 4,
+                  borderRadius: 12,
+                  backgroundColor: isTrainingDay
+                    ? 'rgba(234, 179, 8, 0.15)'
+                    : 'rgba(99, 102, 241, 0.15)',
+                  borderWidth: 1,
+                  borderColor: isTrainingDay
+                    ? 'rgba(234, 179, 8, 0.3)'
+                    : 'rgba(99, 102, 241, 0.3)',
+                  opacity: togglingTrainingDay ? 0.5 : 1,
+                }}
+              >
+                <Text style={{
+                  fontSize: 11,
+                  fontWeight: '600',
+                  color: isTrainingDay
+                    ? colors.fitness.trainingDay
+                    : colors.fitness.restDay,
+                }}>
+                  {isTrainingDay ? 'Switch to rest' : 'Switch to training'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {hasWorkoutToday ? (

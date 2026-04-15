@@ -101,16 +101,16 @@ class LessonInjectionService:
                         trigger_context,
                         created_at,
                         last_applied_at,
-                        1 - (embedding <=> :query_embedding::vector) as similarity
+                        1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity
                     FROM sara_reflection
                     WHERE reflection_type = 'mistake'
                       AND is_active = true
                       AND (effectiveness_score IS NULL OR effectiveness_score >= :min_effectiveness)
-                    ORDER BY embedding <=> :query_embedding::vector
+                    ORDER BY embedding <=> CAST(:query_embedding AS vector)
                     LIMIT :limit_count
                 """),
                 {
-                    "query_embedding": query_embedding,
+                    "query_embedding": str(query_embedding),
                     "min_effectiveness": min_effectiveness,
                     "limit_count": limit * 2  # Fetch extra for filtering
                 }

@@ -466,12 +466,12 @@ class ContentInboxService:
             results = db.execute(text("""
                 SELECT id, title, content_type, original_url, description,
                        status, extraction_status, word_count, shared_at,
-                       1 - (embedding <=> :qemb::vector) as similarity
+                       1 - (embedding <=> CAST(:qemb AS vector)) as similarity
                 FROM shared_content
                 WHERE user_id = :uid
                   AND embedding IS NOT NULL
                   AND extraction_status = 'extracted'
-                ORDER BY embedding <=> :qemb::vector
+                ORDER BY embedding <=> CAST(:qemb AS vector)
                 LIMIT :lim
             """), {
                 "qemb": str(query_embedding),

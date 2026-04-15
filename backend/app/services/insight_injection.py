@@ -110,7 +110,7 @@ class InsightInjectionService:
                     di.last_surfaced_at,
                     CASE
                         WHEN di.embedding IS NULL THEN 0.5
-                        ELSE 1 - (di.embedding <=> :embedding::vector)
+                        ELSE 1 - (di.embedding <=> CAST(:embedding AS vector))
                     END as similarity,
                     rm.last_mentioned,
                     COALESCE(if_fb.positive_count, 0) as positive_feedback,
@@ -128,7 +128,7 @@ class InsightInjectionService:
                     -- Proactive insights get priority boost
                     CASE WHEN di.surface_strategy = 'proactive' THEN 0.1 ELSE 0 END DESC,
                     -- Then by similarity (if embedding exists)
-                    CASE WHEN di.embedding IS NOT NULL THEN 1 - (di.embedding <=> :embedding::vector) ELSE 0.5 END DESC,
+                    CASE WHEN di.embedding IS NOT NULL THEN 1 - (di.embedding <=> CAST(:embedding AS vector)) ELSE 0.5 END DESC,
                     -- Then by confidence
                     di.confidence DESC,
                     -- Prefer insights not yet surfaced
@@ -142,7 +142,7 @@ class InsightInjectionService:
                 query,
                 {
                     "user_id": user_id,
-                    "embedding": conversation_embedding,
+                    "embedding": str(conversation_embedding),
                     "min_confidence": self.MIN_CONFIDENCE,
                     "limit": limit
                 }
@@ -633,7 +633,7 @@ class InsightInjectionService:
                         confidence, temporal_lag_hours,
                         CASE
                             WHEN embedding IS NULL THEN 0.5
-                            ELSE 1 - (embedding <=> :embedding::vector)
+                            ELSE 1 - (embedding <=> CAST(:embedding AS vector))
                         END as similarity
                     FROM correlation_pattern
                     WHERE user_id = :user_id
@@ -641,7 +641,7 @@ class InsightInjectionService:
                       AND confidence >= 0.6
                       {domain_filter}
                     ORDER BY
-                        CASE WHEN embedding IS NOT NULL THEN 1 - (embedding <=> :embedding::vector) ELSE 0.5 END DESC,
+                        CASE WHEN embedding IS NOT NULL THEN 1 - (embedding <=> CAST(:embedding AS vector)) ELSE 0.5 END DESC,
                         confidence DESC
                     LIMIT :limit
                 """)
@@ -650,7 +650,7 @@ class InsightInjectionService:
                     query,
                     {
                         "user_id": user_id,
-                        "embedding": conversation_embedding,
+                        "embedding": str(conversation_embedding),
                         "limit": limit
                     }
                 )

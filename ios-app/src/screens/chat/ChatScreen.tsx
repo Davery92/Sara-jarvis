@@ -19,7 +19,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext } from '../../types/navigation';
+import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext } from '../../types/navigation';
 import { Message } from '../../types/api';
 import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
 import { chatService } from '../../services/chat';
@@ -88,6 +88,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [pendingContextTrigger, setPendingContextTrigger] = useState(0);
   const pendingInboxItemRef = useRef<{ id: string; title: string } | null>(null);
   const handledInboxItemRef = useRef<string | null>(null);
+  const pendingNotificationRef = useRef<NotificationContext | null>(null);
+  const handledNotificationRef = useRef<string | null>(null);
 
   // Keep latest messages in a ref so async voice/text handlers don't use stale closures.
   useEffect(() => {
@@ -185,6 +187,24 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     // Clear the params
     navigation.setParams({ heartbeat: undefined });
   }, [route?.params?.heartbeat, navigation]);
+
+  // Handle notification context (from NotificationsScreen "Chat with Sara about this")
+  useEffect(() => {
+    if (!route || !navigation) return;
+    const notification = route.params?.notification as NotificationContext | undefined;
+    if (!notification) return;
+
+    // Don't re-handle the same notification
+    if (handledNotificationRef.current === notification.id) return;
+    handledNotificationRef.current = notification.id;
+
+    console.log('[Chat] Notification context received, queuing for conversation:', notification);
+    pendingNotificationRef.current = notification;
+    setPendingContextTrigger(t => t + 1);
+
+    // Clear the params
+    navigation.setParams({ notification: undefined });
+  }, [route?.params?.notification, navigation]);
 
   // Handle task chat inject — backend persisted result to conversation, reload it
   useEffect(() => {
@@ -666,6 +686,28 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         };
         setMessages((prev) => [...prev, saraMessage]);
         console.log('[Chat] Added heartbeat message from Sara');
+      }, 300);
+      return;
+    }
+
+    // Process notification context (ACS discoveries, notifications)
+    if (pendingNotificationRef.current) {
+      const notification = pendingNotificationRef.current;
+      pendingNotificationRef.current = null;
+
+      setTimeout(() => {
+        const isACS = notification.item_type === 'acs_discovery';
+        const emoji = isACS ? '🔬' : '💬';
+        const label = isACS ? 'Discovery' : 'Notification';
+
+        const saraMessage: Message = {
+          id: `sara-notification-${Date.now()}`,
+          role: 'assistant',
+          content: `${emoji} **${label}: ${notification.title}**\n\n${notification.message}\n\nWould you like to discuss this further or take any action?`,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, saraMessage]);
+        console.log('[Chat] Added notification message from Sara:', notification.id);
       }, 300);
       return;
     }
