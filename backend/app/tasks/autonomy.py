@@ -1260,6 +1260,21 @@ async def _autonomy_retention_async():
         except Exception:
             pass  # Table may not exist yet
 
+        # Standing-order action_ledger: retain 90 days so pattern promotion
+        # can see a reasonable history, drop older rows so the table doesn't
+        # grow indefinitely. Audit flagged this as a slow leak because the
+        # 5-minute undo window is the only time these rows are accessed, but
+        # nothing ever cleaned up once undo expired.
+        try:
+            r = await db.execute(text("""
+                DELETE FROM action_ledger
+                WHERE executed_at < NOW() - INTERVAL '90 days'
+            """))
+            results["action_ledger_deleted"] = r.rowcount
+        except Exception as e:
+            # Table may not exist yet on a very old DB.
+            results["action_ledger_error"] = str(e)
+
         await db.commit()
         return results
 

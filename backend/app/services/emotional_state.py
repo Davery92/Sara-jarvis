@@ -64,6 +64,13 @@ class EmotionalState:
         )
 
 
+def _clamp_intensity(value: float) -> float:
+    """Pin intensity to [BASELINE_INTENSITY, 1.0]. Guards against callers
+    passing values outside the expected range or compounded floats drifting
+    above 1.0 over time."""
+    return max(BASELINE_INTENSITY, min(1.0, float(value)))
+
+
 def update_emotional_state(
     current_tone: str,
     current_intensity: float,
@@ -81,9 +88,16 @@ def update_emotional_state(
     if new_tone not in VALID_TONES:
         new_tone = BASELINE_TONE
 
+    # Defensive clamp on inputs — callers sometimes pass LLM-derived floats
+    # that exceed 1.0 or go negative.
+    current_intensity = _clamp_intensity(current_intensity)
+    new_intensity = _clamp_intensity(new_intensity)
+
     # Same tone: reinforce intensity
     if new_tone == current_tone:
-        blended_intensity = min(1.0, current_intensity + (new_intensity - current_intensity) * (1 - MOMENTUM * 0.5))
+        blended_intensity = _clamp_intensity(
+            current_intensity + (new_intensity - current_intensity) * (1 - MOMENTUM * 0.5)
+        )
         return EmotionalState(
             tone=new_tone,
             about=about or "",
@@ -98,7 +112,7 @@ def update_emotional_state(
         return EmotionalState(
             tone=new_tone,
             about=about or "",
-            intensity=effective_new_intensity,
+            intensity=_clamp_intensity(effective_new_intensity),
             since=datetime.now(timezone.utc).isoformat(),
         )
     else:
@@ -106,7 +120,7 @@ def update_emotional_state(
         return EmotionalState(
             tone=current_tone,
             about=about or "",
-            intensity=max(BASELINE_INTENSITY, current_intensity * 0.9),
+            intensity=_clamp_intensity(current_intensity * 0.9),
             since=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -120,7 +134,8 @@ def decay_emotional_state(
     Decay emotional state toward attentive baseline over time.
     Applied by DerivedSignalRefresher or consolidation.
     """
-    decayed_intensity = max(BASELINE_INTENSITY, current_intensity - (DECAY_RATE * hours_since_update))
+    current_intensity = _clamp_intensity(current_intensity)
+    decayed_intensity = _clamp_intensity(current_intensity - (DECAY_RATE * hours_since_update))
 
     # If decayed to baseline intensity, switch to baseline tone
     if decayed_intensity <= BASELINE_INTENSITY + 0.05:

@@ -13,6 +13,7 @@ how and when Sara delivers notifications and takes autonomous actions.
 """
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, field, asdict
@@ -129,15 +130,22 @@ class ActivityStateMachine:
         self._max_signal_buffer = 50
         # Pending state change events for event bus publishing
         self._pending_events: List[Dict] = []
+        # Reentrant lock — some handlers call _transition which calls _apply_decay.
+        # RLock lets the same thread re-acquire without deadlocking. Protects
+        # against FastAPI thread-pool fallback and any future multi-thread
+        # caller (the audit flagged this as a race waiting to happen when
+        # subconscious recomputation and HA events land in the same process).
+        self._lock = threading.RLock()
 
     @property
     def current(self) -> ActivitySnapshot:
         """Get current state, applying time-based decay."""
-        self._apply_decay()
-        self._current.interruptibility = STATE_INTERRUPTIBILITY.get(
-            self._current.state, 0.5
-        )
-        return self._current
+        with self._lock:
+            self._apply_decay()
+            self._current.interruptibility = STATE_INTERRUPTIBILITY.get(
+                self._current.state, 0.5
+            )
+            return self._current
 
     def process_signal(self, signal: ActivitySignal) -> ActivitySnapshot:
         """
@@ -145,30 +153,31 @@ class ActivityStateMachine:
 
         Returns the (possibly updated) current state.
         """
-        self._buffer_signal(signal)
+        with self._lock:
+            self._buffer_signal(signal)
 
-        if signal.signal_type == "motion":
-            self._handle_motion(signal)
-        elif signal.signal_type == "calendar":
-            self._handle_calendar(signal)
-        elif signal.signal_type == "interaction":
-            self._handle_interaction(signal)
-        elif signal.signal_type == "time":
-            self._handle_time(signal)
-        elif signal.signal_type == "device":
-            self._handle_device(signal)
-        elif signal.signal_type == "media":
-            self._handle_media(signal)
-        elif signal.signal_type == "sleep":
-            self._handle_sleep(signal)
-        elif signal.signal_type == "workout":
-            self._handle_workout(signal)
-        elif signal.signal_type == "face":
-            self._handle_face(signal)
-        elif signal.signal_type == "desk_presence":
-            self._handle_desk_presence(signal)
-        elif signal.signal_type == "desktop":
-            self._handle_desktop(signal)
+            if signal.signal_type == "motion":
+                self._handle_motion(signal)
+            elif signal.signal_type == "calendar":
+                self._handle_calendar(signal)
+            elif signal.signal_type == "interaction":
+                self._handle_interaction(signal)
+            elif signal.signal_type == "time":
+                self._handle_time(signal)
+            elif signal.signal_type == "device":
+                self._handle_device(signal)
+            elif signal.signal_type == "media":
+                self._handle_media(signal)
+            elif signal.signal_type == "sleep":
+                self._handle_sleep(signal)
+            elif signal.signal_type == "workout":
+                self._handle_workout(signal)
+            elif signal.signal_type == "face":
+                self._handle_face(signal)
+            elif signal.signal_type == "desk_presence":
+                self._handle_desk_presence(signal)
+            elif signal.signal_type == "desktop":
+                self._handle_desktop(signal)
 
         return self.current
 
@@ -185,6 +194,11 @@ class ActivityStateMachine:
         """
         Full recomputation from all available context.
         Called by the subconscious worker each cycle.
+
+        NOTE: when this method is wired into production (currently only tests
+        call it), wrap the body in ``with self._lock:`` — ``process_signal``
+        already holds the lock, and interleaving a full recompute with a live
+        signal would leave ``_current`` in a torn state.
         """
         candidates: List[Tuple[ActivityState, float, str]] = []
 
