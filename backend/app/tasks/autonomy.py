@@ -1276,7 +1276,75 @@ async def _autonomy_retention_async():
             results["action_ledger_error"] = str(e)
 
         await db.commit()
-        return results
+
+    # Episode embedding backfill — several ingestion paths (fitness_food,
+    # pi_dashboard_voice, api, learning_chat) insert rows with NULL
+    # embeddings, making them unreachable by semantic search. Catch them
+    # up here. Capped per run so we don't DOS the embedding service on a
+    # database that's been running for a year.
+    try:
+        filled = await _backfill_episode_embeddings(limit=500)
+        results["episode_embeddings_filled"] = filled
+    except Exception as e:
+        results["episode_embeddings_error"] = str(e)
+
+    return results
+
+
+async def _backfill_episode_embeddings(limit: int = 500) -> int:
+    """Embed episodes whose ``embedding`` column is NULL.
+
+    Returns the count written. Safe to run repeatedly: idempotent because
+    we only touch rows where ``embedding IS NULL``. Bounded by ``limit``
+    per call so one bad day's worth of gaps doesn't saturate the GPU.
+    """
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+    from app.services.embedding_service import EmbeddingService
+
+    factory = get_async_session_factory()
+    svc = EmbeddingService()
+    filled = 0
+
+    async with factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, content
+                    FROM episode
+                    WHERE embedding IS NULL
+                      AND content IS NOT NULL
+                      AND LENGTH(content) > 0
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            )
+        ).fetchall()
+
+        for row in rows:
+            try:
+                vec = await svc.generate_embedding(row.content)
+            except Exception:
+                continue
+            if not vec:
+                continue
+            await db.execute(
+                text(
+                    """
+                    UPDATE episode
+                    SET embedding = CAST(:qvec AS vector)
+                    WHERE id = :id
+                    """
+                ),
+                {"id": row.id, "qvec": str(vec)},
+            )
+            filled += 1
+        await db.commit()
+
+    return filled
 
 
 # ─── Derived Signal Refresh (Phase 1: Working Memory) ───────────
