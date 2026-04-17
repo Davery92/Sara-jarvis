@@ -550,19 +550,30 @@ class MemoryService:
                 from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
 
                 if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-                    # Use vector similarity search
-                    embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
-
-                    episode_results = db.execute(sql_text(f"""
+                    # Parameterized pgvector similarity with composite scoring.
+                    # Mirrors main_simple.py retrieve_episodes_with_window so memory
+                    # search and context retrieval rank consistently.
+                    episode_results = db.execute(sql_text("""
                         SELECT
-                            id, content, role, source, created_at,
-                            1 - (embedding <=> '{embedding_str}'::vector) as score
-                        FROM episode
-                        WHERE user_id = :user_id
-                          AND embedding IS NOT NULL
-                        ORDER BY embedding <=> '{embedding_str}'::vector
+                            e.id, e.content, e.role, e.source, e.created_at,
+                            1 - (e.embedding <=> CAST(:qvec AS vector)) as similarity,
+                            (
+                                (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.55 +
+                                COALESCE(e.importance, 0.5) * 0.25 +
+                                LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.10 +
+                                COALESCE(e.rating_boost, 0.0) * 0.05 +
+                                COALESCE(e.exploration_bonus, 0.0) * 0.05
+                            ) as composite_score
+                        FROM episode e
+                        WHERE e.user_id = :user_id
+                          AND e.embedding IS NOT NULL
+                        ORDER BY composite_score DESC
                         LIMIT :limit
-                    """), {"user_id": user_id, "limit": limit}).fetchall()
+                    """), {
+                        "user_id": user_id,
+                        "qvec": str(query_embedding),
+                        "limit": limit,
+                    }).fetchall()
 
                     for row in episode_results:
                         results.append({
@@ -572,7 +583,8 @@ class MemoryService:
                             "role": row[2],
                             "source": row[3] or "chat",
                             "created_at": row[4].isoformat() if row[4] else "",
-                            "score": float(row[5])
+                            "similarity": float(row[5]),
+                            "score": float(row[6]),
                         })
 
             # Search notes if in scope

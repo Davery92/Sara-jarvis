@@ -58,7 +58,7 @@ _TUNABLE_COOLDOWN_KEYS = {
 
 def _cooldown_for(category: str) -> float:
     """Return effective cooldown (hours) for a category, honoring tunables."""
-    fallback = _cooldown_for(category)
+    fallback = DEFAULT_COOLDOWNS.get(category, 2.0)
     tunable_key = _TUNABLE_COOLDOWN_KEYS.get(category)
     if not tunable_key:
         return fallback

@@ -4140,13 +4140,10 @@ class ContextWindowManager:
                 # Use raw SQL for vector similarity search
                 from sqlalchemy import text as sql_text
 
-                # Convert embedding list to pgvector format
-                embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
-
                 upper_clause = "AND e.created_at <= :upper_time" if upper_time else ""
 
-                # Execute vector similarity query with composite scoring
-                # Use string formatting for embedding to avoid SQLAlchemy parameter issues with pgvector
+                # Parameterized embedding via CAST(:qvec AS vector) — avoids SQL injection
+                # from malformed embedding floats and matches project-wide pgvector pattern.
                 sql = sql_text(f"""
                     SELECT
                         e.id,
@@ -4166,10 +4163,10 @@ class ContextWindowManager:
                         e.embedding,
                         e.rating_boost,
                         e.exploration_bonus,
-                        1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
+                        1 - (e.embedding <=> CAST(:qvec AS vector)) as semantic_similarity,
                         -- Composite score: semantic + recency + importance + frequency + relevance + rating + exploration
                         (
-                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.35 +  -- Semantic similarity (35%)
+                            (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.35 +  -- Semantic similarity (35%)
                             EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.15 +  -- Recency 14-day half-life (15%)
                             COALESCE(e.importance, 0.5) * 0.20 +  -- AI-scored importance (20%)
                             LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.08 +  -- Frequency signal (8%)
@@ -4182,13 +4179,14 @@ class ContextWindowManager:
                       AND e.embedding IS NOT NULL
                       AND e.created_at >= :cutoff_time
                       {upper_clause}
-                      AND (1 - (e.embedding <=> '{embedding_str}'::vector)) >= :min_similarity
+                      AND (1 - (e.embedding <=> CAST(:qvec AS vector))) >= :min_similarity
                     ORDER BY composite_score DESC
                     LIMIT :limit
                 """)
 
                 sql_params = {
                     "user_id": user_id,
+                    "qvec": str(query_embedding),
                     "cutoff_time": cutoff_time,
                     "min_similarity": min_similarity,
                     "limit": limit,

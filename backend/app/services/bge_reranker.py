@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 import logging
 import asyncio
 import os
+import time
 
 import httpx
 
@@ -13,9 +14,21 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Interval (seconds) between rate-limited WARNING logs when the reranker
+# falls back to neutral 0.5 scores. Without this, a cold or broken reranker
+# silently degrades ranking for every query.
+_FALLBACK_LOG_INTERVAL_SEC = 60.0
+
 
 class BGEReranker:
     """Reranks results using BGE reranker model"""
+
+    # Class-level counters exposed so callers (e.g. a /debug endpoint) can
+    # see cumulative degraded-retrieval counts without holding a reference
+    # to a specific instance.
+    _fallback_count: int = 0
+    _fallback_last_logged: float = 0.0
+    _fallback_reasons: dict = {}
 
     def __init__(
         self,
@@ -31,6 +44,36 @@ class BGEReranker:
         self._initialized = False
         self.remote_base_url = (remote_base_url or "").rstrip("/")
         self.remote_model = remote_model or settings.reranker_model
+
+    @classmethod
+    def _note_fallback(cls, reason: str, n_pairs: int) -> None:
+        """Record a neutral-score fallback and emit a rate-limited WARNING.
+
+        Keeps a per-reason counter so the operator can tell whether we're
+        degrading because the model never loaded, prediction raised, or the
+        remote endpoint is flaky.
+        """
+        cls._fallback_count += 1
+        cls._fallback_reasons[reason] = cls._fallback_reasons.get(reason, 0) + 1
+        now = time.monotonic()
+        if now - cls._fallback_last_logged >= _FALLBACK_LOG_INTERVAL_SEC:
+            cls._fallback_last_logged = now
+            top = sorted(cls._fallback_reasons.items(), key=lambda kv: -kv[1])[:3]
+            reasons_str = ", ".join(f"{r}={c}" for r, c in top)
+            logger.warning(
+                "BGE reranker degraded: %d fallback calls so far (most recent reason=%s, %d pairs). "
+                "Top reasons: %s",
+                cls._fallback_count, reason, n_pairs, reasons_str,
+            )
+
+    @classmethod
+    def get_stats(cls) -> dict:
+        """Return cumulative fallback stats for observability endpoints."""
+        return {
+            "fallback_count": cls._fallback_count,
+            "fallback_reasons": dict(cls._fallback_reasons),
+            "last_logged_monotonic": cls._fallback_last_logged,
+        }
 
     async def initialize(self):
         """Initialize the reranker model"""
@@ -80,6 +123,7 @@ class BGEReranker:
         """
         if not self._initialized:
             # Fallback: return neutral scores
+            self._note_fallback("not_initialized", len(pairs))
             return [0.5] * len(pairs)
 
         try:
@@ -97,11 +141,13 @@ class BGEReranker:
 
         except Exception as e:
             logger.error(f"Error during reranking: {e}")
+            self._note_fallback(f"exception:{type(e).__name__}", len(pairs))
             return [0.5] * len(pairs)
 
     def _predict_sync(self, pairs: List[Tuple[str, str]]) -> List[float]:
         """Synchronous prediction (runs in executor)"""
         if not self.model:
+            self._note_fallback("local_model_none", len(pairs))
             return [0.5] * len(pairs)
 
         scores = self.model.predict(pairs)
@@ -127,12 +173,14 @@ class BGEReranker:
     async def _predict_remote(self, pairs: List[Tuple[str, str]]) -> List[float]:
         """Remote prediction via OpenAI-compatible /v1/rerank endpoint."""
         if not self.remote_base_url:
+            self._note_fallback("remote_no_base_url", len(pairs))
             return [0.5] * len(pairs)
 
         if not pairs:
             return []
 
         scores = [0.5] * len(pairs)
+        any_group_failed = False
 
         # Group by query to avoid one request per pair.
         grouped: dict[str, list[tuple[int, str]]] = {}
@@ -163,8 +211,11 @@ class BGEReranker:
                             scores[original_idx] = self._normalize_remote_score(float(relevance))
                 except Exception as e:
                     logger.warning(f"Remote rerank request failed for query group: {e}")
+                    any_group_failed = True
                     # Keep neutral fallback for this group.
 
+        if any_group_failed:
+            self._note_fallback("remote_http_failure", len(pairs))
         return scores
 
     async def rerank(

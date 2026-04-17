@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import asyncio
@@ -28,10 +28,11 @@ class RetrievalResult(BaseModel):
 class HydraRetrieval:
     """Multi-source knowledge retrieval with fusion and reranking"""
 
-    def __init__(self, db: Session, redis_client=None, reranker=None):
+    def __init__(self, db: Session, redis_client=None, reranker=None, embedding_service=None):
         self.db = db
         self.redis_client = redis_client
         self.reranker = reranker  # Will be set to bge-reranker model
+        self.embedding_service = embedding_service  # Optional — used for episode vector search
 
         # Source weights for fusion scoring
         self.source_weights = {
@@ -142,46 +143,101 @@ class HydraRetrieval:
         user_id: str,
         limit: int
     ) -> List[RetrievalResult]:
-        """Retrieve from episodic memory"""
+        """Retrieve from episodic memory via pgvector similarity + composite scoring.
+
+        Falls back to recency ordering only if no embedding service is available
+        or embedding generation fails — degraded retrieval is logged so callers
+        can tell when semantic search is offline.
+        """
         try:
-            # Use existing pgvector similarity search
-            # Note: This is a placeholder - actual embedding-based search would need proper query embedding
+            embedding_service = self.embedding_service
+            if embedding_service is None:
+                try:
+                    from app.services.embedding_service import EmbeddingService
+                    embedding_service = EmbeddingService()
+                except Exception as exc:  # pragma: no cover
+                    logger.warning(f"HYDRA: embedding service unavailable ({exc}); episodes degraded to recency")
+
+            q_emb = None
+            if embedding_service is not None:
+                try:
+                    q_emb = await embedding_service.generate_embedding(query)
+                except Exception as exc:
+                    logger.warning(f"HYDRA: query embedding failed ({exc}); episodes degraded to recency")
+
+            if q_emb:
+                sql = text("""
+                    SELECT
+                        e.id,
+                        e.content,
+                        e.importance,
+                        e.created_at,
+                        e.emotional_tone,
+                        e.topics,
+                        1 - (e.embedding <=> CAST(:qvec AS vector)) AS similarity,
+                        (
+                            (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.55 +
+                            COALESCE(e.importance, 0.5) * 0.25 +
+                            LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.10 +
+                            COALESCE(e.rating_boost, 0.0) * 0.05 +
+                            COALESCE(e.exploration_bonus, 0.0) * 0.05
+                        ) AS composite_score
+                    FROM episode e
+                    WHERE e.user_id = :user_id
+                      AND e.embedding IS NOT NULL
+                    ORDER BY composite_score DESC
+                    LIMIT :limit
+                """)
+                result = self.db.execute(sql, {
+                    "user_id": user_id,
+                    "qvec": str(q_emb),
+                    "limit": limit,
+                })
+                rows = result.fetchall()
+                return [
+                    RetrievalResult(
+                        source="episodes",
+                        id=str(row.id),
+                        content=row.content,
+                        score=float(row.composite_score),
+                        metadata={
+                            "importance": row.importance,
+                            "similarity": float(row.similarity),
+                            "created_at": row.created_at.isoformat() if row.created_at else None,
+                            "emotional_tone": row.emotional_tone,
+                            "topics": row.topics,
+                        },
+                        timestamp=row.created_at,
+                    )
+                    for row in rows
+                ]
+
+            # Degraded fallback — recency only
             sql = text("""
-                SELECT
-                    id,
-                    content,
-                    importance,
-                    created_at,
-                    emotional_tone,
-                    topics
+                SELECT id, content, importance, created_at, emotional_tone, topics
                 FROM episode
                 WHERE user_id = :user_id
                 ORDER BY created_at DESC
                 LIMIT :limit
             """)
-
-            result = self.db.execute(sql, {
-                "user_id": user_id,
-                "limit": limit
-            })
-
-            results = []
-            for row in result.fetchall():
-                results.append(RetrievalResult(
+            result = self.db.execute(sql, {"user_id": user_id, "limit": limit})
+            return [
+                RetrievalResult(
                     source="episodes",
                     id=str(row.id),
                     content=row.content,
-                    score=0.7,  # Default score, will be improved by fusion scoring
+                    score=0.5,
                     metadata={
                         "importance": row.importance,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                         "emotional_tone": row.emotional_tone,
-                        "topics": row.topics
+                        "topics": row.topics,
+                        "degraded": True,
                     },
-                    timestamp=row.created_at
-                ))
-
-            return results
+                    timestamp=row.created_at,
+                )
+                for row in result.fetchall()
+            ]
 
         except Exception as e:
             logger.error(f"Episode retrieval error: {e}")
@@ -387,7 +443,7 @@ class HydraRetrieval:
                 LIMIT :limit
             """)
 
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             start_range = now - timedelta(days=1)
             end_range = now + timedelta(days=7)
 
@@ -443,7 +499,11 @@ class HydraRetrieval:
             # Recency boost (newer = higher)
             recency_boost = 1.0
             if result.timestamp:
-                days_ago = (datetime.utcnow() - result.timestamp).days
+                # Normalize both sides to tz-aware UTC to avoid naive/aware mix
+                ts = result.timestamp
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                days_ago = (datetime.now(timezone.utc) - ts).days
                 recency_boost = max(0.5, 1.0 - (days_ago / 365))  # Decay over a year
 
             # Importance boost (for episodes)
@@ -521,6 +581,11 @@ class HydraRetrieval:
             logger.warning(f"Cache storage failed: {e}")
 
 
-def get_hydra_retrieval(db: Session, redis_client=None, reranker=None) -> HydraRetrieval:
+def get_hydra_retrieval(
+    db: Session,
+    redis_client=None,
+    reranker=None,
+    embedding_service=None,
+) -> HydraRetrieval:
     """Get HYDRA retrieval instance"""
-    return HydraRetrieval(db, redis_client, reranker)
+    return HydraRetrieval(db, redis_client, reranker, embedding_service)

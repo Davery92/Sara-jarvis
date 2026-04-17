@@ -344,6 +344,51 @@ def nightly_memory_consolidation(self):
         raise
 
 
+def _rescore_importance_sync(max_batches: int = 50) -> dict:
+    """Bulk-rescore episode importance using the synchronous ImportanceScorer.
+
+    Runs in a worker thread via asyncio.to_thread — the scorer uses a sync
+    Session internally, so we open one from SessionLocal here. Driving the
+    service's async API from inside the thread via asyncio.run() keeps the
+    scoring logic in one place instead of duplicating it inline.
+    """
+    import asyncio as _asyncio
+    try:
+        from app.db.session import SessionLocal
+        from app.services.importance_scorer import ImportanceScorer
+    except Exception as exc:  # pragma: no cover
+        return {"skipped": f"import_error:{exc}"}
+
+    try:
+        with SessionLocal() as db:
+            scorer = ImportanceScorer(db)
+            return _asyncio.run(scorer.rescore_all_episodes(max_batches=max_batches))
+    except Exception as exc:
+        logger.warning(f"Importance rescoring failed: {exc}")
+        return {"error": str(exc)}
+
+
+def _consolidate_ratings_sync() -> dict:
+    """Run rating consolidation (Redis→DB, Wilson boosts, Thompson exploration).
+
+    Same thread-pool pattern as _rescore_importance_sync — the consolidation
+    job takes a sync Session even though its orchestration is async.
+    """
+    import asyncio as _asyncio
+    try:
+        from app.db.session import SessionLocal
+        from app.services.rating_consolidation_job import run_rating_consolidation_job
+    except Exception as exc:  # pragma: no cover
+        return {"skipped": f"import_error:{exc}"}
+
+    try:
+        with SessionLocal() as db:
+            return _asyncio.run(run_rating_consolidation_job(db))
+    except Exception as exc:
+        logger.warning(f"Rating consolidation failed: {exc}")
+        return {"error": str(exc)}
+
+
 async def _memory_consolidation_async():
     """Async implementation of memory consolidation."""
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -409,12 +454,25 @@ async def _memory_consolidation_async():
 
                 await db.commit()
 
-                return {
-                    "timestamp": local_now().isoformat(),
-                    "episodes_today": episode_count,
-                    "episodes_decayed": decayed,
-                    "actions_cleaned": cleaned,
-                }
+            # Rescore importance for all episodes (sync scorer in thread pool).
+            # This updates base_importance/importance/importance_last_updated so
+            # retrieval ranking reflects recency+frequency+rating signals, not
+            # just the value written at ingestion time.
+            rescore_stats = await asyncio.to_thread(_rescore_importance_sync, 50)
+
+            # Consolidate ratings from Redis into DB and recompute rating_boost /
+            # exploration_bonus. Without this, the retrieval composite score's
+            # rating and exploration terms stay at 0 forever.
+            rating_stats = await asyncio.to_thread(_consolidate_ratings_sync)
+
+            return {
+                "timestamp": local_now().isoformat(),
+                "episodes_today": episode_count,
+                "episodes_decayed": decayed,
+                "actions_cleaned": cleaned,
+                "importance_rescoring": rescore_stats,
+                "rating_consolidation": rating_stats,
+            }
         finally:
             await engine.dispose()
     finally:
