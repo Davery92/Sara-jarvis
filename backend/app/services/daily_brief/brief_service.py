@@ -4,7 +4,7 @@ Provides the primary interface for the daily brief system.
 """
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -159,7 +159,7 @@ class DailyBriefService:
             logger.info(f"🚀 Bootstrapping stable layer for user {user_id[:8]}")
 
             # Get recent episodes (last 30 days or up to 200)
-            thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+            thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
             episodes = db.query(Episode).filter(
                 Episode.user_id == user_id,
                 Episode.created_at >= thirty_days_ago,

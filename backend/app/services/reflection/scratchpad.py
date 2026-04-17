@@ -7,7 +7,7 @@ the reflection agent to identify trends and propose improvements.
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -138,7 +138,7 @@ class ReflectionScratchpad:
         """Add a new observation to the scratchpad."""
         # Calculate expiration based on type
         retention = RETENTION_POLICY.get(observation_type)
-        expires_at = datetime.utcnow() + retention if retention else None
+        expires_at = datetime.now(timezone.utc) + retention if retention else None
 
         result = await self.db.execute(
             text("""

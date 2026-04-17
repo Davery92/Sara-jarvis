@@ -6,7 +6,7 @@ Used by Sara to answer questions about projects, tasks, and development activity
 """
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 import logging
@@ -142,7 +142,7 @@ class ProjectTrackerService:
         if not project:
             return {}
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
         month_ago = now - timedelta(days=30)
 
@@ -202,7 +202,7 @@ class ProjectTrackerService:
 
     def get_weekly_velocity(self, user_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
         """Get weekly velocity metrics (commits and completed tasks)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
 
         query_filter = []
@@ -240,7 +240,7 @@ class ProjectTrackerService:
 
     def get_shipped_this_week(self, user_id: str, project_id: Optional[str] = None) -> List[TaskItem]:
         """Get tasks completed this week."""
-        week_ago = datetime.utcnow() - timedelta(days=7)
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
 
         query = self.db.query(TaskItem).filter(
             TaskItem.user_id == user_id,
@@ -364,7 +364,7 @@ class ProjectTrackerService:
         days_threshold: int = 14
     ) -> List[TaskItem]:
         """Get tasks that haven't been updated in a while."""
-        threshold = datetime.utcnow() - timedelta(days=days_threshold)
+        threshold = datetime.now(timezone.utc) - timedelta(days=days_threshold)
 
         query = self.db.query(TaskItem).filter(
             TaskItem.user_id == user_id,

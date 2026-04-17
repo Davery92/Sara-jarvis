@@ -5,7 +5,7 @@ Implements Wilson Score confidence intervals and temporal decay for rating-aware
 """
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -198,7 +198,7 @@ class RatingService:
             rating.rating_sum = cached["rating_sum"]
             if cached["last_rated"]:
                 rating.last_rated = datetime.fromisoformat(cached["last_rated"])
-            rating.updated_at = datetime.utcnow()
+            rating.updated_at = datetime.now(timezone.utc)
 
             # Calculate and update rating_boost on Episode
             episode = self.db.query(Episode).filter(Episode.id == episode_id).first()
@@ -266,7 +266,7 @@ class RatingService:
         confidence = numerator / denominator
 
         # Temporal decay (exponential decay with 30-day half-life)
-        age_days = (datetime.utcnow() - created_at).days
+        age_days = (datetime.now(timezone.utc) - created_at).days
         decay_constant = math.log(2) / 30.0  # Half-life of 30 days
         age_decay = math.exp(-decay_constant * age_days)
 

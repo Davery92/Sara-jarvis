@@ -5,7 +5,7 @@ Analyzes emotional patterns over time
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import logging
 
@@ -51,7 +51,7 @@ class EmotionTrendAnalyzer:
             List of daily trend points
         """
         try:
-            start_date = datetime.utcnow() - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             query = text("""
                 SELECT
@@ -106,7 +106,7 @@ class EmotionTrendAnalyzer:
         """
         try:
             # Get hourly sentiment averages
-            start_date = datetime.utcnow() - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             query = text("""
                 SELECT
@@ -197,7 +197,7 @@ class EmotionTrendAnalyzer:
     ) -> Optional[EmotionPattern]:
         """Detect if certain days of week have consistent emotions"""
         try:
-            start_date = datetime.utcnow() - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             query = text("""
                 SELECT
@@ -248,7 +248,7 @@ class EmotionTrendAnalyzer:
     ) -> Optional[EmotionPattern]:
         """Detect if certain times of day have consistent emotions"""
         try:
-            start_date = datetime.utcnow() - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             query = text("""
                 SELECT

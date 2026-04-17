@@ -380,17 +380,8 @@ Set include_details=true for full content, or false for just summaries."""
         import os
 
         database_url = os.getenv("DATABASE_URL")
-
-        if database_url.startswith("postgresql://"):
-            async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-        elif database_url.startswith("postgresql+psycopg://"):
-            async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-        else:
-            async_url = database_url
-
-        engine = create_async_engine(async_url, echo=False)
-        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+        from app.db.session import get_async_session_factory
+        async_session = get_async_session_factory()
         async with async_session() as db:
             result = await db.execute(text("""
                 SELECT id, name, status, original_intent, schedule_definition,

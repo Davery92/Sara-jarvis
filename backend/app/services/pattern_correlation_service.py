@@ -18,7 +18,7 @@ Usage:
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
 
@@ -169,7 +169,7 @@ class PatternCorrelationService:
         Returns summary of discovery run.
         """
         run_id = str(uuid4())
-        started_at = datetime.utcnow()
+        started_at = datetime.now(timezone.utc)
 
         logger.info(f"🔍 Starting pattern discovery run {run_id} for user {user_id}")
 
@@ -246,7 +246,7 @@ class PatternCorrelationService:
                 "patterns_validated": validated,
                 "patterns_invalidated": invalidated,
                 "patterns_decayed": decayed,
-                "duration_seconds": (datetime.utcnow() - started_at).total_seconds()
+                "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds()
             }
 
             logger.info(f"✅ Pattern discovery complete: {summary}")

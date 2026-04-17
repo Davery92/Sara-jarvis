@@ -2,7 +2,7 @@
 Autonomy control routes — quiet mode, digest config, etc.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -67,7 +67,7 @@ async def get_quiet_mode_status(
     if is_active and snapshot.quiet_mode_until:
         try:
             until = datetime.fromisoformat(snapshot.quiet_mode_until).replace(tzinfo=None)
-            if datetime.utcnow() > until:
+            if datetime.now(timezone.utc) > until:
                 is_active = False
                 await update_fields(
                     user_id, source="auto_expire",

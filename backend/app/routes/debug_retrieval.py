@@ -40,4 +40,13 @@ async def retrieval_funnel(
     except Exception as exc:  # pragma: no cover
         snap["reranker"] = {"error": f"stats_unavailable: {exc.__class__.__name__}"}
 
+    # Silent-failure trackers (PKG, observation_log, deliberation_gate, etc.).
+    # Lets us see when fire-and-forget subsystems are degraded without having
+    # to tail logs waiting for the rate-limited WARNING to fire.
+    try:
+        from app.services.silent_failure_tracker import Tracker
+        snap["silent_failures"] = Tracker.all_stats()
+    except Exception as exc:  # pragma: no cover
+        snap["silent_failures"] = {"error": f"stats_unavailable: {exc.__class__.__name__}"}
+
     return snap

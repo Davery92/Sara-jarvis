@@ -5,7 +5,7 @@ Redis pub/sub based event system for reactive features
 from typing import Dict, Any, List, Callable, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import json
 import redis.asyncio as redis
@@ -121,11 +121,11 @@ class EventType(str, Enum):
 
 class Event(BaseModel):
     """Event model"""
-    event_id: str = Field(default_factory=lambda: f"evt_{datetime.utcnow().timestamp()}")
+    event_id: str = Field(default_factory=lambda: f"evt_{datetime.now(timezone.utc).timestamp()}")
     event_type: EventType
     user_id: str
     payload: Dict[str, Any] = {}
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "system"  # Source of event (api, scheduled_job, shadow_agent, etc.)
     metadata: Dict[str, Any] = {}
 

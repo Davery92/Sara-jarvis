@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -372,7 +372,7 @@ async def review_candidate_skill(
         try:
             skill_path = _create_skill_file(skill)
             skill.status = "accepted"
-            skill.reviewed_at = datetime.utcnow()
+            skill.reviewed_at = datetime.now(timezone.utc)
             skill.review_notes = req.review_notes or f"Accepted. Skill file: {skill_path}"
 
             # Trigger hot reload via the skill watcher
@@ -394,7 +394,7 @@ async def review_candidate_skill(
 
     elif req.action == "reject":
         skill.status = "rejected"
-        skill.reviewed_at = datetime.utcnow()
+        skill.reviewed_at = datetime.now(timezone.utc)
         skill.review_notes = req.review_notes
         db.commit()
         return {"status": "rejected", "message": f"Skill '{skill.name}' rejected"}

@@ -9,7 +9,7 @@ import uuid
 import mimetypes
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import hmac
 import hashlib
@@ -703,7 +703,7 @@ async def get_project_stats(
 
     try:
         from datetime import timedelta
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
 
         # Task counts by status
@@ -967,7 +967,7 @@ async def update_task(
             task.status = task_data.status
             # Set completed_at if moving to completed
             if task_data.status == "completed" and old_status != "completed":
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc)
             elif task_data.status != "completed":
                 task.completed_at = None
         if task_data.priority is not None:
@@ -1018,7 +1018,7 @@ async def update_task_status(
         task.status = status
 
         if status == "completed" and old_status != "completed":
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
         elif status != "completed":
             task.completed_at = None
 
@@ -1533,7 +1533,7 @@ async def handle_push_event(payload: dict, project: DevProject, db: Session) -> 
                         if (prefix, number) in tags:
                             task.status = new_status
                             if new_status == "completed":
-                                task.completed_at = datetime.utcnow()
+                                task.completed_at = datetime.now(timezone.utc)
                             logger.info(f"Auto-updated {prefix}-{number} to {new_status}")
 
         # Update branch last activity
@@ -1592,10 +1592,10 @@ async def handle_pr_event(payload: dict, project: DevProject, db: Session) -> di
             pr.status = "merged"
             pr.merged_at = datetime.fromisoformat(
                 pr_data.get("merged_at", "").replace("Z", "+00:00")
-            ) if pr_data.get("merged_at") else datetime.utcnow()
+            ) if pr_data.get("merged_at") else datetime.now(timezone.utc)
         else:
             pr.status = "closed"
-            pr.closed_at = datetime.utcnow()
+            pr.closed_at = datetime.now(timezone.utc)
 
     # Update title/description if changed
     pr.title = pr_data.get("title", pr.title)
@@ -2009,7 +2009,7 @@ async def save_qa_result(
         existing.checked_items = result_data.checked_items
         existing.notes = result_data.notes
         existing.status = result_data.status
-        existing.tested_at = datetime.utcnow()
+        existing.tested_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         result = existing
@@ -2022,7 +2022,7 @@ async def save_qa_result(
             checked_items=result_data.checked_items,
             notes=result_data.notes,
             status=result_data.status,
-            tested_at=datetime.utcnow()
+            tested_at=datetime.now(timezone.utc)
         )
         db.add(result)
         db.commit()

@@ -60,7 +60,7 @@ async def extract_patterns(user_id: str, lookback_days: int = 90) -> List[Dict[s
     try:
         async with async_session() as db:
             # Use naive datetime — calendar_event.start_time is DateTime without timezone
-            since = datetime.utcnow() - timedelta(days=lookback_days)
+            since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
             result = await db.execute(text("""
                 SELECT title, start_time, end_time, location,
                        EXTRACT(DOW FROM start_time) AS dow,
@@ -174,7 +174,7 @@ async def get_annotated_schedule(user_id: str, days_ahead: int = 7) -> str:
     try:
         async with async_session() as db:
             # Use naive datetime — calendar_event.start_time is DateTime without timezone
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             until = now + timedelta(days=days_ahead)
 
             result = await db.execute(text("""

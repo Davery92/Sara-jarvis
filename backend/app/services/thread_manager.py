@@ -8,7 +8,7 @@ Each thread has a follow-up window, anti-harping limits, and response tracking.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import redis.asyncio as aioredis
@@ -57,7 +57,7 @@ async def get_open_threads(user_id: str, db: AsyncSession) -> List[Dict]:
     for r in rows:
         hours_ago = 0
         if r.opened_at:
-            delta = datetime.utcnow() - r.opened_at.replace(tzinfo=None)
+            delta = datetime.now(timezone.utc) - r.opened_at.replace(tzinfo=None)
             hours_ago = round(delta.total_seconds() / 3600, 1)
 
         threads.append({

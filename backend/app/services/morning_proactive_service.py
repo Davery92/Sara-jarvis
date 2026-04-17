@@ -11,7 +11,7 @@ with full context awareness.
 
 import logging
 import json
-from datetime import datetime, time, date, timedelta
+from datetime import datetime, time, date, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import httpx
 
@@ -283,7 +283,7 @@ class MorningProactiveService:
         try:
             from app.services.unified_notification import send_notification as unified_send_notification
 
-            topic = f"pattern_suggestion:{pattern['id']}:{datetime.utcnow().strftime('%Y%m%d')}"
+            topic = f"pattern_suggestion:{pattern['id']}:{datetime.now(timezone.utc).strftime('%Y%m%d')}"
             result = await unified_send_notification(
                 user_id=user_id,
                 title=message["title"],

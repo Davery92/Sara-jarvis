@@ -18,7 +18,7 @@ Data sources include:
 
 import logging
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -170,7 +170,7 @@ class DayReplayBuilder:
             summary=summary,
             data_sources_included=sources_included,
             total_events=len(events),
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
 
         logger.info(

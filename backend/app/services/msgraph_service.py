@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.config import settings
 
@@ -213,7 +213,7 @@ class MSGraphService:
                 received_str = received_str[:-1] + "+00:00"
             received_at = datetime.fromisoformat(received_str)
         else:
-            received_at = datetime.utcnow()
+            received_at = datetime.now(timezone.utc)
 
         # Parse recipients
         to_recipients = [

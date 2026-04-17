@@ -7,7 +7,7 @@ with relevant context from memory, notes, and PKG.
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import text
@@ -20,7 +20,7 @@ async def check_and_send_preps(user_id: str):
     from app.db.session import get_async_session_factory
 
     async_session = get_async_session_factory()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     window_start = now + timedelta(minutes=15)
     window_end = now + timedelta(minutes=60)
 
@@ -81,7 +81,7 @@ async def _prep_for_event(
         logger.debug(f"Calendar prep PKG search failed: {e}")
 
     # Build notification
-    minutes_until = max(0, int((start_time.replace(tzinfo=None) - datetime.utcnow()).total_seconds() / 60))
+    minutes_until = max(0, int((start_time.replace(tzinfo=None) - datetime.now(timezone.utc)).total_seconds() / 60))
     time_str = f"in {minutes_until} min" if minutes_until > 0 else "now"
 
     message_parts = [f"{title} starts {time_str}"]

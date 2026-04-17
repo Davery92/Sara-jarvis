@@ -10,7 +10,7 @@ import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from sqlalchemy.orm import Session
 from sqlalchemy import text, desc, and_, or_, func
@@ -108,7 +108,7 @@ class AutonomousSweepService:
             ).first()
 
             # Count items analyzed for metrics
-            recent_cutoff = datetime.utcnow() - timedelta(days=7)
+            recent_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
             metrics.episodes_analyzed = self.db.query(func.count(Episode.id)).filter(
                 Episode.user_id == user_id,
                 Episode.created_at >= recent_cutoff

@@ -148,23 +148,11 @@ async def _run_generate_blueprint_lessons_async(job_id: str):
 
 async def _run_deep_research_async(job_id: str = None):
     """Async implementation of deep research."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
     import os
 
-    database_url = os.getenv("DATABASE_URL", "")
-
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
-    engine = create_async_engine(async_url, echo=False)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
     async with async_session() as db:
         try:
             # Find the job to process

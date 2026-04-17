@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import uuid
 
 from app.core.timezone import now as local_now
@@ -231,7 +231,7 @@ async def save_to_episodic_memory(
             "role": "user",
             "content": content,
             "importance": importance,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         })
         db.commit()
         logger.info(f"💪 Saved {source} to episodic memory for user {user_id}")
@@ -1755,7 +1755,7 @@ async def fitness_chat(
             "role": "user",
             "content": request.message,
             "importance": 0.6,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         })
         db.commit()
 
@@ -1823,7 +1823,7 @@ async def fitness_chat(
             "role": "assistant",
             "content": final_response,
             "importance": 0.6,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         })
         db.commit()
 
@@ -1896,7 +1896,7 @@ async def fitness_chat_stream(
             "role": "user",
             "content": request.message,
             "importance": 0.6,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         })
         db.commit()
 
@@ -1963,7 +1963,7 @@ async def fitness_chat_stream(
                         "role": "assistant",
                         "content": response_content,
                         "importance": 0.6,
-                        "created_at": datetime.utcnow()
+                        "created_at": datetime.now(timezone.utc)
                     })
                     db.commit()
 

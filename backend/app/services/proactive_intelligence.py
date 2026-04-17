@@ -5,7 +5,7 @@ Pattern recognition and smart suggestions
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
 from pydantic import BaseModel
 import json
 import logging
@@ -259,7 +259,7 @@ class ProactiveIntelligenceEngine:
                         action_data={"type": "log_meal", "suggested_time": meal_hour},
                         confidence=0.7,
                         priority=6,
-                        expires_at=datetime.utcnow() + timedelta(hours=1)
+                        expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
                     )
 
             return None
@@ -300,7 +300,7 @@ class ProactiveIntelligenceEngine:
                     action_data={"type": "start_workout"},
                     confidence=0.75,
                     priority=7,
-                    expires_at=datetime.utcnow() + timedelta(hours=2)
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=2)
                 )
 
             return None
@@ -333,7 +333,7 @@ class ProactiveIntelligenceEngine:
                         action_data={"type": "log_meal"},
                         confidence=0.8,
                         priority=8,
-                        expires_at=datetime.utcnow() + timedelta(hours=2)
+                        expires_at=datetime.now(timezone.utc) + timedelta(hours=2)
                     ))
 
         return suggestions

@@ -8,7 +8,7 @@ import chess.engine
 import logging
 import random
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -65,7 +65,7 @@ class ChessService:
         if existing:
             # Abandon the old game
             existing.status = 'abandoned'
-            existing.ended_at = datetime.utcnow()
+            existing.ended_at = datetime.now(timezone.utc)
             self.db.commit()
 
         # Create new game
@@ -145,7 +145,7 @@ class ChessService:
         game.fen = board.fen()
         game.move_history = move_history
         game.move_history_san = move_history_san
-        game.updated_at = datetime.utcnow()
+        game.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
         # Check for game end after Sara's move
@@ -239,7 +239,7 @@ class ChessService:
             return {"error": "No active game to pause."}
 
         game.status = 'paused'
-        game.updated_at = datetime.utcnow()
+        game.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
         return {
@@ -272,7 +272,7 @@ class ChessService:
             return {"error": "No game to resume. Start a new game!"}
 
         game.status = 'active'
-        game.updated_at = datetime.utcnow()
+        game.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
         board = chess.Board(game.fen)
@@ -530,7 +530,7 @@ class ChessService:
         game.result = result
         game.termination = termination
         game.pgn = pgn_str.getvalue()
-        game.ended_at = datetime.utcnow()
+        game.ended_at = datetime.now(timezone.utc)
         self.db.commit()
 
         # Update stats
@@ -606,7 +606,7 @@ class ChessService:
         level_settings = DIFFICULTY_LEVELS.get(stats.current_level, DIFFICULTY_LEVELS[1])
         stats.estimated_elo = level_settings["target_elo"]
 
-        stats.updated_at = datetime.utcnow()
+        stats.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
     def _get_or_create_stats(self, user_id: str) -> ChessStats:

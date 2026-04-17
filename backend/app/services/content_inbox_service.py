@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 
@@ -182,7 +182,7 @@ class ContentInboxService:
 
                 item.extraction_status = "extracted"
                 item.word_count = len(item.extracted_text.split()) if item.extracted_text else 0
-                item.updated_at = datetime.utcnow()
+                item.updated_at = datetime.now(timezone.utc)
                 db.commit()
                 logger.info(f"Extracted content for {content_id}: {item.word_count} words")
 

@@ -12,7 +12,7 @@ These tasks handle incoming sensory data from various sources:
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from app.celery_app import celery_app
@@ -37,7 +37,7 @@ def process_text_input(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
     entry_data = {
         "content": content,
         "source": source,
@@ -86,7 +86,7 @@ def process_notification(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
     entry_data = {
         "content": json.dumps({
             "title": title,
@@ -136,7 +136,7 @@ def process_calendar_event(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
     entry_data = {
         "content": json.dumps({
             "event_id": event_id,
@@ -186,7 +186,7 @@ def process_environmental(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
     entry_data = {
         "content": json.dumps({
             "entity_id": entity_id,
@@ -244,7 +244,7 @@ def process_screen_capture(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
 
     content_summary = ""
     ocr_text = ""
@@ -473,7 +473,7 @@ def process_audio_input(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
 
     # If transcript provided, use it directly
     # Otherwise, this is a placeholder for Riva (Phase 0)
@@ -640,7 +640,7 @@ def process_visual_input(
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url)
 
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
 
     # Use pre-analyzed data if provided
     if detected_objects is not None or scene_description is not None:

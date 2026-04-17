@@ -6,7 +6,7 @@ and logs activity to the database for pattern detection.
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Set
 import aiohttp
 from sqlalchemy import text
@@ -156,7 +156,7 @@ class HAWebsocketService:
         domain = entity_id.split('.')[0]
         friendly_name = new_state.get('attributes', {}).get('friendly_name', entity_id)
         changed_at = datetime.fromisoformat(
-            new_state.get('last_changed', datetime.utcnow().isoformat()).replace('Z', '+00:00')
+            new_state.get('last_changed', datetime.now(timezone.utc).isoformat()).replace('Z', '+00:00')
         )
 
         # Build context

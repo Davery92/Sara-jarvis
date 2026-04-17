@@ -7,7 +7,7 @@ import chess.engine
 import logging
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.models.chess import ChessGame, ChessStats
 
@@ -150,7 +150,7 @@ class ChessAnalysisService:
 
         # Update game with analysis
         game.analysis = analysis
-        game.updated_at = datetime.utcnow()
+        game.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
         # Update player's strengths/weaknesses based on analysis
@@ -247,7 +247,7 @@ class ChessAnalysisService:
         # Keep lists reasonable length
         stats.weaknesses = weaknesses[:5]
         stats.strengths = strengths[:5]
-        stats.updated_at = datetime.utcnow()
+        stats.updated_at = datetime.now(timezone.utc)
         self.db.commit()
 
 

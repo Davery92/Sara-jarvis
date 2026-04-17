@@ -15,7 +15,16 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 
+from app.services.silent_failure_tracker import Tracker
+
 logger = logging.getLogger(__name__)
+
+# Trackers surface PKG fire-and-forget failures in /debug/retrieval-funnel.
+# Without these, a stuck embedding service or a broken Neo4j write shows up
+# only as "why is semantic recall returning nothing?" hours later.
+_PKG_EMBEDDING_TRACKER = Tracker("pkg.embedding")
+_PKG_UPSERT_TRACKER = Tracker("pkg.upsert_fact")
+_PKG_NEO4J_TRACKER = Tracker("pkg.neo4j_sync")
 
 # PKG node labels
 PKG_LABELS = [
@@ -225,6 +234,7 @@ class PersonalKnowledgeGraph:
                     return pkg_id
 
         except Exception as e:
+            _PKG_UPSERT_TRACKER.note(f"exception:{type(e).__name__}")
             logger.error(f"PKG: upsert_fact failed: {e}")
             return None
 
@@ -1429,7 +1439,9 @@ class PersonalKnowledgeGraph:
             loop = asyncio.get_running_loop()
             loop.create_task(self.store_embedding_async(pkg_id, fact_type, properties, confidence))
         except RuntimeError:
-            # No running event loop — skip embedding (will be backfilled later)
+            # No running event loop — skip embedding. pkg_sync reconciliation
+            # will backfill it at the top of the next hour.
+            _PKG_EMBEDDING_TRACKER.note("no_event_loop")
             logger.debug(f"PKG: No event loop for embedding of {pkg_id}, will backfill later")
 
     # --- Semantic search via pgvector shadow table ---
@@ -1543,6 +1555,7 @@ class PersonalKnowledgeGraph:
                 session.close()
                 engine.dispose()
         except Exception as e:
+            _PKG_EMBEDDING_TRACKER.note(f"exception:{type(e).__name__}")
             logger.warning(f"PKG: store_embedding_async failed for {pkg_id}: {e}")
             return False
 

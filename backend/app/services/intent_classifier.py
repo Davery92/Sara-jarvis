@@ -351,7 +351,7 @@ def get_keyword_classifier() -> KeywordIntentClassifier:
 # Tool Intent Classifier - Maps messages to tool categories for token savings
 # ============================================================================
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 @dataclass
@@ -574,7 +574,7 @@ class ToolIntentClassifier:
                 return None
 
             # Check if context has expired
-            if datetime.utcnow() - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES):
+            if datetime.now(timezone.utc) - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES):
                 del self._conversation_contexts[session_id]
                 return None
 
@@ -589,14 +589,14 @@ class ToolIntentClassifier:
                 ctx = ConversationContext(
                     recent_intents=[],
                     recent_tools=[],
-                    last_update=datetime.utcnow()
+                    last_update=datetime.now(timezone.utc)
                 )
                 self._conversation_contexts[session_id] = ctx
 
             # Add current intent/tools, keeping only last N turns
             ctx.recent_intents = ([intent] + ctx.recent_intents)[:self.CONTEXT_TURNS]
             ctx.recent_tools = (tools + ctx.recent_tools)[:self.CONTEXT_TURNS * 3]
-            ctx.last_update = datetime.utcnow()
+            ctx.last_update = datetime.now(timezone.utc)
 
             # Periodically clean up old sessions (every 100 updates)
             if len(self._conversation_contexts) > 100:
@@ -604,7 +604,7 @@ class ToolIntentClassifier:
 
     def _cleanup_old_contexts(self):
         """Remove expired conversation contexts"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = [
             sid for sid, ctx in self._conversation_contexts.items()
             if now - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES)

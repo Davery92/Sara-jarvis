@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now
@@ -1735,7 +1735,7 @@ Output your plan in this format:
                 has_progress = bool(progress or last_progress_at)
                 has_new_angle = status in ("blocked", "deferred") or has_progress
                 under_retry_limit = revisit_count < 2 or item[5] == "david_chat"
-                reopen_ready = reopen_after is None or reopen_after <= datetime.utcnow()
+                reopen_ready = reopen_after is None or reopen_after <= datetime.now(timezone.utc)
 
                 should_carry = reopen_ready and under_retry_limit and (
                     status in ("blocked", "deferred") or has_progress

@@ -731,7 +731,7 @@ class SimpleLLMClient:
             await self.event_queue.put({
                 "type": event_type,
                 "data": data,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
             })
             logger.info(f"📤 Event QUEUED: {event_type}")
         else:
@@ -3049,7 +3049,7 @@ class SimpleLLMClient:
             if not last_episode:
                 return False, None
 
-            time_gap = (datetime.utcnow() - last_episode.created_at).total_seconds()
+            time_gap = (datetime.now(timezone.utc) - last_episode.created_at).total_seconds()
             has_gap = time_gap > 2700  # 45 minutes in seconds
 
             return has_gap, last_episode.created_at
@@ -3150,7 +3150,7 @@ Keep it brief and factual."""
             from redis.asyncio import Redis
             redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
 
-            today = datetime.utcnow().strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             redis_key = f"session_summary:{user_id}:{today}"
 
             summaries_json = await redis.get(redis_key)
@@ -4072,7 +4072,7 @@ class ContextWindowManager:
             # Apply window filters
             if window_config.window_type == WindowType.TEMPORAL:
                 duration = window_config.parameters["duration"]
-                cutoff_time = datetime.utcnow() - duration
+                cutoff_time = datetime.now(timezone.utc) - duration
                 query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.TOPIC:
@@ -4083,7 +4083,7 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.EMOTIONAL:
@@ -4098,7 +4098,7 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.IMPORTANCE:
@@ -4107,14 +4107,14 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.HYBRID:
                 params = window_config.parameters
 
                 if "duration" in params:
-                    cutoff_time = datetime.utcnow() - params["duration"]
+                    cutoff_time = datetime.now(timezone.utc) - params["duration"]
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
 
                 if "min_importance" in params:
@@ -4139,9 +4139,9 @@ class ContextWindowManager:
                     upper_time = temporal_end
                 else:
                     if "duration" in params:
-                        cutoff_time = datetime.utcnow() - params["duration"]
+                        cutoff_time = datetime.now(timezone.utc) - params["duration"]
                     else:
-                        cutoff_time = datetime.utcnow() - timedelta(days=30)  # Default 30 days
+                        cutoff_time = datetime.now(timezone.utc) - timedelta(days=30)  # Default 30 days
                     upper_time = None
 
                 # Use raw SQL for vector similarity search
@@ -4231,7 +4231,7 @@ class ContextWindowManager:
                     episode_obj = db.query(Episode).filter(Episode.id == row.id).first()
                     if episode_obj:
                         episode_obj.access_count = (episode_obj.access_count or 0) + 1
-                        episode_obj.last_accessed = datetime.utcnow()
+                        episode_obj.last_accessed = datetime.now(timezone.utc)
 
                 db.commit()
                 logger.info(f"[Memory] Vector search returned {len(episode_data)} episodes with semantic similarity")
@@ -4247,7 +4247,7 @@ class ContextWindowManager:
             time_filter = ""
             if window_config.window_type == WindowType.TEMPORAL:
                 duration = window_config.parameters.get("duration", timedelta(days=7))
-                cutoff_time = datetime.utcnow() - duration
+                cutoff_time = datetime.now(timezone.utc) - duration
                 time_filter = f"AND e.created_at >= '{cutoff_time.isoformat()}'"
 
             # 14-day half-life for recency decay (unified baseline)
@@ -6721,7 +6721,7 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                         Episode.user_id == user_id
                     ).order_by(Episode.created_at.desc()).first()
 
-                    if last_episode and last_episode.created_at > datetime.utcnow() - timedelta(hours=1):
+                    if last_episode and last_episode.created_at > datetime.now(timezone.utc) - timedelta(hours=1):
                         conversation_id = active_id
                         logger.info(f"[Voice] Joining active conversation: {conversation_id}")
 
@@ -7744,7 +7744,7 @@ async def startup_event():
     import asyncio
     from datetime import datetime
 
-    STARTUP_HEALTH["startup_time"] = datetime.utcnow().isoformat()
+    STARTUP_HEALTH["startup_time"] = datetime.now(timezone.utc).isoformat()
     STARTUP_HEALTH["critical_failures"] = []
 
     # 1. CRITICAL: Validate database connection
@@ -8508,7 +8508,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         _device = getattr(request, 'source', None) or 'unknown'
         _aio.ensure_future(_ctx_update(
             str(current_user.id), source="chat_stream",
-            last_chat_at=datetime.utcnow().isoformat(),
+            last_chat_at=datetime.now(timezone.utc).isoformat(),
             hours_since_last_chat=0.0,
             has_chatted_today=True,
             turn_count=len(request.messages),
@@ -8555,7 +8555,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"♟️ Chess command handled: {last_user_message[:50]}...")
                         # Use text_chunk format for iOS compatibility
                         yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': response_content}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.utcnow().isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         return
 
@@ -8644,7 +8644,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     summary = plan_result.get("summary", "Task completed.")
                     full_response = f"{ack}\n\n{summary}"
                     yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': summary}})}\n\n"
-                    yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': full_response, 'citations': [], 'timestamp': datetime.utcnow().isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': full_response, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
                     # Store as episode
@@ -9070,7 +9070,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     _async_session = get_async_session_factory()
                     async with _async_session() as _adb:
                         # Today's journal note
-                        today = datetime.utcnow().strftime("%Y-%m-%d")
+                        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                         journal_title = f"Sara's Journal — {today}"
                         result = await _adb.execute(text(
                             "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
@@ -9111,7 +9111,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             # --- Run all fetches in parallel ---
-            _t0 = datetime.utcnow()
+            _t0 = datetime.now(timezone.utc)
             (
                 memory_ctx, pkg_ctx, daily_brief_ctx, journal_ctx,
                 personality_ctx, device_ctx, workout_ctx, fitness_ctx,
@@ -9148,7 +9148,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             def _safe(v):
                 return v if isinstance(v, str) else None
 
-            _elapsed = (datetime.utcnow() - _t0).total_seconds()
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
             logger.info(f"⚡ Parallel context assembly completed in {_elapsed:.2f}s")
 
             # --- Sync-only context (fast, must stay sequential) ---
@@ -9507,7 +9507,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         "data": {
                             "content": response_content,
                             "citations": streaming_client.get_citations(),
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                             "conversation_id": final_conv_id,
                             "episode_id": final_episode_id
                         }
@@ -9661,7 +9661,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive
-                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
                 except Exception as e:
                     logger.error(f"Error in event stream: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"

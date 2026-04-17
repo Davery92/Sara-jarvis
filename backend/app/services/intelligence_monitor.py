@@ -489,7 +489,7 @@ Items:
         # Age bonus: newer items get higher novelty
         published = item.get("published")
         if published:
-            age_hours = (datetime.utcnow() - published).total_seconds() / 3600
+            age_hours = (datetime.now(timezone.utc) - published).total_seconds() / 3600
             if age_hours < 2:
                 novelty += 0.2
             elif age_hours < 6:
@@ -553,7 +553,7 @@ Items:
 
     async def _get_pkg_interests(self) -> List[str]:
         """Get David's interests from PKG (cached for 1 hour)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if (self._pkg_interests is not None and
                 self._pkg_interests_fetched_at and
                 (now - self._pkg_interests_fetched_at).total_seconds() < 3600):

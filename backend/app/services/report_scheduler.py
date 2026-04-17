@@ -3,7 +3,7 @@ Report Scheduler Service
 Automatically generates periodic intelligence reports
 """
 from typing import Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from sqlalchemy.orm import Session
 import logging
 import asyncio
@@ -30,7 +30,7 @@ class ReportScheduler:
             return
 
         self.running = True
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             logger.info("📅 Starting weekly report generation job")
@@ -67,10 +67,10 @@ class ReportScheduler:
                         logger.error(f"Failed to generate weekly report for user {user_id}: {e}")
                         fail_count += 1
 
-                duration = (datetime.utcnow() - start_time).total_seconds()
+                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
                 logger.info(f"✅ Weekly job complete: {success_count} success, {fail_count} failed in {duration:.1f}s")
 
-                self.last_weekly_run = datetime.utcnow()
+                self.last_weekly_run = datetime.now(timezone.utc)
 
             finally:
                 db.close()
@@ -88,7 +88,7 @@ class ReportScheduler:
             return
 
         self.running = True
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             logger.info("📅 Starting monthly report generation job")
@@ -124,10 +124,10 @@ class ReportScheduler:
                         logger.error(f"Failed to generate monthly report for user {user_id}: {e}")
                         fail_count += 1
 
-                duration = (datetime.utcnow() - start_time).total_seconds()
+                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
                 logger.info(f"✅ Monthly job complete: {success_count} success, {fail_count} failed in {duration:.1f}s")
 
-                self.last_monthly_run = datetime.utcnow()
+                self.last_monthly_run = datetime.now(timezone.utc)
 
             finally:
                 db.close()
@@ -145,7 +145,7 @@ class ReportScheduler:
             return
 
         self.running = True
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             logger.info("📅 Starting quarterly report generation job")
@@ -187,10 +187,10 @@ class ReportScheduler:
                         logger.error(f"Failed to generate quarterly report for user {user_id}: {e}")
                         fail_count += 1
 
-                duration = (datetime.utcnow() - start_time).total_seconds()
+                duration = (datetime.now(timezone.utc) - start_time).total_seconds()
                 logger.info(f"✅ Quarterly job complete: {success_count} success, {fail_count} failed in {duration:.1f}s")
 
-                self.last_quarterly_run = datetime.utcnow()
+                self.last_quarterly_run = datetime.now(timezone.utc)
 
             finally:
                 db.close()

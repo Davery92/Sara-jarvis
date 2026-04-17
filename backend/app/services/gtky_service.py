@@ -5,7 +5,7 @@ Manages the conversational interview process to learn about users
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 from sqlalchemy.orm import Session
 from app.models.profile import UserProfile, GTKYSession, UserActivityLog
@@ -142,7 +142,7 @@ class GTKYService:
             user_id=user_id,
             question_pack="identity",
             session_metadata={
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "current_question_index": 0
             }
         )
@@ -230,7 +230,7 @@ class GTKYService:
             }
         else:
             # Finished current pack
-            session.completed_at = datetime.utcnow()
+            session.completed_at = datetime.now(timezone.utc)
             self.db.commit()
             
             # Determine next pack
@@ -275,7 +275,7 @@ class GTKYService:
             user_id=user_id,
             question_pack=pack_id,
             session_metadata={
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "current_question_index": 0
             }
         )
@@ -411,8 +411,8 @@ Follow-up:"""
         profile.communication_style = communication_style
         profile.autonomy_level = autonomy_level
         profile.notification_channels = notification_channels
-        profile.gtky_completed_at = datetime.utcnow()
-        profile.updated_at = datetime.utcnow()
+        profile.gtky_completed_at = datetime.now(timezone.utc)
+        profile.updated_at = datetime.now(timezone.utc)
         
         self.db.commit()
         

@@ -10,7 +10,7 @@ import json
 import asyncio
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -121,7 +121,7 @@ class LessonInjectionService:
 
             # Process and score results
             lessons = []
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             for row in result:
                 # Parse trigger_context for when_to_apply

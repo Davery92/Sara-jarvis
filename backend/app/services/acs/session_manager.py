@@ -1846,7 +1846,7 @@ async def _run_loop(
 
     # Compute deadline — Sara runs until she's done or hits the hard ceiling.
     initial_minutes = settings.acs_v2_max_session_minutes  # 180min ceiling
-    deadline = datetime.utcnow() + timedelta(minutes=initial_minutes)
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=initial_minutes)
 
     turns = 0
     notes_created = 0
@@ -1890,7 +1890,7 @@ async def _run_loop(
     async def _maybe_persist_durable():
         """Rate-limited durable persist to Postgres (every 5 turns or 2min)."""
         nonlocal _last_durable_persist_at, _last_durable_persist_turn
-        _now = datetime.utcnow()
+        _now = datetime.now(timezone.utc)
         if (turns - _last_durable_persist_turn >= 5
                 or (_now - _last_durable_persist_at).total_seconds() >= 120):
             try:
@@ -2054,7 +2054,7 @@ async def _run_loop(
             return
 
         # Continue loop
-        while datetime.utcnow() < deadline:
+        while datetime.now(timezone.utc) < deadline:
             current_state = await state_machine.get_state(user_id)
             if current_state != ACSState.AUTONOMOUS:
                 reason = "conversation" if current_state == ACSState.PAUSING else "manual"

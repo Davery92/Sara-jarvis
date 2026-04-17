@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -56,7 +56,7 @@ class ResearchExecutor:
                 return
 
             # Update status to running
-            await self._update_plan_status(db, "running", started_at=datetime.utcnow())
+            await self._update_plan_status(db, "running", started_at=datetime.now(timezone.utc))
             logger.info("Starting research plan: %s (%s)", plan["title"], self.plan_id)
 
             steps = plan.get("steps", [])
@@ -156,7 +156,7 @@ class ResearchExecutor:
             # All steps complete — synthesize findings
             await self._synthesize_findings(db, plan)
             await self._update_plan_status(
-                db, "complete", completed_at=datetime.utcnow()
+                db, "complete", completed_at=datetime.now(timezone.utc)
             )
             logger.info("Research plan complete: %s", plan["title"])
 

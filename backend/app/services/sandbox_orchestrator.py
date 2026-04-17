@@ -12,7 +12,7 @@ Escalation flow: Claude Code → GLM → Sara (notification) → David
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -591,7 +591,7 @@ class SandboxOrchestrator:
                     action_name="orchestrator_step",
                     description=description,
                     status=status,
-                    started_at=datetime.utcnow() if status == "running" else None,
+                    started_at=datetime.now(timezone.utc) if status == "running" else None,
                 )
                 db.add(step)
 
@@ -628,7 +628,7 @@ class SandboxOrchestrator:
                 if step:
                     step.status = status
                     if status in ("done", "failed"):
-                        step.completed_at = datetime.utcnow()
+                        step.completed_at = datetime.now(timezone.utc)
                     if error:
                         step.error_message = error
 

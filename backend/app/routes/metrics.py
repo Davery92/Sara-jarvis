@@ -5,7 +5,7 @@ System metrics endpoint — aggregates health, LLM, ACS, task, and notification 
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -33,7 +33,7 @@ async def get_metrics(db: Session = Depends(_get_db)):
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis.from_url(redis_url, decode_responses=True)
     user_id = os.getenv("SOLO_USER_ID", "")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     day_ago = now - timedelta(hours=24)
 
     metrics = {}

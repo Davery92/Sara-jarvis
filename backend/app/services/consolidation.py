@@ -151,17 +151,8 @@ class ConsolidationEngine:
             "recent_chat_topics": [],
         }
 
-        database_url = os.getenv("DATABASE_URL", "")
-        if database_url.startswith("postgresql://"):
-            async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-        elif database_url.startswith("postgresql+psycopg://"):
-            async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-        else:
-            async_url = database_url
-
-        engine = create_async_engine(async_url, echo=False)
-        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+        from app.db.session import get_async_session_factory
+        async_session = get_async_session_factory()
         try:
             async with async_session() as db:
                 since = datetime.now(timezone.utc) - timedelta(hours=12)
@@ -291,9 +282,6 @@ class ConsolidationEngine:
 
         except Exception as e:
             logger.error(f"[Consolidation] Context gathering failed: {e}")
-        finally:
-            await engine.dispose()
-
         # Gather calendar patterns
         context["calendar_patterns"] = []
         try:
@@ -501,8 +489,6 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
                     }
         except Exception as e:
             logger.debug(f"[Consolidation] Engagement stats gather failed: {e}")
-        finally:
-            await engine.dispose()
         return stats
 
     async def _dispatch_research_proposals(self, user_id: str, proposals: List[str]) -> None:
@@ -821,9 +807,6 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
         except Exception as e:
             logger.error(f"[WeeklyCalibration] Failed to generate report: {e}")
             return None
-        finally:
-            await engine.dispose()
-
         # Only return if we have meaningful data
         if not report["category_scores"]:
             logger.info("[WeeklyCalibration] No notification data for calibration report.")

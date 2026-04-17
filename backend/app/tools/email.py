@@ -3,7 +3,7 @@ Email tools for Sara to search and read emails.
 """
 
 from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.tools.base import BaseTool, ToolResult
 from app.db.session import get_db
 from sqlalchemy.orm import Session
@@ -92,7 +92,7 @@ Returns up to 20 most recent matching emails."""
             q = db.query(Email).filter(Email.user_id == user_id)
 
             # Date filter
-            since_date = datetime.utcnow() - timedelta(days=days_back)
+            since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
             q = q.filter(Email.received_at >= since_date)
 
             # Text search (subject, body, AND attachment filenames)
@@ -318,7 +318,7 @@ class EmailRecentTool(BaseTool):
         from app.models.email import Email, EmailAttachment
 
         hours = kwargs.get("hours", 24)
-        since = datetime.utcnow() - timedelta(hours=hours)
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         db = next(get_db())
         try:

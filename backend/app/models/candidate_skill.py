@@ -1,6 +1,6 @@
 """CandidateSkill model — skills proposed by agents for review and promotion."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -26,5 +26,5 @@ class CandidateSkill(Base):
     review_notes = Column(Text, nullable=True)
     times_used = Column(Integer, default=0, nullable=False, server_default="0")
     times_succeeded = Column(Integer, default=0, nullable=False, server_default="0")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     reviewed_at = Column(DateTime, nullable=True)

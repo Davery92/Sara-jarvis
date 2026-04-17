@@ -102,17 +102,8 @@ class AutomationCreateTool(BaseTool):
 
             # Connect to database
             database_url = os.getenv("DATABASE_URL")
-
-            if database_url.startswith("postgresql://"):
-                async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-            elif database_url.startswith("postgresql+psycopg://"):
-                async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-            else:
-                async_url = database_url
-
-            engine = create_async_engine(async_url, echo=False)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
             async with async_session() as db:
                 # Check user limits
                 can_create, limit_error = await safety.check_user_task_limit(db, user_id)
@@ -206,17 +197,8 @@ class AutomationConfirmTool(BaseTool):
 
         try:
             database_url = os.getenv("DATABASE_URL")
-
-            if database_url.startswith("postgresql://"):
-                async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-            elif database_url.startswith("postgresql+psycopg://"):
-                async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-            else:
-                async_url = database_url
-
-            engine = create_async_engine(async_url, echo=False)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
             async with async_session() as db:
                 # If no task_id provided, find the most recent pending automation
                 if not task_id:
@@ -336,17 +318,8 @@ class AutomationListTool(BaseTool):
 
         try:
             database_url = os.getenv("DATABASE_URL")
-
-            if database_url.startswith("postgresql://"):
-                async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-            elif database_url.startswith("postgresql+psycopg://"):
-                async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-            else:
-                async_url = database_url
-
-            engine = create_async_engine(async_url, echo=False)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
             async with async_session() as db:
                 query = """
                     SELECT id, name, status, schedule_definition->>'type' as schedule_type,
@@ -443,17 +416,8 @@ class AutomationCancelTool(BaseTool):
 
         try:
             database_url = os.getenv("DATABASE_URL")
-
-            if database_url.startswith("postgresql://"):
-                async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-            elif database_url.startswith("postgresql+psycopg://"):
-                async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-            else:
-                async_url = database_url
-
-            engine = create_async_engine(async_url, echo=False)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
             async with async_session() as db:
                 if task_id:
                     result = await db.execute(
@@ -536,17 +500,8 @@ class AutomationModifyTool(BaseTool):
 
         try:
             database_url = os.getenv("DATABASE_URL")
-
-            if database_url.startswith("postgresql://"):
-                async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-            elif database_url.startswith("postgresql+psycopg://"):
-                async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-            else:
-                async_url = database_url
-
-            engine = create_async_engine(async_url, echo=False)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+            from app.db.session import get_async_session_factory
+            async_session = get_async_session_factory()
             async with async_session() as db:
                 # Get current task
                 result = await db.execute(

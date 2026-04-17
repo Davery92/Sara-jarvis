@@ -5,7 +5,7 @@ Routes commands to the appropriate active device via WebSocket
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,8 +36,8 @@ class DeviceConnection:
     device_id: str
     user_id: str
     websocket: WebSocket
-    connected_at: datetime = field(default_factory=datetime.utcnow)
-    last_message_at: datetime = field(default_factory=datetime.utcnow)
+    connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_message_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -174,11 +174,11 @@ class CommandRouterService:
                 "command": command.command_type.value,
                 "payload": command.payload,
                 "source_device": command.source_device_id,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
             await connection.websocket.send_json(message)
-            connection.last_message_at = datetime.utcnow()
+            connection.last_message_at = datetime.now(timezone.utc)
 
             logger.info(
                 f"Command {command.command_type.value} sent to device {target_device_id}"

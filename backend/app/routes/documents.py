@@ -3,7 +3,7 @@ import logging
 import os
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, Response, File
@@ -418,7 +418,7 @@ async def upload_3d_model(
             await f.write(file_content)
 
         # Create database record
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         cursor = db.connection().connection.cursor()
         cursor.execute("""
             INSERT INTO models_3d (id, user_id, filename, display_name, file_format, minio_key, file_size, created_at, updated_at)

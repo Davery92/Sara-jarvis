@@ -9,7 +9,7 @@ Dynamic importance scoring for memories based on:
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import math
 import logging
@@ -60,7 +60,7 @@ class ImportanceScorer:
         Returns:
             Factor from 0.0 to 1.0 (1.0 = today, decays over time)
         """
-        days_ago = (datetime.utcnow() - created_at).days
+        days_ago = (datetime.now(timezone.utc) - created_at).days
 
         # Exponential decay: score = e^(-λt)
         # Where λ = ln(2) / halflife
@@ -90,7 +90,7 @@ class ImportanceScorer:
 
         # Apply recency decay to frequency
         if last_accessed:
-            days_since_access = (datetime.utcnow() - last_accessed).days
+            days_since_access = (datetime.now(timezone.utc) - last_accessed).days
             recency_weight = max(0.1, 1.0 - (days_since_access / self.frequency_decay_days))
         else:
             recency_weight = 0.5  # Default if no access data
@@ -183,7 +183,7 @@ class ImportanceScorer:
             popularity_factor=popularity_factor,
             user_rating_factor=user_rating_factor,
             final_score=final_score,
-            score_date=datetime.utcnow()
+            score_date=datetime.now(timezone.utc)
         )
 
     async def rescore_episode(self, episode_id: str) -> Optional[float]:

@@ -13,7 +13,7 @@ Usage:
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.services.deliberation_prompt import build_deliberation_prompt
@@ -90,7 +90,7 @@ class DeliberationEngine:
         4. Single LLM call for structured JSON
         5. Parse and return result
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         result = DeliberationResult()
 
         # 1. Read working memory
@@ -132,7 +132,7 @@ class DeliberationEngine:
         except Exception as e:
             logger.error(f"[Deliberation] LLM call failed: {e}")
             result.thought = f"Deliberation failed: {e}"
-            result.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+            result.duration_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
             return result
 
         # 5. Parse response
@@ -188,7 +188,7 @@ class DeliberationEngine:
         # Otherwise stale observations persist and re-trigger the same deliberation loop.
         result.observations_consumed = [obs.id for obs in observations]
 
-        result.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+        result.duration_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
         logger.info(
             f"[Deliberation] Complete in {result.duration_seconds:.1f}s: "
             f"{len(result.notification_proposals)} notifications, "

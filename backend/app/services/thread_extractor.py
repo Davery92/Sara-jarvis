@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from sqlalchemy import text
@@ -149,7 +149,7 @@ class ThreadExtractor:
 
                 category = thread_data.get("category", "project")
                 timing = CATEGORY_TIMING.get(category, DEFAULT_TIMING)
-                now_dt = datetime.utcnow()
+                now_dt = datetime.now(timezone.utc)
 
                 thread_id = await create_thread(
                     user_id=user_id,

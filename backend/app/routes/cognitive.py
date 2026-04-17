@@ -17,7 +17,7 @@ from datetime import datetime
 import logging
 
 # Import from main_simple for auth and database
-from app.main_simple import SessionLocal, get_current_user
+from app.main_simple import get_current_user
 
 # Import services
 from app.services.sara_identity_service import sara_identity_service
@@ -109,12 +109,9 @@ class PredictionResolve(BaseModel):
 
 # ==================== Dependency ====================
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# get_db() lives in app.db.session as the canonical dependency. The local
+# duplicate used to shadow it for no reason.
+from app.db.session import get_db
 
 
 # ==================== Self-Reflection Endpoints ====================

@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from typing import Union, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import traceback
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ def format_error_response(
             "type": error_type,
             "message": message,
             "status_code": status_code,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     }
 

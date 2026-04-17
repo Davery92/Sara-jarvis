@@ -9,7 +9,7 @@ Orchestrates all reflection components:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ReflectionCycleResult:
     """Results of a complete reflection cycle."""
-    cycle_start: datetime = field(default_factory=datetime.utcnow)
+    cycle_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     consolidation_audit: Optional[ConsolidationAuditResult] = None
     outcomes_assessed: int = 0
     patterns_detected: List[DetectedPattern] = field(default_factory=list)
@@ -85,7 +85,7 @@ class ReflectionAgent:
 
         Called periodically by the Celery worker.
         """
-        cycle_start = datetime.utcnow()
+        cycle_start = datetime.now(timezone.utc)
         result = ReflectionCycleResult(cycle_start=cycle_start)
 
         logger.info("Starting reflection cycle")
@@ -140,7 +140,7 @@ class ReflectionAgent:
             logger.error(f"Reflection cycle failed: {e}", exc_info=True)
             raise
 
-        result.duration_seconds = (datetime.utcnow() - cycle_start).total_seconds()
+        result.duration_seconds = (datetime.now(timezone.utc) - cycle_start).total_seconds()
         logger.info(f"Reflection cycle complete in {result.duration_seconds:.1f}s")
 
         return result
@@ -234,7 +234,7 @@ class ReflectionAgent:
             }
         else:
             # After timeout, assume partial success if no negative signals
-            hours_elapsed = (datetime.utcnow() - created_at).total_seconds() / 3600
+            hours_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
             if hours_elapsed > 24:
                 return {
                     "status": "unknown",

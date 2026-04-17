@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.importance_scorer import get_importance_scorer
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import asyncio
 
@@ -36,7 +36,7 @@ class NightlyRescoringJob:
             return {"status": "skipped", "reason": "already_running"}
 
         self.running = True
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             logger.info("🌙 Starting nightly importance rescoring job")
@@ -56,7 +56,7 @@ class NightlyRescoringJob:
                 )
 
                 # Add timing info
-                end_time = datetime.utcnow()
+                end_time = datetime.now(timezone.utc)
                 duration = (end_time - start_time).total_seconds()
 
                 stats["start_time"] = start_time.isoformat()

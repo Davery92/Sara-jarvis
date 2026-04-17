@@ -9,7 +9,7 @@ import re
 import uuid
 import io
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
@@ -277,7 +277,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
             # Extract metadata
             meta = {
                 "url": url,
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "content_type": response.headers.get("content-type", ""),
             }
 
@@ -310,7 +310,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
 
             content, title, meta, toc, reader = self._extract_pdf_with_chapters(response.content)
             meta["url"] = url
-            meta["fetched_at"] = datetime.utcnow().isoformat()
+            meta["fetched_at"] = datetime.now(timezone.utc).isoformat()
             # Remove the 'uploaded' key since this was fetched
             meta.pop("uploaded", None)
 

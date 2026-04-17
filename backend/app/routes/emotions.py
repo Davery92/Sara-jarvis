@@ -1,3 +1,4 @@
+from datetime import timezone
 """
 Emotion Analysis API Endpoints
 """
@@ -189,7 +190,7 @@ async def get_emotion_distribution(
         from sqlalchemy import text
         from datetime import datetime, timedelta
 
-        start_date = datetime.utcnow() - timedelta(days=days)
+        start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         query = text("""
             SELECT

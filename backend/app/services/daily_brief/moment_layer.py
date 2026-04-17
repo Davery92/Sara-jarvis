@@ -5,7 +5,7 @@ Updates on every message, no LLM required (fast, template-based)
 import os
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Tuple
 from pathlib import Path
 
@@ -146,7 +146,7 @@ class MomentLayer:
 
             time_gap = None
             if last_episode:
-                time_gap = datetime.utcnow() - last_episode.created_at
+                time_gap = datetime.now(timezone.utc) - last_episode.created_at
 
             # Extract keywords from message
             keywords = self._extract_keywords(current_message)

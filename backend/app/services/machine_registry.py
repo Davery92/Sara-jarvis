@@ -2,7 +2,7 @@
 Machine Registry Service
 Manages registered machines for shadow agent with activity detection
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import select, update, and_
 from sqlalchemy.orm import Session
@@ -36,7 +36,7 @@ class MachineRegistryService:
         stmt = select(Machine).where(Machine.device_id == device_id)
         existing = db.execute(stmt).scalar_one_or_none()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         if existing:
             # Update existing machine
@@ -96,7 +96,7 @@ class MachineRegistryService:
             active_window: Current active window title
             active_app: Current active application name
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         stmt = select(Machine).where(Machine.device_id == device_id)
         machine = db.execute(stmt).scalar_one_or_none()
@@ -141,7 +141,7 @@ class MachineRegistryService:
         Get the most recently active online machine for a user.
         Used for auto-detection when starting shadow session.
         """
-        cutoff = datetime.utcnow() - timedelta(seconds=self.OFFLINE_THRESHOLD_SECONDS)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.OFFLINE_THRESHOLD_SECONDS)
 
         stmt = (
             select(Machine)
@@ -167,7 +167,7 @@ class MachineRegistryService:
         """
         Get all machines registered for a user.
         """
-        cutoff = datetime.utcnow() - timedelta(seconds=self.OFFLINE_THRESHOLD_SECONDS)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.OFFLINE_THRESHOLD_SECONDS)
 
         if include_offline:
             stmt = (
@@ -225,7 +225,7 @@ class MachineRegistryService:
         stmt = (
             update(Machine)
             .where(Machine.device_id == device_id)
-            .values(is_online=False, updated_at=datetime.utcnow())
+            .values(is_online=False, updated_at=datetime.now(timezone.utc))
         )
         result = db.execute(stmt)
         db.commit()
@@ -240,7 +240,7 @@ class MachineRegistryService:
         Mark machines as offline if they haven't sent a heartbeat in a while.
         Should be called periodically (e.g., every minute).
         """
-        cutoff = datetime.utcnow() - timedelta(hours=stale_threshold_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_threshold_hours)
 
         stmt = (
             update(Machine)
@@ -250,7 +250,7 @@ class MachineRegistryService:
                     Machine.last_heartbeat_at < cutoff
                 )
             )
-            .values(is_online=False, updated_at=datetime.utcnow())
+            .values(is_online=False, updated_at=datetime.now(timezone.utc))
         )
 
         result = db.execute(stmt)
@@ -273,7 +273,7 @@ class MachineRegistryService:
             return None
 
         machine.friendly_name = friendly_name
-        machine.updated_at = datetime.utcnow()
+        machine.updated_at = datetime.now(timezone.utc)
 
         db.commit()
         db.refresh(machine)
@@ -309,7 +309,7 @@ class MachineRegistryService:
         if file_access_enabled is not None:
             machine.file_access_enabled = file_access_enabled
 
-        machine.updated_at = datetime.utcnow()
+        machine.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(machine)
         return machine

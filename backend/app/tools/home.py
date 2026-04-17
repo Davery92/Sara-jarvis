@@ -18,17 +18,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class _SharedEngineStub:
+    """Stand-in for the per-call engine. The shared factory owns the real
+    engine, so ``dispose()`` here is a harmless no-op — lets legacy
+    ``try: ... finally: await engine.dispose()`` callers stay untouched."""
+
+    async def dispose(self) -> None:
+        return None
+
+
+_SHARED_ENGINE_STUB = _SharedEngineStub()
+
+
 def _get_async_session_maker():
-    """Create async session maker for database operations."""
-    database_url = os.getenv("DATABASE_URL")
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-    engine = create_async_engine(async_url, echo=False)
-    return sessionmaker(engine, class_=AsyncSession, expire_on_commit=False), engine
+    """Return the shared async session factory.
+
+    Legacy signature returns ``(factory, engine)``. The engine is now a
+    no-op stub because the shared singleton factory owns real disposal,
+    so existing callers that dispose don't need to change.
+    """
+    from app.db.session import get_async_session_factory
+    return get_async_session_factory(), _SHARED_ENGINE_STUB
 
 
 class HomeGetDevicesTool(BaseTool):

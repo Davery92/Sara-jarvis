@@ -5,7 +5,7 @@ These tasks monitor system health and alert on issues.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
 from app.celery_app import celery_app
@@ -31,7 +31,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
     from sqlalchemy import create_engine, text
 
     health_report = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": {},
         "overall_status": HealthStatus.HEALTHY,
     }
@@ -109,7 +109,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
         last_run = r.get("consolidation:last_run")
         if last_run:
             last_run_time = datetime.fromisoformat(last_run.decode())
-            age = datetime.utcnow() - last_run_time
+            age = datetime.now(timezone.utc) - last_run_time
 
             if age > timedelta(minutes=5):
                 health_report["checks"]["consolidation"] = {

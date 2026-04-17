@@ -10,7 +10,7 @@ Used by AgentDispatchService when a task is classified as "internal".
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -603,7 +603,7 @@ class InternalToolAgent:
                     action_name=action_name,
                     description=description,
                     status=status,
-                    started_at=datetime.utcnow() if status == "running" else None,
+                    started_at=datetime.now(timezone.utc) if status == "running" else None,
                 )
                 db.add(step)
 
@@ -641,7 +641,7 @@ class InternalToolAgent:
                 if step:
                     step.status = status
                     if status in ("done", "failed"):
-                        step.completed_at = datetime.utcnow()
+                        step.completed_at = datetime.now(timezone.utc)
                     if error:
                         step.error_message = error
 

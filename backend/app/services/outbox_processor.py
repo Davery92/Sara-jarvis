@@ -12,7 +12,7 @@ Architecture:
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Callable, Any, Optional
 from sqlalchemy import select, and_, or_, func
 from sqlalchemy.orm import Session
@@ -126,7 +126,7 @@ class OutboxProcessor:
                 ).label('avg_latency')
             ).filter(
                 EventOutbox.status == 'completed',
-                EventOutbox.processed_at >= datetime.utcnow() - timedelta(minutes=5)
+                EventOutbox.processed_at >= datetime.now(timezone.utc) - timedelta(minutes=5)
             ).first()
 
             avg_latency = latency_result.avg_latency if latency_result and latency_result.avg_latency else 0
@@ -161,7 +161,7 @@ class OutboxProcessor:
             # - status is pending or failed (for retry)
             # - retry_count < max_retries
             # - next_retry_at is null or in the past
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             events = db.query(EventOutbox).filter(
                 and_(
@@ -212,7 +212,7 @@ class OutboxProcessor:
 
             # Mark as completed
             event.status = "completed"
-            event.processed_at = datetime.utcnow()
+            event.processed_at = datetime.now(timezone.utc)
             event.last_error = None
 
             # Add any chained events
@@ -231,7 +231,7 @@ class OutboxProcessor:
 
             # Exponential backoff: 30s, 1m, 2m, 4m, 8m
             backoff_seconds = 30 * (2 ** event.retry_count)
-            event.next_retry_at = datetime.utcnow() + timedelta(seconds=backoff_seconds)
+            event.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
 
             if event.retry_count >= event.max_retries:
                 logger.error(f"💀 Event {event.id} exhausted retries, will not retry")
@@ -562,7 +562,7 @@ Return ONLY valid JSON in this exact format, no other text:
         min_importance = payload.get("min_importance", 0.1)
         days_threshold = payload.get("days_threshold", 30)
 
-        cutoff_date = datetime.utcnow() - timedelta(days=days_threshold)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_threshold)
 
         # Find episodes that:
         # - Are older than threshold

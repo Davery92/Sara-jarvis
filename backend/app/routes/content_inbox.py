@@ -1,6 +1,6 @@
 """Content Inbox routes — share URLs, files, and text to Sara."""
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, Query
@@ -149,7 +149,7 @@ async def get_item(
     # Auto-mark as read
     if item.status == "unread":
         item.status = "read"
-        item.read_at = datetime.utcnow()
+        item.read_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(item)
 
@@ -208,7 +208,7 @@ async def update_status(
         raise HTTPException(status_code=404, detail="Item not found")
 
     item.status = body.status
-    item.decided_at = datetime.utcnow()
+    item.decided_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
     return SharedContentSummary.model_validate(item)

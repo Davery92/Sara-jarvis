@@ -5,7 +5,7 @@ Provides chess instruction, lessons, and game review
 import logging
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.models.chess import ChessCoachingProgress, ChessGame, ChessStats
 
@@ -696,8 +696,8 @@ class ChessCoachService:
 
         progress.current_topic = topic
         progress.total_coaching_sessions += 1
-        progress.last_session_at = datetime.utcnow()
-        progress.updated_at = datetime.utcnow()
+        progress.last_session_at = datetime.now(timezone.utc)
+        progress.updated_at = datetime.now(timezone.utc)
 
         self.db.commit()
 

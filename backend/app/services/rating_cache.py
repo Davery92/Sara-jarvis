@@ -6,7 +6,7 @@ Provides fast real-time rating storage with eventual consistency to PostgreSQL.
 
 import redis.asyncio as redis
 from typing import Optional, Dict, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 
@@ -102,7 +102,7 @@ class RatingCache:
             "rating_count": rating_count,
             "average_rating": average_rating,
             "rating_sum": rating_sum,
-            "last_rated": last_rated or datetime.utcnow().isoformat(),
+            "last_rated": last_rated or datetime.now(timezone.utc).isoformat(),
         }
 
         if user_rating is not None:
@@ -162,7 +162,7 @@ class RatingCache:
             new_rating_sum = current["rating_sum"] - prev_user_rating + user_rating
 
         new_average_rating = new_rating_sum / new_rating_count if new_rating_count > 0 else 0.0
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         # Update episode rating cache
         await self.set_episode_rating(

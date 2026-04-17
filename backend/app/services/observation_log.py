@@ -27,7 +27,13 @@ from typing import List, Optional
 
 import redis.asyncio as aioredis
 
+from app.services.silent_failure_tracker import Tracker
+
 logger = logging.getLogger(__name__)
+
+# One tracker for the whole module — reasons differentiate between
+# log/get/consume/prune failure modes.
+_OBS_LOG_TRACKER = Tracker("observation_log")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 OBS_ZSET_KEY = "sara:observations:{user_id}"
@@ -114,6 +120,7 @@ async def log_observation(
 
         return obs_id
     except Exception as e:
+        _OBS_LOG_TRACKER.note(f"log:{type(e).__name__}")
         logger.warning(f"[ObservationLog] Failed to log observation: {e}")
         return obs_id
 
@@ -144,6 +151,7 @@ async def get_pending_observations(
                     observations.append(obs)
         return observations
     except Exception as e:
+        _OBS_LOG_TRACKER.note(f"get_pending:{type(e).__name__}")
         logger.warning(f"[ObservationLog] Failed to get pending observations: {e}")
         return []
 
@@ -160,6 +168,7 @@ async def get_accumulated_salience(user_id: str, top_n: int = 10) -> float:
         top_scores = await r.zrevrange(zset_key, 0, top_n - 1, withscores=True)
         return sum(score for _, score in top_scores) if top_scores else 0.0
     except Exception as e:
+        _OBS_LOG_TRACKER.note(f"accumulated_salience:{type(e).__name__}")
         logger.warning(f"[ObservationLog] Failed to get accumulated salience: {e}")
         return 0.0
 
@@ -196,6 +205,7 @@ async def consume_observations(user_id: str, observation_ids: List[str]) -> int:
         logger.debug(f"[ObservationLog] Consumed {consumed_count} observations")
         return consumed_count
     except Exception as e:
+        _OBS_LOG_TRACKER.note(f"consume:{type(e).__name__}")
         logger.warning(f"[ObservationLog] Failed to consume observations: {e}")
         return 0
 
@@ -234,6 +244,7 @@ async def prune_old(user_id: str, max_age_hours: int = 24) -> int:
             logger.debug(f"[ObservationLog] Pruned {len(to_remove)} old observations")
         return len(to_remove)
     except Exception as e:
+        _OBS_LOG_TRACKER.note(f"prune:{type(e).__name__}")
         logger.warning(f"[ObservationLog] Failed to prune observations: {e}")
         return 0
 

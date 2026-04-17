@@ -6,7 +6,7 @@ and exploration bonuses, and performs data consistency checks.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
@@ -55,7 +55,7 @@ class RatingConsolidationJob:
             Dict with statistics: episodes_processed, success_count, error_count
         """
         logger.info("Starting nightly rating consolidation job")
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         total_processed = 0
         success_count = 0
@@ -97,7 +97,7 @@ class RatingConsolidationJob:
             # Run consistency checks
             consistency_results = await self._check_consistency()
 
-            duration = (datetime.utcnow() - start_time).total_seconds()
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
             logger.info(
                 f"Rating consolidation completed in {duration:.2f}s: "
                 f"{total_processed} episodes processed "
@@ -198,7 +198,7 @@ class RatingConsolidationJob:
             rating.rating_sum = cached_rating["rating_sum"]
             if cached_rating["last_rated"]:
                 rating.last_rated = datetime.fromisoformat(cached_rating["last_rated"])
-            rating.updated_at = datetime.utcnow()
+            rating.updated_at = datetime.now(timezone.utc)
 
             # Get episode for boost calculations
             episode = self.db.query(Episode).filter(Episode.id == episode_id).first()
@@ -271,7 +271,7 @@ class RatingConsolidationJob:
         confidence = numerator / denominator
 
         # Temporal decay (exponential, 30-day half-life)
-        age_days = (datetime.utcnow() - created_at).days
+        age_days = (datetime.now(timezone.utc) - created_at).days
         decay_constant = math.log(2) / 30.0
         age_decay = math.exp(-decay_constant * age_days)
 

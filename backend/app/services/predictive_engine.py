@@ -10,7 +10,7 @@ Runs as a Celery task every 30 minutes during waking hours.
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
             for row in upcoming:
                 event_id, title, start_time, desc = row
-                hours_until = (start_time.replace(tzinfo=None) - datetime.utcnow()).total_seconds() / 3600
+                hours_until = (start_time.replace(tzinfo=None) - datetime.now(timezone.utc)).total_seconds() / 3600
                 if desc and len(desc) > 20:
                     predictions.append({
                         "type": "preparation_needed",
@@ -156,7 +156,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
             for row in travel_events:
                 title, start_time, location = row
-                hours_until = (start_time.replace(tzinfo=None) - datetime.utcnow()).total_seconds() / 3600
+                hours_until = (start_time.replace(tzinfo=None) - datetime.now(timezone.utc)).total_seconds() / 3600
                 if hours_until < 1.5:
                     predictions.append({
                         "type": "travel_reminder",

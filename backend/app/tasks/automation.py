@@ -57,19 +57,8 @@ async def _automation_watcher_async():
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
     import os
-
-    database_url = os.getenv("DATABASE_URL", "")
-
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
-
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
     dispatched = 0
     expired = 0
     errors = 0
@@ -191,240 +180,269 @@ async def _automation_execute_async(task_id: str):
 
     from app.services.automation.primitives import execute_primitive, PrimitiveResult
     from app.services.automation.safety import get_safety_validator
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        # Load task
+        result = await db.execute(
+            text("""
+                SELECT id, user_id, name, schedule_definition, actions, conditions,
+                       status, next_wake_at, current_step, step_state,
+                       consecutive_errors, execution_count
+                FROM automation_task
+                WHERE id = :task_id
+                FOR UPDATE SKIP LOCKED
+            """),
+            {"task_id": task_id}
+        )
+        row = result.fetchone()
 
-    database_url = os.getenv("DATABASE_URL", "")
+        if not row:
+            logger.warning(f"Automation task {task_id} not found or locked")
+            return {"status": "not_found"}
 
-    if database_url.startswith("postgresql://"):
-        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
-    elif database_url.startswith("postgresql+psycopg://"):
-        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    else:
-        async_url = database_url
+        (
+            task_id, user_id, name, schedule_definition, actions, conditions,
+            status, next_wake_at, current_step, step_state,
+            consecutive_errors, execution_count
+        ) = row
 
-    engine = create_async_engine(async_url, echo=False)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        # Verify status is still active
+        if status != AutomationStatus.ACTIVE:
+            logger.info(f"Automation {task_id[:8]} no longer active (status={status})")
+            return {"status": "skipped", "reason": "not_active"}
 
-    try:
-        async with async_session() as db:
-            # Load task
-            result = await db.execute(
-                text("""
-                    SELECT id, user_id, name, schedule_definition, actions, conditions,
-                           status, next_wake_at, current_step, step_state,
-                           consecutive_errors, execution_count
-                    FROM automation_task
-                    WHERE id = :task_id
-                    FOR UPDATE SKIP LOCKED
-                """),
-                {"task_id": task_id}
+        # Check conditions before executing
+        conditions_met = await _check_conditions(conditions, db)
+        if not conditions_met:
+            # Set next wake time and skip execution
+            next_wake = _calculate_next_wake(schedule_definition)
+            if next_wake is None:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            last_error = 'One-time condition not met',
+                            last_executed_at = NOW()
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "status": AutomationStatus.COMPLETED}
+                )
+            else:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET next_wake_at = :next_wake
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "next_wake": next_wake}
+                )
+            await db.commit()
+            logger.info(
+                f"Automation '{name}' conditions not met, "
+                + ("completed" if next_wake is None else "rescheduled")
             )
-            row = result.fetchone()
+            return {"status": "condition_not_met"}
 
-            if not row:
-                logger.warning(f"Automation task {task_id} not found or locked")
-                return {"status": "not_found"}
+        # Get current action
+        if not actions or current_step >= len(actions):
+            # All steps done for this execution cycle
+            next_wake = _calculate_next_wake(schedule_definition)
+            if next_wake is None:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            current_step = 0,
+                            execution_count = execution_count + 1,
+                            next_wake_at = NULL,
+                            last_executed_at = NOW(),
+                            consecutive_errors = 0
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "status": AutomationStatus.COMPLETED}
+                )
+            else:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET current_step = 0,
+                            execution_count = execution_count + 1,
+                            next_wake_at = :next_wake,
+                            last_executed_at = NOW(),
+                            consecutive_errors = 0
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "next_wake": next_wake}
+                )
+            await db.commit()
+            if next_wake is None:
+                logger.info(f"Automation '{name}' completed one-time cycle")
+            else:
+                logger.info(f"Automation '{name}' completed cycle, rescheduled for {next_wake}")
+            return {"status": "cycle_complete", "next_wake": next_wake.isoformat() if next_wake else None}
 
-            (
-                task_id, user_id, name, schedule_definition, actions, conditions,
-                status, next_wake_at, current_step, step_state,
-                consecutive_errors, execution_count
-            ) = row
+        action = actions[current_step]
+        primitive = action.get("primitive")
+        started_at = datetime.now(timezone.utc)
 
-            # Verify status is still active
-            if status != AutomationStatus.ACTIVE:
-                logger.info(f"Automation {task_id[:8]} no longer active (status={status})")
-                return {"status": "skipped", "reason": "not_active"}
+        # Build step state with user_id for notifications
+        exec_step_state = step_state or {}
+        exec_step_state["user_id"] = user_id
 
-            # Check conditions before executing
-            conditions_met = await _check_conditions(conditions, db)
-            if not conditions_met:
-                # Set next wake time and skip execution
+        # Execute the primitive
+        exec_result = await execute_primitive(
+            primitive=primitive,
+            action=action,
+            task_id=task_id,
+            step_state=exec_step_state,
+            db_session=db
+        )
+
+        completed_at = datetime.now(timezone.utc)
+        exec_duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+
+        # Log execution
+        await db.execute(
+            text("""
+                INSERT INTO automation_execution_log
+                (task_id, started_at, completed_at, step_executed, action_primitive, action_details, status, result, error_message)
+                VALUES (:task_id, :started_at, :completed_at, :step, :primitive, CAST(:action_details AS jsonb), :status, CAST(:result AS jsonb), :error)
+            """),
+            {
+                "task_id": task_id,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "step": current_step,
+                "primitive": primitive,
+                "action_details": json.dumps(action),
+                "status": exec_result.status.value,
+                "result": json.dumps(exec_result.result) if exec_result.result else None,
+                "error": exec_result.error
+            }
+        )
+
+        # Write action trace (Phase 0 — Cortana Evolution)
+        try:
+            from app.services.autonomy.action_tracer import ActionTracer
+            tracer = ActionTracer()
+            await tracer.trace(
+                db=db, run_uuid=None, user_id=user_id,
+                source="automation", action_name=f"automation:{primitive}",
+                action_args={"task_id": task_id, "step": current_step, "action": action},
+                result=exec_result.result,
+                success=(exec_result.status != PrimitiveResult.FAILED),
+                error_message=exec_result.error,
+                step_index=current_step,
+                duration_ms=exec_duration_ms,
+            )
+        except Exception as e:
+            logger.debug(f"Action trace write failed (non-fatal): {e}")
+
+        # Handle result
+        if exec_result.status == PrimitiveResult.FAILED:
+            # Increment error count
+            new_error_count = consecutive_errors + 1
+            safety = get_safety_validator()
+
+            if safety.should_pause_task(new_error_count):
+                # Auto-pause due to too many errors
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            consecutive_errors = :errors,
+                            last_error = :error
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "errors": new_error_count, "error": exec_result.error, "status": AutomationStatus.FAILED}
+                )
+                await db.commit()
+                logger.warning(f"Automation '{name}' auto-paused after {new_error_count} consecutive errors")
+                return {"status": "auto_paused", "errors": new_error_count}
+            else:
+                # Retry later
                 next_wake = _calculate_next_wake(schedule_definition)
                 if next_wake is None:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET status = :status,
-                                last_error = 'One-time condition not met',
-                                last_executed_at = NOW()
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "status": AutomationStatus.COMPLETED}
-                    )
-                else:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET next_wake_at = :next_wake
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "next_wake": next_wake}
-                    )
-                await db.commit()
-                logger.info(
-                    f"Automation '{name}' conditions not met, "
-                    + ("completed" if next_wake is None else "rescheduled")
-                )
-                return {"status": "condition_not_met"}
-
-            # Get current action
-            if not actions or current_step >= len(actions):
-                # All steps done for this execution cycle
-                next_wake = _calculate_next_wake(schedule_definition)
-                if next_wake is None:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET status = :status,
-                                current_step = 0,
-                                execution_count = execution_count + 1,
-                                next_wake_at = NULL,
-                                last_executed_at = NOW(),
-                                consecutive_errors = 0
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "status": AutomationStatus.COMPLETED}
-                    )
-                else:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET current_step = 0,
-                                execution_count = execution_count + 1,
-                                next_wake_at = :next_wake,
-                                last_executed_at = NOW(),
-                                consecutive_errors = 0
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "next_wake": next_wake}
-                    )
-                await db.commit()
-                if next_wake is None:
-                    logger.info(f"Automation '{name}' completed one-time cycle")
-                else:
-                    logger.info(f"Automation '{name}' completed cycle, rescheduled for {next_wake}")
-                return {"status": "cycle_complete", "next_wake": next_wake.isoformat() if next_wake else None}
-
-            action = actions[current_step]
-            primitive = action.get("primitive")
-            started_at = datetime.now(timezone.utc)
-
-            # Build step state with user_id for notifications
-            exec_step_state = step_state or {}
-            exec_step_state["user_id"] = user_id
-
-            # Execute the primitive
-            exec_result = await execute_primitive(
-                primitive=primitive,
-                action=action,
-                task_id=task_id,
-                step_state=exec_step_state,
-                db_session=db
-            )
-
-            completed_at = datetime.now(timezone.utc)
-            exec_duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-
-            # Log execution
-            await db.execute(
-                text("""
-                    INSERT INTO automation_execution_log
-                    (task_id, started_at, completed_at, step_executed, action_primitive, action_details, status, result, error_message)
-                    VALUES (:task_id, :started_at, :completed_at, :step, :primitive, CAST(:action_details AS jsonb), :status, CAST(:result AS jsonb), :error)
-                """),
-                {
-                    "task_id": task_id,
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                    "step": current_step,
-                    "primitive": primitive,
-                    "action_details": json.dumps(action),
-                    "status": exec_result.status.value,
-                    "result": json.dumps(exec_result.result) if exec_result.result else None,
-                    "error": exec_result.error
-                }
-            )
-
-            # Write action trace (Phase 0 — Cortana Evolution)
-            try:
-                from app.services.autonomy.action_tracer import ActionTracer
-                tracer = ActionTracer()
-                await tracer.trace(
-                    db=db, run_uuid=None, user_id=user_id,
-                    source="automation", action_name=f"automation:{primitive}",
-                    action_args={"task_id": task_id, "step": current_step, "action": action},
-                    result=exec_result.result,
-                    success=(exec_result.status != PrimitiveResult.FAILED),
-                    error_message=exec_result.error,
-                    step_index=current_step,
-                    duration_ms=exec_duration_ms,
-                )
-            except Exception as e:
-                logger.debug(f"Action trace write failed (non-fatal): {e}")
-
-            # Handle result
-            if exec_result.status == PrimitiveResult.FAILED:
-                # Increment error count
-                new_error_count = consecutive_errors + 1
-                safety = get_safety_validator()
-
-                if safety.should_pause_task(new_error_count):
-                    # Auto-pause due to too many errors
                     await db.execute(
                         text("""
                             UPDATE automation_task
                             SET status = :status,
                                 consecutive_errors = :errors,
-                                last_error = :error
+                                last_error = :error,
+                                last_executed_at = NOW()
                             WHERE id = :task_id
                         """),
                         {"task_id": task_id, "errors": new_error_count, "error": exec_result.error, "status": AutomationStatus.FAILED}
                     )
-                    await db.commit()
-                    logger.warning(f"Automation '{name}' auto-paused after {new_error_count} consecutive errors")
-                    return {"status": "auto_paused", "errors": new_error_count}
                 else:
-                    # Retry later
-                    next_wake = _calculate_next_wake(schedule_definition)
-                    if next_wake is None:
-                        await db.execute(
-                            text("""
-                                UPDATE automation_task
-                                SET status = :status,
-                                    consecutive_errors = :errors,
-                                    last_error = :error,
-                                    last_executed_at = NOW()
-                                WHERE id = :task_id
-                            """),
-                            {"task_id": task_id, "errors": new_error_count, "error": exec_result.error, "status": AutomationStatus.FAILED}
-                        )
-                    else:
-                        await db.execute(
-                            text("""
-                                UPDATE automation_task
-                                SET consecutive_errors = :errors,
-                                    last_error = :error,
-                                    next_wake_at = :next_wake
-                                WHERE id = :task_id
-                            """),
-                            {"task_id": task_id, "errors": new_error_count, "error": exec_result.error, "next_wake": next_wake}
-                        )
-                    await db.commit()
-                    logger.warning(f"Automation '{name}' step {current_step} failed: {exec_result.error}")
-                    return {"status": "failed", "error": exec_result.error}
+                    await db.execute(
+                        text("""
+                            UPDATE automation_task
+                            SET consecutive_errors = :errors,
+                                last_error = :error,
+                                next_wake_at = :next_wake
+                            WHERE id = :task_id
+                        """),
+                        {"task_id": task_id, "errors": new_error_count, "error": exec_result.error, "next_wake": next_wake}
+                    )
+                await db.commit()
+                logger.warning(f"Automation '{name}' step {current_step} failed: {exec_result.error}")
+                return {"status": "failed", "error": exec_result.error}
 
-            elif exec_result.status == PrimitiveResult.CONDITION_NOT_MET:
-                # Condition check failed - skip remaining steps
+        elif exec_result.status == PrimitiveResult.CONDITION_NOT_MET:
+            # Condition check failed - skip remaining steps
+            next_wake = _calculate_next_wake(schedule_definition)
+            if next_wake is None:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            current_step = 0,
+                            next_wake_at = NULL,
+                            last_error = 'One-time condition not met',
+                            last_executed_at = NOW()
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "status": AutomationStatus.COMPLETED}
+                )
+            else:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET current_step = 0,
+                            next_wake_at = :next_wake,
+                            last_executed_at = NOW()
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "next_wake": next_wake}
+                )
+            await db.commit()
+            logger.info(f"Automation '{name}' condition not met at step {current_step}")
+            return {"status": "condition_not_met", "step": current_step}
+
+        else:
+            # Success - advance to next step
+            next_step = current_step + 1
+
+            # Check if there's a delay
+            if exec_result.delay_seconds > 0:
+                # Set wake time for after the delay
+                next_wake = datetime.now(timezone.utc) + timedelta(seconds=exec_result.delay_seconds)
+            elif next_step >= len(actions):
+                # Completed all steps
                 next_wake = _calculate_next_wake(schedule_definition)
+                next_step = 0
                 if next_wake is None:
                     await db.execute(
                         text("""
                             UPDATE automation_task
                             SET status = :status,
                                 current_step = 0,
+                                execution_count = execution_count + 1,
                                 next_wake_at = NULL,
-                                last_error = 'One-time condition not met',
-                                last_executed_at = NOW()
+                                last_executed_at = NOW(),
+                                consecutive_errors = 0
                             WHERE id = :task_id
                         """),
                         {"task_id": task_id, "status": AutomationStatus.COMPLETED}
@@ -434,81 +452,38 @@ async def _automation_execute_async(task_id: str):
                         text("""
                             UPDATE automation_task
                             SET current_step = 0,
+                                execution_count = execution_count + 1,
                                 next_wake_at = :next_wake,
-                                last_executed_at = NOW()
+                                last_executed_at = NOW(),
+                                consecutive_errors = 0
                             WHERE id = :task_id
                         """),
                         {"task_id": task_id, "next_wake": next_wake}
                     )
                 await db.commit()
-                logger.info(f"Automation '{name}' condition not met at step {current_step}")
-                return {"status": "condition_not_met", "step": current_step}
-
-            else:
-                # Success - advance to next step
-                next_step = current_step + 1
-
-                # Check if there's a delay
-                if exec_result.delay_seconds > 0:
-                    # Set wake time for after the delay
-                    next_wake = datetime.now(timezone.utc) + timedelta(seconds=exec_result.delay_seconds)
-                elif next_step >= len(actions):
-                    # Completed all steps
-                    next_wake = _calculate_next_wake(schedule_definition)
-                    next_step = 0
-                    if next_wake is None:
-                        await db.execute(
-                            text("""
-                                UPDATE automation_task
-                                SET status = :status,
-                                    current_step = 0,
-                                    execution_count = execution_count + 1,
-                                    next_wake_at = NULL,
-                                    last_executed_at = NOW(),
-                                    consecutive_errors = 0
-                                WHERE id = :task_id
-                            """),
-                            {"task_id": task_id, "status": AutomationStatus.COMPLETED}
-                        )
-                    else:
-                        await db.execute(
-                            text("""
-                                UPDATE automation_task
-                                SET current_step = 0,
-                                    execution_count = execution_count + 1,
-                                    next_wake_at = :next_wake,
-                                    last_executed_at = NOW(),
-                                    consecutive_errors = 0
-                                WHERE id = :task_id
-                            """),
-                            {"task_id": task_id, "next_wake": next_wake}
-                        )
-                    await db.commit()
-                    if next_wake is None:
-                        logger.info(f"Automation '{name}' completed one-time execution")
-                    else:
-                        logger.info(f"Automation '{name}' completed all steps")
-                    return {"status": "cycle_complete", "next_wake": next_wake.isoformat() if next_wake else None}
+                if next_wake is None:
+                    logger.info(f"Automation '{name}' completed one-time execution")
                 else:
-                    # More steps to execute - wake immediately
-                    next_wake = datetime.now(timezone.utc) + timedelta(seconds=1)
+                    logger.info(f"Automation '{name}' completed all steps")
+                return {"status": "cycle_complete", "next_wake": next_wake.isoformat() if next_wake else None}
+            else:
+                # More steps to execute - wake immediately
+                next_wake = datetime.now(timezone.utc) + timedelta(seconds=1)
 
-                await db.execute(
-                    text("""
-                        UPDATE automation_task
-                        SET current_step = :next_step,
-                            next_wake_at = :next_wake,
-                            consecutive_errors = 0
-                        WHERE id = :task_id
-                    """),
-                    {"task_id": task_id, "next_step": next_step, "next_wake": next_wake}
-                )
-                await db.commit()
+            await db.execute(
+                text("""
+                    UPDATE automation_task
+                    SET current_step = :next_step,
+                        next_wake_at = :next_wake,
+                        consecutive_errors = 0
+                    WHERE id = :task_id
+                """),
+                {"task_id": task_id, "next_step": next_step, "next_wake": next_wake}
+            )
+            await db.commit()
 
-                logger.info(f"Automation '{name}' step {current_step} complete, next step {next_step}")
-                return {"status": "step_complete", "step": current_step, "next_step": next_step}
-    finally:
-        await engine.dispose()
+            logger.info(f"Automation '{name}' step {current_step} complete, next step {next_step}")
+            return {"status": "step_complete", "step": current_step, "next_step": next_step}
 
 
 async def _check_conditions(conditions: list, db) -> bool:

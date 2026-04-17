@@ -21,8 +21,13 @@ from typing import Optional
 from app.core.timezone import now as local_now
 
 from app.services.deliberation import DeliberationResult, NotificationProposal, HomeActionProposal, TaskProposal
+from app.services.silent_failure_tracker import Tracker
 
 logger = logging.getLogger(__name__)
+
+# Single tracker per gate — reasons differentiate the 8 post-deliberation
+# side-effect paths that used to fail to DEBUG-only logs.
+_GATE_TRACKER = Tracker("deliberation_gate")
 
 DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
@@ -202,6 +207,7 @@ async def process_deliberation_result(
             await _deliver_notification(user_id, proposal)
             summary["notifications_sent"] += 1
         except Exception as e:
+            _GATE_TRACKER.note(f"notify_delivery:{type(e).__name__}")
             logger.error(f"[DeliberationGate] Notification delivery failed: {e}")
 
     # 2. Process home actions
@@ -216,6 +222,7 @@ async def process_deliberation_result(
             await _execute_home_action(user_id, action)
             summary["home_actions_executed"] += 1
         except Exception as e:
+            _GATE_TRACKER.note(f"home_action:{type(e).__name__}")
             logger.error(f"[DeliberationGate] Home action failed: {e}")
 
     # 3. Process task proposals
@@ -241,6 +248,7 @@ async def process_deliberation_result(
         await increment_deliberation_count(user_id)
         summary["state_updated"] = bool(result.state_update)
     except Exception as e:
+        _GATE_TRACKER.note(f"state_update:{type(e).__name__}")
         logger.error(f"[DeliberationGate] State update failed: {e}")
 
     # 5. Update handoff note and watching_for in working memory
@@ -260,6 +268,7 @@ async def process_deliberation_result(
         fields["last_heartbeat_at"] = now_iso
         await update_memory(user_id, source="deliberation_gate", **fields)
     except Exception as e:
+        _GATE_TRACKER.note(f"handoff:{type(e).__name__}")
         logger.error(f"[DeliberationGate] Handoff update failed: {e}")
 
     # 6. Consume processed observations
@@ -269,6 +278,7 @@ async def process_deliberation_result(
             consumed = await consume_observations(user_id, result.observations_consumed)
             summary["observations_consumed"] = consumed
         except Exception as e:
+            _GATE_TRACKER.note(f"obs_consume:{type(e).__name__}")
             logger.error(f"[DeliberationGate] Observation consumption failed: {e}")
 
     # 7. Write journal entry
@@ -277,12 +287,14 @@ async def process_deliberation_result(
             await _write_journal(user_id, result)
             summary["journal_written"] = True
         except Exception as e:
+            _GATE_TRACKER.note(f"journal:{type(e).__name__}")
             logger.error(f"[DeliberationGate] Journal write failed: {e}")
 
     # 8. Write agent_run_log
     try:
         await _write_run_log(user_id, result, summary)
     except Exception as e:
+        _GATE_TRACKER.note(f"run_log:{type(e).__name__}")
         logger.error(f"[DeliberationGate] Run log write failed: {e}")
 
     logger.info(f"[DeliberationGate] Result: {summary}")
