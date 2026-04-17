@@ -517,20 +517,36 @@ class MemoryService:
         Returns:
             List of search results with type, text, score, etc.
         """
+        from app.services import retrieval_observer
+        import time as _time
+        _funnel_start = _time.monotonic()
+
         if scopes is None:
             scopes = ["episodes", "notes", "docs", "summaries"]
 
-        results = []
+        results: List[Dict[str, Any]] = []
 
         # Get embedding for query
         embedding_fn = self._get_embedding_service()
         if not embedding_fn:
             logger.error("Embedding service not available")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                degraded=True, error="embedding_service_unavailable",
+                metadata={"scopes": scopes},
+            )
             return results
 
         query_embedding = await embedding_fn(query)
         if not query_embedding:
             logger.error("Failed to generate query embedding")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                degraded=True, error="query_embedding_failed",
+                metadata={"scopes": scopes},
+            )
             return results
 
         # Get db session - support both init patterns
@@ -617,10 +633,22 @@ class MemoryService:
             # Sort all results by score
             results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-            return results[:limit * 2]  # Return top results across all scopes
+            top = results[:limit * 2]
+            retrieval_observer.record(
+                "memory_service.search_memory", query, len(top),
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                metadata={"scopes": scopes, "raw_count": len(results)},
+            )
+            return top  # Return top results across all scopes
 
         except Exception as e:
             logger.error(f"Memory search failed: {e}")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                error=type(e).__name__,
+                metadata={"scopes": scopes},
+            )
             raise
         finally:
             if should_close:

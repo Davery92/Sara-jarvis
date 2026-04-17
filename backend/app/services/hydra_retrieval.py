@@ -106,12 +106,21 @@ class HydraRetrieval:
             # Execute in parallel
             results_by_source = await asyncio.gather(*retrieval_tasks, return_exceptions=True)
 
-            # Combine results
+            # Combine results; record each source's contribution to the funnel
+            # so we can spot a single-source failure (e.g. Neo4j down) that
+            # would otherwise vanish behind return_exceptions=True.
+            from app.services import retrieval_observer as _obs
+            import time as _time
             all_results = []
-            for source_results in results_by_source:
+            for source_name, source_results in zip(sources, results_by_source):
                 if isinstance(source_results, Exception):
-                    logger.error(f"Source retrieval failed: {source_results}")
+                    logger.error(f"Source {source_name} retrieval failed: {source_results}")
+                    _obs.record(
+                        f"hydra.{source_name}", query, 0, 0.0,
+                        error=type(source_results).__name__,
+                    )
                     continue
+                _obs.record(f"hydra.{source_name}", query, len(source_results), 0.0)
                 all_results.extend(source_results)
 
             logger.info(f"Retrieved {len(all_results)} total results before fusion")

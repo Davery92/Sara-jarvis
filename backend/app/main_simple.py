@@ -4049,14 +4049,21 @@ class ContextWindowManager:
         )
     
     async def retrieve_episodes_with_window(
-        self, 
-        user_id: str, 
+        self,
+        user_id: str,
         window_config: ContextWindowConfig,
         query: str = None,
         limit: int = 10
     ) -> List[dict]:
         """Retrieve episodes using context window"""
-        
+
+        from app.services import retrieval_observer
+        import time as _time
+        _funnel_start = _time.monotonic()
+        _funnel_source = f"episodes.{window_config.window_type.name.lower()}"
+        _funnel_err: str | None = None
+        _funnel_results: list[dict] = []
+
         db = SessionLocal()
         try:
             # Start with base query
@@ -4228,6 +4235,7 @@ class ContextWindowManager:
 
                 db.commit()
                 logger.info(f"[Memory] Vector search returned {len(episode_data)} episodes with semantic similarity")
+                _funnel_results = episode_data
                 return episode_data
 
             # Use composite score with temporal decay for non-semantic retrieval
@@ -4312,10 +4320,22 @@ class ContextWindowManager:
                 db.commit()
 
             logger.info(f"[Memory] Non-semantic retrieval returned {len(episode_data)} episodes with decay scoring")
+            _funnel_results = episode_data
             return episode_data
-            
+
+        except Exception as _exc:
+            _funnel_err = type(_exc).__name__
+            raise
         finally:
             db.close()
+            retrieval_observer.record(
+                _funnel_source,
+                query or "",
+                len(_funnel_results),
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                error=_funnel_err,
+                metadata={"user_id": user_id, "limit": limit},
+            )
 
 class IntelligentMemoryService:
     """Enhanced memory service with context windows and emotional intelligence"""
@@ -5718,6 +5738,8 @@ app.include_router(session_router)
 # Debug/observability routes
 from app.routes.debug_notifications import router as debug_notifications_router
 app.include_router(debug_notifications_router)
+from app.routes.debug_retrieval import router as debug_retrieval_router
+app.include_router(debug_retrieval_router)
 
 # Autonomous Cognition System (ACS)
 from app.routes.acs import router as acs_router
