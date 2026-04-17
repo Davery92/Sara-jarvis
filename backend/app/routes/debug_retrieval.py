@@ -49,4 +49,13 @@ async def retrieval_funnel(
     except Exception as exc:  # pragma: no cover
         snap["silent_failures"] = {"error": f"stats_unavailable: {exc.__class__.__name__}"}
 
+    # Memory health — embedding gap counts for episodes and PKG. A spike in
+    # gaps means the embedding service has been silently failing and
+    # retrieval is about to look dumber than it should.
+    try:
+        from app.services.personal_knowledge_graph import get_memory_health
+        snap["memory_health"] = get_memory_health()
+    except Exception as exc:
+        snap["memory_health"] = {"error": f"health_check_failed:{exc.__class__.__name__}"}
+
     return snap

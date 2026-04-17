@@ -47,9 +47,53 @@ class PersonalKnowledgeGraph:
     Every node carries confidence, source provenance, and temporal versioning.
     """
 
+    # On-demand backfill rate limit. Without this, a flurry of zero-result
+    # semantic queries would each trigger their own Neo4j-heavy backfill run.
+    _last_backfill_attempt: float = 0.0
+    _BACKFILL_COOLDOWN_SEC: float = 300.0  # 5 minutes
+
     def __init__(self):
         self.driver = None
         self._initialized = False
+
+    def _maybe_schedule_backfill(self, reason: str = "") -> None:
+        """Fire-and-forget backfill, gated by a class-level cooldown.
+
+        Called when ``query_semantic`` hits a zero-match — common failure
+        mode is that pkg_embedding is missing rows for nodes Neo4j has.
+        The regular hourly reconcile will eventually catch it, but that
+        leaves Sara looking forgetful for up to an hour.
+        """
+        import time as _time
+        import asyncio as _asyncio
+        now = _time.monotonic()
+        if now - type(self)._last_backfill_attempt < self._BACKFILL_COOLDOWN_SEC:
+            return  # still cooling down
+        type(self)._last_backfill_attempt = now
+
+        try:
+            loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop — not much we can do from sync context.
+            _PKG_EMBEDDING_TRACKER.note(f"backfill_skipped_no_loop:{reason}")
+            return
+
+        async def _run_backfill():
+            try:
+                # backfill_embeddings is async; awaiting directly keeps us
+                # on the current event loop. to_thread would give us a
+                # coroutine object instead of running it.
+                count = await self.backfill_embeddings()
+                if count:
+                    logger.info(
+                        f"PKG: on-demand backfill ({reason}) filled {count} nodes"
+                    )
+                else:
+                    logger.debug(f"PKG: on-demand backfill ({reason}) found no gaps")
+            except Exception as exc:
+                _PKG_EMBEDDING_TRACKER.note(f"backfill_failed:{type(exc).__name__}")
+
+        loop.create_task(_run_backfill())
 
     def _ensure_driver(self):
         """Lazy-initialize Neo4j driver"""
@@ -1612,6 +1656,12 @@ class PersonalKnowledgeGraph:
                 engine.dispose()
 
             if not matches:
+                # Zero semantic matches is legitimate when nothing is relevant,
+                # but it also hides the case where pkg_embedding is simply
+                # missing rows for nodes Neo4j has. Schedule a fire-and-forget
+                # backfill (rate-limited) so we self-heal rather than waiting
+                # for the hourly reconcile.
+                self._maybe_schedule_backfill(reason="zero_semantic_matches")
                 return []
 
             # Fetch full node data from Neo4j
@@ -1682,13 +1732,16 @@ class PersonalKnowledgeGraph:
             logger.error(f"PKG: backfill_embeddings — Neo4j query failed: {e}")
             return 0
 
-        # Check which pkg_ids already have embeddings
+        # Check which pkg_ids already have embeddings.
+        # Keep the psycopg3 driver in the URL — bare ``postgresql://`` defaults
+        # to psycopg2, which isn't installed. Previously this silently broke
+        # every backfill attempt with ModuleNotFoundError.
         from sqlalchemy import text as sa_text
         database_url = os.getenv("DATABASE_URL", "")
         if "asyncpg" in database_url:
-            database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-        elif "psycopg" in database_url:
-            database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+            database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        elif not database_url.startswith("postgresql+psycopg://"):
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker as sync_sm
@@ -1725,3 +1778,71 @@ class PersonalKnowledgeGraph:
 
 # Singleton instance
 personal_kg = PersonalKnowledgeGraph()
+
+
+def get_memory_health() -> Dict[str, Any]:
+    """Count embedding gaps — PKG nodes without a pkg_embedding row and
+    episodes with NULL embeddings.
+
+    Used by /debug/retrieval-funnel so a stuck embedding pipeline shows up
+    at a glance instead of silently eroding retrieval quality.
+    """
+    from sqlalchemy import create_engine, text as sa_text
+    from sqlalchemy.orm import sessionmaker as _sm
+
+    health: Dict[str, Any] = {
+        "episode_embedding_gaps": None,
+        "episode_total": None,
+        "pkg_embedding_gaps": None,
+        "pkg_active_total": None,
+    }
+
+    database_url = os.getenv("DATABASE_URL", "")
+    if "asyncpg" in database_url:
+        database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    elif not database_url.startswith("postgresql+psycopg://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    try:
+        engine = create_engine(database_url, echo=False)
+        Session = _sm(bind=engine)
+        session = Session()
+        try:
+            row = session.execute(sa_text(
+                "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE embedding IS NULL) AS gaps FROM episode"
+            )).fetchone()
+            if row:
+                health["episode_total"] = int(row.total or 0)
+                health["episode_embedding_gaps"] = int(row.gaps or 0)
+
+            row = session.execute(sa_text(
+                "SELECT COUNT(*) AS total FROM pkg_embedding"
+            )).fetchone()
+            pkg_embedding_count = int(row.total or 0) if row else 0
+        finally:
+            session.close()
+            engine.dispose()
+    except Exception as exc:
+        health["error"] = f"pg_query_failed:{type(exc).__name__}"
+        return health
+
+    # PKG active count from Neo4j (may fail if Neo4j down — that's fine).
+    try:
+        if personal_kg._ensure_driver():
+            with personal_kg.driver.session() as neo:
+                result = neo.run(
+                    f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                      AND n.superseded_by IS NULL
+                    RETURN count(n) AS c
+                    """
+                )
+                record = result.single()
+                active = int(record["c"]) if record else 0
+                health["pkg_active_total"] = active
+                health["pkg_embedding_gaps"] = max(0, active - pkg_embedding_count)
+    except Exception as exc:
+        health["pkg_error"] = f"neo4j_query_failed:{type(exc).__name__}"
+
+    return health
