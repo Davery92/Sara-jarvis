@@ -39,6 +39,26 @@ BASE_PROPERTIES = [
 ]
 
 
+def _to_psycopg3_url(database_url: str) -> str:
+    """Force a ``postgresql+psycopg://`` (psycopg3) URL.
+
+    The async engine factory uses ``+asyncpg`` URLs. Everywhere this file
+    opens a sync engine it used to strip the driver suffix and fall back
+    to bare ``postgresql://``, which defaults to psycopg2. psycopg2 isn't
+    installed in this project, so every on-demand PKG DB call silently
+    hit ``ModuleNotFoundError``. One helper, one correct answer.
+    """
+    if not database_url:
+        return database_url
+    if "postgresql+asyncpg://" in database_url:
+        return database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    if database_url.startswith("postgresql+psycopg://"):
+        return database_url
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
 class PersonalKnowledgeGraph:
     """
     Neo4j-based personal knowledge graph about David.
@@ -840,12 +860,9 @@ class PersonalKnowledgeGraph:
 
         # Otherwise create our own sync session
         try:
-            database_url = os.getenv("DATABASE_URL", "")
-            # Ensure we use a sync driver
-            if "asyncpg" in database_url:
-                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-            elif "psycopg" in database_url:
-                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+            # Keep psycopg3 driver — bare postgresql:// defaults to psycopg2,
+            # which isn't installed. Use project-wide psycopg3 suffix.
+            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
 
             from sqlalchemy import create_engine
             engine = create_engine(database_url, echo=False)
@@ -1279,11 +1296,7 @@ class PersonalKnowledgeGraph:
                 return []
         else:
             try:
-                database_url = os.getenv("DATABASE_URL", "")
-                if "asyncpg" in database_url:
-                    database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-                elif "psycopg" in database_url:
-                    database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+                database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
 
                 from sqlalchemy import create_engine
                 from sqlalchemy.orm import sessionmaker as sync_sessionmaker
@@ -1563,11 +1576,7 @@ class PersonalKnowledgeGraph:
                 return False
 
             from sqlalchemy import text as sa_text
-            database_url = os.getenv("DATABASE_URL", "")
-            if "asyncpg" in database_url:
-                database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-            elif "psycopg" in database_url:
-                database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
 
             from sqlalchemy import create_engine
             from sqlalchemy.orm import sessionmaker as sync_sm
