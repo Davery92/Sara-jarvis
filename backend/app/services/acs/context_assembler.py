@@ -25,189 +25,65 @@ OPEN_THREADS_KEY = "sara:acs:open_threads:{user_id}"
 DAILY_PLAN_KEY = "sara:acs:daily_plan:{user_id}"
 
 
-def assemble_context(db: Session, user_id: str) -> dict:
-    """Assemble the full context packet for an autonomous session.
-
-    Returns a dict with keys: soul_block, context_block, curiosity_block,
-    show_david_block, handoff_block
-    """
-    soul_block = _load_soul(db)
-    context_block = _build_context_block(db, user_id)
-    curiosity_block = _build_curiosity_block(db, user_id)
-    show_david_block = _build_show_david_block(db, user_id)
-    handoff_block = _load_last_handoff(user_id)
-
-    return {
-        "soul_block": soul_block,
-        "context_block": context_block,
-        "curiosity_block": curiosity_block,
-        "show_david_block": show_david_block,
-        "handoff_block": handoff_block,
-    }
-
-
-def _load_soul(db: Session) -> str:
-    try:
-        from app.services.soul_loader import load_soul_for_prompt
-        return load_soul_for_prompt(db) or ""
-    except Exception as e:
-        logger.warning(f"Failed to load soul: {e}")
-        return ""
-
-
-def _build_context_block(db: Session, user_id: str) -> str:
-    """Build context from stable/day layers and recent episodes."""
-    parts = []
-
-    # Stable layer
-    try:
-        from app.services.daily_brief.stable_layer import build_stable_layer
-        stable = build_stable_layer(db, user_id)
-        if stable:
-            parts.append(f"## World Context\n{stable}")
-    except Exception as e:
-        logger.debug(f"Stable layer unavailable: {e}")
-
-    # Day layer
-    try:
-        from app.services.daily_brief.day_layer import build_day_layer
-        day = build_day_layer(db, user_id)
-        if day:
-            parts.append(f"## Today\n{day}")
-    except Exception as e:
-        logger.debug(f"Day layer unavailable: {e}")
-
-    # Recent episodes (last 5)
-    try:
-        result = db.execute(text("""
-            SELECT content, importance, created_at
-            FROM episode
-            WHERE user_id = :uid
-            ORDER BY created_at DESC
-            LIMIT 5
-        """), {"uid": user_id})
-        rows = result.fetchall()
-        if rows:
-            ep_lines = []
-            for row in rows:
-                content = (row[0] or "")[:200]
-                ep_lines.append(f"- [{row[2].strftime('%H:%M') if row[2] else '?'}] {content}")
-            parts.append(f"## Recent Memories\n" + "\n".join(ep_lines))
-    except Exception as e:
-        logger.debug(f"Episode fetch failed: {e}")
-
-    return "\n\n".join(parts) if parts else ""
-
-
-def _build_curiosity_block(db: Session, user_id: str) -> str:
-    """Legacy curiosity block — replaced by interest graph in v2."""
-    return ""
-
-
-def _build_show_david_block(db: Session, user_id: str) -> str:
-    """Load unshown show-david items."""
-    try:
-        result = db.execute(text("""
-            SELECT title, category, created_at
-            FROM acs_show_david_buffer
-            WHERE user_id = :uid AND shown = FALSE
-            ORDER BY priority DESC
-            LIMIT 5
-        """), {"uid": user_id})
-        rows = result.fetchall()
-        if not rows:
-            return ""
-        lines = []
-        for row in rows:
-            lines.append(f"- [{row[1]}] {row[0]}")
-        return "Already queued to show David:\n" + "\n".join(lines)
-    except Exception as e:
-        logger.debug(f"Show-david fetch failed: {e}")
-        return ""
-
-
-def _load_last_handoff(user_id: str) -> str:
-    """Load the last session handoff from Redis."""
-    try:
-        r = redis.from_url(REDIS_URL, decode_responses=True)
-        try:
-            raw = r.get(HANDOFF_KEY.format(user_id=user_id))
-            if not raw:
-                return ""
-            handoff = json.loads(raw)
-            parts = ["## Where I Left Off"]
-            if handoff.get("was_doing"):
-                parts.append(f"I was working on: {handoff['was_doing']}")
-            if handoff.get("got_to"):
-                parts.append(f"I got to: {handoff['got_to']}")
-            if handoff.get("next_time"):
-                parts.append(f"Next time I want to: {handoff['next_time']}")
-            if handoff.get("open_questions"):
-                parts.append(f"Open questions: {handoff['open_questions']}")
-            return "\n".join(parts)
-        finally:
-            r.close()
-    except Exception as e:
-        logger.debug(f"Failed to load handoff: {e}")
-        return ""
-
-
-# ── v2 Async Context Assembly ──
+# ── Async Context Assembly ──
 
 async def assemble_context_v2(user_id: str, mode: str) -> dict:
     """Assemble the full context packet for a v2 autonomous session (async).
 
-    Returns dict with keys: soul_block, context_block, interest_graph_block,
-    self_model_block, mode_context_block, show_david_block, handoff_block
+    Runs block builders in parallel. Critical blocks (soul, self_model,
+    mode_context) fail loud — if any raise, the exception propagates so the
+    caller (session start) fails rather than silently producing a degraded
+    prompt. Secondary blocks (interest graph, journals, PKG, calendar, etc.)
+    degrade gracefully with a visible marker in the rendered prompt so the
+    LLM knows context is missing.
     """
     import asyncio
 
-    # Run independent context builders in parallel
+    # (name, coroutine, is_critical)
+    # Order determines key mapping below — do not reorder without updating
+    # both the gather() and the return dict.
+    builders = [
+        ("soul_block",            _async_load_soul(user_id),                      True),
+        ("context_block",         _async_build_context_block(user_id),            False),
+        ("interest_graph_block",  _build_interest_graph_block(user_id),           False),
+        ("self_model_block",      _build_self_model_block(user_id),               True),
+        ("mode_context_block",    _build_mode_context_block(user_id, mode),       True),
+        ("show_david_block",      _async_build_show_david_block(user_id),         False),
+        ("handoff_block",         _async_load_session_history(user_id),           False),
+        ("temporal_block",        _build_temporal_block(user_id),                 False),
+        ("journal_context_block", _build_journal_context(user_id),                False),
+        ("open_threads_block",    _async_load_open_threads(user_id),              False),
+        ("daily_plan_block",      _async_load_daily_plan(user_id),                False),
+        ("pkg_context_block",     _build_pkg_context_block(user_id),              False),
+        ("calendar_context_block", _build_calendar_context_block(user_id),        False),
+        ("operational_knowledge_block", _build_operational_knowledge_block(user_id), False),
+        ("directives_block",      _async_load_directives(user_id),                False),
+    ]
     results = await asyncio.gather(
-        _async_load_soul(user_id),             # 0
-        _async_build_context_block(user_id),   # 1
-        _build_interest_graph_block(user_id),  # 2
-        _build_self_model_block(user_id),      # 3
-        _build_mode_context_block(user_id, mode),  # 4
-        _async_build_show_david_block(user_id),    # 5
-        _async_load_session_history(user_id),  # 6 — replaces _async_load_last_handoff
-        _build_temporal_block(user_id),        # 7
-        _build_journal_context(user_id),       # 8
-        _async_load_open_threads(user_id),     # 9
-        _async_load_daily_plan(user_id),       # 10
-        _build_pkg_context_block(user_id),     # 11
-        _build_calendar_context_block(user_id),  # 12
-        _build_operational_knowledge_block(user_id),  # 13
-        _async_load_directives(user_id),       # 14
+        *(b[1] for b in builders),
         return_exceptions=True,
     )
 
-    def _safe(idx, default=""):
-        val = results[idx]
-        return val if isinstance(val, str) else default
+    out: dict = {}
+    for (name, _coro, critical), val in zip(builders, results):
+        if isinstance(val, BaseException):
+            if critical:
+                logger.error(
+                    f"ACS context assembly: critical block '{name}' failed: {val}",
+                    exc_info=val,
+                )
+                raise val
+            logger.warning(f"ACS context assembly: block '{name}' failed, degrading: {val}")
+            out[name] = f"*[{name} unavailable: {type(val).__name__}]*"
+        else:
+            out[name] = val if isinstance(val, str) else ""
 
     # Prepend daily plan to handoff block so Sara sees her plan for the day
-    handoff = _safe(6)
-    daily_plan = _safe(10)
+    daily_plan = out.pop("daily_plan_block", "")
     if daily_plan:
-        handoff = f"## Today's Plan\n{daily_plan}\n\n{handoff}".strip()
+        out["handoff_block"] = f"## Today's Plan\n{daily_plan}\n\n{out.get('handoff_block', '')}".strip()
 
-    return {
-        "soul_block": _safe(0),
-        "context_block": _safe(1),
-        "interest_graph_block": _safe(2),
-        "self_model_block": _safe(3),
-        "mode_context_block": _safe(4),
-        "show_david_block": _safe(5),
-        "handoff_block": handoff,
-        "temporal_block": _safe(7),
-        "journal_context_block": _safe(8),
-        "open_threads_block": _safe(9),
-        "pkg_context_block": _safe(11),
-        "calendar_context_block": _safe(12),
-        "operational_knowledge_block": _safe(13),
-        "directives_block": _safe(14),
-    }
+    return out
 
 
 async def _async_load_soul(user_id: str) -> str:
@@ -325,7 +201,7 @@ async def _build_interest_graph_block(user_id: str) -> str:
             return "(Interest graph is empty — explore freely!)"
 
         lines = [f"Active: {data['stats']['total_active']} nodes, showing top {len(data['nodes'])}"]
-        for node in data["nodes"][:15]:  # Cap to top 15
+        for node in data["nodes"]:
             fasc = node.get("fascination", 0)
             depth = node.get("depth", 0)
             tag = " [David requested]" if node.get("source") == "david_request" else ""

@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 class InterestGraph:
     """Manages the ACS interest graph (nodes + edges) in PostgreSQL with Neo4j mirror."""
 
+    # Class-level divergence counters so failures are visible even when
+    # individual calls are fire-and-forget. Reset on process restart.
+    _neo4j_sync_failures = 0
+    _neo4j_last_warn_ts = 0.0
+    _NEO4J_WARN_INTERVAL_SEC = 300  # Re-warn at most every 5 min per-class
+
     def __init__(self):
         self._neo4j_driver = None
 
@@ -41,6 +47,31 @@ class InterestGraph:
         except Exception as e:
             logger.debug(f"Neo4j not available: {e}")
             return None
+
+    @classmethod
+    def _log_neo4j_failure(cls, kind: str, err: Exception):
+        """Rate-limited WARNING log so one-off outages don't flood, but sustained
+        divergence between PG and Neo4j is visible in ops dashboards."""
+        import time
+        cls._neo4j_sync_failures += 1
+        now = time.time()
+        if now - cls._neo4j_last_warn_ts >= cls._NEO4J_WARN_INTERVAL_SEC:
+            logger.warning(
+                f"Neo4j {kind} sync failed (total failures since restart: "
+                f"{cls._neo4j_sync_failures}): {err}"
+            )
+            cls._neo4j_last_warn_ts = now
+        else:
+            logger.debug(f"Neo4j {kind} sync failed: {err}")
+
+    def close(self):
+        """Close the Neo4j driver. Safe to call multiple times."""
+        if self._neo4j_driver is not None:
+            try:
+                self._neo4j_driver.close()
+            except Exception:
+                pass
+            self._neo4j_driver = None
 
     async def _neo4j_sync_node(self, node_data: dict):
         """Fire-and-forget sync of an interest node to Neo4j."""
@@ -59,7 +90,7 @@ class InterestGraph:
                     **node_data,
                 )
         except Exception as e:
-            logger.debug(f"Neo4j node sync failed: {e}")
+            self._log_neo4j_failure("node", e)
 
     async def _sync_to_pkg_interest(self, label: str, description: str, depth: str):
         """Fire-and-forget sync of an interest node to PKG as a PKG_Interest fact."""
@@ -97,7 +128,7 @@ class InterestGraph:
                     **edge_data,
                 )
         except Exception as e:
-            logger.debug(f"Neo4j edge sync failed: {e}")
+            self._log_neo4j_failure("edge", e)
 
     async def add_node(
         self,
@@ -139,7 +170,7 @@ class InterestGraph:
                 # Exact match — merge
                 node_id = row[0]
                 new_fascination = min(1.0, row[3] + 0.1)
-                new_desc = description if len(description) > len(row[1] or "") else row[2]
+                new_desc = description if len(description) > len(row[2] or "") else row[2]
                 await db.execute(text("""
                     UPDATE acs_interest_node
                     SET fascination = :fasc, description = :desc,

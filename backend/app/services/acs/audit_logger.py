@@ -66,21 +66,49 @@ async def _llm_call_with_retry(client, **kwargs):
 class TranscriptBuffer:
     """Accumulates raw turn data during an ACS session for later persistence."""
 
+    # Hard cap on non-system entries. A 6-hour session at 10 turns/min could
+    # theoretically hit thousands of entries; we keep the most-recent ones plus
+    # a single elided marker summarizing what was dropped.
+    MAX_ENTRIES = int(os.environ.get("ACS_TRANSCRIPT_MAX_ENTRIES", "2000"))
+
     def __init__(self, session_id: str, mode: Optional[str] = None):
         self.session_id = session_id
         self.mode = mode
         self.started_at = datetime.now(ET).isoformat()
         self.entries: list[dict] = []
+        self._dropped_entries = 0
+
+    def _append(self, entry: dict):
+        self.entries.append(entry)
+        if len(self.entries) > self.MAX_ENTRIES:
+            # Drop the oldest non-system entries, keeping the system_prompt
+            # (usually entries[0]) at the head. We drop in chunks of 10% of
+            # MAX_ENTRIES so we don't re-trigger on every single append.
+            drop_n = max(1, self.MAX_ENTRIES // 10)
+            start = 1 if self.entries and self.entries[0].get("type") == "system_prompt" else 0
+            del self.entries[start:start + drop_n]
+            self._dropped_entries += drop_n
+            marker = {
+                "type": "elided",
+                "dropped": self._dropped_entries,
+                "note": f"{self._dropped_entries} older entries dropped to keep transcript bounded",
+                "ts": datetime.now(ET).isoformat(),
+            }
+            # Replace the prior elided marker if one exists, else insert one.
+            if len(self.entries) > start and self.entries[start].get("type") == "elided":
+                self.entries[start] = marker
+            else:
+                self.entries.insert(start, marker)
 
     def record_system_prompt(self, prompt: str):
-        self.entries.append({
+        self._append({
             "type": "system_prompt",
             "content": prompt[:2000],
             "ts": datetime.now(ET).isoformat(),
         })
 
     def record_user_turn(self, turn: int, content: str):
-        self.entries.append({
+        self._append({
             "type": "user_turn",
             "turn": turn,
             "content": content[:3000],
@@ -102,10 +130,10 @@ class TranscriptBuffer:
                 }
                 for tc in tool_calls
             ]
-        self.entries.append(entry)
+        self._append(entry)
 
     def record_tool_result(self, turn: int, tool_name: str, args: str, result: str):
-        self.entries.append({
+        self._append({
             "type": "tool_result",
             "turn": turn,
             "tool": tool_name,
@@ -147,6 +175,8 @@ class TranscriptBuffer:
                 lines.append("")
             elif etype == "tool_result":
                 lines.append(f"  ← {e['tool']} result [{ts}]: {e['result']}\n")
+            elif etype == "elided":
+                lines.append(f"\n[...{e.get('dropped', 0)} older entries dropped to keep transcript bounded...]\n")
 
         return "\n".join(lines)
 
@@ -242,6 +272,44 @@ async def persist_transcript(user_id: str, transcript: TranscriptBuffer):
             await db.commit()
     except Exception as e:
         logger.warning(f"Durable transcript persistence failed for {transcript.session_id[:8]}: {e}")
+
+
+async def persist_transcript_durable_only(user_id: str, transcript: TranscriptBuffer):
+    """Write transcript to Postgres only (skip Redis bookkeeping).
+
+    Cheaper than persist_transcript — designed to be called mid-session on a
+    rate-limited cadence so orphaned sessions aren't lost.
+    """
+    if not transcript or not transcript.entries:
+        return
+    try:
+        from app.db.session import get_async_session_factory
+        async_session = get_async_session_factory()
+        transcript_payload = json.loads(transcript.to_json())
+        async with async_session() as db:
+            await db.execute(text("""
+                INSERT INTO acs_session_transcript (
+                    id, user_id, session_id, mode, started_at, transcript_json, raw_text, created_at, updated_at
+                )
+                VALUES (
+                    :id, :uid, :sid, :mode, :started_at, CAST(:payload AS JSONB), :raw_text, NOW(), NOW()
+                )
+                ON CONFLICT (session_id) DO UPDATE
+                SET transcript_json = EXCLUDED.transcript_json,
+                    raw_text = EXCLUDED.raw_text,
+                    updated_at = NOW()
+            """), {
+                "id": str(uuid.uuid4()),
+                "uid": user_id,
+                "sid": transcript.session_id,
+                "mode": transcript.mode,
+                "started_at": datetime.fromisoformat(transcript_payload["started_at"]) if transcript_payload.get("started_at") else datetime.now(ET),
+                "payload": json.dumps(transcript_payload),
+                "raw_text": transcript.to_raw_text(),
+            })
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"Mid-session durable persist failed for {transcript.session_id[:8]}: {e}")
 
 
 # ── Humanized Session Log ──────────────────────────────────────────
@@ -584,6 +652,8 @@ async def run_daily_audit(user_id: str):
 
         # ── Step 2: Multi-turn dialogue (3 rounds) ──
         dialogue_parts = [f"## Auditor Assessment\n\n{auditor_assessment}"]
+        dialogue_status = "complete"  # 'complete' | 'partial'
+        failed_rounds: list[str] = []
 
         conversation = [
             {"role": "system", "content": SARA_AUDIT_RESPONSE_PROMPT},
@@ -591,6 +661,7 @@ async def run_daily_audit(user_id: str):
         ]
 
         for round_num in range(3):
+            label = ["Initial Response", "Follow-up", "Final Thoughts"][round_num]
             # Sara responds
             sara_response = await _llm_call_with_retry(
                 client,
@@ -601,10 +672,19 @@ async def run_daily_audit(user_id: str):
                 allow_during_lesson_generation=True,
             )
             if not sara_response:
+                dialogue_status = "partial"
+                failed_rounds.append(f"Sara {label}")
+                logger.warning(
+                    f"ACS audit: Sara's '{label}' (round {round_num + 1}) failed after retries — "
+                    f"continuing with partial dialogue"
+                )
+                dialogue_parts.append(
+                    f"## Sara's {label}\n\n*[round failed: LLM unavailable after retries]*"
+                )
+                # Can't continue dialogue without Sara's response — break the loop
                 break
 
             conversation.append({"role": "assistant", "content": sara_response})
-            label = ["Initial Response", "Follow-up", "Final Thoughts"][round_num]
             dialogue_parts.append(f"## Sara's {label}\n\n{sara_response}")
 
             if round_num < 2:
@@ -625,20 +705,36 @@ async def run_daily_audit(user_id: str):
                     request_timeout=600.0,
                     allow_during_lesson_generation=True,
                 )
+                followup_label = ["First Follow-up", "Final Follow-up"][round_num]
                 if not auditor_followup:
+                    dialogue_status = "partial"
+                    failed_rounds.append(f"Auditor {followup_label}")
+                    logger.warning(
+                        f"ACS audit: auditor's '{followup_label}' (round {round_num + 1}) "
+                        f"failed after retries — ending dialogue early"
+                    )
+                    dialogue_parts.append(
+                        f"## Auditor's {followup_label}\n\n*[round failed: LLM unavailable after retries]*"
+                    )
                     break
 
-                followup_label = ["First Follow-up", "Final Follow-up"][round_num]
                 dialogue_parts.append(f"## Auditor's {followup_label}\n\n{auditor_followup}")
                 conversation.append({"role": "user", "content": f"The auditor responds:\n\n{auditor_followup}"})
 
         # ── Step 3: Save to audit note ──
         full_audit = "\n\n---\n\n".join(dialogue_parts)
         audit_title = f"ACS Audit — {today}"
-        header = f"# {audit_title}\n\n*{len(session_ids)} session(s) reviewed*\n\n"
+        status_note = ""
+        if dialogue_status == "partial":
+            status_note = f"\n\n*⚠ Audit dialogue incomplete. Failed rounds: {', '.join(failed_rounds)}*"
+        header = f"# {audit_title}\n\n*{len(session_ids)} session(s) reviewed*{status_note}\n\n"
         await _save_log_note(user_id, audit_title, header + full_audit)
 
-        logger.info(f"ACS daily audit complete: {len(session_ids)} sessions, {len(dialogue_parts)} dialogue sections")
+        logger.info(
+            f"ACS daily audit {dialogue_status}: {len(session_ids)} sessions, "
+            f"{len(dialogue_parts)} dialogue sections"
+            + (f", failed: {failed_rounds}" if failed_rounds else "")
+        )
 
         # Extract "Feedback for Tomorrow's Plan" and store in Redis for morning plan
         try:

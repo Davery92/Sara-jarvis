@@ -73,6 +73,10 @@ class SendACSDirectiveTool(BaseTool):
             "required": ["directive_type", "content"],
         }
 
+    # Rate limits: prevent runaway directive creation from a bad chat loop.
+    MAX_PENDING_PER_USER = 10
+    MAX_PER_HOUR = 20
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         directive_type = kwargs.get("directive_type", "").strip()
         content = kwargs.get("content", "").strip()
@@ -98,6 +102,54 @@ class SendACSDirectiveTool(BaseTool):
             async_session = get_async_session_factory()
 
             async with async_session() as db:
+                # Rate-limit checks: reject if too many pending or too many recent.
+                # 'stop' directives bypass the hourly cap (operator override) but
+                # still respect the pending cap to prevent runaway insertion.
+                pending_result = await db.execute(text("""
+                    SELECT COUNT(*) FROM acs_directive
+                    WHERE user_id = :uid AND status = 'pending'
+                """), {"uid": user_id})
+                pending_count = pending_result.scalar() or 0
+                if pending_count >= self.MAX_PENDING_PER_USER:
+                    return ToolResult(
+                        success=False,
+                        message=(
+                            f"Cannot create directive: {pending_count} directives already "
+                            f"pending (cap: {self.MAX_PENDING_PER_USER}). Wait for ACS to "
+                            f"acknowledge or expire some first."
+                        ),
+                    )
+
+                if directive_type != "stop":
+                    hourly_result = await db.execute(text("""
+                        SELECT COUNT(*) FROM acs_directive
+                        WHERE user_id = :uid
+                          AND created_at > NOW() - INTERVAL '1 hour'
+                    """), {"uid": user_id})
+                    hourly_count = hourly_result.scalar() or 0
+                    if hourly_count >= self.MAX_PER_HOUR:
+                        return ToolResult(
+                            success=False,
+                            message=(
+                                f"Cannot create directive: {hourly_count} directives in "
+                                f"the last hour (cap: {self.MAX_PER_HOUR}). Only 'stop' "
+                                f"directives bypass this limit."
+                            ),
+                        )
+
+                # Dedup: reject if an identical pending directive already exists
+                dedup_result = await db.execute(text("""
+                    SELECT id FROM acs_directive
+                    WHERE user_id = :uid AND status = 'pending'
+                      AND directive_type = :dtype AND content = :content
+                    LIMIT 1
+                """), {"uid": user_id, "dtype": directive_type, "content": content})
+                if dedup_result.fetchone():
+                    return ToolResult(
+                        success=False,
+                        message="An identical directive is already pending. No new directive created.",
+                    )
+
                 await db.execute(text("""
                     INSERT INTO acs_directive (id, user_id, directive_type, content, priority, status, source)
                     VALUES (:id, :uid, :dtype, :content, :priority, 'pending', 'david_chat')

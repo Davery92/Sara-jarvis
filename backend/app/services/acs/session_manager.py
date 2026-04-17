@@ -34,7 +34,6 @@ from app.services.acs.state_machine import ACSState
 class LLMContextOverflowError(Exception):
     """Raised when the LLM returns HTTP 400, typically context window overflow."""
     pass
-from app.services.acs.context_assembler import assemble_context
 from app.services.acs.prompts import build_autonomous_prompt, build_turn_prompt
 from app.services.vm_bridge import VMBridge, VMConnectionStatus
 
@@ -1089,749 +1088,12 @@ async def _execute_infra_tool(
         return f"Infra tool error: {e}", None
 
 
-# ── v2 Cognitive tool execution ──
+# ── Cognitive tool execution (delegated to cognitive_tools module) ──
 
-_V2_COGNITIVE_TOOL_NAMES = {
-    "create_interest_node", "update_interest_node", "create_interest_edge",
-    "update_self_model", "signal_engagement",
-    "write_note", "write_journal", "show_david",
-    "find_similar_notes", "merge_notes",
-    "archive_note", "find_notes_by_topic",
-    "create_topic_folder", "move_note_to_folder",
-    "archive_interest",
-    "request_human_input",
-    "open_thread", "update_thread", "resolve_thread",
-    "acknowledge_directive",
-    "complete_plan_item", "block_plan_item", "defer_plan_item", "park_plan_item",
-}
-
-
-async def _execute_cognitive_tool(
-    user_id: str, session_id: str, name: str, args: dict
-) -> tuple[str, Optional[dict]]:
-    """Execute a v2 cognitive tool call. Returns (result_text, stats_update_or_None)."""
-    stats: dict = {}
-    try:
-        if name == "create_interest_node":
-            from app.services.acs.interest_graph import InterestGraph
-            graph = InterestGraph()
-            result = await graph.add_node(
-                user_id=user_id,
-                label=args.get("label", ""),
-                description=args.get("description", ""),
-                source=args.get("source", "self_discovery"),
-                fascination=args.get("fascination", 0.5),
-            )
-            if result and not result.get("merged"):
-                stats["nodes_created"] = 1
-                return f"Created interest node: {args.get('label')}", stats
-            elif result and result.get("merged"):
-                stats["nodes_updated"] = 1
-                return f"Merged with existing node: {args.get('label')} (fascination boosted)", stats
-            return "Failed to create node (empty label?)", stats
-
-        elif name == "update_interest_node":
-            from app.services.acs.interest_graph import InterestGraph
-            graph = InterestGraph()
-            label = args.get("label", "")
-            node = await graph.find_by_label(user_id, label)
-            if not node:
-                return f"No interest node found with label: {label}", stats
-            updates = {k: v for k, v in args.items()
-                       if k in ("description", "fascination", "depth", "confidence") and v is not None}
-            if updates:
-                await graph.update_node(node["id"], **updates)
-            await graph.engage_node(node["id"], meaningful=("depth" in updates))
-            stats["nodes_updated"] = 1
-            return f"Updated interest node: {label}", stats
-
-        elif name == "create_interest_edge":
-            from app.services.acs.interest_graph import InterestGraph
-            graph = InterestGraph()
-            src = await graph.find_by_label(user_id, args.get("source_label", ""))
-            tgt = await graph.find_by_label(user_id, args.get("target_label", ""))
-            if not src:
-                return f"Source node not found: {args.get('source_label')}", stats
-            if not tgt:
-                return f"Target node not found: {args.get('target_label')}", stats
-            await graph.add_edge(
-                user_id=user_id,
-                source_node_id=src["id"],
-                target_node_id=tgt["id"],
-                relationship=args.get("relationship", "relates_to"),
-                description=args.get("description", ""),
-                strength=args.get("strength", 0.5),
-            )
-            stats["edges_created"] = 1
-            return f"Connected '{args.get('source_label')}' → '{args.get('target_label')}' ({args.get('relationship')})", stats
-
-        elif name == "update_self_model":
-            from app.services.acs.self_model import SelfModel
-            sm = SelfModel()
-            updates = args.get("updates", {})
-            if not updates:
-                return "No updates provided", stats
-            await sm.update(user_id, updates, session_id=session_id)
-            stats["self_model_updated"] = True
-            return "Self-model updated", stats
-
-        elif name == "signal_engagement":
-            score = args.get("score", 0.5)
-            reason = args.get("reason", "")
-            stats["engagement_score"] = float(score)
-            return f"Engagement recorded: {score} ({reason})", stats
-
-        elif name == "write_note":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                await _save_note(db, user_id, session_id, {
-                    "title": args.get("title", "Untitled"),
-                    "content": args.get("content", ""),
-                    "tags": args.get("tags", []),
-                })
-                await db.commit()
-            stats["notes_written"] = 1
-            logger.info(f"ACS note written: {args.get('title')}")
-            return f"Note saved: {args.get('title')}", stats
-
-        elif name == "write_journal":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                await _append_journal(db, user_id, args.get("content", ""))
-                await db.commit()
-            stats["notes_written"] = 1
-            return "Journal entry added", stats
-
-        elif name == "show_david":
-            from app.db.session import get_async_session_factory
-            from app.services.acs.communication_policy import queue_show_david
-            async_session = get_async_session_factory()
-            show_title = args.get("title", "")
-            show_content = args.get("content", "")
-            show_category = args.get("category", "insight")
-            show_priority = args.get("priority", 0.5)
-            shared_reason = args.get("shared_reason", "interesting_discovery")
-            async with async_session() as db:
-                try:
-                    queued = await queue_show_david(
-                        db,
-                        user_id=user_id,
-                        session_id=session_id,
-                        title=show_title,
-                        content=show_content,
-                        category=show_category,
-                        priority=float(show_priority or 0.5),
-                        shared_reason=shared_reason,
-                    )
-                except Exception:
-                    await db.rollback()
-                    show_id = str(uuid.uuid4())
-                    await db.execute(text("""
-                        INSERT INTO acs_show_david_buffer (id, user_id, session_id, title, content, category, created_at)
-                        VALUES (:id, :uid, :sid, :title, :content, :cat, NOW())
-                    """), {
-                        "id": show_id, "uid": user_id, "sid": session_id,
-                        "title": show_title,
-                        "content": show_content,
-                        "cat": show_category,
-                    })
-                    queued = {"status": "queued", "reason": "legacy_fallback"}
-                await db.commit()
-            status = queued.get("status", "queued")
-            reason = queued.get("reason", "queued")
-            if status == "queued":
-                logger.info(f"ACS show_david queued: {show_title}")
-                return f"Queued for David: {show_title}", stats
-            logger.info(f"ACS show_david {status}: {show_title} ({reason})")
-            stats["suppressed_messages"] = stats.get("suppressed_messages", 0) + 1
-            return f"Share suppressed ({reason})", stats
-
-        elif name == "find_similar_notes":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                note_id = args.get("note_id")
-                threshold = args.get("threshold", 0.78)
-                limit = args.get("limit", 10)
-
-                if note_id:
-                    # Find notes similar to a specific note
-                    result = await db.execute(text("""
-                        SELECT n2.id, n2.title, LEFT(n2.content, 200) AS preview,
-                               1 - (n1.embedding <=> n2.embedding) AS similarity
-                        FROM note n1
-                        JOIN note n2 ON n2.user_id = n1.user_id
-                            AND n2.id != n1.id
-                            AND n2.embedding IS NOT NULL
-                            AND n2.title NOT LIKE 'Sara''s Journal%'
-                        WHERE n1.id = :nid AND n1.embedding IS NOT NULL
-                          AND 1 - (n1.embedding <=> n2.embedding) > :threshold
-                        ORDER BY similarity DESC
-                        LIMIT :lim
-                    """), {"nid": note_id, "threshold": threshold, "lim": limit})
-                else:
-                    # Find all high-similarity pairs
-                    result = await db.execute(text("""
-                        SELECT n1.id AS id1, n1.title AS title1, LEFT(n1.content, 200) AS preview1,
-                               n2.id AS id2, n2.title AS title2, LEFT(n2.content, 200) AS preview2,
-                               1 - (n1.embedding <=> n2.embedding) AS similarity
-                        FROM note n1
-                        JOIN note n2 ON n2.user_id = n1.user_id
-                            AND n2.id > n1.id
-                            AND n2.embedding IS NOT NULL
-                            AND n2.title NOT LIKE 'Sara''s Journal%'
-                        WHERE n1.user_id = :uid
-                          AND n1.embedding IS NOT NULL
-                          AND n1.title NOT LIKE 'Sara''s Journal%'
-                          AND 1 - (n1.embedding <=> n2.embedding) > :threshold
-                        ORDER BY similarity DESC
-                        LIMIT :lim
-                    """), {"uid": user_id, "threshold": threshold, "lim": limit})
-
-                rows = result.fetchall()
-                if note_id:
-                    pairs = [
-                        {"note_id": r[0], "title": r[1], "preview": r[2],
-                         "similarity": round(float(r[3]), 3)}
-                        for r in rows
-                    ]
-                    return f"Found {len(pairs)} similar notes:\n" + "\n".join(
-                        f"- [{p['similarity']}] {p['title']} ({p['note_id'][:8]}): {p['preview'][:80]}"
-                        for p in pairs
-                    ), stats
-                else:
-                    pairs = [
-                        {"id1": r[0], "title1": r[1], "preview1": r[2],
-                         "id2": r[3], "title2": r[4], "preview2": r[5],
-                         "similarity": round(float(r[6]), 3)}
-                        for r in rows
-                    ]
-                    return f"Found {len(pairs)} similar pairs:\n" + "\n".join(
-                        f"- [{p['similarity']}] \"{p['title1']}\" ({p['id1'][:8]}) ↔ \"{p['title2']}\" ({p['id2'][:8]})"
-                        for p in pairs
-                    ), stats
-
-        elif name == "merge_notes":
-            from app.db.session import get_async_session_factory
-            from app.services.note_connector import process_note_connections
-            async_session = get_async_session_factory()
-            target_id = args.get("target_note_id", "")
-            source_id = args.get("source_note_id", "")
-            merged_title = args.get("merged_title")
-            merged_content = args.get("merged_content", "")
-
-            if not target_id or not source_id or not merged_content:
-                return "merge_notes requires target_note_id, source_note_id, and merged_content", stats
-
-            async with async_session() as db:
-                # Verify both notes exist and belong to this user
-                for nid, label in [(target_id, "target"), (source_id, "source")]:
-                    r = await db.execute(text(
-                        "SELECT id FROM note WHERE id = :nid AND user_id = :uid"
-                    ), {"nid": nid, "uid": user_id})
-                    if not r.fetchone():
-                        return f"merge_notes: {label} note {nid} not found", stats
-
-                # Transfer connections from source to target
-                await db.execute(text("""
-                    UPDATE note_connection
-                    SET source_note_id = :tid, updated_at = NOW()
-                    WHERE source_note_id = :sid AND user_id = :uid
-                      AND target_note_id != :tid
-                      AND NOT EXISTS (
-                          SELECT 1 FROM note_connection nc2
-                          WHERE nc2.source_note_id = :tid
-                            AND nc2.target_note_id = note_connection.target_note_id
-                            AND nc2.connection_type = note_connection.connection_type
-                      )
-                """), {"tid": target_id, "sid": source_id, "uid": user_id})
-
-                await db.execute(text("""
-                    UPDATE note_connection
-                    SET target_note_id = :tid, updated_at = NOW()
-                    WHERE target_note_id = :sid AND user_id = :uid
-                      AND source_note_id != :tid
-                      AND NOT EXISTS (
-                          SELECT 1 FROM note_connection nc2
-                          WHERE nc2.target_note_id = :tid
-                            AND nc2.source_note_id = note_connection.source_note_id
-                            AND nc2.connection_type = note_connection.connection_type
-                      )
-                """), {"tid": target_id, "sid": source_id, "uid": user_id})
-
-                # Delete source note (CASCADE handles remaining connections)
-                await db.execute(text(
-                    "DELETE FROM note WHERE id = :sid AND user_id = :uid"
-                ), {"sid": source_id, "uid": user_id})
-
-                # Update target with merged content
-                update_params = {"content": merged_content, "nid": target_id}
-                if merged_title:
-                    await db.execute(text(
-                        "UPDATE note SET title = :title, content = :content, updated_at = NOW() WHERE id = :nid"
-                    ), {**update_params, "title": merged_title})
-                else:
-                    await db.execute(text(
-                        "UPDATE note SET content = :content, updated_at = NOW() WHERE id = :nid"
-                    ), update_params)
-
-                await db.commit()
-
-                # Re-detect connections on the merged note
-                final_title = merged_title or target_id
-                r = await db.execute(text("SELECT title FROM note WHERE id = :nid"), {"nid": target_id})
-                row = r.fetchone()
-                if row:
-                    final_title = row[0]
-
-            # Run connection detection in a fresh session
-            async with async_session() as db:
-                await process_note_connections(target_id, user_id, final_title, merged_content, db)
-                await db.commit()
-
-            logger.info(f"ACS merged note {source_id[:8]} into {target_id[:8]}")
-            return f"Merged notes. Source {source_id[:8]} deleted, target {target_id[:8]} updated.", stats
-
-        elif name == "archive_note":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            note_id = args.get("note_id", "")
-            reason = args.get("reason", "")
-            if not note_id or not reason:
-                return "archive_note requires note_id and reason", stats
-
-            archived_folder_id = await _ensure_subfolder(user_id, "Archived")
-            async with async_session() as db:
-                # Verify note exists and belongs to user
-                r = await db.execute(text(
-                    "SELECT id, title, content FROM note WHERE id = :nid AND user_id = :uid"
-                ), {"nid": note_id, "uid": user_id})
-                row = r.fetchone()
-                if not row:
-                    return f"Note {note_id} not found", stats
-
-                title = row[1]
-                content = row[2] or ""
-                archived_content = f"[ARCHIVED: {reason}]\n\n{content}"
-                await db.execute(text("""
-                    UPDATE note SET folder_id = :fid, content = :content, updated_at = NOW()
-                    WHERE id = :nid
-                """), {"fid": archived_folder_id, "content": archived_content, "nid": note_id})
-                await db.commit()
-
-            logger.info(f"ACS archived note: {title} ({note_id[:8]})")
-            return f"Archived note '{title}' — reason: {reason}", stats
-
-        elif name == "find_notes_by_topic":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            query = args.get("query", "")
-            limit = args.get("limit", 10)
-            if not query:
-                return "find_notes_by_topic requires a query", stats
-
-            # Generate embedding for the query using the embedding service
-            try:
-                from app.services.embeddings import get_embedding
-                query_embedding = await get_embedding(query)
-            except Exception as e:
-                return f"Embedding generation failed: {e}", stats
-
-            # Get root folder and all subfolders
-            root_id = await state_machine.get_notes_folder_id(user_id)
-            if not root_id:
-                return "Sara's Notes folder not found", stats
-
-            async with async_session() as db:
-                result = await db.execute(text("""
-                    WITH sara_folders AS (
-                        SELECT id, name FROM folder
-                        WHERE user_id = :uid AND (id = :root OR parent_id = :root)
-                    )
-                    SELECT n.id, n.title, LEFT(n.content, 200) AS preview,
-                           f.name AS folder_name,
-                           1 - (n.embedding <=> CAST(:emb AS vector)) AS similarity
-                    FROM note n
-                    JOIN sara_folders f ON n.folder_id = f.id
-                    WHERE n.user_id = :uid
-                      AND n.embedding IS NOT NULL
-                      AND n.title NOT LIKE 'Sara''s Journal%'
-                    ORDER BY similarity DESC
-                    LIMIT :lim
-                """), {
-                    "uid": user_id, "root": root_id,
-                    "emb": str(query_embedding), "lim": limit,
-                })
-                rows = result.fetchall()
-
-            if not rows:
-                return f"No notes found matching '{query}'", stats
-
-            results = []
-            for r in rows:
-                folder = r[3] if r[3] != "Sara's Notes" else "(root)"
-                results.append(
-                    f"- [{round(float(r[4]), 3)}] {r[1]} ({r[0][:8]}) [{folder}]: {(r[2] or '')[:80]}"
-                )
-            return f"Found {len(rows)} notes for '{query}':\n" + "\n".join(results), stats
-
-        elif name == "create_topic_folder":
-            folder_name = args.get("name", "")
-            if not folder_name:
-                return "create_topic_folder requires a name", stats
-            folder_id = await _ensure_subfolder(user_id, folder_name)
-            return f"Topic folder '{folder_name}' ready (id: {folder_id[:8]})", stats
-
-        elif name == "move_note_to_folder":
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            note_id = args.get("note_id", "")
-            folder_name = args.get("folder_name", "")
-            if not note_id or not folder_name:
-                return "move_note_to_folder requires note_id and folder_name", stats
-
-            target_folder_id = await _ensure_subfolder(user_id, folder_name)
-            async with async_session() as db:
-                r = await db.execute(text(
-                    "SELECT title FROM note WHERE id = :nid AND user_id = :uid"
-                ), {"nid": note_id, "uid": user_id})
-                row = r.fetchone()
-                if not row:
-                    return f"Note {note_id} not found", stats
-
-                await db.execute(text(
-                    "UPDATE note SET folder_id = :fid, updated_at = NOW() WHERE id = :nid"
-                ), {"fid": target_folder_id, "nid": note_id})
-                await db.commit()
-
-            return f"Moved '{row[0]}' to {folder_name}/", stats
-
-        elif name == "archive_interest":
-            from app.services.acs.interest_graph import InterestGraph
-            from app.services.acs.communication_policy import queue_show_david
-            graph = InterestGraph()
-            label = args.get("label", "")
-            reason = args.get("reason", "")
-            if not label or not reason:
-                return "archive_interest requires label and reason", stats
-
-            node = await graph.find_by_label(user_id, label)
-            if not node:
-                return f"No active interest node found with label: {label}", stats
-
-            await graph.archive_node(node["id"])
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                await db.execute(text("""
-                    UPDATE acs_interest_node
-                    SET cooldown_until = NOW() + INTERVAL '7 days',
-                        revisit_count = COALESCE(revisit_count, 0) + 1
-                    WHERE id = :id
-                """), {"id": node["id"]})
-                await db.commit()
-
-            # Log the reason via show_david so David knows
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                try:
-                    await queue_show_david(
-                        db,
-                        user_id=user_id,
-                        session_id=session_id,
-                        title=f"Archived interest: {label}",
-                        content=f"I've decided to archive my interest in '{label}'. {reason}",
-                        category="insight",
-                        priority=0.7,
-                        shared_reason="needs_attention",
-                    )
-                except Exception:
-                    await db.rollback()
-                    pass
-                await db.commit()
-
-            logger.info(f"ACS archived interest node: {label}")
-            return f"Archived interest '{label}' — reason recorded and David notified.", stats
-
-        elif name == "request_human_input":
-            result_text = await _handle_hitl_request(
-                user_id=user_id,
-                session_id=session_id,
-                question=args.get("question", ""),
-                context=args.get("context", ""),
-                alternatives=args.get("alternatives", ""),
-            )
-            return result_text, stats
-
-        elif name == "open_thread":
-            thread_id = str(uuid.uuid4())[:8]
-            thread = {
-                "id": thread_id,
-                "title": args.get("title", ""),
-                "description": args.get("description", ""),
-                "priority": args.get("priority", "medium"),
-                "status": "active",
-                "progress": [],
-                "opened_at": local_now().isoformat(),
-                "updated_at": local_now().isoformat(),
-                "source_session": session_id,
-            }
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-            try:
-                await r.hset(OPEN_THREADS_KEY.format(user_id=user_id), thread_id, json.dumps(thread))
-            finally:
-                await _close_redis(r)
-            logger.info(f"ACS thread opened: {thread_id} — {args.get('title')}")
-            return f"Thread opened: {thread_id} — {args.get('title')}", stats
-
-        elif name == "update_thread":
-            thread_id = args.get("thread_id", "")
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-            try:
-                raw = await r.hget(OPEN_THREADS_KEY.format(user_id=user_id), thread_id)
-                if not raw:
-                    return f"Thread not found: {thread_id}", stats
-                thread = json.loads(raw)
-                if args.get("progress"):
-                    thread.setdefault("progress", []).append({
-                        "text": args["progress"],
-                        "next_steps": args.get("next_steps", ""),
-                        "session": session_id,
-                        "at": local_now().isoformat(),
-                    })
-                if args.get("priority"):
-                    thread["priority"] = args["priority"]
-                if args.get("next_steps"):
-                    thread["next_steps"] = args["next_steps"]
-                thread["updated_at"] = local_now().isoformat()
-                await r.hset(OPEN_THREADS_KEY.format(user_id=user_id), thread_id, json.dumps(thread))
-            finally:
-                await _close_redis(r)
-            logger.info(f"ACS thread updated: {thread_id}")
-            return f"Thread {thread_id} updated", stats
-
-        elif name == "resolve_thread":
-            thread_id = args.get("thread_id", "")
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-            try:
-                raw = await r.hget(OPEN_THREADS_KEY.format(user_id=user_id), thread_id)
-                if not raw:
-                    return f"Thread not found: {thread_id}", stats
-                thread = json.loads(raw)
-                thread["status"] = "resolved"
-                thread["resolution"] = args.get("resolution", "completed")
-                thread["resolution_summary"] = args.get("summary", "")
-                thread["resolved_at"] = local_now().isoformat()
-                # Keep resolved threads for 7 days then they'll naturally be pruned
-                await r.hset(OPEN_THREADS_KEY.format(user_id=user_id), thread_id, json.dumps(thread))
-            finally:
-                await _close_redis(r)
-            logger.info(f"ACS thread resolved: {thread_id} ({args.get('resolution')})")
-            return f"Thread {thread_id} resolved: {args.get('resolution')}", stats
-
-        elif name == "acknowledge_directive":
-            directive_id = args.get("directive_id", "")
-            response_text = args.get("response", "")
-            if not directive_id:
-                return "Error: directive_id is required", stats
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                result = await db.execute(text("""
-                    UPDATE acs_directive
-                    SET status = 'acknowledged', acknowledged_at = NOW(),
-                        response = :response
-                    WHERE id = :id AND user_id = :uid AND status = 'pending'
-                    RETURNING directive_type, content
-                """), {"id": directive_id, "uid": user_id, "response": response_text or None})
-                row = result.fetchone()
-                if not row:
-                    return f"Directive not found or already acknowledged: {directive_id[:8]}", stats
-                await db.commit()
-            logger.info(f"ACS directive acknowledged: {directive_id[:8]} [{row[0]}]")
-            return f"Acknowledged [{row[0]}] directive: {row[1][:80]}", stats
-
-        elif name == "complete_plan_item":
-            result_summary = args.get("result_summary", "")
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                try:
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'completed',
-                            result_summary = :summary,
-                            completed_at = NOW(),
-                            last_meaningful_progress_at = NOW(),
-                            closure_reason = 'completed',
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"summary": result_summary[:5000], "sid": session_id})
-                except Exception:
-                    await db.rollback()
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'completed',
-                            result_summary = :summary,
-                            completed_at = NOW(),
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"summary": result_summary[:5000], "sid": session_id})
-                updated = row.fetchone()
-                if updated:
-                    await db.commit()
-                    return f"Plan item '{updated[1]}' marked as completed.", {"plan_item_completed": 1}
-                else:
-                    await db.commit()
-                    return "No active plan item found for this session.", {}
-
-        elif name == "block_plan_item":
-            reason = args.get("reason", "")
-            progress = args.get("progress_so_far", "")
-            from app.db.session import get_async_session_factory
-            from app.services.acs.communication_policy import queue_show_david
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                try:
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'blocked',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            last_meaningful_progress_at = CASE WHEN :progress != '' THEN NOW() ELSE last_meaningful_progress_at END,
-                            closure_reason = 'blocked',
-                            reopen_after = NOW() + INTERVAL '12 hours',
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title, success_criteria
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                except Exception:
-                    await db.rollback()
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'blocked',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title, success_criteria
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                updated = row.fetchone()
-                if updated:
-                    try:
-                        await queue_show_david(
-                            db,
-                            user_id=user_id,
-                            session_id=session_id,
-                            title=f"Blocked: {updated[1]}",
-                            content=f"I'm blocked on '{updated[1]}'. Reason: {reason[:500]}. Progress so far: {progress[:1000]}",
-                            category="question",
-                            priority=0.9,
-                            shared_reason="blocked",
-                        )
-                    except Exception:
-                        await db.rollback()
-                        pass
-                    await db.commit()
-                    return f"Plan item '{updated[1]}' marked as blocked: {reason[:200]}", {"plan_item_blocked": 1}
-                else:
-                    await db.commit()
-                    return "No active plan item found for this session.", {}
-
-        elif name == "defer_plan_item":
-            reason = args.get("reason", "")
-            progress = args.get("progress_so_far", "")
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                try:
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'deferred',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            last_meaningful_progress_at = CASE WHEN :progress != '' THEN NOW() ELSE last_meaningful_progress_at END,
-                            closure_reason = 'deferred',
-                            reopen_after = NOW() + INTERVAL '18 hours',
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                except Exception:
-                    await db.rollback()
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'deferred',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                updated = row.fetchone()
-                if updated:
-                    await db.commit()
-                    return f"Plan item '{updated[1]}' deferred: {reason[:200]}", {"plan_item_deferred": 1}
-                else:
-                    await db.commit()
-                    return "No active plan item found for this session.", {}
-
-        elif name == "park_plan_item":
-            reason = args.get("reason", "")
-            progress = args.get("progress_so_far", "")
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                try:
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'parked',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            last_meaningful_progress_at = CASE WHEN :progress != '' THEN NOW() ELSE last_meaningful_progress_at END,
-                            closure_reason = 'parked',
-                            reopen_after = NOW() + INTERVAL '3 days',
-                            parked_at = NOW(),
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                except Exception:
-                    await db.rollback()
-                    row = await db.execute(text("""
-                        UPDATE acs_plan_item
-                        SET status = 'deferred',
-                            blocker_reason = :reason,
-                            result_summary = :progress,
-                            assigned_session_id = NULL,
-                            updated_at = NOW()
-                        WHERE assigned_session_id = :sid AND status = 'in_progress'
-                        RETURNING id, title
-                    """), {"reason": reason[:2000], "progress": progress[:5000], "sid": session_id})
-                updated = row.fetchone()
-                if updated:
-                    await db.commit()
-                    return f"Plan item '{updated[1]}' parked: {reason[:200]}", {"plan_item_parked": 1}
-                await db.commit()
-                return "No active plan item found for this session.", {}
-
-        return f"Unknown cognitive tool: {name}", stats
-
-    except Exception as e:
-        logger.warning(f"Cognitive tool {name} failed: {e}")
-        return f"Error: {e}", stats
+from app.services.acs.cognitive_tools import (
+    COGNITIVE_TOOL_NAMES as _V2_COGNITIVE_TOOL_NAMES,
+    execute_cognitive_tool as _execute_cognitive_tool,
+)
 
 
 # ── Human-in-the-loop request handling ──
@@ -2227,6 +1489,7 @@ async def _llm_turn(
                         bridge = new_bridge
                 else:
                     output = await _execute_tool(bridge, tool_name, tool_args)
+                    cognitive_stats["vm_tool_calls"] = cognitive_stats.get("vm_tool_calls", 0) + 1
 
                 # Record tool result to transcript
                 if transcript:
@@ -2433,11 +1696,10 @@ async def _run_loop(
 ):
     """Main autonomous turn loop — LLM with tool-calling for VM shell access.
 
-    When settings.acs_v2_enabled, uses mode selection, interest graph context,
-    dynamic session duration, and engagement tracking.
+    Uses mode selection, interest graph context, dynamic session duration,
+    and engagement tracking.
     """
-    v2 = settings.acs_v2_enabled
-    mode = None
+    mode = "exploration"  # Default if mode-selection fails
     session_log_id = None
     plan_item_id = None
     plan_item_block = ""
@@ -2445,135 +1707,145 @@ async def _run_loop(
     primary_objective = None
     expected_artifact = None
 
-    # v2: select cognitive mode and create session log
-    if v2:
+    # Select cognitive mode and create session log
+    try:
+        from app.services.acs.mode_selector import select_mode, claim_plan_item
+        mode, plan_item_id = await select_mode(user_id)
+        logger.info(f"ACS mode selected: {mode}")
+        await _publish_live(user_id, "mode_selected", {"mode": mode})
+
+        # Store mode on session record
+        from app.db.session import get_async_session_factory
+        async_session = get_async_session_factory()
+        async with async_session() as db:
+            await db.execute(text("""
+                UPDATE acs_session SET cognitive_mode = :mode WHERE id = :sid
+            """), {"mode": mode, "sid": session_id})
+            await db.commit()
+
+        # Store mode in Redis for lifecycle check
+        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
         try:
-            from app.services.acs.mode_selector import select_mode, claim_plan_item
-            mode, plan_item_id = await select_mode(user_id)
-            logger.info(f"ACS v2 mode selected: {mode}")
-            await _publish_live(user_id, "mode_selected", {"mode": mode})
+            await r.set(f"sara:acs:session_mode:{user_id}", mode, ex=86400)
+        finally:
+            await _close_redis(r)
 
-            # Store mode on session record
-            from app.db.session import get_async_session_factory
-            async_session = get_async_session_factory()
-            async with async_session() as db:
-                await db.execute(text("""
-                    UPDATE acs_session SET cognitive_mode = :mode WHERE id = :sid
-                """), {"mode": mode, "sid": session_id})
-                await db.commit()
+        # Create session log
+        session_log_id = str(uuid.uuid4())
+        async with async_session() as db:
+            await db.execute(text("""
+                INSERT INTO acs_session_log
+                    (id, user_id, session_id, mode, started_at)
+                VALUES (:id, :uid, :sid, :mode, NOW())
+            """), {"id": session_log_id, "uid": user_id, "sid": session_id, "mode": mode})
+            await db.commit()
 
-            # Store mode in Redis for lifecycle check
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        # If execution mode with a plan item, assign it and build prompt block
+        if mode == "execution" and plan_item_id:
             try:
-                await r.set(f"sara:acs:session_mode:{user_id}", mode, ex=86400)
-            finally:
-                await _close_redis(r)
+                claimed_item = await claim_plan_item(
+                    user_id,
+                    session_id,
+                    preferred_plan_item_id=plan_item_id,
+                )
+                if not claimed_item:
+                    raise RuntimeError("No eligible execution plan item could be claimed")
 
-            # Create session log
-            session_log_id = str(uuid.uuid4())
-            async with async_session() as db:
-                await db.execute(text("""
-                    INSERT INTO acs_session_log
-                        (id, user_id, session_id, mode, started_at)
-                    VALUES (:id, :uid, :sid, :mode, NOW())
-                """), {"id": session_log_id, "uid": user_id, "sid": session_id, "mode": mode})
-                await db.commit()
+                async with async_session() as db:
+                    # Load today's plan status for context
+                    from datetime import date
+                    result = await db.execute(text("""
+                        SELECT title, status, result_summary, reopen_after
+                        FROM acs_plan_item
+                        WHERE user_id = :uid AND plan_date = :today
+                        ORDER BY priority DESC
+                    """), {"uid": user_id, "today": date.today()})
+                    all_items = result.fetchall()
 
-            # If execution mode with a plan item, assign it and build prompt block
-            plan_item_block = ""
-            if mode == "execution" and plan_item_id:
-                try:
-                    claimed_item = await claim_plan_item(
-                        user_id,
-                        session_id,
-                        preferred_plan_item_id=plan_item_id,
+                    primary_topic = claimed_item["title"][:200]
+                    primary_objective = (claimed_item.get("description") or claimed_item["title"])[:2000]
+                    expected_artifact = (claimed_item.get("success_criteria") or "A concrete artifact or a closed loop.")[:2000]
+                    await db.execute(text("""
+                        UPDATE acs_session_log
+                        SET primary_topic = :topic,
+                            primary_objective = :objective,
+                            expected_artifact = :artifact
+                        WHERE id = :id
+                    """), {
+                        "topic": primary_topic,
+                        "objective": primary_objective,
+                        "artifact": expected_artifact,
+                        "id": session_log_id,
+                    })
+                    await db.commit()
+
+                from app.services.acs.prompts import EXECUTION_INSTRUCTIONS
+                est = f"**Estimated effort:** {claimed_item['estimated_turns']} turns" if claimed_item.get("estimated_turns") else ""
+
+                # Build plan status overview
+                status_lines = []
+                status_icons = {
+                    "completed": "DONE",
+                    "in_progress": "NOW",
+                    "pending": "TODO",
+                    "blocked": "BLOCKED",
+                    "deferred": "LATER",
+                    "parked": "PARKED",
+                }
+                for pi in all_items:
+                    icon = status_icons.get(pi[1], pi[1].upper())
+                    line = f"- [{icon}] {pi[0]}"
+                    if pi[1] == "completed" and pi[2]:
+                        line += f" — {pi[2][:80]}"
+                    elif pi[1] in ("blocked", "deferred") and pi[3]:
+                        line += f" — reopens {pi[3].strftime('%m/%d %H:%M')}"
+                    status_lines.append(line)
+                plan_status = "\n".join(status_lines) if status_lines else "(This is the only item today)"
+
+                plan_item_block = EXECUTION_INSTRUCTIONS.format(
+                    plan_item_title=claimed_item["title"],
+                    plan_item_description=claimed_item.get("description") or "",
+                    plan_item_success_criteria=claimed_item.get("success_criteria") or "Use your judgment to determine when this is complete.",
+                    plan_item_estimated=est,
+                    plan_status_block=plan_status,
+                )
+                if claimed_item.get("revisit_count", 0):
+                    plan_item_block += (
+                        f"\n\n## Revisit Pressure\n"
+                        f"This item has already been reopened {claimed_item['revisit_count']} time(s). "
+                        "If you cannot produce a concrete artifact this session, defer or park it instead of looping."
                     )
-                    if not claimed_item:
-                        raise RuntimeError("No eligible execution plan item could be claimed")
-
+            except Exception as e:
+                logger.warning(
+                    f"Plan item claim failed for session {session_id[:8]}: {e} — "
+                    f"downgrading mode from execution to exploration"
+                )
+                mode = "exploration"
+                plan_item_id = None
+                plan_item_block = ""
+                try:
                     async with async_session() as db:
-                        # Load today's plan status for context
-                        from datetime import date
-                        result = await db.execute(text("""
-                            SELECT title, status, result_summary, reopen_after
-                            FROM acs_plan_item
-                            WHERE user_id = :uid AND plan_date = :today
-                            ORDER BY priority DESC
-                        """), {"uid": user_id, "today": date.today()})
-                        all_items = result.fetchall()
-
-                        primary_topic = claimed_item["title"][:200]
-                        primary_objective = (claimed_item.get("description") or claimed_item["title"])[:2000]
-                        expected_artifact = (claimed_item.get("success_criteria") or "A concrete artifact or a closed loop.")[:2000]
                         await db.execute(text("""
-                            UPDATE acs_session_log
-                            SET primary_topic = :topic,
-                                primary_objective = :objective,
-                                expected_artifact = :artifact
-                            WHERE id = :id
-                        """), {
-                            "topic": primary_topic,
-                            "objective": primary_objective,
-                            "artifact": expected_artifact,
-                            "id": session_log_id,
-                        })
+                            UPDATE acs_session SET cognitive_mode = 'exploration' WHERE id = :sid
+                        """), {"sid": session_id})
+                        if session_log_id:
+                            await db.execute(text("""
+                                UPDATE acs_session_log SET mode = 'exploration' WHERE id = :id
+                            """), {"id": session_log_id})
                         await db.commit()
+                except Exception:
+                    pass
 
-                    if claimed_item:
-                        from app.services.acs.prompts import EXECUTION_INSTRUCTIONS
-                        est = f"**Estimated effort:** {claimed_item['estimated_turns']} turns" if claimed_item.get("estimated_turns") else ""
-
-                        # Build plan status overview
-                        status_lines = []
-                        status_icons = {
-                            "completed": "DONE",
-                            "in_progress": "NOW",
-                            "pending": "TODO",
-                            "blocked": "BLOCKED",
-                            "deferred": "LATER",
-                            "parked": "PARKED",
-                        }
-                        for pi in all_items:
-                            icon = status_icons.get(pi[1], pi[1].upper())
-                            line = f"- [{icon}] {pi[0]}"
-                            if pi[1] == "completed" and pi[2]:
-                                line += f" — {pi[2][:80]}"
-                            elif pi[1] in ("blocked", "deferred") and pi[3]:
-                                line += f" — reopens {pi[3].strftime('%m/%d %H:%M')}"
-                            status_lines.append(line)
-                        plan_status = "\n".join(status_lines) if status_lines else "(This is the only item today)"
-
-                        plan_item_block = EXECUTION_INSTRUCTIONS.format(
-                            plan_item_title=claimed_item["title"],
-                            plan_item_description=claimed_item.get("description") or "",
-                            plan_item_success_criteria=claimed_item.get("success_criteria") or "Use your judgment to determine when this is complete.",
-                            plan_item_estimated=est,
-                            plan_status_block=plan_status,
-                        )
-                        if claimed_item.get("revisit_count", 0):
-                            plan_item_block += (
-                                f"\n\n## Revisit Pressure\n"
-                                f"This item has already been reopened {claimed_item['revisit_count']} time(s). "
-                                "If you cannot produce a concrete artifact this session, defer or park it instead of looping."
-                            )
-                except Exception as e:
-                    logger.warning(f"Plan item assignment failed, continuing without: {e}")
-                    plan_item_block = ""
-
-        except Exception as e:
-            logger.error(f"v2 mode selection failed, falling back to v1: {e}")
-            v2 = False
-            mode = None
-            plan_item_id = None
-            plan_item_block = ""
+    except Exception as e:
+        # Mode selection / session log creation failed — continue in exploration
+        # mode with no plan item. Everything downstream works with just a mode.
+        logger.error(f"ACS mode selection failed, defaulting to exploration: {e}")
+        mode = "exploration"
+        plan_item_id = None
+        plan_item_block = ""
 
     # Compute deadline — Sara runs until she's done or hits the hard ceiling.
-    # No mode-based duration limits; the engagement early-exit and done signal
-    # are the natural session boundaries.
-    if v2:
-        initial_minutes = settings.acs_v2_max_session_minutes  # 180min ceiling
-    else:
-        initial_minutes = await state_machine.get_max_duration_minutes(user_id)
+    initial_minutes = settings.acs_v2_max_session_minutes  # 180min ceiling
     deadline = datetime.utcnow() + timedelta(minutes=initial_minutes)
 
     turns = 0
@@ -2583,18 +1855,17 @@ async def _run_loop(
     _consecutive_turn_errors = 0
     tools = VM_TOOLS[:] if vm_available else []
     tools.extend(INFRA_TOOLS)  # Always available — can spin up containers even without static VM
-    if v2:
-        tools.extend(V2_COGNITIVE_TOOLS)
-        tools.append(HITL_TOOL)  # Available in all modes
-        if mode == "consolidation":
-            tools.extend(V2_CONSOLIDATION_TOOLS)
-            tools.extend(V2_CURATION_TOOLS)
-            tools.extend(V2_ORGANIZATION_TOOLS)
-        elif mode == "reflection":
-            tools.extend(V2_CURATION_TOOLS)
-            tools.extend(V2_REFLECTION_TOOLS)
-        elif mode == "execution":
-            tools.extend(V2_EXECUTION_TOOLS)
+    tools.extend(V2_COGNITIVE_TOOLS)
+    tools.append(HITL_TOOL)  # Available in all modes
+    if mode == "consolidation":
+        tools.extend(V2_CONSOLIDATION_TOOLS)
+        tools.extend(V2_CURATION_TOOLS)
+        tools.extend(V2_ORGANIZATION_TOOLS)
+    elif mode == "reflection":
+        tools.extend(V2_CURATION_TOOLS)
+        tools.extend(V2_REFLECTION_TOOLS)
+    elif mode == "execution":
+        tools.extend(V2_EXECUTION_TOOLS)
     tools = tools or None
     conversation: list[dict] = []
 
@@ -2602,7 +1873,6 @@ async def _run_loop(
     from app.services.acs.audit_logger import TranscriptBuffer
     transcript = TranscriptBuffer(session_id, mode)
 
-    # v2 tracking
     engagement_scores: list[float] = []
     total_nodes_created = 0
     total_nodes_updated = 0
@@ -2612,22 +1882,60 @@ async def _run_loop(
     session_files_touched: list[str] = []  # Track files for handoff context
     session_memory = SessionWorkingMemory()
     total_token_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    consecutive_done_turns = 0
+    ACS_DONE_DEADLOCK_LIMIT = int(os.environ.get("ACS_DONE_DEADLOCK_LIMIT", "3"))
+    _last_durable_persist_at = datetime.min
+    _last_durable_persist_turn = 0
 
-    from app.db.base import SessionLocal
+    async def _maybe_persist_durable():
+        """Rate-limited durable persist to Postgres (every 5 turns or 2min)."""
+        nonlocal _last_durable_persist_at, _last_durable_persist_turn
+        _now = datetime.utcnow()
+        if (turns - _last_durable_persist_turn >= 5
+                or (_now - _last_durable_persist_at).total_seconds() >= 120):
+            try:
+                from app.services.acs.audit_logger import persist_transcript_durable_only
+                await persist_transcript_durable_only(user_id, transcript)
+                _last_durable_persist_at = _now
+                _last_durable_persist_turn = turns
+            except Exception:
+                pass
+
+    async def _finalize(end_reason: str, *, error: str = "", early_termination: bool = False):
+        """Call _finalize_session with the current closure of _run_loop locals.
+
+        Closes over the session metadata so every exit path gets consistent v2_stats
+        + plan-item fields without 13 separately-maintained call sites.
+        """
+        await _finalize_session(
+            user_id, session_id, end_reason, turns,
+            notes_created, curiosities_explored,
+            error=error,
+            mode=mode,
+            session_log_id=session_log_id,
+            engagement_scores=engagement_scores,
+            early_termination=early_termination,
+            v2_stats={
+                "nodes_created": total_nodes_created,
+                "nodes_updated": total_nodes_updated,
+                "edges_created": total_edges_created,
+                "notes_written": total_notes_written,
+                "self_model_updated": self_model_ever_updated,
+            },
+            transcript=transcript,
+            session_memory=session_memory,
+            token_usage=total_token_usage,
+            plan_item_id=plan_item_id,
+            primary_topic=primary_topic,
+            primary_objective=primary_objective,
+            expected_artifact=expected_artifact,
+        )
 
     try:
         # Build initial context
-        if v2 and mode:
-            from app.services.acs.context_assembler import assemble_context_v2
-            ctx = await assemble_context_v2(user_id, mode)
-            system_prompt = build_autonomous_prompt(mode=mode, plan_item_block=plan_item_block, **ctx)
-        else:
-            db = SessionLocal()
-            try:
-                ctx = assemble_context(db, user_id)
-            finally:
-                db.close()
-            system_prompt = build_autonomous_prompt(**ctx)
+        from app.services.acs.context_assembler import assemble_context_v2
+        ctx = await assemble_context_v2(user_id, mode)
+        system_prompt = build_autonomous_prompt(mode=mode, plan_item_block=plan_item_block, **ctx)
 
         # Notes are auto-filed by date (Sara's Notes / YYYY / MM / DD), so
         # there's no longer a per-topic folder for the LLM to pick. The
@@ -2635,7 +1943,7 @@ async def _run_loop(
 
         conversation.append({"role": "system", "content": system_prompt})
         transcript.record_system_prompt(system_prompt)
-        if mode == "execution" and v2 and plan_item_id:
+        if mode == "execution" and plan_item_id:
             initial_msg = "Begin your execution session. Your plan item is loaded in the system prompt — start working on it."
         else:
             initial_msg = "Begin your autonomous session. What would you like to explore, think about, or work on?"
@@ -2652,63 +1960,40 @@ async def _run_loop(
             total_token_usage[k] += turn_tokens.get(k, 0)
 
         if not response:
-            await _finalize_session(
-                user_id, session_id, "error", turns, notes_created,
-                curiosities_explored, error="Empty LLM response on first turn",
-                mode=mode, session_log_id=session_log_id,
-                engagement_scores=engagement_scores,
-                v2_stats={
-                    "nodes_created": total_nodes_created,
-                    "nodes_updated": total_nodes_updated,
-                    "edges_created": total_edges_created,
-                    "notes_written": total_notes_written,
-                    "self_model_updated": self_model_ever_updated,
-                },
-                transcript=transcript,
-                session_memory=session_memory,
-                token_usage=total_token_usage,
-            )
+            await _finalize("error", error="Empty LLM response on first turn")
             return
 
         conversation.append({"role": "assistant", "content": response})
         transcript.record_assistant_turn(1, response)
 
-        result = await _process_output(user_id, session_id, response, v2=v2, transcript=transcript, session_memory=session_memory, mode=mode, turns=turns)
-        if isinstance(result, TurnResult):
-            # Merge cognitive tool stats from _llm_turn
-            result.nodes_created += turn_cog_stats.get("nodes_created", 0)
-            result.nodes_updated += turn_cog_stats.get("nodes_updated", 0)
-            result.edges_created += turn_cog_stats.get("edges_created", 0)
-            tool_notes = turn_cog_stats.get("notes_written", 0)
-            result.notes_written += tool_notes
-            result.notes_created += tool_notes
-            if turn_cog_stats.get("self_model_updated"):
-                result.self_model_updated = True
-            if turn_cog_stats.get("engagement_score"):
-                result.engagement_score = turn_cog_stats["engagement_score"]
+        result = await _process_output(user_id, session_id, response, transcript=transcript, session_memory=session_memory, mode=mode, turns=turns)
+        # Merge cognitive tool stats from _llm_turn
+        result.nodes_created += turn_cog_stats.get("nodes_created", 0)
+        result.nodes_updated += turn_cog_stats.get("nodes_updated", 0)
+        result.edges_created += turn_cog_stats.get("edges_created", 0)
+        tool_notes = turn_cog_stats.get("notes_written", 0)
+        result.notes_written += tool_notes
+        result.notes_created += tool_notes
+        if turn_cog_stats.get("self_model_updated"):
+            result.self_model_updated = True
+        if turn_cog_stats.get("engagement_score"):
+            result.engagement_score = turn_cog_stats["engagement_score"]
 
-            notes_created += result.notes_created
-            curiosities_explored += result.curiosities_explored
-            topics_covered.extend(result.topics)
-            total_nodes_created += result.nodes_created
-            total_nodes_updated += result.nodes_updated
-            total_edges_created += result.edges_created
-            total_notes_written += result.notes_written
-            if result.self_model_updated:
-                self_model_ever_updated = True
-            turn_engagement = result.engagement_score or _infer_engagement(result)
-            engagement_scores.append(turn_engagement)
-            # Populate session working memory
-            session_memory.notes_created.extend(result.note_titles)
-            session_memory.nodes_created.extend(result.node_labels)
-            session_memory.edges_created += result.edges_created
-        else:
-            n, c, t = result
-            notes_created += n
-            curiosities_explored += c
-            topics_covered.extend(t)
-            turn_engagement = 0.6
-            engagement_scores.append(turn_engagement)
+        notes_created += result.notes_created
+        curiosities_explored += result.curiosities_explored
+        topics_covered.extend(result.topics)
+        total_nodes_created += result.nodes_created
+        total_nodes_updated += result.nodes_updated
+        total_edges_created += result.edges_created
+        total_notes_written += result.notes_written
+        if result.self_model_updated:
+            self_model_ever_updated = True
+        turn_engagement = result.engagement_score or _infer_engagement(result)
+        engagement_scores.append(turn_engagement)
+        # Populate session working memory
+        session_memory.notes_created.extend(result.note_titles)
+        session_memory.nodes_created.extend(result.node_labels)
+        session_memory.edges_created += result.edges_created
         turns += 1
 
         # Persist progress so the UI/lifecycle watchdog see live turn counts
@@ -2719,6 +2004,8 @@ async def _run_loop(
             await snapshot_transcript(transcript)
         except Exception:
             pass
+
+        await _maybe_persist_durable()
 
         # Run the auditor watchdog. If a rule trips, we kick off the audit
         # dialogue (which runs in-process here so the session is genuinely
@@ -2733,20 +2020,7 @@ async def _run_loop(
                 trigger_kind="watchdog_loop",
             )
             if audit_outcome == "stopped":
-                await _finalize_session(user_id, session_id, "auditor_stop", turns,
-                                        notes_created, curiosities_explored,
-                                        mode=mode, session_log_id=session_log_id,
-                                        engagement_scores=engagement_scores,
-                                        v2_stats={
-                                            "nodes_created": total_nodes_created,
-                                            "nodes_updated": total_nodes_updated,
-                                            "edges_created": total_edges_created,
-                                            "notes_written": total_notes_written,
-                                            "self_model_updated": self_model_ever_updated,
-                                        },
-                                        transcript=transcript,
-                                        session_memory=session_memory,
-                                        token_usage=total_token_usage)
+                await _finalize("auditor_stop")
                 return
         except Exception as e:
             logger.debug(f"Watchdog audit dispatch failed: {e}")
@@ -2769,21 +2043,14 @@ async def _run_loop(
                 "turn": turns, "text": narrative, "mode": mode,
             })
 
-        if _output_signals_done(response):
-            await _finalize_session(user_id, session_id, "completed", turns,
-                                    notes_created, curiosities_explored,
-                                    mode=mode, session_log_id=session_log_id,
-                                    engagement_scores=engagement_scores,
-                                    v2_stats={
-                                        "nodes_created": total_nodes_created,
-                                        "nodes_updated": total_nodes_updated,
-                                        "edges_created": total_edges_created,
-                                        "notes_written": total_notes_written,
-                                        "self_model_updated": self_model_ever_updated,
-                                    },
-                                    transcript=transcript,
-                                    session_memory=session_memory,
-                                    token_usage=total_token_usage)
+        v1_turn_had_real_activity = (
+            turn_cog_stats.get("vm_tool_calls", 0) > 0
+            or turn_cog_stats.get("notes_written", 0) > 0
+            or turn_cog_stats.get("nodes_created", 0) > 0
+            or turn_cog_stats.get("edges_created", 0) > 0
+        )
+        if _output_signals_done(response, turn_had_real_activity=v1_turn_had_real_activity):
+            await _finalize("completed")
             return
 
         # Continue loop
@@ -2791,23 +2058,11 @@ async def _run_loop(
             current_state = await state_machine.get_state(user_id)
             if current_state != ACSState.AUTONOMOUS:
                 reason = "conversation" if current_state == ACSState.PAUSING else "manual"
-                await _finalize_session(user_id, session_id, reason, turns,
-                                        notes_created, curiosities_explored,
-                                        mode=mode, session_log_id=session_log_id,
-                                        engagement_scores=engagement_scores,
-                                        v2_stats={
-                                            "nodes_created": total_nodes_created,
-                                            "nodes_updated": total_nodes_updated,
-                                            "edges_created": total_edges_created,
-                                            "notes_written": total_notes_written,
-                                            "self_model_updated": self_model_ever_updated,
-                                        },
-                                        transcript=transcript,
-                                        session_memory=session_memory)
+                await _finalize(reason)
                 return
 
             # Adaptive turn pacing based on activity type
-            had_vm_tools = turn_cog_stats.get("notes_written", 0) > 0 or "run_command" in response[:3000]
+            had_vm_tools = turn_cog_stats.get("notes_written", 0) > 0 or turn_cog_stats.get("vm_tool_calls", 0) > 0
             if had_vm_tools:
                 sleep_time = TURN_SLEEP_VM_ACTIVE
             elif turn_engagement < 0.4 and not turn_cog_stats.get("nodes_created"):
@@ -2833,27 +2088,18 @@ async def _run_loop(
             # Build turn prompt (refresh context periodically)
             refresh_ctx = ""
             if turns % CONTEXT_REFRESH_INTERVAL == 0:
-                if v2 and mode:
-                    from app.services.acs.context_assembler import assemble_context_v2
-                    ctx = await assemble_context_v2(user_id, mode)
-                    # Rebuild interest graph and self-model blocks on refresh
-                    refresh_parts = []
-                    if ctx.get("context_block"):
-                        refresh_parts.append(ctx["context_block"])
-                    if ctx.get("interest_graph_block"):
-                        refresh_parts.append(f"### Interest Graph\n{ctx['interest_graph_block']}")
-                    if ctx.get("self_model_block"):
-                        refresh_parts.append(f"### Self-Model\n{ctx['self_model_block']}")
-                    if ctx.get("directives_block"):
-                        refresh_parts.append(ctx["directives_block"])
-                    refresh_ctx = "\n\n".join(refresh_parts)
-                else:
-                    db = SessionLocal()
-                    try:
-                        ctx = assemble_context(db, user_id)
-                        refresh_ctx = ctx.get("context_block", "")
-                    finally:
-                        db.close()
+                from app.services.acs.context_assembler import assemble_context_v2
+                ctx = await assemble_context_v2(user_id, mode)
+                refresh_parts = []
+                if ctx.get("context_block"):
+                    refresh_parts.append(ctx["context_block"])
+                if ctx.get("interest_graph_block"):
+                    refresh_parts.append(f"### Interest Graph\n{ctx['interest_graph_block']}")
+                if ctx.get("self_model_block"):
+                    refresh_parts.append(f"### Self-Model\n{ctx['self_model_block']}")
+                if ctx.get("directives_block"):
+                    refresh_parts.append(ctx["directives_block"])
+                refresh_ctx = "\n\n".join(refresh_parts)
             elif new_directives:
                 # Inject directives even on non-refresh turns
                 refresh_ctx = new_directives
@@ -2931,40 +2177,17 @@ async def _run_loop(
                         total_token_usage[k] += turn_tokens.get(k, 0)
                 except LLMContextOverflowError:
                     logger.error(f"ACS turn {turns + 1}: LLM 400 persists after compaction")
-                    await _finalize_session(user_id, session_id, "error", turns,
-                                            notes_created, curiosities_explored,
-                                            error="LLM context overflow after compaction retry",
-                                            mode=mode, session_log_id=session_log_id,
-                                            engagement_scores=engagement_scores,
-                                            v2_stats={
-                                                "nodes_created": total_nodes_created,
-                                                "nodes_updated": total_nodes_updated,
-                                                "edges_created": total_edges_created,
-                                                "notes_written": total_notes_written,
-                                                "self_model_updated": self_model_ever_updated,
-                                            },
-                                            transcript=transcript,
-                                            session_memory=session_memory)
+                    await _finalize("error", error="LLM context overflow after compaction retry")
                     return
             except Exception as _turn_err:
                 # General turn error — retry up to 3 times before giving up
                 _consecutive_turn_errors += 1
                 if _consecutive_turn_errors >= 3:
                     logger.error(f"ACS turn {turns + 1}: {_consecutive_turn_errors} consecutive errors, ending session: {_turn_err}")
-                    await _finalize_session(user_id, session_id, "error", turns,
-                                            notes_created, curiosities_explored,
-                                            error=f"{_consecutive_turn_errors} consecutive errors: {str(_turn_err)[:300]}",
-                                            mode=mode, session_log_id=session_log_id,
-                                            engagement_scores=engagement_scores,
-                                            v2_stats={
-                                                "nodes_created": total_nodes_created,
-                                                "nodes_updated": total_nodes_updated,
-                                                "edges_created": total_edges_created,
-                                                "notes_written": total_notes_written,
-                                                "self_model_updated": self_model_ever_updated,
-                                            },
-                                            transcript=transcript,
-                                            session_memory=session_memory)
+                    await _finalize(
+                        "error",
+                        error=f"{_consecutive_turn_errors} consecutive errors: {str(_turn_err)[:300]}",
+                    )
                     return
                 logger.warning(f"ACS turn {turns + 1}: error (attempt {_consecutive_turn_errors}/3), retrying in 10s: {_turn_err}")
                 await asyncio.sleep(10)
@@ -2972,61 +2195,40 @@ async def _run_loop(
 
             if not response:
                 logger.warning(f"ACS turn {turns + 1}: empty response")
-                await _finalize_session(user_id, session_id, "error", turns,
-                                        notes_created, curiosities_explored,
-                                        error="Empty LLM response",
-                                        mode=mode, session_log_id=session_log_id,
-                                        engagement_scores=engagement_scores,
-                                        v2_stats={
-                                            "nodes_created": total_nodes_created,
-                                            "nodes_updated": total_nodes_updated,
-                                            "edges_created": total_edges_created,
-                                            "notes_written": total_notes_written,
-                                            "self_model_updated": self_model_ever_updated,
-                                        },
-                                        transcript=transcript,
-                                        session_memory=session_memory)
+                await _finalize("error", error="Empty LLM response")
                 return
 
             conversation.append({"role": "assistant", "content": response})
             transcript.record_assistant_turn(turns + 1, response)
 
-            result = await _process_output(user_id, session_id, response, v2=v2, transcript=transcript, session_memory=session_memory, mode=mode, turns=turns)
-            if isinstance(result, TurnResult):
-                # Merge cognitive tool stats from _llm_turn
-                result.nodes_created += turn_cog_stats.get("nodes_created", 0)
-                result.nodes_updated += turn_cog_stats.get("nodes_updated", 0)
-                result.edges_created += turn_cog_stats.get("edges_created", 0)
-                tool_notes = turn_cog_stats.get("notes_written", 0)
-                result.notes_written += tool_notes
-                result.notes_created += tool_notes
-                if turn_cog_stats.get("self_model_updated"):
-                    result.self_model_updated = True
-                if turn_cog_stats.get("engagement_score"):
-                    result.engagement_score = turn_cog_stats["engagement_score"]
+            result = await _process_output(user_id, session_id, response, transcript=transcript, session_memory=session_memory, mode=mode, turns=turns)
+            # Merge cognitive tool stats from _llm_turn
+            result.nodes_created += turn_cog_stats.get("nodes_created", 0)
+            result.nodes_updated += turn_cog_stats.get("nodes_updated", 0)
+            result.edges_created += turn_cog_stats.get("edges_created", 0)
+            tool_notes = turn_cog_stats.get("notes_written", 0)
+            result.notes_written += tool_notes
+            result.notes_created += tool_notes
+            if turn_cog_stats.get("self_model_updated"):
+                result.self_model_updated = True
+            if turn_cog_stats.get("engagement_score"):
+                result.engagement_score = turn_cog_stats["engagement_score"]
 
-                notes_created += result.notes_created
-                curiosities_explored += result.curiosities_explored
-                topics_covered.extend(result.topics)
-                total_nodes_created += result.nodes_created
-                total_nodes_updated += result.nodes_updated
-                total_edges_created += result.edges_created
-                total_notes_written += result.notes_written
-                if result.self_model_updated:
-                    self_model_ever_updated = True
-                turn_engagement = result.engagement_score or _infer_engagement(result)
-                engagement_scores.append(turn_engagement)
-                # Populate session working memory
-                session_memory.notes_created.extend(result.note_titles)
-                session_memory.nodes_created.extend(result.node_labels)
-                session_memory.edges_created += result.edges_created
-            else:
-                n, c, t = result
-                notes_created += n
-                curiosities_explored += c
-                topics_covered.extend(t)
-                turn_engagement = 0.6
-                engagement_scores.append(turn_engagement)
+            notes_created += result.notes_created
+            curiosities_explored += result.curiosities_explored
+            topics_covered.extend(result.topics)
+            total_nodes_created += result.nodes_created
+            total_nodes_updated += result.nodes_updated
+            total_edges_created += result.edges_created
+            total_notes_written += result.notes_written
+            if result.self_model_updated:
+                self_model_ever_updated = True
+            turn_engagement = result.engagement_score or _infer_engagement(result)
+            engagement_scores.append(turn_engagement)
+            # Populate session working memory
+            session_memory.notes_created.extend(result.note_titles)
+            session_memory.nodes_created.extend(result.node_labels)
+            session_memory.edges_created += result.edges_created
             turns += 1
 
             # Persist progress so the UI/lifecycle watchdog see live turn counts
@@ -3037,6 +2239,8 @@ async def _run_loop(
                 await snapshot_transcript(transcript)
             except Exception:
                 pass
+
+            await _maybe_persist_durable()
 
             # Run the auditor watchdog. If a rule trips, we kick off the audit
             # dialogue (which runs in-process here so the session is genuinely
@@ -3051,19 +2255,7 @@ async def _run_loop(
                     trigger_kind="watchdog_loop",
                 )
                 if audit_outcome == "stopped":
-                    await _finalize_session(user_id, session_id, "auditor_stop", turns,
-                                            notes_created, curiosities_explored,
-                                            mode=mode, session_log_id=session_log_id,
-                                            engagement_scores=engagement_scores,
-                                            v2_stats={
-                                                "nodes_created": total_nodes_created,
-                                                "nodes_updated": total_nodes_updated,
-                                                "edges_created": total_edges_created,
-                                                "notes_written": total_notes_written,
-                                                "self_model_updated": self_model_ever_updated,
-                                            },
-                                            transcript=transcript,
-                                            session_memory=session_memory)
+                    await _finalize("auditor_stop")
                     return
             except Exception as e:
                 logger.debug(f"Watchdog audit dispatch failed: {e}")
@@ -3086,69 +2278,37 @@ async def _run_loop(
                     "turn": turns, "text": narrative, "mode": mode,
                 })
 
-            # Sara decides when she's done — no engagement-based early termination.
-            # The only automatic stops are: done signal, chat interrupt, auditor stop, or 180min ceiling.
+            # Done detection: check if the model emitted a done signal.
+            # Also track consecutive done-with-no-activity turns for deadlock detection.
+            turn_had_real_activity = (
+                turn_cog_stats.get("vm_tool_calls", 0) > 0
+                or turn_cog_stats.get("notes_written", 0) > 0
+                or turn_cog_stats.get("nodes_created", 0) > 0
+                or turn_cog_stats.get("edges_created", 0) > 0
+            )
 
-            if _output_signals_done(response):
-                await _finalize_session(user_id, session_id, "completed", turns,
-                                        notes_created, curiosities_explored,
-                                        mode=mode, session_log_id=session_log_id,
-                                        engagement_scores=engagement_scores,
-                                        v2_stats={
-                                            "nodes_created": total_nodes_created,
-                                            "nodes_updated": total_nodes_updated,
-                                            "edges_created": total_edges_created,
-                                            "notes_written": total_notes_written,
-                                            "self_model_updated": self_model_ever_updated,
-                                        },
-                                        transcript=transcript,
-                                        session_memory=session_memory)
+            if _output_signals_done(response, turn_had_real_activity=turn_had_real_activity):
+                await _finalize("completed")
                 return
 
+            if _output_has_done_block(response) and not turn_had_real_activity:
+                consecutive_done_turns += 1
+                logger.warning(f"ACS done-deadlock counter: {consecutive_done_turns}/{ACS_DONE_DEADLOCK_LIMIT} (session {session_id})")
+                if consecutive_done_turns >= ACS_DONE_DEADLOCK_LIMIT:
+                    logger.error(f"ACS done-deadlock detected after {consecutive_done_turns} consecutive idle done turns — force-ending session {session_id}")
+                    await _finalize("done_deadlock")
+                    return
+            else:
+                consecutive_done_turns = 0
+
         # Deadline reached
-        await _finalize_session(user_id, session_id, "timeout", turns,
-                                notes_created, curiosities_explored,
-                                mode=mode, session_log_id=session_log_id,
-                                engagement_scores=engagement_scores,
-                                v2_stats={
-                                    "nodes_created": total_nodes_created,
-                                    "nodes_updated": total_nodes_updated,
-                                    "edges_created": total_edges_created,
-                                    "notes_written": total_notes_written,
-                                    "self_model_updated": self_model_ever_updated,
-                                },
-                                transcript=transcript,
-                                session_memory=session_memory)
+        await _finalize("timeout")
 
     except asyncio.CancelledError:
-        await _finalize_session(user_id, session_id, "manual", turns,
-                                notes_created, curiosities_explored,
-                                mode=mode, session_log_id=session_log_id,
-                                engagement_scores=engagement_scores,
-                                v2_stats={
-                                    "nodes_created": total_nodes_created,
-                                    "nodes_updated": total_nodes_updated,
-                                    "edges_created": total_edges_created,
-                                    "notes_written": total_notes_written,
-                                    "self_model_updated": self_model_ever_updated,
-                                },
-                                transcript=transcript,
-                                session_memory=session_memory)
+        await _finalize("manual")
     except Exception as e:
         logger.exception(f"ACS loop crashed: {e}")
-        await _finalize_session(user_id, session_id, "error", turns,
-                                notes_created, curiosities_explored, error=str(e)[:500],
-                                mode=mode, session_log_id=session_log_id,
-                                engagement_scores=engagement_scores,
-                                v2_stats={
-                                    "nodes_created": total_nodes_created,
-                                    "nodes_updated": total_nodes_updated,
-                                    "edges_created": total_edges_created,
-                                    "notes_written": total_notes_written,
-                                    "self_model_updated": self_model_ever_updated,
-                                },
-                                transcript=transcript,
-                                session_memory=session_memory)
+        await _finalize("error", error=str(e)[:500])
     finally:
         _active_tasks.pop(user_id, None)
         # Clean up ephemeral containers, but preserve persistent ones
@@ -3185,75 +2345,34 @@ def _infer_engagement(result: TurnResult) -> float:
     return 0.3
 
 
-# ── Output parsing ──
+# ── Output parsing (re-exports from output_parsing module) ──
 
-def _output_signals_done(output: str) -> bool:
-    """Check if the output contains a done block signaling nothing left to do."""
-    try:
-        for line in output.strip().split("\n"):
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                block = json.loads(line)
-                if block.get("type") == "done":
-                    summary = block.get("summary", "")
-                    if any(phrase in summary.lower() for phrase in
-                           ["nothing meaningful", "nothing to do", "no more", "stopping"]):
-                        return True
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
-    return False
-
-
-def _extract_files_from_transcript(transcript) -> list[str]:
-    """Extract file paths from write_file/read_file tool calls in the transcript."""
-    files = []
-    seen = set()
-    for entry in transcript.entries:
-        if entry.get("type") == "tool_result" and entry.get("tool") in ("write_file", "read_file"):
-            args_str = entry.get("args", "")
-            try:
-                args = json.loads(args_str) if args_str.startswith("{") else {}
-                path = args.get("path", "")
-            except (json.JSONDecodeError, AttributeError):
-                path = ""
-            if path and path not in seen:
-                files.append(path)
-                seen.add(path)
-        # Also catch paths from tool_calls in assistant turns
-        if entry.get("type") == "assistant_turn" and entry.get("tool_calls"):
-            for tc in entry["tool_calls"]:
-                if tc.get("name") in ("write_file", "read_file"):
-                    try:
-                        args = json.loads(tc.get("args", "{}"))
-                        path = args.get("path", "")
-                    except (json.JSONDecodeError, AttributeError):
-                        path = ""
-                    if path and path not in seen:
-                        files.append(path)
-                        seen.add(path)
-    return files
+from app.services.acs.output_parsing import (
+    compact_conversation as _compact_conversation,
+    compress_older_turns as _compress_older_turns,
+    extract_files_from_transcript as _extract_files_from_transcript,
+    extract_json_blocks as _extract_json_blocks,
+    extract_narrative as _extract_narrative,
+    output_has_done_block as _output_has_done_block,
+    output_signals_done as _output_signals_done,
+    strip_narrative as _strip_narrative,
+)
 
 
 async def _process_output(
-    user_id: str, session_id: str, output: str, v2: bool = False,
+    user_id: str, session_id: str, output: str,
     transcript=None, session_memory: SessionWorkingMemory = None,
     mode: str = None, turns: int = 0,
-):
-    """Parse structured JSON blocks from output.
+) -> TurnResult:
+    """Parse structured JSON blocks from the LLM output and dispatch side-effects.
 
-    When v2=False: returns (notes_created, curiosities_explored, topics_this_turn).
-    When v2=True: returns TurnResult with full stats.
+    Returns a TurnResult with per-turn stats (notes_created, nodes_created, etc.).
     """
     tr = TurnResult()
     blocks = _extract_json_blocks(output)
-    if v2:
-        logger.debug(f"_process_output v2: {len(blocks)} blocks found in {len(output)} chars")
-        if blocks:
-            logger.info(f"ACS v2 blocks: {[b.get('type') for b in blocks]}")
+    logger.debug(f"_process_output: {len(blocks)} blocks found in {len(output)} chars")
+    if blocks:
+        logger.info(f"ACS blocks: {[b.get('type') for b in blocks]}")
 
     from app.db.session import get_async_session_factory
     async_session = get_async_session_factory()
@@ -3270,12 +2389,12 @@ async def _process_output(
                 tr.topics.append(note_title)
                 tr.note_titles.append(note_title)
 
-            elif block_type == "note_revision" and v2:
+            elif block_type == "note_revision":
                 await _revise_note(db, user_id, block)
                 tr.notes_written += 1
                 tr.note_titles.append(f"(revised) {block.get('note_title', '')}")
 
-            elif block_type == "interest_node_create" and v2:
+            elif block_type == "interest_node_create":
                 try:
                     from app.services.acs.interest_graph import InterestGraph
                     graph = InterestGraph()
@@ -3296,7 +2415,7 @@ async def _process_output(
                 except Exception as e:
                     logger.warning(f"interest_node_create failed: {e}")
 
-            elif block_type == "interest_node_update" and v2:
+            elif block_type == "interest_node_update":
                 try:
                     from app.services.acs.interest_graph import InterestGraph
                     graph = InterestGraph()
@@ -3312,7 +2431,7 @@ async def _process_output(
                 except Exception as e:
                     logger.warning(f"interest_node_update failed: {e}")
 
-            elif block_type == "interest_edge_create" and v2:
+            elif block_type == "interest_edge_create":
                 try:
                     from app.services.acs.interest_graph import InterestGraph
                     graph = InterestGraph()
@@ -3331,7 +2450,7 @@ async def _process_output(
                 except Exception as e:
                     logger.warning(f"interest_edge_create failed: {e}")
 
-            elif block_type == "self_model_update" and v2:
+            elif block_type == "self_model_update":
                 try:
                     from app.services.acs.self_model import SelfModel
                     sm = SelfModel()
@@ -3342,25 +2461,23 @@ async def _process_output(
                 except Exception as e:
                     logger.warning(f"self_model_update failed: {e}")
 
-            elif block_type == "engagement_signal" and v2:
+            elif block_type == "engagement_signal":
                 score = block.get("score", 0.5)
                 tr.engagement_score = max(0.0, min(1.0, float(score)))
 
             elif block_type == "curiosity":
-                # Route through interest graph (v2) or just track topic
-                if v2:
-                    try:
-                        from app.services.acs.interest_graph import InterestGraph
-                        graph = InterestGraph()
-                        await graph.add_node(
-                            user_id=user_id,
-                            label=block.get("topic", ""),
-                            source="self_discovery",
-                            fascination=block.get("priority", 0.5),
-                        )
-                        tr.nodes_created += 1
-                    except Exception:
-                        pass
+                try:
+                    from app.services.acs.interest_graph import InterestGraph
+                    graph = InterestGraph()
+                    await graph.add_node(
+                        user_id=user_id,
+                        label=block.get("topic", ""),
+                        source="self_discovery",
+                        fascination=block.get("priority", 0.5),
+                    )
+                    tr.nodes_created += 1
+                except Exception:
+                    pass
                 tr.topics.append(block.get("topic", ""))
 
             elif block_type == "show_david":
@@ -3390,155 +2507,7 @@ async def _process_output(
 
         await db.commit()
 
-    if v2:
-        return tr
-    return tr.notes_created, tr.curiosities_explored, tr.topics
-
-
-def _extract_json_blocks(output: str) -> list[dict]:
-    """Extract JSON objects from output text, one per line."""
-    blocks = []
-    for line in output.split("\n"):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-            if isinstance(obj, dict) and "type" in obj:
-                blocks.append(obj)
-        except json.JSONDecodeError:
-            match = re.search(r'\{[^{}]*"type"\s*:\s*"[^"]+?"[^{}]*\}', line)
-            if match:
-                try:
-                    blocks.append(json.loads(match.group()))
-                except json.JSONDecodeError:
-                    pass
-    return blocks
-
-
-def _strip_narrative(output: str) -> str:
-    """Strip narrative text from assistant output, keeping only JSON blocks.
-
-    Used to compress older turns in conversation history so narration
-    doesn't consume context budget across a long session.
-    """
-    lines = []
-    for line in output.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("{"):
-            try:
-                obj = json.loads(stripped)
-                if isinstance(obj, dict) and "type" in obj:
-                    lines.append(stripped)
-                    continue
-            except json.JSONDecodeError:
-                pass
-    return "\n".join(lines) if lines else output[:200]
-
-
-def _compress_older_turns(messages: list[dict]) -> list[dict]:
-    """Compress older assistant turns by stripping narration, keep recent ones intact.
-
-    Keeps the last 6 messages (3 turns) with full narration.
-    Older assistant messages get narration stripped to just JSON blocks.
-    Also drops messages beyond 21 to bound total size.
-    """
-    # Keep last 6 messages intact (recent turns with full narration)
-    if len(messages) <= 6:
-        return messages
-
-    recent = messages[-6:]
-    older = messages[-21:-6] if len(messages) > 21 else messages[:-6]
-
-    compressed = []
-    for msg in older:
-        if msg.get("role") == "assistant":
-            compressed.append({
-                "role": "assistant",
-                "content": _strip_narrative(msg["content"]),
-            })
-        else:
-            compressed.append(msg)
-
-    return compressed + recent
-
-
-async def _compact_conversation(
-    conversation: list[dict], model_id: str
-) -> str:
-    """LLM-summarize old turns into a checkpoint instead of silently dropping them."""
-    from app.core.llm import BackgroundLLMClient
-
-    # Collect everything except system prompt + last 8 messages (4 turns)
-    old_messages = conversation[1:-8]
-    if not old_messages:
-        return ""
-
-    # Build text of old conversation
-    old_text_parts = []
-    for msg in old_messages:
-        role = msg.get("role", "?")
-        content = msg.get("content", "")[:2000]
-        if role == "tool":
-            old_text_parts.append(f"[Tool result]: {content[:500]}")
-        elif content:
-            old_text_parts.append(f"[{role}]: {content}")
-    old_text = "\n\n".join(old_text_parts)
-
-    client = BackgroundLLMClient()
-    compaction_prompt = (
-        "Summarize this ACS session conversation into a compact recap covering:\n"
-        "- What was accomplished (notes, tools, findings)\n"
-        "- Current working state (files created, things built)\n"
-        "- Decisions made and reasoning\n"
-        "- What was being worked on most recently\n"
-        "- Open questions or next steps\n"
-        "Be specific — include file paths, note titles, concrete findings. Under 1500 tokens."
-    )
-
-    try:
-        result = await client.chat_completion(
-            messages=[
-                {"role": "system", "content": compaction_prompt},
-                {"role": "user", "content": old_text},
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-            model=model_id,
-            request_timeout=120.0,
-            allow_during_lesson_generation=True,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        choices = result.get("choices", [])
-        if choices:
-            summary = choices[0].get("message", {}).get("content", "")
-            if summary:
-                return summary
-    except Exception as e:
-        logger.warning(f"Compaction LLM call failed: {e}")
-
-    # Fallback: just return a basic summary
-    return "(Compaction failed — previous turns were trimmed to save context)"
-
-
-def _extract_narrative(output: str) -> str:
-    """Extract narrative text from LLM output, stripping JSON blocks."""
-    lines = []
-    for line in output.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("{"):
-            try:
-                obj = json.loads(stripped)
-                if isinstance(obj, dict) and "type" in obj:
-                    continue  # skip structured blocks
-            except json.JSONDecodeError:
-                pass
-        lines.append(stripped)
-    return " ".join(lines)[:800]
+    return tr
 
 
 async def _revise_note(db, user_id: str, block: dict):
@@ -4255,6 +3224,10 @@ async def _finalize_session(
     transcript=None,
     session_memory: SessionWorkingMemory = None,
     token_usage: dict = None,
+    plan_item_id: Optional[str] = None,
+    primary_topic: Optional[str] = None,
+    primary_objective: Optional[str] = None,
+    expected_artifact: Optional[str] = None,
 ):
     """Mark session as ended, update DB, transition state."""
     from app.db.session import get_async_session_factory

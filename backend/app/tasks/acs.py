@@ -583,40 +583,46 @@ async def _lifecycle_check():
         logger.warning(f"show_david cleanup failed: {e}")
 
     # Clean up zombie/orphaned ACS sessions in the database.
-    # Two sweeps:
-    #   1. Autonomous sessions >30 min old with no ended_at, not the active Redis session
-    #   2. Any non-ended session stuck >24 hours (certainly dead regardless of turns)
+    # Heartbeat-based detection: the session loop writes to
+    # acs_session_transcript every 5 turns / 2 min via persist_transcript_durable_only.
+    # A session is zombie when:
+    #   Sweep 1: transcript heartbeat is stale (>15 min since updated_at), OR
+    #            no transcript row exists and session is older than 30 min.
+    #   Sweep 2: any non-ended session stuck >24 hours (ultimate fail-safe).
     try:
         from app.db.session import get_async_session_factory
         from sqlalchemy import text
         active_session_id = await state_machine.get_active_session_id(user_id)
         async_session = get_async_session_factory()
         async with async_session() as db:
-            # Sweep 1: autonomous sessions older than 30 min not tracked in Redis
-            if active_session_id:
-                sweep1_q = text("""
-                    UPDATE acs_session
-                    SET state = 'ended', ended_at = NOW(), end_reason = 'orphaned',
-                        error_log = 'Zombie cleanup: autonomous with no ended_at, older than 30 minutes'
-                    WHERE user_id = :uid AND state = 'autonomous' AND ended_at IS NULL
-                      AND started_at < NOW() - INTERVAL '30 minutes'
-                      AND id != :active_sid
-                    RETURNING id
-                """)
-                result = await db.execute(sweep1_q, {"uid": user_id, "active_sid": active_session_id})
-            else:
-                sweep1_q = text("""
-                    UPDATE acs_session
-                    SET state = 'ended', ended_at = NOW(), end_reason = 'orphaned',
-                        error_log = 'Zombie cleanup: autonomous with no ended_at, older than 30 minutes'
-                    WHERE user_id = :uid AND state = 'autonomous' AND ended_at IS NULL
-                      AND started_at < NOW() - INTERVAL '30 minutes'
-                    RETURNING id
-                """)
-                result = await db.execute(sweep1_q, {"uid": user_id})
+            sweep1_params = {"uid": user_id, "active_sid": active_session_id or ""}
+            result = await db.execute(text("""
+                UPDATE acs_session s
+                SET state = 'ended', ended_at = NOW(), end_reason = 'orphaned',
+                    error_log = 'Zombie cleanup: transcript heartbeat stale or absent'
+                WHERE s.user_id = :uid
+                  AND s.state = 'autonomous'
+                  AND s.ended_at IS NULL
+                  AND (
+                    -- Heartbeat stale (active persist >15 min old)
+                    EXISTS (
+                      SELECT 1 FROM acs_session_transcript t
+                      WHERE t.session_id = s.id
+                        AND t.updated_at < NOW() - INTERVAL '15 minutes'
+                    )
+                    OR
+                    -- Never heartbeat'd and older than 30 min
+                    (
+                      NOT EXISTS (SELECT 1 FROM acs_session_transcript t WHERE t.session_id = s.id)
+                      AND s.started_at < NOW() - INTERVAL '30 minutes'
+                    )
+                  )
+                  AND s.id != :active_sid
+                RETURNING s.id
+            """), sweep1_params)
             rows = result.fetchall()
 
-            # Sweep 2: anything stuck > 24 hours regardless of state or turns
+            # Sweep 2: anything stuck > 24 hours regardless of heartbeat (hard cap)
             result2 = await db.execute(text("""
                 UPDATE acs_session
                 SET state = 'ended', ended_at = NOW(), end_reason = 'orphaned',
@@ -637,6 +643,31 @@ async def _lifecycle_check():
                     f"ACS zombie cleanup: ended {len(all_rows)} orphaned session(s): "
                     f"{', '.join(cleaned_ids)}"
                 )
+                # Persist transcripts from Redis before they expire
+                for orphan_row in all_rows:
+                    orphan_sid = str(orphan_row[0])
+                    try:
+                        import redis.asyncio as aioredis
+                        import json as _json
+                        _redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+                        r = await aioredis.from_url(_redis_url, decode_responses=True)
+                        try:
+                            raw = await r.get(f"sara:acs:transcript:{orphan_sid}")
+                        finally:
+                            if hasattr(r, "aclose"):
+                                await r.aclose()
+                            else:
+                                await r.close()
+                        if raw:
+                            from app.services.acs.audit_logger import TranscriptBuffer, persist_transcript_durable_only
+                            data = _json.loads(raw)
+                            buf = TranscriptBuffer(data["session_id"], data.get("mode"))
+                            buf.started_at = data.get("started_at", "")
+                            buf.entries = data.get("entries", [])
+                            await persist_transcript_durable_only(user_id, buf)
+                            logger.info(f"Persisted orphaned transcript for {orphan_sid[:8]}")
+                    except Exception as e:
+                        logger.debug(f"Orphan transcript persist failed for {orphan_sid[:8]}: {e}")
     except Exception as e:
         logger.warning(f"ACS zombie session cleanup failed: {e}")
 
@@ -1777,7 +1808,7 @@ Output your plan in this format:
                     f"{parked_count} stale items from yesterday"
                 )
 
-        # Step 2: Extract structured items from the prose plan
+        # Step 2: Extract structured items from the prose plan (with retries)
         extract_prompt = (
             "Extract concrete, actionable plan items from this daily plan.\n\n"
             "For each item, provide:\n"
@@ -1793,50 +1824,105 @@ Output your plan in this format:
             "Plan:\n" + plan_content
         )
 
-        extract_result = await client.chat_completion(
-            messages=[
-                {"role": "system", "content": "Extract structured plan items from prose. Output valid JSON array only."},
-                {"role": "user", "content": extract_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=2000,
-            request_timeout=60.0,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-
-        extract_content = ""
-        extract_choices = extract_result.get("choices", [])
-        if extract_choices:
-            extract_content = extract_choices[0].get("message", {}).get("content", "")
-
-        # Parse JSON array from response
+        items_inserted = 0
+        extraction_succeeded = False
         import re as _re
-        json_match = _re.search(r'\[.*\]', extract_content, _re.DOTALL)
-        if json_match:
-            items = json.loads(json_match.group())
-            async with async_session() as db:
-                for plan_item in items[:8]:  # Cap at 8 items per day
-                    if not isinstance(plan_item, dict) or not plan_item.get("title"):
-                        continue
+
+        for attempt in range(3):
+            try:
+                extract_result = await client.chat_completion(
+                    messages=[
+                        {"role": "system", "content": "Extract structured plan items from prose. Output valid JSON array only."},
+                        {"role": "user", "content": extract_prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=2000,
+                    request_timeout=60.0,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                )
+
+                extract_content = ""
+                extract_choices = extract_result.get("choices", [])
+                if extract_choices:
+                    extract_content = extract_choices[0].get("message", {}).get("content", "")
+
+                json_match = _re.search(r'\[.*\]', extract_content, _re.DOTALL)
+                if json_match:
+                    items = json.loads(json_match.group())
+                    if items:
+                        async with async_session() as db:
+                            for plan_item in items[:8]:
+                                if not isinstance(plan_item, dict) or not plan_item.get("title"):
+                                    continue
+                                await db.execute(text("""
+                                    INSERT INTO acs_plan_item (id, user_id, plan_date, title, description,
+                                        success_criteria, priority, status, source, estimated_turns,
+                                        cognitive_mode)
+                                    VALUES (:id, :uid, :today, :title, :desc, :criteria, :priority,
+                                        'pending', 'morning_plan', :est, :mode)
+                                """), {
+                                    "id": str(uuid.uuid4()), "uid": user_id, "today": date.today(),
+                                    "title": str(plan_item.get("title", ""))[:200],
+                                    "desc": str(plan_item.get("description", ""))[:2000],
+                                    "criteria": str(plan_item.get("success_criteria", ""))[:1000],
+                                    "priority": min(max(int(plan_item.get("priority", 50)), 10), 80),
+                                    "est": int(plan_item.get("estimated_turns", 5)) if plan_item.get("estimated_turns") else 5,
+                                    "mode": str(plan_item.get("cognitive_mode", "execution"))[:20],
+                                })
+                                items_inserted += 1
+                            await db.commit()
+                        logger.info(f"ACS daily plan: created {items_inserted} structured plan items (attempt {attempt + 1})")
+                        extraction_succeeded = True
+                        break
+                    else:
+                        logger.warning(f"ACS daily plan: extraction returned empty array (attempt {attempt + 1})")
+                else:
+                    logger.warning(f"ACS daily plan: no JSON array found in extraction response (attempt {attempt + 1})")
+            except Exception as e:
+                logger.warning(f"ACS daily plan: extraction attempt {attempt + 1} failed: {e}")
+
+            if attempt < 2:
+                await asyncio.sleep(30)
+
+        if not extraction_succeeded or items_inserted == 0:
+            logger.error(
+                f"ACS daily plan: FAILED to extract any plan items from prose after 3 attempts. "
+                f"Inserting fallback item. Raw extract: {extract_content[:500] if 'extract_content' in dir() else '(no response)'}"
+            )
+            try:
+                async with async_session() as db:
                     await db.execute(text("""
                         INSERT INTO acs_plan_item (id, user_id, plan_date, title, description,
                             success_criteria, priority, status, source, estimated_turns,
                             cognitive_mode)
-                        VALUES (:id, :uid, :today, :title, :desc, :criteria, :priority,
-                            'pending', 'morning_plan', :est, :mode)
+                        VALUES (:id, :uid, :today, :title, :desc, :criteria, 50,
+                            'pending', 'morning_plan_fallback', 5, 'consolidation')
                     """), {
                         "id": str(uuid.uuid4()), "uid": user_id, "today": date.today(),
-                        "title": str(plan_item.get("title", ""))[:200],
-                        "desc": str(plan_item.get("description", ""))[:2000],
-                        "criteria": str(plan_item.get("success_criteria", ""))[:1000],
-                        "priority": min(max(int(plan_item.get("priority", 50)), 10), 80),
-                        "est": int(plan_item.get("estimated_turns", 5)) if plan_item.get("estimated_turns") else 5,
-                        "mode": str(plan_item.get("cognitive_mode", "execution"))[:20],
+                        "title": "Review today's prose plan",
+                        "desc": plan_content[:2000],
+                        "criteria": "Read the prose plan and decide on concrete next steps",
                     })
-                await db.commit()
-                logger.info(f"ACS daily plan: created {min(len(items), 8)} structured plan items")
+                    await db.commit()
+                logger.info("ACS daily plan: inserted morning_plan_fallback item")
+            except Exception as e:
+                logger.error(f"ACS daily plan: even fallback item insertion failed: {e}")
+
+            # Surface the failure to David
+            try:
+                async with async_session() as db:
+                    await db.execute(text("""
+                        INSERT INTO acs_show_david_buffer (id, user_id, content, category, priority, created_at)
+                        VALUES (:id, :uid, :content, 'system_alert', 80, NOW())
+                    """), {
+                        "id": str(uuid.uuid4()), "uid": user_id,
+                        "content": "Daily planner generated a prose plan but failed to extract structured plan items after 3 attempts. A fallback item was created, but today's execution may be weaker than intended.",
+                    })
+                    await db.commit()
+            except Exception as e:
+                logger.debug(f"Failed to write planner alert to show_david_buffer: {e}")
     except Exception as e:
-        logger.warning(f"ACS daily plan: structured item extraction failed (non-critical): {e}")
+        logger.error(f"ACS daily plan: structured item extraction failed: {e}", exc_info=True)
 
 
 # ── Daily Audit ─────────────────────────────────────────────────────

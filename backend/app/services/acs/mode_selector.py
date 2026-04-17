@@ -447,6 +447,41 @@ async def select_mode(user_id: str) -> tuple[str, Optional[str]]:
     except Exception as e:
         logger.warning(f"Plan item check failed: {e}")
 
+    # Consistency check: prose plan exists but no plan_items for today
+    try:
+        import os
+        import redis.asyncio as aioredis
+        from datetime import date
+        _redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        _r = await aioredis.from_url(_redis_url, decode_responses=True)
+        try:
+            _plan_key = f"sara:acs:daily_plan:{user_id}"
+            _prose_exists = await _r.exists(_plan_key)
+            if _prose_exists:
+                from app.db.session import get_async_session_factory
+                _as = get_async_session_factory()
+                async with _as() as _db:
+                    _count_result = await _db.execute(text("""
+                        SELECT COUNT(*) FROM acs_plan_item
+                        WHERE user_id = :uid AND plan_date = :today AND status != 'parked'
+                    """), {"uid": user_id, "today": date.today()})
+                    _item_count = _count_result.scalar() or 0
+                if _item_count == 0:
+                    _guard_key = f"sara:acs:planner_inconsistency_logged:{user_id}:{date.today().isoformat()}"
+                    if not await _r.exists(_guard_key):
+                        logger.error(
+                            f"ACS mode_selector: prose daily plan exists in Redis but 0 plan_items "
+                            f"for today — planner extraction likely failed silently"
+                        )
+                        await _r.set(_guard_key, "1", ex=86400)
+        finally:
+            if hasattr(_r, "aclose"):
+                await _r.aclose()
+            else:
+                await _r.close()
+    except Exception as e:
+        logger.debug(f"Planner consistency check failed: {e}")
+
     # Phase 1: Compute signals (existing)
     if signals is None:
         try:

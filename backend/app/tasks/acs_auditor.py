@@ -88,6 +88,29 @@ async def _periodic_audit_check_async() -> dict:
                 f"Periodic check: session {session_id[:8]} at audit ceiling "
                 f"({MAX_AUDITS_PER_SESSION}); force-stopping"
             )
+            # Persist transcript before force-stopping
+            try:
+                import redis.asyncio as aioredis
+                import json as _json
+                import os
+                _redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+                r = await aioredis.from_url(_redis_url, decode_responses=True)
+                try:
+                    raw = await r.get(f"sara:acs:transcript:{session_id}")
+                finally:
+                    if hasattr(r, "aclose"):
+                        await r.aclose()
+                    else:
+                        await r.close()
+                if raw:
+                    from app.services.acs.audit_logger import TranscriptBuffer, persist_transcript_durable_only
+                    data = _json.loads(raw)
+                    buf = TranscriptBuffer(data["session_id"], data.get("mode"))
+                    buf.started_at = data.get("started_at", "")
+                    buf.entries = data.get("entries", [])
+                    await persist_transcript_durable_only(user_id, buf)
+            except Exception as e:
+                logger.debug(f"Force-stop transcript persist failed for {session_id[:8]}: {e}")
             try:
                 async with async_session() as db:
                     await db.execute(text("""
@@ -193,6 +216,35 @@ REASON: <one sentence>
             except Exception:
                 pass
             await release_audit_lock(session_id)
+
+    # Safety-net: durable-persist transcripts for all active sessions.
+    # Even if the in-loop rate-limited persist missed a window, the auditor
+    # runs every ~20min and ensures Postgres has the latest snapshot.
+    for row in rows:
+        session_id = row[0]
+        user_id = row[1]
+        try:
+            import redis.asyncio as aioredis
+            import json as _json
+            import os
+            _redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+            r = await aioredis.from_url(_redis_url, decode_responses=True)
+            try:
+                raw = await r.get(f"sara:acs:transcript:{session_id}")
+            finally:
+                if hasattr(r, "aclose"):
+                    await r.aclose()
+                else:
+                    await r.close()
+            if raw:
+                from app.services.acs.audit_logger import TranscriptBuffer, persist_transcript_durable_only
+                data = _json.loads(raw)
+                buf = TranscriptBuffer(data["session_id"], data.get("mode"))
+                buf.started_at = data.get("started_at", "")
+                buf.entries = data.get("entries", [])
+                await persist_transcript_durable_only(user_id, buf)
+        except Exception as e:
+            logger.debug(f"Safety-net transcript persist failed for {session_id[:8]}: {e}")
 
     return {
         "checked": len(rows),

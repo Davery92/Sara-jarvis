@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, timezone
+
+from app.core.timezone import now as local_now, to_local
 
 from app.core.deps import get_current_user, get_db
 from app.core.auth import verify_token
@@ -253,7 +255,8 @@ async def acs_snapshot(current_user=Depends(get_current_user)):
         }
 
     if active:
-        elapsed = (datetime.utcnow() - active[4].replace(tzinfo=None)).total_seconds() / 60
+        started_local = to_local(active[4]) if active[4] else local_now()
+        elapsed = (local_now() - started_local).total_seconds() / 60
         result["live_session"] = {
             "id": active[0],
             "mode": active[1],
@@ -510,7 +513,7 @@ async def get_session_notes(
         raise HTTPException(404, "Session not found")
 
     started = session_row[0]
-    ended = session_row[1] or datetime.utcnow()
+    ended = session_row[1] or datetime.now(timezone.utc).replace(tzinfo=None)
 
     notes_result = db.execute(text("""
         SELECT id, title, content, tags, created_at

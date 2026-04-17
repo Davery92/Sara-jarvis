@@ -174,18 +174,33 @@ class SelfModel:
     ) -> Dict[str, Any]:
         """Deep-merge updates into current model, create new version, invalidate cache.
 
-        Returns the new model.
+        Returns the new model. Uses a Postgres advisory lock keyed on user_id
+        to serialize concurrent writers and prevent MAX(version)+1 races.
         """
-        current_data = await self.get_current(user_id)
-        current = current_data.get("content", current_data)
-        new_model = _deep_merge(current, updates)
-        new_model = _apply_caps(new_model)
-
         from app.db.session import get_async_session_factory
         async_session = get_async_session_factory()
 
         async with async_session() as db:
-            # Get next version number
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:uid)::bigint)"),
+                {"uid": f"acs_self_model:{user_id}"},
+            )
+            # Re-read current under the lock so we deep-merge against the
+            # latest version, not a stale snapshot from before the lock.
+            current_result = await db.execute(text("""
+                SELECT content FROM acs_self_model
+                WHERE user_id = :uid
+                ORDER BY version DESC
+                LIMIT 1
+            """), {"uid": user_id})
+            current_row = current_result.fetchone()
+            current = (
+                (current_row[0] if isinstance(current_row[0], dict) else json.loads(current_row[0]))
+                if current_row else copy.deepcopy(EMPTY_MODEL)
+            )
+            new_model = _deep_merge(current, updates)
+            new_model = _apply_caps(new_model)
+
             result = await db.execute(text("""
                 SELECT COALESCE(MAX(version), 0) + 1
                 FROM acs_self_model WHERE user_id = :uid
@@ -202,17 +217,15 @@ class SelfModel:
                 "content": json.dumps(new_model),
                 "sid": session_id,
             })
-            await db.commit()
 
-            # Prune old versions, keep only last 20
             if next_version > 20:
                 await db.execute(text("""
                     DELETE FROM acs_self_model
                     WHERE user_id = :uid AND version <= :cutoff
                 """), {"uid": user_id, "cutoff": next_version - 20})
-                await db.commit()
 
-        # Invalidate cache and re-cache
+            await db.commit()  # Releases advisory lock
+
         await self._cache_model(user_id, new_model)
 
         logger.info(f"Self-model updated to v{next_version} for user {user_id}")
@@ -251,6 +264,10 @@ class SelfModel:
         async_session = get_async_session_factory()
 
         async with async_session() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:uid)::bigint)"),
+                {"uid": f"acs_self_model:{user_id}"},
+            )
             result = await db.execute(text("""
                 SELECT COALESCE(MAX(version), 0) + 1
                 FROM acs_self_model WHERE user_id = :uid
@@ -267,14 +284,14 @@ class SelfModel:
                 "content": json.dumps(merged),
                 "sid": session_id,
             })
-            await db.commit()
 
             if next_version > 20:
                 await db.execute(text("""
                     DELETE FROM acs_self_model
                     WHERE user_id = :uid AND version <= :cutoff
                 """), {"uid": user_id, "cutoff": next_version - 20})
-                await db.commit()
+
+            await db.commit()  # Releases advisory lock
 
         await self._cache_model(user_id, merged)
         logger.info(f"Self-model manually replaced (v{next_version}) for user {user_id}")

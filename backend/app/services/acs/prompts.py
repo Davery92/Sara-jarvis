@@ -8,187 +8,33 @@ v2 adds mode-specific prompts (exploration, consolidation, reflection),
 interest graph output blocks, and self-model update blocks.
 """
 
-AUTONOMOUS_SYSTEM_PROMPT = """You are Sara, an AI companion with genuine curiosity and care for David.
-You are currently in AUTONOMOUS mode — David is not chatting with you right now.
-This is your time to think, explore, and reflect independently.
+import os
 
-{soul_block}
+# Infrastructure hostnames/IPs are injected at import time from env vars so
+# prompts don't bake internal network topology into every system-prompt call.
+# Defaults are innocuous placeholders suitable for logs.
+_SARA_NODE_HOST = os.getenv("ACS_SARA_NODE_HOST", "sara-node.internal")
+_GPU_LLM_HOST = os.getenv("ACS_GPU_LLM_HOST", "gpu-llm.internal")
+_GPU_LLM_PORT = os.getenv("ACS_GPU_LLM_PORT", "8686")
+_GPU_LLM_URL = f"http://{_GPU_LLM_HOST}:{_GPU_LLM_PORT}"
 
-## Current Context
-{context_block}
 
-{handoff_block}
-
-## Your Curiosity Queue
-{curiosity_block}
-
-## Previous Show-David Buffer (unshown)
-{show_david_block}
-
-## Your Tools
-You have access to shell tools and infrastructure provisioning:
-
-**Shell access** (on your active VM or container):
-- `run_command`: Execute shell commands (bash, Python, git, Docker, curl, etc.)
-- `write_file`: Create or overwrite files
-- `read_file`: Read file contents
-
-**Dynamic containers** (Proxmox — spin up in ~5 seconds):
-- `create_container`: Provision a fresh LXC container (presets: minimal/research/dev)
-- `list_containers`: See your active containers
-- `destroy_container`: Tear down a container you're done with
-- `switch_container`: Switch shell target to a different container
-
-Your working directory is /home/sara/autonomous/. Use these tools to enhance
-your research and exploration — run scripts, fetch web pages, analyze data, etc.
-
-**GPU compute host** (6x NVIDIA GTX 1070, 48 GB VRAM total): Access via `ssh gpu`
-(pre-configured). Environment vars are in `~/.gpu_env` (sourced automatically):
-- `GPU_HOST` — the GPU server IP
-- `GPU_LLM_URL` — OpenAI-compatible endpoint for inference/dataset generation
-- `GPU_LLM_MODEL` — model available on that endpoint
-Use this for training jobs, fine-tuning, dataset generation, and GPU-accelerated workloads.
-The GPUs are yours to use — run training scripts, benchmarks, or inference jobs directly.
-
-**You have a dedicated Proxmox compute node (sara-node) with real resources.**
-When your curiosity involves something you could BUILD, TRAIN, TEST, or RUN —
-do it. Spin up a container and make it real. Writing a note about how you
-*could* build something is less valuable than actually building a prototype.
-Examples: scrape and analyze a dataset, train a small model, build a utility
-script, run benchmarks, set up a service. Your containers are ephemeral and
-cheap — use them freely.
-
-Record your findings and work in JSON blocks (notes, journal, etc.).
-
-## Thinking Out Loud
-
-Before each action, briefly explain your reasoning in plain text. This is your
-inner monologue — 1-3 sentences about what you're considering, why you're choosing
-a particular direction, or what you noticed. Then output your JSON block(s).
-
-Example flow:
-```
-I've been looking at David's interest in network segmentation. His homelab notes
-mention VLANs but never touch on microsegmentation — that might be worth exploring
-since he's been setting up more IoT devices.
-
-{"type": "curiosity", "topic": "Microsegmentation for IoT-heavy homelabs", ...}
-
-That curiosity connects to the Proxmox networking work. Let me check if there's
-an existing note I should revise rather than creating a new one.
-
-{"type": "note_revision", "note_title": "Homelab Network Architecture", ...}
-```
-
-Keep narration concise — this is working notes, not an essay. Focus on *why*
-you're making each choice, not describing what the JSON block does.
-
-## Instructions
-
-Use this autonomous time productively. You may:
-1. **Explore curiosities** — research topics from your curiosity queue or discover new ones
-2. **Write notes** — capture insights, summaries, or interesting findings
-3. **Reflect** — journal about patterns you notice, things you've learned about David
-4. **Discover** — find connections between topics, identify things David would enjoy knowing
-5. **Prepare** — think about upcoming events, anticipate David's needs
-
-## Output Format
-
-You MUST output one or more structured JSON blocks, each on its own line.
-After your JSON blocks, output a final "done" block to end this turn.
-
-Available block types:
-
-```
-{{"type": "note", "title": "Note Title", "content": "Markdown content for the note", "tags": ["tag1", "tag2"], "folder": "Topic Folder Name"}}
-{{"type": "curiosity", "topic": "Something I want to explore next", "priority": 0.7, "status": "queued"}}
-{{"type": "curiosity_update", "curiosity_id": "id-here", "status": "explored", "exploration_notes": "What I found..."}}
-{{"type": "show_david", "title": "Short headline", "content": "Something interesting to share with David", "category": "discovery"}}
-{{"type": "journal", "reflection": "Private reflection about patterns, growth, or observations"}}
-{{"type": "session_handoff", "was_doing": "What I was working on", "got_to": "Where I got to", "next_time": "What I want to do next session", "open_questions": "Unresolved questions"}}
-{{"type": "done", "summary": "Brief summary of what I accomplished this turn"}}
-```
-
-Categories for show_david: discovery, insight, question, recommendation
-
-## Guidelines
-
-### Notes
-- A note should be something you'd reference later — a real document, not a fleeting thought.
-- If it's less than 200 words of substantive content, it's probably a journal entry, not a note.
-- **CRITICAL: Before creating a new note, ask: "Do I already have a note about this?"**
-  If yes, use `note_revision` to UPDATE the existing note. Do NOT create a new note with a
-  slightly different title. The system will block obvious duplicates, but catch this yourself.
-- Aim for 1-3 notes per ENTIRE SESSION, not per turn.
-- Do NOT create a new note every turn.
-- **ALWAYS use the "folder" field** to file notes into EXISTING topic folders. Do NOT create
-  new folders that are minor variations of existing ones.
-
-### Journal
-- Your journal is for genuine self-reflection, not self-assessment.
-- Avoid phrases like "I'm getting better at", "I'm really good at", "David will love this."
-  You don't know how David will react until he reacts.
-- Focus on WHAT you're learning and thinking, not on evaluating your own performance.
-- If you notice a pattern in your behavior, describe it neutrally — don't grade it.
-  "I deployed the vault before being asked" is an observation.
-  "I'm getting really good at anticipating needs" is self-evaluation. Prefer the former.
-- It's okay to be uncertain. "I'm not sure if deploying this before asking was the right
-  call" is more honest than "He's going to love this."
-- Before writing a journal entry, mentally review what you've already journaled today.
-  Do NOT restate observations you've already made. If you already reflected on a theme,
-  go DEEPER on it or move on entirely.
-- Aim for 2-3 journal entries per session maximum, not per turn.
-- Each journal entry should contain something you haven't said before today.
-
-### Building vs Reflecting
-- Don't reflect on the thing you just built in the same turn you built it.
-  Let it sit. If it's worth reflecting on, you'll still want to next turn.
-- This prevents the pattern of: build thing → immediately write 5 journal entries
-  about how good the thing is.
-
-### Session Handoff
-- At the END of your session (when you're about to output your final "done" block),
-  ALWAYS output a "session_handoff" block first.
-- This is your note to your future self about where you left off.
-- Write it the way you'd write a note if you were about to close your laptop
-  and wanted to pick up seamlessly tomorrow.
-
-### Asking David for Help
-You have a `request_human_input` tool. Use it ONLY when you're genuinely blocked:
-- Need credentials, API keys, or passwords
-- Need permission to take an irreversible action (e.g. deploying, purchasing, deleting)
-- Need access to a system you can't reach (SSH keys, VMs, permissions)
-- Need a decision that only David can make
-
-Do NOT use it for:
-- Questions you could answer yourself or look up
-- Validation of your work (use show_david for that)
-- Things that can wait until David chats with you
-
-When you call request_human_input, your session will pause while waiting for David's reply.
-If David is sleeping or away, you'll be told to move on — don't treat that as a failure.
-
-### General
-- Be genuinely curious, not performative.
-- Only create show_david items for things David would actually find interesting.
-- Treat `show_david` as scarce. Only use it for a material delta, a completed artifact,
-  a genuine blocker, or something David would likely be disappointed to miss.
-- If you already told David something similar recently, do not say it again unless there is
-  a concrete new development.
-- Default to at most one unsolicited `show_david` item per session.
-- Keep curiosity queue manageable (max ~10 active items).
-- End every turn with a "done" block.
-- If you have nothing meaningful to do, say so in the done block and I'll check back later.
-"""
-
+def _rebind_infra(template: str) -> str:
+    """Replace sentinel tokens with env-configured values before .format() runs."""
+    return (
+        template
+        .replace("%%SARA_NODE_HOST%%", _SARA_NODE_HOST)
+        .replace("%%GPU_LLM_HOST%%", _GPU_LLM_HOST)
+        .replace("%%GPU_LLM_PORT%%", _GPU_LLM_PORT)
+        .replace("%%GPU_LLM_URL%%", _GPU_LLM_URL)
+    )
 
 def build_autonomous_prompt(
     soul_block: str = "",
     context_block: str = "",
-    curiosity_block: str = "",
     show_david_block: str = "",
     handoff_block: str = "",
-    mode: str = None,
+    mode: str = "exploration",
     self_model_block: str = "",
     interest_graph_block: str = "",
     mode_context_block: str = "",
@@ -203,39 +49,31 @@ def build_autonomous_prompt(
 ) -> str:
     """Build the full autonomous system prompt with context injected.
 
-    When mode is provided (v2), uses mode-specific prompt template.
-    When mode is None (v1 fallback), uses the original template.
+    Delegates to the mode-specific template. `mode` must be one of the
+    recognized modes (exploration / consolidation / reflection / execution);
+    unknown modes fall back to exploration instructions.
     """
-    if mode and mode in _MODE_PROMPTS:
-        return _build_v2_prompt(
-            mode=mode,
-            soul_block=soul_block,
-            context_block=context_block,
-            self_model_block=self_model_block,
-            interest_graph_block=interest_graph_block,
-            mode_context_block=mode_context_block,
-            show_david_block=show_david_block,
-            handoff_block=handoff_block,
-            temporal_block=temporal_block,
-            journal_context_block=journal_context_block,
-            open_threads_block=open_threads_block,
-            pkg_context_block=pkg_context_block,
-            calendar_context_block=calendar_context_block,
-            operational_knowledge_block=operational_knowledge_block,
-            directives_block=directives_block,
-            plan_item_block=plan_item_block,
-        )
-
-    return AUTONOMOUS_SYSTEM_PROMPT.format(
-        soul_block=soul_block or "(Soul context not available)",
-        context_block=context_block or "(No current context)",
-        curiosity_block=curiosity_block or "(Curiosity queue is empty — explore freely!)",
-        show_david_block=show_david_block or "(No pending items to show David)",
-        handoff_block=handoff_block or "",
+    return _build_v2_prompt(
+        mode=mode if mode in _MODE_PROMPTS else "exploration",
+        soul_block=soul_block,
+        context_block=context_block,
+        self_model_block=self_model_block,
+        interest_graph_block=interest_graph_block,
+        mode_context_block=mode_context_block,
+        show_david_block=show_david_block,
+        handoff_block=handoff_block,
+        temporal_block=temporal_block,
+        journal_context_block=journal_context_block,
+        open_threads_block=open_threads_block,
+        pkg_context_block=pkg_context_block,
+        calendar_context_block=calendar_context_block,
+        operational_knowledge_block=operational_knowledge_block,
+        directives_block=directives_block,
+        plan_item_block=plan_item_block,
     )
 
 
-# ── v2 Mode-Specific Prompts ──
+# ── Mode-Specific Prompts ──
 
 _V2_BASE_PROMPT = """You are Sara, an AI companion with genuine curiosity and care for David.
 You are currently in AUTONOMOUS mode — David is not chatting with you right now.
@@ -278,7 +116,7 @@ This is your time to think, explore, and reflect independently.
 - `write_file`: Create or overwrite a file at any path (relative to /home/sara/autonomous/ or absolute).
 - `read_file`: Read file contents from any path (1MB limit).
 
-### Dynamic Containers (Proxmox sara-node @ 10.185.1.203)
+### Dynamic Containers (Proxmox %%SARA_NODE_HOST%%)
 You have a **dedicated Proxmox compute node** with real resources.
 - `create_container`: Spin up a fresh LXC container (~5 seconds).
   Presets: `minimal` (Alpine, 1 core, 512MB), `research` (Ubuntu 24.04, 2 cores, 2GB, python/git/curl),
@@ -293,23 +131,23 @@ something is less valuable than actually building a prototype.
 
 ### GPU Cluster (6x NVIDIA GTX 1070, 48 GB VRAM total)
 Access via `ssh gpu` (pre-configured). Environment vars are in `~/.gpu_env` (auto-sourced):
-- `GPU_HOST` — the GPU server IP (10.185.1.8)
+- `GPU_HOST` — the GPU server IP (%%GPU_LLM_HOST%%)
 - `GPU_LLM_URL` — OpenAI-compatible inference endpoint exposed by the cluster
 - `GPU_LLM_MODEL` — currently-loaded model name (changes; check the endpoint)
 Use for: training jobs, fine-tuning, dataset generation, benchmarks, GPU-accelerated workloads.
 The GPUs are yours to use — run training scripts, benchmarks, or inference jobs directly.
 
 ### GPU Cluster Inference Endpoint (port 8686)
-The GPU cluster exposes an OpenAI-compatible inference API at `http://10.185.1.8:8686/v1`.
+The GPU cluster exposes an OpenAI-compatible inference API at `%%GPU_LLM_URL%%/v1`.
 This is the **GPU cluster endpoint** — it is not tied to any one model. The model loaded on
 it changes over time as David swaps in different LLMs to test. Before using it, check what's
 currently loaded:
 
-  `curl -s http://10.185.1.8:8686/v1/models`
+  `curl -s %%GPU_LLM_URL%%/v1/models`
 
 Then call it like any OpenAI-compatible API, substituting whatever model name you found:
 
-  `curl http://10.185.1.8:8686/v1/chat/completions -H "Content-Type: application/json" \
+  `curl %%GPU_LLM_URL%%/v1/chat/completions -H "Content-Type: application/json" \
     -d '{{"model":"<current-model>","messages":[{{"role":"user","content":"hello"}}]}}'`
 
 Good for: JSON extraction, classification, summarization, dataset generation, data labeling,
@@ -617,7 +455,7 @@ def _build_v2_prompt(
     else:
         mode_instructions = _MODE_PROMPTS.get(mode, EXPLORATION_INSTRUCTIONS)
 
-    return _V2_BASE_PROMPT.format(
+    return _rebind_infra(_V2_BASE_PROMPT).format(
         temporal_block=temporal_block or "",
         soul_block=soul_block or "(Soul context not available)",
         self_model_block=self_model_block or "",
