@@ -190,6 +190,76 @@ async def send_notification(
     """
     priority = _normalize_priority(priority)
 
+    # Ensure we always have a session. Without this, callers that forget
+    # the db kwarg silently skip dedup AND logging — which is how the
+    # "hourly push about the same email" bug landed in production: a
+    # Celery task at :43 past each hour called us with db=None, dedup was
+    # skipped, notification_log wasn't written, and the outer cooldown
+    # never kicked in. Opening our own session here makes dedup the
+    # default instead of an opt-in.
+    _owned_session = False
+    if db is None:
+        try:
+            from app.db.session import get_async_session_factory
+            _factory = get_async_session_factory()
+            db = _factory()
+            await db.__aenter__()
+            _owned_session = True
+        except Exception as exc:
+            logger.warning(
+                f"send_notification could not open fallback session: {exc}; "
+                "proceeding without dedup/logging"
+            )
+            db = None
+
+    try:
+        result = await _send_notification_impl(
+            user_id=user_id,
+            title=title,
+            message=message,
+            priority=priority,
+            topic=topic,
+            category=category,
+            source=source,
+            cooldown_hours=cooldown_hours,
+            agent_run_id=agent_run_id,
+            db=db,
+            _bypass_attention=_bypass_attention,
+            _attention_item_id=_attention_item_id,
+        )
+        # AsyncSession does not auto-commit — if we opened this session
+        # ourselves, the caller isn't going to commit for us, so the
+        # dedup log row + attention item would roll back on exit and
+        # next hour's call would not see them as dupes. Explicit commit.
+        if _owned_session and db is not None:
+            try:
+                await db.commit()
+            except Exception as exc:
+                logger.warning(f"send_notification auto-session commit failed: {exc}")
+        return result
+    finally:
+        if _owned_session and db is not None:
+            try:
+                await db.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+
+async def _send_notification_impl(
+    *,
+    user_id: str,
+    title: str,
+    message: str,
+    priority: str,
+    topic: Optional[str],
+    category: str,
+    source: str,
+    cooldown_hours: Optional[float],
+    agent_run_id: Optional[int],
+    db: Optional[AsyncSession],
+    _bypass_attention: bool,
+    _attention_item_id: Optional[str],
+) -> Dict[str, Any]:
     # ── Engagement-based priority adjustment ──
     # If David consistently ignores a category, lower priority; if he engages, boost
     if db and category not in ("system_health", "security"):
