@@ -28,6 +28,23 @@ ESCALATION_HOURS = 2.0
 # blasting the phone with a dozen pushes if many items piled up at once.
 MAX_ESCALATIONS_PER_USER = 5
 
+# Per-category escalation cooldowns (hours). If we've already pushed a
+# similar item in this window, swallow the escalation and just mark the
+# item 'sent'. Prevents the "same Jim email, different hash" loop where
+# cross_system_check kept minting fresh attention items with drifting
+# topics and the escalator dutifully pushed each one.
+_ESCALATION_COOLDOWN_HOURS = {
+    "checkin": 24.0,       # informational cross-refs — once per day is plenty
+    "acs_discovery": 12.0,
+    "email": 4.0,
+    "calendar_prep": 2.0,
+}
+_DEFAULT_ESCALATION_COOLDOWN_HOURS = 6.0
+
+# Categories that should never escalate to a push. They live in the
+# attention queue but David reads them in the webapp, not on his phone.
+_NO_ESCALATE_CATEGORIES: set[str] = set()
+
 
 @celery_app.task(
     name="app.tasks.attention.escalate_unread_attention",
@@ -77,8 +94,57 @@ async def _escalate_unread_attention_async() -> dict:
             user_id = row.user_id
             if per_user_count.get(user_id, 0) >= MAX_ESCALATIONS_PER_USER:
                 continue
-            per_user_count[user_id] = per_user_count.get(user_id, 0) + 1
 
+            category = row.category or "general"
+            topic = row.dedupe_key or f"attention_escalation:{row.id}"
+
+            # Some categories never escalate — they live in the queue and the
+            # user picks them up in the webapp.
+            if category in _NO_ESCALATE_CATEGORIES:
+                escalated_ids.append(row.id)
+                continue
+
+            # Recent-push guard. If a similar item (same topic OR same
+            # title/body fingerprint) was pushed within this category's
+            # escalation cooldown, skip. This is the fix for the "Jim email
+            # every hour" bug: cross_system_check was minting new attention
+            # items with drifting hash-based topics, and the old escalator
+            # dutifully pushed every single one because cooldown_hours=0.
+            cooldown_h = _ESCALATION_COOLDOWN_HOURS.get(
+                category, _DEFAULT_ESCALATION_COOLDOWN_HOURS
+            )
+            try:
+                recent = db.execute(text("""
+                    SELECT 1 FROM notification_log
+                    WHERE user_id = :uid
+                      AND sent = TRUE
+                      AND sent_at > NOW() - MAKE_INTERVAL(secs => :age_secs)
+                      AND (
+                          topic = :topic
+                          OR (category = :category AND title = :title)
+                      )
+                    LIMIT 1
+                """), {
+                    "uid": user_id,
+                    "age_secs": int(cooldown_h * 3600),
+                    "topic": topic,
+                    "category": category,
+                    "title": row.title,
+                }).fetchone()
+                if recent:
+                    logger.info(
+                        f"Attention escalation suppressed by recent push: "
+                        f"item={row.id} topic={topic} category={category} "
+                        f"cooldown={cooldown_h}h"
+                    )
+                    escalated_ids.append(row.id)
+                    continue
+            except Exception as e:
+                # If the guard query fails, fall through to the normal path —
+                # we'd rather occasionally double-notify than block everything.
+                logger.warning(f"Escalation cooldown check failed: {e}")
+
+            per_user_count[user_id] = per_user_count.get(user_id, 0) + 1
             push_attempts += 1
             try:
                 result = await send_notification(
@@ -88,8 +154,8 @@ async def _escalate_unread_attention_async() -> dict:
                     # Bump escalated items to "high" so they actually leave as a
                     # push regardless of the per-category cooldown floor.
                     priority="high",
-                    topic=row.dedupe_key or f"attention_escalation:{row.id}",
-                    category=row.category or "general",
+                    topic=topic,
+                    category=category,
                     source="attention_escalation",
                     cooldown_hours=0,
                     db=db,

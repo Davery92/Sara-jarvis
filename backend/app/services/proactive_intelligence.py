@@ -655,9 +655,13 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
 
     try:
         async with async_session() as db:
-            # Get recent email senders + subjects (last 24h)
+            # Get recent email senders + subjects (last 24h). Include the
+            # email id so callers can form stable topics — without the id,
+            # the old caller hashed the insight title and the hash drifted
+            # every time a new matching email arrived, which broke dedup
+            # in the attention escalator.
             emails = await db.execute(text("""
-                SELECT sender_name, subject, importance_score
+                SELECT id, sender_name, subject, importance_score
                 FROM email
                 WHERE user_id = :uid AND received_at > NOW() - INTERVAL '24 hours'
                 ORDER BY received_at DESC LIMIT 20
@@ -666,7 +670,7 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
 
             # Get upcoming calendar events (next 48h)
             events = await db.execute(text("""
-                SELECT title, start_time, description
+                SELECT id, title, start_time, description
                 FROM calendar_event
                 WHERE user_id = :uid
                   AND start_time BETWEEN NOW() AND NOW() + INTERVAL '48 hours'
@@ -688,7 +692,7 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
 
         # Extract entities from emails
         email_entities = set()
-        for sender, subject, _ in email_rows:
+        for _eid, sender, subject, _imp in email_rows:
             if sender:
                 email_entities.add(sender.lower().split()[0])  # First name
             if subject:
@@ -697,28 +701,34 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
                         email_entities.add(word.lower())
 
         # Check calendar events for overlap
-        for title, start_time, description in event_rows:
+        for event_id, title, start_time, description in event_rows:
             event_text = f"{title} {description or ''}".lower()
             matches = [e for e in email_entities if e in event_text]
 
             if matches:
                 # Find the matching email
-                for sender, subject, importance in email_rows:
+                for email_id, sender, subject, _imp in email_rows:
                     sender_match = sender and sender.lower().split()[0] in matches
                     subject_match = subject and any(m in subject.lower() for m in matches)
                     if sender_match or subject_match:
                         time_str = start_time.strftime("%A at %I:%M %p") if start_time else "soon"
+                        # Stable dedup key per email-event pair. The old
+                        # code hashed the title which drifted as new emails
+                        # arrived, causing one push per hour.
+                        short_email = (str(email_id) or "")[-12:]
+                        short_event = (str(event_id) or "")[:12]
                         insights.append({
                             "type": "email_calendar_link",
                             "title": f"Email from {sender} may relate to upcoming event",
                             "message": f"You received an email from {sender} about \"{subject}\" — and you have \"{title}\" {time_str}.",
                             "priority": "normal",
                             "confidence": 0.7,
+                            "topic": f"xref:email:{short_email}:event:{short_event}",
                         })
                         break  # One insight per event
 
         # Check notes for calendar overlap
-        for title, start_time, description in event_rows:
+        for event_id, title, start_time, description in event_rows:
             event_words = set(w.lower() for w in f"{title} {description or ''}".split() if len(w) > 4)
             for note_title, note_tags in note_rows:
                 note_words = set(w.lower() for w in (note_title or "").split() if len(w) > 4)
@@ -731,6 +741,7 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
                         "message": f"Your note \"{note_title}\" overlaps with \"{title}\" ({time_str}) on: {', '.join(overlap)}",
                         "priority": "low",
                         "confidence": 0.5,
+                        "topic": f"xref:note:{str(note_title)[:40]}:event:{str(event_id)[:12]}",
                     })
                     break
 

@@ -40,13 +40,17 @@ def cross_system_check(self):
 
         insights = _run_async(cross_reference_check(DEFAULT_USER_ID))
         for insight in insights:
+            # Prefer the stable topic the generator emitted (tied to email
+            # id + event id). Fall back to the legacy hash-of-title key
+            # only if an older generator is somehow still in the tree.
+            topic = insight.get("topic") or f"xref:{hash(insight['title']) % 100000}"
             _run_async(send_notification(
                 user_id=DEFAULT_USER_ID,
                 title=insight["title"],
                 message=insight["message"],
                 priority=insight.get("priority", "normal"),
                 category="checkin",
-                topic=f"xref:{hash(insight['title']) % 100000}",
+                topic=topic,
                 source="cross_system_synthesis",
             ))
         if insights:
