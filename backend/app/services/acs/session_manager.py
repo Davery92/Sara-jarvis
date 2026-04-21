@@ -228,6 +228,59 @@ VM_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_probe",
+            "description": (
+                "Load a URL in a headless Chromium browser on the sandbox VM, "
+                "take a screenshot, and capture page title, load time, console "
+                "errors, failed requests, and optional selector checks. Use this "
+                "to verify UIs you build — catch render errors, missing elements, "
+                "and broken network calls. Screenshot is saved to the VM at the "
+                "returned path; use run_command (e.g. `ls -la <path>`, or copy "
+                "into a container/MinIO) to share it. URL can point to any host "
+                "reachable from the VM, including localhost for dev servers you "
+                "started on the VM."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to load (http/https)",
+                    },
+                    "out_path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path on the VM where the PNG screenshot "
+                            "should be written. Defaults to /tmp/sara-shots/<ts>.png."
+                        ),
+                    },
+                    "wait_for_selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to wait for before screenshotting",
+                    },
+                    "selectors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional CSS selectors to check — each reported as found/not-found with text snippet",
+                    },
+                    "viewport_width": {"type": "integer", "description": "Viewport width in px (default 1280)"},
+                    "viewport_height": {"type": "integer", "description": "Viewport height in px (default 800)"},
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "Capture the full scrollable page instead of just the viewport (default false)",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Max milliseconds to wait for page load (default 15000)",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 # ── Infrastructure tools — dynamic container provisioning ──
@@ -311,9 +364,67 @@ INFRA_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ship_to_lxc",
+            "description": (
+                "Deploy a finished UI build from the sandbox VM to a fresh LXC "
+                "container so David can review it. Provisions a dev-preset LXC, "
+                "rsyncs the source_dir into it, installs deps (for kind='node'), "
+                "starts the service on the given port, and registers it as a "
+                "deliverable. Returns the LXC's IP:port URL David can visit. "
+                "The deliverable auto-destroys after 7 days unless David keeps it. "
+                "Use this ONLY when the UI is ready for human review — iterate "
+                "on the VM first using run_command + browser_probe."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short human-readable title (appears in David's review queue)",
+                    },
+                    "source_dir": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path on the sandbox VM containing the build "
+                            "(e.g. /home/sara/work/myapp/dist for a static build, "
+                            "or /home/sara/work/myapp for a node project with package.json)"
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["static", "node"],
+                        "description": (
+                            "'static' = serve source_dir with python http.server. "
+                            "'node' = npm install + npm start (your package.json "
+                            "must have a 'start' script that honors $PORT)."
+                        ),
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "Port to serve on (default 8080)",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Longer description of what this is and what to test",
+                    },
+                    "start_command": {
+                        "type": "string",
+                        "description": (
+                            "Optional override for the startup command. Runs inside "
+                            "the LXC in the app dir. Only use if 'kind' doesn't fit."
+                        ),
+                    },
+                },
+                "required": ["title", "source_dir", "kind"],
+            },
+        },
+    },
 ]
 
-_INFRA_TOOL_NAMES = {"create_container", "list_containers", "destroy_container", "switch_container"}
+_INFRA_TOOL_NAMES = {"create_container", "list_containers", "destroy_container", "switch_container", "ship_to_lxc"}
 
 # ── v2 Cognitive tools — interest graph, self-model, engagement ──
 
@@ -966,6 +1077,44 @@ async def _execute_tool(bridge: Optional[VMBridge], name: str, args: dict) -> st
                 return f"Error reading file: {result.stderr}"
             return result.stdout[:10000] or "(empty file)"
 
+        elif name == "browser_probe":
+            url = args.get("url", "")
+            if not url:
+                return "Error: url required"
+            out_path = args.get("out_path") or f"/tmp/sara-shots/{uuid.uuid4().hex}.png"
+            payload = {
+                "url": url,
+                "out_path": out_path,
+                "viewport": {
+                    "width": int(args.get("viewport_width", 1280)),
+                    "height": int(args.get("viewport_height", 800)),
+                },
+                "full_page": bool(args.get("full_page", False)),
+                "timeout_ms": int(args.get("timeout_ms", 15000)),
+            }
+            if args.get("wait_for_selector"):
+                payload["wait_for_selector"] = args["wait_for_selector"]
+            if args.get("selectors"):
+                payload["selectors"] = args["selectors"]
+
+            stdin_json = json.dumps(payload)
+            # Pass JSON via stdin through a heredoc to avoid quoting pain
+            marker = "SARA_PROBE_EOF"
+            cmd = (
+                f"node ~/tools/browser_probe.mjs << '{marker}'\n"
+                f"{stdin_json}\n"
+                f"{marker}"
+            )
+            result = await bridge.execute_command(cmd, timeout=max(30, payload["timeout_ms"] // 1000 + 20))
+            if result.timed_out:
+                return f"browser_probe timed out loading {url}"
+            # Script emits a single JSON line on stdout on success/failure
+            out = (result.stdout or "").strip()
+            if not out:
+                return f"browser_probe: no output. stderr: {result.stderr[:500]}"
+            # Surface the raw JSON — Sara can parse fields she cares about
+            return out[:6000]
+
         else:
             return f"Unknown tool: {name}"
 
@@ -1077,6 +1226,25 @@ async def _execute_infra_tool(
                 f"Switched shell to container vmid={vmid} ({target['hostname']} @ {target['ip_address']}). "
                 f"run_command/write_file/read_file now target this container."
             ), new_bridge
+
+        elif name == "ship_to_lxc":
+            from app.services.acs.deliverable_ship import ship_to_lxc
+            title = args.get("title", "")
+            source_dir = args.get("source_dir", "")
+            kind = args.get("kind", "")
+            if not title or not source_dir or not kind:
+                return "Error: title, source_dir, and kind are required", None
+            result = await ship_to_lxc(
+                user_id=user_id,
+                session_id=session_id,
+                title=title,
+                source_dir=source_dir,
+                kind=kind,
+                port=int(args.get("port", 8080)),
+                description=args.get("description"),
+                start_command=args.get("start_command"),
+            )
+            return json.dumps(result, default=str)[:6000], None
 
         else:
             return f"Unknown infra tool: {name}", None
@@ -1884,7 +2052,7 @@ async def _run_loop(
     total_token_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     consecutive_done_turns = 0
     ACS_DONE_DEADLOCK_LIMIT = int(os.environ.get("ACS_DONE_DEADLOCK_LIMIT", "3"))
-    _last_durable_persist_at = datetime.min
+    _last_durable_persist_at = datetime.min.replace(tzinfo=timezone.utc)
     _last_durable_persist_turn = 0
 
     async def _maybe_persist_durable():
@@ -2481,18 +2649,28 @@ async def _process_output(
                 tr.topics.append(block.get("topic", ""))
 
             elif block_type == "show_david":
-                await db.execute(text("""
-                    INSERT INTO acs_show_david_buffer
-                    (id, user_id, title, content, category, priority, session_id)
-                    VALUES (:id, :uid, :title, :content, :cat, :priority, :sid)
-                """), {
-                    "id": str(uuid.uuid4()), "uid": user_id,
-                    "title": block.get("title", ""),
-                    "content": block.get("content", ""),
-                    "cat": block.get("category", "discovery"),
-                    "priority": block.get("priority", 0.5),
-                    "sid": session_id,
-                })
+                from app.services.acs.communication_policy import queue_show_david
+
+                category = block.get("category", "discovery")
+                shared_reason = block.get("shared_reason")
+                if not shared_reason:
+                    if category in ("blocked", "artifact_complete", "needs_attention"):
+                        shared_reason = category
+                    elif category == "question":
+                        shared_reason = "needs_attention"
+                    else:
+                        shared_reason = "interesting_discovery"
+
+                await queue_show_david(
+                    db,
+                    user_id=user_id,
+                    session_id=session_id,
+                    title=block.get("title", ""),
+                    content=block.get("content", ""),
+                    category=category,
+                    priority=block.get("priority", 0.5),
+                    shared_reason=shared_reason,
+                )
 
             elif block_type == "journal":
                 await _append_journal(db, user_id, block.get("reflection", ""))

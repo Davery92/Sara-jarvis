@@ -124,6 +124,8 @@ class ContainerProvisioner:
         from app.db.session import get_async_session_factory
         async_session = get_async_session_factory()
         async with async_session() as db:
+            # VMID is unique; a destroyed-but-not-deleted row with this vmid
+            # would break the insert. Upsert by vmid.
             await db.execute(text("""
                 INSERT INTO proxmox_container
                     (id, vmid, user_id, session_id, hostname, ip_address, preset,
@@ -131,6 +133,22 @@ class ContainerProvisioner:
                 VALUES
                     (:id, :vmid, :uid, :sid, :hostname, :ip, :preset,
                      :cores, :mem, :disk, :persistent, :purpose, 'running', NOW(), NOW())
+                ON CONFLICT (vmid) DO UPDATE SET
+                    id = EXCLUDED.id,
+                    user_id = EXCLUDED.user_id,
+                    session_id = EXCLUDED.session_id,
+                    hostname = EXCLUDED.hostname,
+                    ip_address = EXCLUDED.ip_address,
+                    preset = EXCLUDED.preset,
+                    cores = EXCLUDED.cores,
+                    memory_mb = EXCLUDED.memory_mb,
+                    disk_gb = EXCLUDED.disk_gb,
+                    persistent = EXCLUDED.persistent,
+                    purpose = EXCLUDED.purpose,
+                    status = 'running',
+                    created_at = NOW(),
+                    destroyed_at = NULL,
+                    last_used_at = NOW()
             """), {
                 "id": container_id, "vmid": vmid, "uid": user_id, "sid": session_id,
                 "hostname": hostname, "ip": ip, "preset": preset,
@@ -150,17 +168,30 @@ class ContainerProvisioner:
     ) -> bool:
         """Run post-create setup inside the container via lxc-attach."""
         try:
-            # Install packages if specified
+            # Install packages if specified.
+            # Fresh Ubuntu LXCs run unattended-upgrades + cloud-init which hold
+            # apt locks for up to 10+ minutes on first boot. We do two things:
+            #   1) Stop & disable unattended-upgrades so our apt-get isn't
+            #      racing a background process.
+            #   2) Pass DPkg::Lock::Timeout=900 so apt-get itself waits up to
+            #      15 min for any remaining lock holders instead of bailing.
             packages = preset_config.get("packages", [])
+            disable_bg = (
+                "systemctl stop unattended-upgrades 2>/dev/null || true; "
+                "systemctl disable unattended-upgrades 2>/dev/null || true; "
+                "systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true; "
+                "systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true"
+            )
+            apt_opts = "-o DPkg::Lock::Timeout=900"
             if packages:
                 pkg_str = " ".join(packages)
-                # Give the container a moment to initialize networking
                 import asyncio
                 await asyncio.sleep(3)
                 await self.pve.exec_in_container(
                     vmid,
-                    f"apt-get update -qq && apt-get install -y -qq {pkg_str} openssh-client openssh-server",
-                    timeout=120.0,
+                    f"{disable_bg}; apt-get {apt_opts} update -qq && "
+                    f"apt-get {apt_opts} install -y -qq {pkg_str} openssh-client openssh-server",
+                    timeout=1200.0,
                 )
             else:
                 # Minimal preset (Alpine) — still needs SSH server
@@ -169,8 +200,9 @@ class ContainerProvisioner:
                 await self.pve.exec_in_container(
                     vmid,
                     "apk add --no-cache openssh-server openssh-client || "
-                    "apt-get update -qq && apt-get install -y -qq openssh-server openssh-client",
-                    timeout=120.0,
+                    f"({disable_bg}; apt-get {apt_opts} update -qq && "
+                    f"apt-get {apt_opts} install -y -qq openssh-server openssh-client)",
+                    timeout=1200.0,
                 )
 
             # Ensure SSH daemon is running

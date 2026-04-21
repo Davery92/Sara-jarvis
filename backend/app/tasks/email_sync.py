@@ -441,6 +441,11 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                 ).order_by(Email.received_at.desc()).limit(20)
             )
             retry_emails = retry_result.scalars().all()
+            # Retry emails are for MEETING DETECTION ONLY — they've already
+            # been triaged once and should never fire a push notification.
+            # Previously the loop re-ran the full notification gate on them
+            # every 3-min sync, spamming the user about old emails.
+            retry_ids = {e.id for e in retry_emails}
             if retry_emails:
                 logger.info(f"Retrying meeting detection for {len(retry_emails)} previously-analyzed emails")
                 emails.extend(retry_emails)
@@ -519,13 +524,19 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                         should_notify = True
                         notify_reason = "riskninja_attachment"
 
-                    # Send notification if needed
-                    if should_notify and not email.notification_sent:
+                    # Send notification if needed. Skip entirely for retry
+                    # emails — they were already triaged on their first pass,
+                    # and this loop is only re-visiting them for meeting
+                    # detection. Re-notifying would spam the user about every
+                    # old email every 3 minutes.
+                    is_retry = email.id in retry_ids
+                    if should_notify and not email.notification_sent and not is_retry:
                         await notification_service.notify_david(
                             title=f"New {analysis['category'].title()} Email",
                             body=f"From: {email.sender_name or email.sender_email}\n{email.subject}\n\n{analysis['summary'][:200]}",
                             priority="high" if analysis["importance_score"] >= 0.8 else "normal",
                             category="email",
+                            topic=f"email:{email.id}",
                             url=f"https://sara.avery.cloud/email/{email.id}"
                         )
                         email.notification_sent = True

@@ -1226,3 +1226,144 @@ async def acs_analytics(current_user=Depends(get_current_user), db: Session = De
         "mode_distribution": mode_dist,
         "top_interests": top,
     }
+
+
+# ── Deliverables (UIs Sara shipped to LXCs for David's review) ──
+
+
+@router.get("/deliverables")
+async def list_deliverables(
+    status: Optional[str] = Query(None, description="Filter by status"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List deliverables for the current user, newest first."""
+    where = ["user_id = :uid"]
+    params: dict = {"uid": current_user.id, "limit": limit}
+    if status:
+        where.append("status = :status")
+        params["status"] = status
+    rows = db.execute(
+        text(
+            f"""
+            SELECT id, user_id, session_id, vmid, title, description, kind, ip, port,
+                   start_command, built_from, status, created_at, reviewed_at,
+                   auto_destroy_at, destroyed_at
+            FROM acs_deliverable
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        params,
+    ).fetchall()
+
+    def _row(r):
+        return {
+            "id": r[0],
+            "user_id": r[1],
+            "session_id": r[2],
+            "vmid": r[3],
+            "title": r[4],
+            "description": r[5],
+            "kind": r[6],
+            "ip": r[7],
+            "port": r[8],
+            "url": f"http://{r[7]}:{r[8]}" if r[7] and r[8] else None,
+            "start_command": r[9],
+            "built_from": r[10],
+            "status": r[11],
+            "created_at": r[12].isoformat() if r[12] else None,
+            "reviewed_at": r[13].isoformat() if r[13] else None,
+            "auto_destroy_at": r[14].isoformat() if r[14] else None,
+            "destroyed_at": r[15].isoformat() if r[15] else None,
+        }
+
+    return {"deliverables": [_row(r) for r in rows]}
+
+
+@router.post("/deliverables/{deliverable_id}/keep")
+async def keep_deliverable(
+    deliverable_id: str,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a deliverable as 'kept' — clears auto_destroy_at so it persists."""
+    row = db.execute(
+        text(
+            "SELECT id FROM acs_deliverable WHERE id = :id AND user_id = :uid"
+        ),
+        {"id": deliverable_id, "uid": current_user.id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Deliverable not found")
+
+    db.execute(
+        text(
+            """
+            UPDATE acs_deliverable
+            SET status = 'kept',
+                reviewed_at = NOW(),
+                auto_destroy_at = NULL
+            WHERE id = :id
+            """
+        ),
+        {"id": deliverable_id},
+    )
+    db.commit()
+    return {"success": True, "id": deliverable_id, "status": "kept"}
+
+
+@router.delete("/deliverables/{deliverable_id}")
+async def destroy_deliverable(
+    deliverable_id: str,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Destroy the LXC backing a deliverable and mark the row as destroyed."""
+    row = db.execute(
+        text(
+            "SELECT id, vmid, status FROM acs_deliverable WHERE id = :id AND user_id = :uid"
+        ),
+        {"id": deliverable_id, "uid": current_user.id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Deliverable not found")
+
+    if row[2] == "destroyed":
+        return {"success": True, "id": deliverable_id, "status": "destroyed", "note": "already destroyed"}
+
+    vmid = row[1]
+    destroyed_ok = False
+    destroy_error = None
+    if vmid:
+        try:
+            from app.services.container_provisioner import ContainerProvisioner
+            provisioner = ContainerProvisioner()
+            destroyed_ok = await provisioner.destroy(vmid)
+        except Exception as e:
+            destroy_error = str(e)
+            logger.warning(f"Destroy vmid={vmid} failed: {e}")
+
+    db.execute(
+        text(
+            """
+            UPDATE acs_deliverable
+            SET status = 'destroyed',
+                reviewed_at = COALESCE(reviewed_at, NOW()),
+                destroyed_at = NOW()
+            WHERE id = :id
+            """
+        ),
+        {"id": deliverable_id},
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "id": deliverable_id,
+        "status": "destroyed",
+        "lxc_destroyed": destroyed_ok,
+        "destroy_error": destroy_error,
+    }

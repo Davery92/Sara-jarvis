@@ -132,6 +132,10 @@ class ProxmoxClient:
             "unprivileged": 1,
             "start": int(start),
             "features": "nesting=1",
+            # The Proxmox host's resolv.conf points at Tailscale MagicDNS
+            # (100.100.100.100) which doesn't resolve from inside the LXC —
+            # force a pair of public resolvers so apt-get works.
+            "nameserver": "1.1.1.1 8.8.8.8",
         }
         if ssh_keys:
             payload["ssh-public-keys"] = ssh_keys
@@ -159,9 +163,12 @@ class ProxmoxClient:
 
     async def destroy_container(self, vmid: int, purge: bool = True) -> str:
         """Destroy a container (must be stopped first). Returns UPID."""
-        params = {"purge": int(purge)} if purge else None
+        # Proxmox rejects bodies on DELETE — put purge on the query string.
+        path = f"/nodes/{self.node}/lxc/{vmid}"
+        if purge:
+            path += "?purge=1"
         result = await self._request(
-            "DELETE", f"/nodes/{self.node}/lxc/{vmid}", data=params
+            "DELETE", path
         )
         return result.get("data", "")
 
@@ -200,7 +207,7 @@ class ProxmoxClient:
                     "GET",
                     f"/nodes/{self.node}/lxc/{vmid}/interfaces",
                 )
-                interfaces = result.get("data", [])
+                interfaces = result.get("data") or []
                 for iface in interfaces:
                     if iface.get("name") == "eth0":
                         hwaddr = iface.get("inet", "")
@@ -219,24 +226,57 @@ class ProxmoxClient:
     # ── Exec via lxc-attach (PVE API) ──
 
     async def exec_in_container(self, vmid: int, command: str, timeout: float = 30.0) -> str:
-        """Execute a command inside a container via the PVE exec API.
+        """Execute a command inside a container.
 
-        Falls back to lxc-attach via node SSH if exec API is unavailable.
+        This PVE release does not expose /status/exec, so we SSH as root using
+        the key that was injected via ssh-public-keys at container creation.
         """
-        try:
-            # PVE 8.x+ has a direct exec endpoint
-            result = await self._request(
-                "POST",
-                f"/nodes/{self.node}/lxc/{vmid}/status/exec",
-                data={"command": command},
-                timeout=timeout,
+        ip = await self.get_container_ip(vmid, timeout=10.0)
+        if not ip:
+            raise ProxmoxError(f"cannot resolve IP for vmid={vmid} to exec command")
+        return await self.ssh_exec_as_root(ip, command, timeout=timeout)
+
+    async def ssh_exec_as_root(self, ip: str, command: str, timeout: float = 30.0) -> str:
+        """SSH into a container as root using the provisioner's SSH key."""
+        import asyncio as _asyncio
+        import os as _os
+        key_path = _os.path.expanduser(
+            settings.proxmox_ssh_public_key_path.replace(".pub", "")
+        )
+        ssh_args = [
+            "ssh",
+            "-i", key_path,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=10",
+            "-o", "BatchMode=yes",
+            f"root@{ip}",
+            command,
+        ]
+        # Retry only for transient "not ready yet" errors on connect. A timeout
+        # means a long-running command hit the deadline — do NOT retry, we'd
+        # just spawn a duplicate fighting the same locks.
+        last_err = ""
+        for attempt in range(6):
+            proc = await _asyncio.create_subprocess_exec(
+                *ssh_args,
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.PIPE,
             )
-            return str(result.get("data", ""))
-        except ProxmoxError:
-            # Fallback: use the create-then-poll approach for older PVE
-            # Run via a helper that wraps lxc-attach as a node-level command
-            logger.debug(f"exec API unavailable, skipping exec for vmid={vmid}")
-            return ""
+            try:
+                out, err = await _asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except _asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise ProxmoxError(f"ssh exec on {ip} timed out after {timeout}s")
+            if proc.returncode == 0:
+                return out.decode(errors="replace")
+            last_err = err.decode(errors="replace")[:500]
+            if "Connection refused" in last_err or "Permission denied" in last_err:
+                await _asyncio.sleep(2)
+                continue
+            break
+        raise ProxmoxError(f"ssh exec on {ip} failed: {last_err}")
 
     # ── VMID allocation ──
 
@@ -262,10 +302,8 @@ class ProxmoxClient:
         managed = [
             c for c in containers
             if settings.proxmox_vmid_range_start <= int(c.get("vmid", 0)) <= settings.proxmox_vmid_range_end
+            and c.get("status") != "stopped"
         ]
-
-        if len(managed) >= settings.proxmox_max_containers:
-            return False, f"At max containers ({settings.proxmox_max_containers})"
 
         total_cores = sum(int(c.get("cpus", 0)) for c in managed)
         total_mem = sum(int(c.get("maxmem", 0)) // (1024 * 1024) for c in managed)

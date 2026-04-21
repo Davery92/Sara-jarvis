@@ -576,21 +576,35 @@ class LLMClientWithFailover:
         if not emb_base.endswith("/v1"):
             emb_base = emb_base + "/v1"
 
-        # Local Ollama endpoints don't require auth - skip header if api_key is empty
-        embedding_client = httpx.AsyncClient(
-            base_url=emb_base,
-            headers=self._get_headers(emb_base, skip_auth_if_empty=True),
-            timeout=60.0
-        )
+        # NOTE: routed through sync `requests` in a thread to dodge the httpx 0.25 +
+        # uvicorn ConnectError bug (see embedding_service.py for details).
+        import asyncio
+        import requests
 
+        headers = self._get_headers(emb_base, skip_auth_if_empty=True)
         payload = {
             "model": model or settings.embedding_model,
-            "input": text
+            "input": text,
         }
+        url = f"{emb_base}/embeddings"
+
+        def _post():
+            return requests.post(url, json=payload, headers=headers, timeout=60)
 
         try:
             logger.debug(f"Getting embedding for text: {text[:100]}...")
-            response = await embedding_client.post("/embeddings", json=payload)
+            response = None
+            last_exc: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    response = await asyncio.to_thread(_post)
+                    break
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    last_exc = e
+                    if attempt < 2:
+                        await asyncio.sleep(0.3 * (attempt + 1))
+            if response is None:
+                raise last_exc or RuntimeError("embedding request failed")
             response.raise_for_status()
 
             result = response.json()
@@ -617,16 +631,13 @@ class LLMClientWithFailover:
                         exc_info=True
                     )
 
-            await embedding_client.aclose()
             return embedding
 
-        except httpx.HTTPError as e:
+        except requests.HTTPError as e:
             logger.error(f"HTTP error in embedding: {e}")
-            await embedding_client.aclose()
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in embedding: {e}")
-            await embedding_client.aclose()
+            logger.error(f"Unexpected error in embedding [{type(e).__name__}]: {e}")
             raise
 
     async def score_importance(self, content: str) -> float:

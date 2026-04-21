@@ -11,10 +11,12 @@ Adds semantic understanding to calendar events:
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
+
+from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,16 @@ _CATEGORY_RULES = [
     (r"\b(flight|travel|hotel|airport|vacation|trip)\b", "travel", "family"),
     (r"\b(church|mass|service|bible|youth.group)\b", "religious", "family"),
 ]
+
+
+def _naive_local_now() -> datetime:
+    """Return app-local wall clock time as a naive datetime for calendar_event.
+
+    calendar_event.start_time/end_time are stored as naive timestamps, so ACS
+    prompt-building queries must compare against naive datetimes in the same
+    local timezone semantics or asyncpg will reject the comparison.
+    """
+    return local_now().replace(tzinfo=None)
 
 
 def classify_event(title: str, description: str = "") -> Dict[str, Any]:
@@ -60,7 +72,7 @@ async def extract_patterns(user_id: str, lookback_days: int = 90) -> List[Dict[s
     try:
         async with async_session() as db:
             # Use naive datetime — calendar_event.start_time is DateTime without timezone
-            since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+            since = _naive_local_now() - timedelta(days=lookback_days)
             result = await db.execute(text("""
                 SELECT title, start_time, end_time, location,
                        EXTRACT(DOW FROM start_time) AS dow,
@@ -174,7 +186,7 @@ async def get_annotated_schedule(user_id: str, days_ahead: int = 7) -> str:
     try:
         async with async_session() as db:
             # Use naive datetime — calendar_event.start_time is DateTime without timezone
-            now = datetime.now(timezone.utc)
+            now = _naive_local_now()
             until = now + timedelta(days=days_ahead)
 
             result = await db.execute(text("""

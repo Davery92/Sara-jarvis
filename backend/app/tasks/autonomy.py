@@ -991,12 +991,9 @@ def home_state_hourly_summary(self):
 
 async def _home_state_summary_async():
     """Aggregate HA events from Redis event replay buffer into DB."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
-    import os
-    engine = create_async_engine(async_url, echo=False)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
     try:
         from app.services.event_bus import event_bus
         now = local_now()
@@ -1066,8 +1063,6 @@ async def _home_state_summary_async():
     except Exception as e:
         logger.warning(f"Home state summary async failed: {e}")
         return {"error": str(e)}
-    finally:
-        await engine.dispose()
 
 
 # ── Daily Autonomy Digest ──

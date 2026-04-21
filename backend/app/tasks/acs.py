@@ -26,16 +26,31 @@ DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
 
 def _run_async(coro):
-    """Run an async function from sync Celery task."""
+    """Run an async function from a sync Celery task on a fresh loop."""
+    from app.db.session import reset_async_session_factory
+
+    # Each Celery task should start with a fresh async session factory so
+    # asyncpg connections are never reused across unrelated event loops.
+    reset_async_session_factory()
+    return asyncio.run(coro)
+
+
+async def _clear_dispatch_lock(user_id: str) -> None:
+    """Release the ACS session dispatch lock if it exists."""
+    import redis.asyncio as aioredis
+
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        r = await aioredis.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+        )
+        await r.delete(f"sara:acs:session_dispatching:{user_id}")
+        if hasattr(r, "aclose"):
+            await r.aclose()
+        else:
+            await r.close()
+    except Exception:
+        logger.debug("Failed to clear ACS dispatch lock", exc_info=True)
 
 
 @celery_app.task(
@@ -68,20 +83,7 @@ async def _run_session(user_id: str, model_id: str = None):
         from app.services.acs.session_manager import start_session_and_run
         await start_session_and_run(user_id, model_id=model_id)
     finally:
-        # Clear the dispatch lock so the next session can be dispatched
-        import redis.asyncio as aioredis
-        try:
-            r = await aioredis.from_url(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-            )
-            await r.delete(f"sara:acs:session_dispatching:{user_id}")
-            if hasattr(r, "aclose"):
-                await r.aclose()
-            else:
-                await r.close()
-        except Exception:
-            pass
+        await _clear_dispatch_lock(user_id)
 
 
 async def _emergency_cleanup(user_id: str, error: str):
@@ -148,6 +150,7 @@ async def _emergency_cleanup(user_id: str, error: str):
         """), {"uid": user_id})
         await db.commit()
 
+    await _clear_dispatch_lock(user_id)
     await state_machine.set_active_session(user_id, None)
     import redis.asyncio as aioredis
     r = await aioredis.from_url(
@@ -364,7 +367,19 @@ async def _lifecycle_check():
             async_session = get_async_session_factory()
             async with async_session() as db:
                 result = await db.execute(text(
-                    "SELECT started_at, turns_completed, state FROM acs_session WHERE id = :sid"
+                    """
+                    SELECT
+                        s.started_at,
+                        s.turns_completed,
+                        s.state,
+                        (
+                            SELECT MAX(t.updated_at)
+                            FROM acs_session_transcript t
+                            WHERE t.session_id = s.id
+                        ) AS transcript_updated_at
+                    FROM acs_session s
+                    WHERE s.id = :sid
+                    """
                 ), {"sid": session_id})
                 row = result.fetchone()
                 if row and row[0]:
@@ -373,20 +388,34 @@ async def _lifecycle_check():
                     elapsed = (local_now() - started).total_seconds() / 60
                     db_state = row[2]
                     turns = row[1] or 0
+                    transcript_updated_at = row[3]
+                    heartbeat_elapsed = None
+                    if transcript_updated_at:
+                        heartbeat_elapsed = (
+                            local_now() - to_local(transcript_updated_at)
+                        ).total_seconds() / 60
 
                     # Check if the session was already ended in DB but Redis wasn't cleaned up
                     if db_state == "ended":
                         logger.warning(f"ACS session {session_id[:8]} ended in DB but Redis state is AUTONOMOUS, recovering")
+                        await _clear_dispatch_lock(user_id)
                         await state_machine.set_active_session(user_id, None)
                         await state_machine.set_state(user_id, ACSState.COOLDOWN, reason="orphaned_session")
                         return
 
-                    # Check for stale session: running > 10 min with 0 turns means the loop died
-                    # (e.g. worker restarted, asyncio task orphaned)
+                    # Check for stale/orphaned session:
+                    # - running > 10 min with 0 turns means the loop died early
+                    # - transcript heartbeat stale means the loop died after making progress
+                    #   (e.g. worker restarted, asyncio task orphaned)
                     # BUT: don't kill sessions waiting for HITL (human input) responses
                     STALE_THRESHOLD_MINUTES = 10
                     hitl_pending = False
-                    if turns == 0 and elapsed > STALE_THRESHOLD_MINUTES:
+                    stale_zero_turn = turns == 0 and elapsed > STALE_THRESHOLD_MINUTES
+                    stale_heartbeat = (
+                        heartbeat_elapsed is not None
+                        and heartbeat_elapsed > STALE_THRESHOLD_MINUTES
+                    )
+                    if stale_zero_turn or stale_heartbeat:
                         # Check if session is waiting for a HITL response
                         import redis.asyncio as aioredis
                         r_check = await aioredis.from_url(
@@ -409,18 +438,30 @@ async def _lifecycle_check():
                                 await r_check.aclose()
                             else:
                                 await r_check.close()
-                    if turns == 0 and elapsed > STALE_THRESHOLD_MINUTES and not hitl_pending:
+                    if (stale_zero_turn or stale_heartbeat) and not hitl_pending:
+                        if stale_heartbeat:
+                            stale_reason = (
+                                f"transcript heartbeat stale ({heartbeat_elapsed:.0f}min since update)"
+                            )
+                            error_log = (
+                                "Recovered by lifecycle check: transcript heartbeat stale"
+                            )
+                        else:
+                            stale_reason = f"{elapsed:.0f}min elapsed, 0 turns"
+                            error_log = (
+                                "Recovered by lifecycle check: 0 turns after threshold"
+                            )
                         logger.warning(
-                            f"ACS session {session_id[:8]} stale: {elapsed:.0f}min elapsed, "
-                            f"0 turns — loop likely dead, recovering"
+                            f"ACS session {session_id[:8]} stale: {stale_reason} — loop likely dead, recovering"
                         )
                         await db.execute(text("""
                             UPDATE acs_session
                             SET state = 'ended', ended_at = NOW(), end_reason = 'stale_session',
-                                error_log = 'Recovered by lifecycle check: 0 turns after threshold'
+                                error_log = :error_log
                             WHERE id = :sid AND state = 'autonomous'
-                        """), {"sid": session_id})
+                        """), {"sid": session_id, "error_log": error_log})
                         await db.commit()
+                        await _clear_dispatch_lock(user_id)
                         await state_machine.set_active_session(user_id, None)
                         import redis.asyncio as aioredis
                         r = await aioredis.from_url(
@@ -452,6 +493,7 @@ async def _lifecycle_check():
         else:
             # No active session but state says AUTONOMOUS — crash recovery
             logger.warning("ACS state is AUTONOMOUS but no active session, recovering")
+            await _clear_dispatch_lock(user_id)
             # Reset to cooldown and let the next lifecycle tick dispatch a fresh session
             await state_machine.set_state(user_id, ACSState.COOLDOWN, reason="crash_recovery")
             import redis.asyncio as aioredis
@@ -493,9 +535,11 @@ async def _lifecycle_check():
                         WHERE id = :sid AND state != 'ended'
                     """), {"sid": session_id})
                     await db.commit()
+            await _clear_dispatch_lock(user_id)
             await state_machine.set_active_session(user_id, None)
         else:
             logger.warning("ACS stuck in PAUSING with no active session, recovering")
+            await _clear_dispatch_lock(user_id)
 
         # Transition to COOLDOWN with a short cooldown so the next session starts soon
         import redis.asyncio as aioredis
@@ -555,7 +599,7 @@ async def _lifecycle_check():
                         if ok:
                             run_acs_session.apply_async(
                                 args=[user_id],
-                                queue="critical",
+                                queue="acs",
                                 expires=300,
                             )
         except Exception as e:
@@ -595,7 +639,12 @@ async def _lifecycle_check():
         active_session_id = await state_machine.get_active_session_id(user_id)
         async_session = get_async_session_factory()
         async with async_session() as db:
-            sweep1_params = {"uid": user_id, "active_sid": active_session_id or ""}
+            # NOTE: do NOT protect the state-machine's "active session" here.
+            # A zombie session is often *precisely* the one Redis still thinks
+            # is active (because Celery died before it could end the session).
+            # If the DB row meets the zombie condition (stale heartbeat OR no
+            # heartbeat after 30 min), it's dead regardless of Redis state,
+            # and we clear Redis below so new sessions can start.
             result = await db.execute(text("""
                 UPDATE acs_session s
                 SET state = 'ended', ended_at = NOW(), end_reason = 'orphaned',
@@ -617,10 +666,24 @@ async def _lifecycle_check():
                       AND s.started_at < NOW() - INTERVAL '30 minutes'
                     )
                   )
-                  AND s.id != :active_sid
                 RETURNING s.id
-            """), sweep1_params)
+            """), {"uid": user_id})
             rows = result.fetchall()
+
+            # If we just killed the session Redis considers "active", clear
+            # the state-machine pointers so a fresh session can be scheduled.
+            killed_ids = {str(r[0]) for r in rows}
+            if active_session_id and active_session_id in killed_ids:
+                try:
+                    await _clear_dispatch_lock(user_id)
+                    await state_machine.set_active_session(user_id, None)
+                    await state_machine.set_state(user_id, ACSState.COOLDOWN, reason="zombie_cleanup")
+                    logger.info(
+                        f"ACS zombie cleanup cleared active session pointer "
+                        f"for user {user_id[:8]} (killed {active_session_id[:8]})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to clear active session after zombie cleanup: {e}")
 
             # Sweep 2: anything stuck > 24 hours regardless of heartbeat (hard cap)
             result2 = await db.execute(text("""
@@ -701,6 +764,32 @@ async def _lifecycle_check():
                     logger.info(f"ACS plan item released: '{r[1][:60]}' (session ended)")
     except Exception as e:
         logger.warning(f"ACS zombie plan item cleanup failed: {e}")
+
+    # Repair legacy rows that were marked ended but never got an end_reason.
+    try:
+        from app.db.session import get_async_session_factory as _get_sf4
+        from sqlalchemy import text as _text4
+        _sf4 = _get_sf4()
+        async with _sf4() as db:
+            result = await db.execute(_text4("""
+                UPDATE acs_session
+                SET end_reason = 'unknown_historical'
+                WHERE user_id = :uid
+                  AND state = 'ended'
+                  AND ended_at IS NOT NULL
+                  AND end_reason IS NULL
+                  AND ended_at < NOW() - INTERVAL '5 minutes'
+                RETURNING id
+            """), {"uid": user_id})
+            repaired = result.fetchall()
+            if repaired:
+                await db.commit()
+                logger.info(
+                    f"ACS session repair: filled missing end_reason for "
+                    f"{len(repaired)} ended session(s)"
+                )
+    except Exception as e:
+        logger.warning(f"ACS ended-session repair failed: {e}")
 
     # Clean up stale plan items — items carried over for too many days without progress.
     # After 5 days of carryover, flag them so the daily audit can decide to drop or escalate.

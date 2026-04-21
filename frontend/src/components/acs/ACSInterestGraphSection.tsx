@@ -29,11 +29,16 @@ interface GraphData {
 }
 
 function FascinationBar({ value, color }: { value: number; color: string }) {
+  const pct = Number.isFinite(value) ? Math.max(0, Math.min(100, value * 100)) : 0
   return (
     <div className="w-full bg-gray-700 rounded-full h-1.5">
-      <div className={`${color} h-1.5 rounded-full`} style={{ width: `${Math.min(100, value)}%` }} />
+      <div className={`${color} h-1.5 rounded-full`} style={{ width: `${pct}%` }} />
     </div>
   )
+}
+
+function scoreLabel(v: number | undefined): string {
+  return Number.isFinite(v as number) ? String(Math.round((v as number) * 100)) : '—'
 }
 
 export default function ACSInterestGraphSection() {
@@ -76,6 +81,22 @@ export default function ACSInterestGraphSection() {
       }
     } catch { /* ignore */ }
   }, [searchQuery])
+
+  const bumpNode = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/interest-graph/nodes/${id}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fascination: 0.9, status: 'active' }),
+      })
+      if (!res.ok) return
+      const patch = (n: InterestNode) => n.id === id ? { ...n, fascination: 0.9, status: 'active' } : n
+      setData(d => d ? { ...d, nodes: d.nodes.map(patch) } : d)
+      setSearchResults(r => r ? r.map(patch) : r)
+      setFrontier(f => f ? f.map(patch) : f)
+    } catch { /* ignore */ }
+  }, [])
 
   const fetchFrontier = useCallback(async () => {
     try {
@@ -136,6 +157,18 @@ export default function ACSInterestGraphSection() {
         )}
       </div>
 
+      {/* Mode banner */}
+      {searchResults && (
+        <div className="bg-indigo-900/20 border border-indigo-800/40 rounded-lg px-4 py-2 text-xs text-indigo-300">
+          Showing {searchResults.length} result{searchResults.length === 1 ? '' : 's'} for <span className="font-medium text-indigo-200">"{searchQuery}"</span>
+        </div>
+      )}
+      {showFrontier && !searchResults && (
+        <div className="bg-amber-900/20 border border-amber-800/40 rounded-lg px-4 py-2 text-xs text-amber-300">
+          Showing {frontier?.length ?? 0} frontier node{frontier?.length === 1 ? '' : 's'}
+        </div>
+      )}
+
       {/* Node cards */}
       {displayNodes.length === 0 ? (
         <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-8 text-center">
@@ -145,9 +178,9 @@ export default function ACSInterestGraphSection() {
         <div className="grid gap-3 sm:grid-cols-2">
           {displayNodes.map(node => (
             <div key={node.id} className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-              <div className="flex items-start justify-between mb-2">
+              <div className="flex items-start justify-between mb-2 gap-2">
                 <h3 className="text-white font-medium">{node.label}</h3>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
                   node.status === 'active' ? 'bg-emerald-900/30 text-emerald-400' : 'bg-gray-700 text-gray-400'
                 }`}>{node.status}</span>
               </div>
@@ -158,22 +191,31 @@ export default function ACSInterestGraphSection() {
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-gray-500 w-20">Fascination</span>
                   <FascinationBar value={node.fascination} color="bg-indigo-500" />
-                  <span className="text-gray-400 w-8 text-right">{Math.round(node.fascination)}</span>
+                  <span className="text-gray-400 w-8 text-right">{scoreLabel(node.fascination)}</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-gray-500 w-20">Depth</span>
                   <FascinationBar value={node.depth} color="bg-emerald-500" />
-                  <span className="text-gray-400 w-8 text-right">{Math.round(node.depth)}</span>
+                  <span className="text-gray-400 w-8 text-right">{scoreLabel(node.depth)}</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-gray-500 w-20">Confidence</span>
                   <FascinationBar value={node.confidence} color="bg-amber-500" />
-                  <span className="text-gray-400 w-8 text-right">{Math.round(node.confidence)}</span>
+                  <span className="text-gray-400 w-8 text-right">{scoreLabel(node.confidence)}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2 text-xs text-gray-500">
-                {node.source && <span>{node.source}</span>}
-                {node.times_engaged !== undefined && <span>{node.times_engaged} engagements</span>}
+              <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
+                <div className="flex items-center gap-2 truncate">
+                  {node.source && <span className="truncate">{node.source}</span>}
+                  {node.times_engaged !== undefined && <span>{node.times_engaged} engagements</span>}
+                </div>
+                <button
+                  onClick={() => bumpNode(node.id)}
+                  title="Set fascination to 90 and reactivate"
+                  className="px-2 py-0.5 text-xs bg-indigo-600/80 hover:bg-indigo-500 text-white rounded transition-colors flex-shrink-0"
+                >
+                  Bump
+                </button>
               </div>
             </div>
           ))}

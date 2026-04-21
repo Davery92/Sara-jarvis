@@ -7,6 +7,7 @@ import ACSShowDavidSection from '../components/acs/ACSShowDavidSection'
 import ACSDirectivesSection from '../components/acs/ACSDirectivesSection'
 import ACSSessionHistorySection from '../components/acs/ACSSessionHistorySection'
 import ACSSelfModelSection from '../components/acs/ACSSelfModelSection'
+import ACSDeliverablesSection from '../components/acs/ACSDeliverablesSection'
 
 class ErrorBoundary extends Component<
   { children: ReactNode; fallback?: string },
@@ -41,6 +42,7 @@ const TABS = [
   { key: 'show-david', label: 'Show David' },
   { key: 'directives', label: 'Directives' },
   { key: 'sessions', label: 'Sessions' },
+  { key: 'deliverables', label: 'Deliverables' },
   { key: 'self-model', label: 'Self-Model' },
 ] as const
 
@@ -90,6 +92,9 @@ export default function ACSPage() {
         </ErrorBoundary>
         <ErrorBoundary fallback="sessions" key={activeTab === 'sessions' ? 'sessions' : undefined}>
           {activeTab === 'sessions' && <ACSSessionHistorySection />}
+        </ErrorBoundary>
+        <ErrorBoundary fallback="deliverables" key={activeTab === 'deliverables' ? 'deliverables' : undefined}>
+          {activeTab === 'deliverables' && <ACSDeliverablesSection />}
         </ErrorBoundary>
         <ErrorBoundary fallback="self-model" key={activeTab === 'self-model' ? 'self-model' : undefined}>
           {activeTab === 'self-model' && <ACSSelfModelSection />}

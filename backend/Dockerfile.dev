@@ -18,6 +18,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt --ignore-installed \
     && pip install email-validator aiofiles lxml_html_clean
 
+# Create a stable non-root runtime user for dev containers that need access to
+# host-mounted files under /home/david (SSH keys, generated artifacts, etc.).
+RUN groupadd -g 1000 david \
+    && useradd -m -u 1000 -g 1000 -d /home/david david \
+    && mkdir -p /home/david/.ssh /home/david/jarvis/data \
+    && chown -R 1000:1000 /home/david
+
 # Don't copy code - it will be mounted as a volume
 # This way code changes are instant
 

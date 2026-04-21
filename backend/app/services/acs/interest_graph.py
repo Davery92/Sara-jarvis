@@ -676,7 +676,8 @@ class InterestGraph:
         async_session = get_async_session_factory()
         async with async_session() as db:
             result = await db.execute(text("""
-                SELECT id, label, description, fascination, depth, status,
+                SELECT id, label, description, fascination, depth, confidence,
+                       source, status, times_engaged, last_engaged_at, created_at,
                        GREATEST(0, 1 - (embedding <=> CAST(:emb AS vector))) AS similarity
                 FROM acs_interest_node
                 WHERE user_id = :uid AND embedding IS NOT NULL
@@ -687,8 +688,11 @@ class InterestGraph:
             return [
                 {
                     "id": r[0], "label": r[1], "description": r[2],
-                    "fascination": r[3], "depth": r[4], "status": r[5],
-                    "similarity": r[6],
+                    "fascination": r[3], "depth": r[4], "confidence": r[5],
+                    "source": r[6], "status": r[7], "times_engaged": r[8],
+                    "last_engaged_at": r[9].isoformat() if r[9] else None,
+                    "created_at": r[10].isoformat() if r[10] else None,
+                    "similarity": r[11],
                 }
                 for r in result.fetchall()
             ]

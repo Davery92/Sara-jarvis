@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 def periodic_audit_check():
     """Beat-driven check that asks the auditor LLM if Sara is making progress."""
     try:
+        from app.db.session import reset_async_session_factory
+
+        reset_async_session_factory()
         return asyncio.run(_periodic_audit_check_async())
     except Exception as e:
         logger.warning(f"Periodic audit check failed: {e}")

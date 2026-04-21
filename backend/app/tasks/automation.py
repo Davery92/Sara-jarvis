@@ -16,6 +16,14 @@ from app.services.automation.constants import AutomationStatus
 logger = logging.getLogger(__name__)
 
 
+def _run_async(coro):
+    """Run an async function from a sync Celery task on a fresh loop."""
+    from app.db.session import reset_async_session_factory
+
+    reset_async_session_factory()
+    return asyncio.run(coro)
+
+
 @celery_app.task(
     name="app.tasks.automation.automation_watcher",
     bind=True,
@@ -35,14 +43,7 @@ def automation_watcher(self):
     logger.debug("Automation watcher running...")
 
     try:
-        result = asyncio.get_event_loop().run_until_complete(
-            _automation_watcher_async()
-        )
-        if result.get("dispatched", 0) > 0:
-            logger.info(f"Automation watcher: dispatched {result['dispatched']} tasks")
-        return result
-    except RuntimeError:
-        result = asyncio.run(_automation_watcher_async())
+        result = _run_async(_automation_watcher_async())
         if result.get("dispatched", 0) > 0:
             logger.info(f"Automation watcher: dispatched {result['dispatched']} tasks")
         return result
@@ -53,80 +54,73 @@ def automation_watcher(self):
 
 async def _automation_watcher_async():
     """Async implementation of automation watcher."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlalchemy import text
-    import os
-    engine = create_async_engine(async_url, echo=False)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
     dispatched = 0
     expired = 0
     errors = 0
 
-    try:
-        async with async_session() as db:
-            now = datetime.now(timezone.utc)
+    async with async_session() as db:
+        now = datetime.now(timezone.utc)
 
-            # Find tasks that are due
-            result = await db.execute(
-                text("""
-                    SELECT id, user_id, name, expires_at, max_executions, execution_count
-                    FROM automation_task
-                    WHERE status = :status
-                    AND next_wake_at <= :now
-                    ORDER BY next_wake_at ASC
-                    LIMIT 20
-                """),
-                {"now": now, "status": AutomationStatus.ACTIVE}
-            )
-            due_tasks = result.fetchall()
+        # Find tasks that are due
+        result = await db.execute(
+            text("""
+                SELECT id, user_id, name, expires_at, max_executions, execution_count
+                FROM automation_task
+                WHERE status = :status
+                AND next_wake_at <= :now
+                ORDER BY next_wake_at ASC
+                LIMIT 20
+            """),
+            {"now": now, "status": AutomationStatus.ACTIVE}
+        )
+        due_tasks = result.fetchall()
 
-            for task_row in due_tasks:
-                task_id, user_id, name, expires_at, max_executions, execution_count = task_row
+        for task_row in due_tasks:
+            task_id, user_id, name, expires_at, max_executions, execution_count = task_row
 
-                # Check expiration
-                if expires_at and expires_at <= now:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET status = :status,
-                                last_error = 'Expired'
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "status": AutomationStatus.COMPLETED}
-                    )
-                    expired += 1
-                    logger.info(f"Automation '{name}' ({task_id[:8]}) expired")
-                    continue
+            # Check expiration
+            if expires_at and expires_at <= now:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            last_error = 'Expired'
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "status": AutomationStatus.COMPLETED}
+                )
+                expired += 1
+                logger.info(f"Automation '{name}' ({task_id[:8]}) expired")
+                continue
 
-                # Check max executions
-                if max_executions and execution_count >= max_executions:
-                    await db.execute(
-                        text("""
-                            UPDATE automation_task
-                            SET status = :status,
-                                last_error = 'Max executions reached'
-                            WHERE id = :task_id
-                        """),
-                        {"task_id": task_id, "status": AutomationStatus.COMPLETED}
-                    )
-                    expired += 1
-                    logger.info(f"Automation '{name}' ({task_id[:8]}) reached max executions")
-                    continue
+            # Check max executions
+            if max_executions and execution_count >= max_executions:
+                await db.execute(
+                    text("""
+                        UPDATE automation_task
+                        SET status = :status,
+                            last_error = 'Max executions reached'
+                        WHERE id = :task_id
+                    """),
+                    {"task_id": task_id, "status": AutomationStatus.COMPLETED}
+                )
+                expired += 1
+                logger.info(f"Automation '{name}' ({task_id[:8]}) reached max executions")
+                continue
 
-                # Dispatch execution
-                try:
-                    automation_execute.delay(task_id)
-                    dispatched += 1
-                    logger.debug(f"Dispatched automation '{name}' ({task_id[:8]})")
-                except Exception as e:
-                    logger.error(f"Failed to dispatch automation {task_id}: {e}")
-                    errors += 1
+            # Dispatch execution
+            try:
+                automation_execute.delay(task_id)
+                dispatched += 1
+                logger.debug(f"Dispatched automation '{name}' ({task_id[:8]})")
+            except Exception as e:
+                logger.error(f"Failed to dispatch automation {task_id}: {e}")
+                errors += 1
 
-            await db.commit()
-
-    finally:
-        await engine.dispose()
+        await db.commit()
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),

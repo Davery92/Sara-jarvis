@@ -632,6 +632,7 @@ async def _async_load_daily_plan(user_id: str) -> str:
     from datetime import date
 
     parts = []
+    have_structured_items = False
 
     # Load structured plan items from database
     try:
@@ -649,6 +650,7 @@ async def _async_load_daily_plan(user_id: str) -> str:
             items = result.fetchall()
 
             if items:
+                have_structured_items = True
                 status_icons = {
                     "completed": "DONE", "in_progress": "NOW",
                     "pending": "TODO", "blocked": "BLOCKED",
@@ -672,22 +674,25 @@ async def _async_load_daily_plan(user_id: str) -> str:
     except Exception as e:
         logger.debug(f"Plan items load failed: {e}")
 
-    # Also load prose plan from Redis (backward compatibility)
-    try:
-        import redis.asyncio as aioredis
-        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+    # Only fall back to the prose Redis plan when no structured items exist.
+    # The Redis note often lags behind completed work and can contradict the
+    # current plan-item state, which confuses ACS during prompt assembly.
+    if not have_structured_items:
         try:
-            plan = await r.get(DAILY_PLAN_KEY.format(user_id=user_id))
-            if plan:
-                parts.append("\n### Plan Notes")
-                parts.append(plan)
-        finally:
-            if hasattr(r, 'aclose'):
-                await r.aclose()
-            else:
-                await r.close()
-    except Exception as e:
-        logger.debug(f"Async daily plan load failed: {e}")
+            import redis.asyncio as aioredis
+            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+            try:
+                plan = await r.get(DAILY_PLAN_KEY.format(user_id=user_id))
+                if plan:
+                    parts.append("\n### Plan Notes")
+                    parts.append(plan)
+            finally:
+                if hasattr(r, 'aclose'):
+                    await r.aclose()
+                else:
+                    await r.close()
+        except Exception as e:
+            logger.debug(f"Async daily plan load failed: {e}")
 
     return "\n".join(parts) if parts else ""
 

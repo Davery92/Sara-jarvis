@@ -52,6 +52,7 @@ from .acs_session_log import ACSSessionLog
 from .acs_session_transcript import ACSSessionTranscript
 from .acs_directive import ACSDirective
 from .acs_plan_item import ACSPlanItem
+from .acs_deliverable import ACSDeliverable
 from .research_plan import ResearchPlan, ResearchMessage
 from .scheduled_job import ScheduledJob
 from .tunable_setting import TunableSetting

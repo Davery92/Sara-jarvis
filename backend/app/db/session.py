@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 _async_engine = None
 _AsyncSessionLocal = None
 _async_loop_id = None  # track which event loop the engine was created on
+_async_pid = None
 
 
 def _get_async_url() -> str:
@@ -39,27 +40,43 @@ def reset_async_session_factory():
     Call this at the top of any Celery task that uses asyncio.run() to avoid
     'Event loop is closed' / 'Future attached to a different loop' errors.
     """
-    global _async_engine, _AsyncSessionLocal, _async_loop_id
+    global _async_engine, _AsyncSessionLocal, _async_loop_id, _async_pid
     if _async_engine is not None:
-        _try_dispose_engine(_async_engine)
+        _try_dispose_engine(_async_engine, engine_loop_id=_async_loop_id)
     _async_engine = None
     _AsyncSessionLocal = None
     _async_loop_id = None
+    _async_pid = None
 
 
-def _try_dispose_engine(engine):
-    """Best-effort dispose of an async engine, handling both sync and async contexts."""
+def _use_async_null_pool() -> bool:
+    value = (
+        os.getenv("ACS_ASYNC_DB_NULLPOOL")
+        or os.getenv("ASYNC_DB_NULLPOOL")
+        or ""
+    ).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _try_dispose_engine(engine, engine_loop_id: int | None = None):
+    """Best-effort dispose of an async engine without crossing event loops.
+
+    Asyncpg connections are bound to the loop that created them. Disposing the
+    engine on a different loop raises the exact "Future attached to a different
+    loop" / "Event loop is closed" errors ACS has been hitting in Celery.
+    """
     try:
         import asyncio
         try:
             loop = asyncio.get_running_loop()
-            # Already in an async context — schedule dispose as a task
+            if engine_loop_id and id(loop) != engine_loop_id:
+                logger.debug("Skipping async engine dispose across event loops")
+                return
             loop.create_task(engine.dispose())
         except RuntimeError:
-            # No running loop — safe to use run_until_complete
-            asyncio.get_event_loop().run_until_complete(engine.dispose())
-    except Exception:
-        pass  # GC will clean up the connection pool
+            logger.debug("Skipping async engine dispose without a running loop")
+    except Exception as e:
+        logger.debug(f"Async engine dispose skipped: {e}")
 
 
 def get_async_session_factory():
@@ -68,19 +85,32 @@ def get_async_session_factory():
     Safe to call from Celery tasks that use asyncio.run() — the engine is
     automatically rebuilt if the event loop has changed since last creation.
     """
-    global _async_engine, _AsyncSessionLocal, _async_loop_id
+    global _async_engine, _AsyncSessionLocal, _async_loop_id, _async_pid
+    current_pid = os.getpid()
     cur_loop = _current_loop_id()
-    if _AsyncSessionLocal is None or (cur_loop and cur_loop != _async_loop_id):
-        # Event loop changed (or first call) — rebuild engine
+    if (
+        _AsyncSessionLocal is None
+        or _async_pid != current_pid
+        or (cur_loop and cur_loop != _async_loop_id)
+    ):
+        # Process or event loop changed (or first call) — rebuild engine
         if _async_engine is not None:
-            _try_dispose_engine(_async_engine)
+            _try_dispose_engine(_async_engine, engine_loop_id=_async_loop_id)
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker as sa_sessionmaker
-        _async_engine = create_async_engine(_get_async_url(), echo=False, pool_pre_ping=True)
+        engine_kwargs = {
+            "echo": False,
+            "pool_pre_ping": not _use_async_null_pool(),
+        }
+        if _use_async_null_pool():
+            from sqlalchemy.pool import NullPool
+            engine_kwargs["poolclass"] = NullPool
+        _async_engine = create_async_engine(_get_async_url(), **engine_kwargs)
         _AsyncSessionLocal = sa_sessionmaker(
             _async_engine, class_=AsyncSession, expire_on_commit=False,
         )
         _async_loop_id = cur_loop
+        _async_pid = current_pid
     return _AsyncSessionLocal
 
 

@@ -88,6 +88,9 @@ celery_app.conf.update(
     # Result backend settings
     result_expires=3600,  # Results expire after 1 hour
 
+    # Broker startup behavior
+    broker_connection_retry_on_startup=True,
+
     # Rate limiting
     task_default_rate_limit="60/m",  # Default: 60 tasks per minute
 
@@ -143,7 +146,12 @@ celery_app.conf.task_default_queue = "cognitive"
 
 
 def _validate_queue_topology():
-    """Startup check: all queues used in routing/scheduling are declared and consumed."""
+    """Startup check: queues used in routing/scheduling are declared.
+
+    Worker subscription coverage is only meaningful at the cluster level, so a
+    queue-specific worker should not warn just because it intentionally
+    subscribes to a subset of the application's queues.
+    """
     declared_queues = set(celery_app.conf.task_queues.keys()) if celery_app.conf.task_queues else set()
 
     # Collect queues targeted by the DB-backed beat schedule.
@@ -171,14 +179,23 @@ def _validate_queue_topology():
             if q not in declared_queues:
                 logger.warning(f"Queue topology: route '{pattern}' targets queue '{q}' not in task_queues")
 
-    # Check worker subscription covers required queues (from env)
+    # Check worker subscription declares valid queues. Full coverage is a
+    # cluster-level property and cannot be inferred from a single worker.
     required_queues = beat_queues | route_queues
     worker_queues_str = os.environ.get("CELERY_WORKER_QUEUES", "")
     if worker_queues_str:
         worker_queues = {q.strip() for q in worker_queues_str.split(",")}
+        undeclared_worker_queues = worker_queues - declared_queues
+        if undeclared_worker_queues:
+            logger.warning(
+                f"Queue topology: worker subscription includes undeclared queues {undeclared_worker_queues}"
+            )
         uncovered = required_queues - worker_queues
         if uncovered:
-            logger.warning(f"Queue topology: required queues {uncovered} not in worker subscription")
+            logger.info(
+                f"Queue topology: worker subscribes to {worker_queues}; remaining queues {uncovered} "
+                "must be covered elsewhere in the cluster"
+            )
 
     logger.info(f"Queue topology validated: {len(required_queues)} required queues, {len(declared_queues)} declared")
 

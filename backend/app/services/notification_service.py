@@ -185,7 +185,8 @@ class NotificationService:
         body: str,
         priority: str = "normal",
         category: str = "general",
-        url: Optional[str] = None
+        url: Optional[str] = None,
+        topic: Optional[str] = None,
     ) -> bool:
         """
         Send a push notification to David.
@@ -221,7 +222,9 @@ class NotificationService:
             title=title,
             message=body,
             priority=priority_map.get(priority, NotificationPriority.NORMAL),
-            data=notification_data
+            data=notification_data,
+            category=category,
+            topic=topic,
         )
 
     async def send_timer_alert(self, user_id: str, timer_label: str, is_overdue: bool = False) -> bool:

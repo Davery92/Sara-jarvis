@@ -178,10 +178,36 @@ class EventBus:
         self.event_handlers: Dict[EventType, List[Callable]] = {}
         self.running = False
         self._listener_task: Optional[asyncio.Task] = None
+        self._connect_lock: Optional[asyncio.Lock] = None
+        self._connect_lock_loop_id: Optional[int] = None
 
         # Event replay buffer (in-memory, could be Redis-backed)
         self.replay_buffer: List[Event] = []
         self.replay_buffer_size = 1000  # Keep last 1000 events
+
+    def _get_connect_lock(self) -> asyncio.Lock:
+        loop_id = id(asyncio.get_running_loop())
+        if self._connect_lock is None or self._connect_lock_loop_id != loop_id:
+            self._connect_lock = asyncio.Lock()
+            self._connect_lock_loop_id = loop_id
+        return self._connect_lock
+
+    async def _ensure_connected(self) -> bool:
+        if self.redis_client is not None:
+            return True
+
+        lock = self._get_connect_lock()
+        async with lock:
+            if self.redis_client is not None:
+                return True
+            try:
+                await self.connect()
+                return True
+            except Exception as e:
+                logger.warning(f"Event bus connect failed, event not published: {e}")
+                self.redis_client = None
+                self.pubsub = None
+                return False
 
     async def connect(self):
         """Connect to Redis"""
@@ -223,8 +249,7 @@ class EventBus:
         Args:
             event: Event to publish
         """
-        if not self.redis_client:
-            logger.warning("Event bus not connected, event not published")
+        if not await self._ensure_connected():
             return
 
         try:
@@ -249,6 +274,8 @@ class EventBus:
 
         except Exception as e:
             logger.error(f"Failed to publish event: {e}")
+            self.redis_client = None
+            self.pubsub = None
 
     def subscribe(self, subscriber: EventSubscriber):
         """

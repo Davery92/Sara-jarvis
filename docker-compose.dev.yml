@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
@@ -235,6 +233,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     restart: unless-stopped
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection
     deploy:
@@ -249,6 +248,7 @@ services:
       start_period: 30s
     env_file: .env
     environment:
+      - HOME=/home/david
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
@@ -273,7 +273,7 @@ services:
       - ./backend:/app
       - /app/__pycache__
       - /app/app/__pycache__
-      - /home/david/.ssh:/root/.ssh:ro
+      - /home/david/.ssh:/home/david/.ssh:ro
       # Shared with backend so generated artifacts (morning brief audio,
       # briefing TTS, etc.) are visible to the API that serves them.
       - ./data:/home/david/jarvis/data
@@ -293,6 +293,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     restart: unless-stopped
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q acs -n acs@%h
     deploy:
@@ -307,6 +308,7 @@ services:
       start_period: 30s
     env_file: .env
     environment:
+      - HOME=/home/david
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
@@ -320,15 +322,21 @@ services:
       - EMBEDDING_DIM=1024
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - GRAPH_BACKEND=neo4j
+      - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - TIMEZONE=America/New_York
       - TZ=America/New_York
+      - CELERY_WORKER_QUEUES=acs
+      - ACS_ASYNC_DB_NULLPOOL=1
       - SENTRY_DSN=${SENTRY_DSN-}
       - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
     volumes:
       - ./backend:/app
       - /app/__pycache__
       - /app/app/__pycache__
-      - /home/david/.ssh:/root/.ssh:ro
+      - /home/david/.ssh:/home/david/.ssh:ro
       - ./data:/home/david/jarvis/data
     depends_on:
       redis:
@@ -346,6 +354,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     restart: unless-stopped
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q critical -n critical@%h
     deploy:
@@ -360,6 +369,7 @@ services:
       start_period: 30s
     env_file: .env
     environment:
+      - HOME=/home/david
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8080/v1}
@@ -381,7 +391,7 @@ services:
       - ./backend:/app
       - /app/__pycache__
       - /app/app/__pycache__
-      - /home/david/.ssh:/root/.ssh:ro
+      - /home/david/.ssh:/home/david/.ssh:ro
       - ./data:/home/david/jarvis/data
     depends_on:
       redis:
@@ -394,6 +404,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     restart: unless-stopped
     command: celery -A app.celery_app beat --loglevel=info -s /tmp/celerybeat-schedule
     deploy:
@@ -401,13 +412,14 @@ services:
         limits:
           memory: 512m
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule && test $$(( $$(date +%s) - $$(stat -c %Y /tmp/celerybeat-schedule) )) -lt 300"]
+      test: ["CMD-SHELL", "python -c \"import pathlib, sys; data = pathlib.Path('/proc/1/cmdline').read_bytes(); sys.exit(0 if b'celery' in data and b'beat' in data else 1)\""]
       interval: 60s
       timeout: 5s
       retries: 3
       start_period: 30s
     env_file: .env
     environment:
+      - HOME=/home/david
       - REDIS_URL=redis://redis:6379/0
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
       - TIMEZONE=America/New_York

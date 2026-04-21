@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     def __init__(self):
-        self.client = httpx.AsyncClient()
+        # Note: no persistent client. We open a fresh httpx.AsyncClient per call below
+        # to avoid the httpx 0.25 / httpcore 1.0 "All connection attempts failed" bug
+        # that fires when a pooled connection is reused after its source loop is gone.
+        pass
 
     def _get_current_settings(self) -> Tuple[str, str, int]:
         """Get current settings dynamically so runtime updates work"""
@@ -36,17 +39,34 @@ class EmbeddingService:
             # Get current settings dynamically for runtime updates to work
             base_url, model, dimension = self._get_current_settings()
 
-            # Use the embeddings endpoint
-            response = await self.client.post(
-                f"{base_url}/v1/embeddings",
-                json={
-                    "model": model,
-                    "input": text,
-                    "encoding_format": "float"
-                },
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                timeout=30.0
-            )
+            # NOTE: httpx 0.25 + httpcore 1.0 inside the long-running uvicorn process
+            # was raising "All connection attempts failed" (ConnectError) intermittently
+            # for *only* the backend process — celery workers on the same docker network
+            # had no trouble. Probing the same hostname from `docker exec ... python3 -c`
+            # also worked. To sidestep the bug we use sync `requests` in a thread.
+            import asyncio
+            import requests
+
+            url = f"{base_url}/v1/embeddings"
+            payload = {"model": model, "input": text, "encoding_format": "float"}
+            headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+
+            def _post():
+                return requests.post(url, json=payload, headers=headers, timeout=60)
+
+            last_exc: Optional[Exception] = None
+            response = None
+            for attempt in range(3):
+                try:
+                    response = await asyncio.to_thread(_post)
+                    break
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    last_exc = e
+                    if attempt < 2:
+                        await asyncio.sleep(0.3 * (attempt + 1))
+                    continue
+            if response is None:
+                raise last_exc or RuntimeError("embedding request failed without exception")
             response.raise_for_status()
 
             result = response.json()
@@ -69,7 +89,7 @@ class EmbeddingService:
             return embedding
 
         except Exception as e:
-            logger.error(f"Error generating embedding: {e}")
+            logger.error(f"Error generating embedding [{type(e).__name__}]: {e}")
             return None
     
     async def generate_embeddings_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
