@@ -11,6 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import apiClient from '../../services/api';
+import { Ionicons } from '@expo/vector-icons';
+import { navigateToChat } from '../../services/navigation';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -192,6 +194,68 @@ export default function LearningScreen() {
     );
   };
 
+  const openLearningPrompt = () => {
+    const message = reviewQueue.due_count > 0
+      ? `Help me work through my ${reviewQueue.due_count} due learning review${reviewQueue.due_count === 1 ? '' : 's'} and tell me what to study first.`
+      : nextSession
+        ? `Help me plan a ${nextSession.suggested_duration}-minute study session for ${nextSession.topic_title}.`
+        : 'Help me decide what to learn next and suggest a focused study session.';
+
+    navigateToChat({
+      quickReply: {
+        title: 'Learning',
+        message,
+        nudgeType: 'learning_focus',
+      },
+    });
+  };
+
+  const renderLearningGuideCard = () => {
+    const primaryTitle = reviewQueue.due_count > 0
+      ? `Best next move: review ${reviewQueue.due_count} due item${reviewQueue.due_count === 1 ? '' : 's'}`
+      : nextSession
+        ? `Best next move: continue ${nextSession.topic_title}`
+        : 'Best next move: pick a learning direction';
+
+    const detail = reviewQueue.due_count > 0
+      ? 'Clear what is already due first, then continue with a focused study session.'
+      : nextSession
+        ? `${nextSession.suggested_duration} minutes is enough to keep momentum without turning this into a big project.`
+        : 'Start with one topic that matters now, then let Sara turn it into a study path.';
+
+    return (
+      <View style={styles.guideCard}>
+        <View style={styles.guideHeader}>
+          <View style={styles.guideIcon}>
+            <Ionicons name="school-outline" size={18} color={colors.accent} />
+          </View>
+          <View style={styles.guideCopy}>
+            <Text style={styles.guideEyebrow}>What can I do next?</Text>
+            <Text style={styles.guideTitle}>{primaryTitle}</Text>
+            <Text style={styles.guideBody}>{detail}</Text>
+          </View>
+        </View>
+
+        <View style={styles.guideActions}>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonPrimary]}
+            onPress={() => setTab(reviewQueue.due_count > 0 ? 'review' : 'topics')}
+          >
+            <Text style={styles.guideButtonPrimaryText}>
+              {reviewQueue.due_count > 0 ? 'Open Reviews' : 'Open Topics'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonSecondary]}
+            onPress={openLearningPrompt}
+          >
+            <Text style={styles.guideButtonSecondaryText}>Ask Sara</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   const renderProgressBar = (mastery: number) => {
     const pct = Math.min(Math.max(mastery, 0), 100);
     return (
@@ -352,11 +416,16 @@ export default function LearningScreen() {
           keyExtractor={(item) => item.id}
           onRefresh={handleRefresh}
           refreshing={refreshing}
-          ListHeaderComponent={renderNextSessionCard}
+          ListHeaderComponent={
+            <>
+              {renderLearningGuideCard()}
+              {renderNextSessionCard()}
+            </>
+          }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>
-                No learning topics yet. Start a topic from the web app.
+                No learning topics yet. Ask Sara to suggest a study path or create one from the web app.
               </Text>
             </View>
           }
@@ -373,18 +442,21 @@ export default function LearningScreen() {
           onRefresh={handleRefresh}
           refreshing={refreshing}
           ListHeaderComponent={
-            reviewQueue.due_count > 0 ? (
-              <View style={styles.reviewSummary}>
-                <Text style={styles.reviewSummaryText}>
-                  {reviewQueue.due_count} item{reviewQueue.due_count !== 1 ? 's' : ''} due for review
-                </Text>
-              </View>
-            ) : null
+            <>
+              {renderLearningGuideCard()}
+              {reviewQueue.due_count > 0 ? (
+                <View style={styles.reviewSummary}>
+                  <Text style={styles.reviewSummaryText}>
+                    {reviewQueue.due_count} item{reviewQueue.due_count !== 1 ? 's' : ''} due for review
+                  </Text>
+                </View>
+              ) : null}
+            </>
           }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>
-                No reviews due right now. Keep studying!
+                No reviews due right now. Open Topics or ask Sara what to study next.
               </Text>
             </View>
           }
@@ -412,6 +484,80 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingBottom: 100,
+  },
+
+  guideCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guideHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  guideIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: borderRadius.full,
+    backgroundColor: `${colors.accent}1a`,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  guideCopy: {
+    flex: 1,
+  },
+  guideEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  guideTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  guideBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  guideActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  guideButton: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  guideButtonPrimary: {
+    backgroundColor: colors.primary,
+  },
+  guideButtonSecondary: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guideButtonPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  guideButtonSecondaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
 
   // Tab bar

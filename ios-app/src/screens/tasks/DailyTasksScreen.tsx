@@ -11,10 +11,12 @@ import {
   RefreshControl,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 import apiClient from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { SkeletonList } from '../../components/SkeletonLoader';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { navigateToChat, navigateToInbox } from '../../services/navigation';
 
 interface DailyTask {
   id: string;
@@ -137,6 +139,79 @@ export default function DailyTasksScreen() {
 
   const completedCount = tasks.filter((t) => t.is_completed).length;
   const totalCount = tasks.length;
+  const remainingTasks = tasks.filter((t) => !t.is_completed);
+  const nextTask = [...remainingTasks].sort((a, b) => {
+    const priorityRank = { high: 0, normal: 1, low: 2 };
+    const priorityDiff = priorityRank[a.priority] - priorityRank[b.priority];
+    if (priorityDiff !== 0) return priorityDiff;
+    return a.created_at.localeCompare(b.created_at);
+  })[0];
+
+  const openTaskPrompt = () => {
+    const message = remainingTasks.length > 0
+      ? `Help me prioritize my ${remainingTasks.length} remaining task${remainingTasks.length === 1 ? '' : 's'} for today.`
+      : 'Help me build a realistic task list for today.';
+
+    navigateToChat({
+      quickReply: {
+        title: 'Daily Tasks',
+        message,
+        nudgeType: 'daily_tasks',
+      },
+    });
+  };
+
+  const renderTaskGuideCard = () => {
+    const title = remainingTasks.length === 0
+      ? totalCount === 0
+        ? 'Nothing planned yet'
+        : 'You are clear for today'
+      : nextTask
+        ? `Next move: ${nextTask.title}`
+        : `Next move: finish ${remainingTasks.length} task${remainingTasks.length === 1 ? '' : 's'}`;
+
+    const body = remainingTasks.length === 0
+      ? totalCount === 0
+        ? 'Add the first task below or let Sara help you sketch the day before it gets noisy.'
+        : 'Everything here is complete. Check Inbox for new signals or add a follow-up task.'
+      : nextTask
+        ? `${remainingTasks.length} task${remainingTasks.length === 1 ? '' : 's'} still need attention today.`
+        : 'You still have work left today. Decide the order before you start.';
+
+    return (
+      <View style={styles.guideCard}>
+        <View style={styles.guideHeader}>
+          <View style={styles.guideIcon}>
+            <Ionicons name="checkbox-outline" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.guideCopy}>
+            <Text style={styles.guideEyebrow}>What can I do next?</Text>
+            <Text style={styles.guideTitle}>{title}</Text>
+            <Text style={styles.guideBody}>{body}</Text>
+          </View>
+        </View>
+
+        <View style={styles.guideActions}>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonPrimary]}
+            onPress={openTaskPrompt}
+          >
+            <Text style={styles.guideButtonPrimaryText}>
+              {remainingTasks.length > 0 ? 'Ask Sara to Prioritize' : 'Plan with Sara'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonSecondary]}
+            onPress={remainingTasks.length === 0 && totalCount > 0 ? () => navigateToInbox({ focus: 'new' }) : handleCarryOver}
+          >
+            <Text style={styles.guideButtonSecondaryText}>
+              {remainingTasks.length === 0 && totalCount > 0 ? 'Open Inbox' : 'Carry Over'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
 
   const renderTask = ({ item }: { item: DailyTask }) => (
     <TouchableOpacity
@@ -205,6 +280,8 @@ export default function DailyTasksScreen() {
         )}
       </View>
 
+      {renderTaskGuideCard()}
+
       {/* Task list */}
       <FlatList
         data={tasks}
@@ -216,9 +293,9 @@ export default function DailyTasksScreen() {
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyIcon}>{"\\u2705"}</Text>
+            <Ionicons name="checkmark-done-circle-outline" size={42} color={colors.textMuted} />
             <Text style={styles.emptyText}>No tasks for today</Text>
-            <Text style={styles.emptySubtext}>Add a task below or ask Sara</Text>
+            <Text style={styles.emptySubtext}>Add one below or let Sara sketch the day with you.</Text>
           </View>
         }
       />
@@ -315,6 +392,79 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: colors.success,
     borderRadius: 2,
+  },
+  guideCard: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guideHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  guideIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: borderRadius.full,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: `${colors.primary}1a`,
+  },
+  guideCopy: {
+    flex: 1,
+  },
+  guideEyebrow: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  guideTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  guideBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  guideActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  guideButton: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  guideButtonPrimary: {
+    backgroundColor: colors.primary,
+  },
+  guideButtonSecondary: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guideButtonPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  guideButtonSecondaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
   listContent: {
     padding: spacing.md,

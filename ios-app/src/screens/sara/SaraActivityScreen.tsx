@@ -280,9 +280,9 @@ export default function SaraActivityScreen() {
       if (target === 'calendar') {
         navigation.navigate('Calendar');
       } else if (target === 'inbox') {
-        navigation.navigate('Inbox');
+        navigation.navigate('AssistantInbox');
       } else {
-        navigation.navigate('Inbox', { tab: 'attention' });
+        navigation.navigate('AssistantInbox', { focus: 'waiting' });
       }
       return;
     }

@@ -6,10 +6,13 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
+  Modal,
 } from 'react-native';
 import { Audio } from 'expo-av';
+import * as ExpoClipboard from 'expo-clipboard';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { apiClient } from '../../services/api';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 import Markdown from 'react-native-markdown-display';
 
 interface BriefSummary {
@@ -67,6 +70,14 @@ const iconToEmoji: Record<string, string> = {
   '50d': '🌫️', '50n': '🌫️',
 };
 
+const normalizeReaderText = (text?: string | null) => (text || '').replace(/\r\n/g, '\n').trim();
+
+const splitReaderBlocks = (text?: string | null) =>
+  normalizeReaderText(text)
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
 // Helper to get auth headers
 const getAuthHeaders = async () => {
   const token = await apiClient.getToken();
@@ -86,6 +97,7 @@ export default function BriefingsScreen() {
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused] = useState(false);
   const [audioProgress, setAudioProgress] = useState<{ positionMs: number; durationMs: number } | null>(null);
+  const [readerVisible, setReaderVisible] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   const progressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -353,6 +365,36 @@ export default function BriefingsScreen() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const briefReaderText = selectedBrief
+    ? normalizeReaderText(
+        selectedBrief.full_text ||
+        [selectedBrief.weather_summary, selectedBrief.calendar_summary, selectedBrief.news_summary]
+          .filter(Boolean)
+          .join('\n\n')
+      )
+    : '';
+
+  const recoveryReaderText = normalizeReaderText(selectedBrief?.recovery_text);
+  const briefPreview = splitReaderBlocks(briefReaderText)[0] || 'Generate or open a brief to see the current morning summary.';
+  const weatherSummary = weather
+    ? `${iconToEmoji[weather.current.icon] || '🌤️'} ${Math.round(weather.current.temperature)}° in ${weather.location}`
+    : 'Weather unavailable';
+  const briefMetaLabel = selectedBrief?.generated_at
+    ? `Generated ${new Date(selectedBrief.generated_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : 'No generation timestamp yet';
+  const hasRecovery = Boolean(selectedBrief?.recovery_text);
+
+  const copyReaderText = async () => {
+    const combined = [briefReaderText, recoveryReaderText].filter(Boolean).join('\n\n');
+    if (!combined) return;
+
+    try {
+      await ExpoClipboard.setStringAsync(combined);
+    } catch (error) {
+      console.error('Failed to copy brief:', error);
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -363,38 +405,73 @@ export default function BriefingsScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Weather Widget */}
-      {weather && (
-        <View style={styles.weatherWidget}>
-          <Text style={styles.weatherEmoji}>
-            {iconToEmoji[weather.current.icon] || '🌡️'}
+      <View style={styles.heroWrap}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>Morning Brief</Text>
+          <Text style={styles.heroTitle}>
+            {selectedBrief ? `${formatDate(selectedBrief.brief_date)} overview` : 'Start your day with Sara'}
           </Text>
-          <View style={styles.weatherInfo}>
-            <Text style={styles.weatherTemp}>{Math.round(weather.current.temperature)}°F</Text>
-            <Text style={styles.weatherDesc}>{weather.current.description}</Text>
+          <Text style={styles.heroSubtitle} numberOfLines={3}>
+            {briefPreview}
+          </Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Weather</Text>
+              <Text style={styles.heroStatValue}>
+                {weather ? `${Math.round(weather.current.temperature)}°` : '—'}
+              </Text>
+              <Text style={styles.heroStatMeta}>{weatherSummary}</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Audio</Text>
+              <Text style={styles.heroStatValue}>
+                {selectedBrief?.has_audio ? formatDuration(selectedBrief.audio_duration_seconds) || 'Ready' : 'None'}
+              </Text>
+              <Text style={styles.heroStatMeta}>
+                {selectedBrief?.has_audio ? 'spoken version available' : 'text only right now'}
+              </Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Recovery</Text>
+              <Text style={styles.heroStatValue}>{hasRecovery ? 'Included' : 'Off'}</Text>
+              <Text style={styles.heroStatMeta}>{briefMetaLabel}</Text>
+            </View>
           </View>
-          <View style={styles.weatherDetails}>
-            <Text style={styles.weatherLocation}>{weather.location.split(',')[0]}</Text>
-            <Text style={styles.weatherFeels}>Feels {Math.round(weather.current.feels_like)}°</Text>
+
+          <View style={styles.heroActions}>
+            <TouchableOpacity
+              onPress={generateBrief}
+              disabled={generating}
+              style={[styles.heroActionButton, styles.heroActionPrimary, generating && styles.heroActionDisabled]}
+            >
+              {generating ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.heroActionPrimaryText}>Refresh Brief</Text>
+              )}
+            </TouchableOpacity>
+            {briefReaderText ? (
+              <TouchableOpacity
+                onPress={() => setReaderVisible(true)}
+                style={[styles.heroActionButton, styles.heroActionSecondary]}
+              >
+                <Text style={styles.heroActionSecondaryText}>Open Full Brief</Text>
+              </TouchableOpacity>
+            ) : null}
+            {selectedBrief?.has_audio ? (
+              <TouchableOpacity
+                onPress={playAudio}
+                style={[styles.heroActionButton, styles.heroActionSecondary]}
+              >
+                <Text style={styles.heroActionSecondaryText}>
+                  {playing ? 'Pause Audio' : paused ? 'Resume Audio' : 'Play Audio'}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
-      )}
-
-      {/* Generate Button */}
-      <TouchableOpacity
-        onPress={generateBrief}
-        disabled={generating}
-        style={styles.generateButton}
-      >
-        {generating ? (
-          <ActivityIndicator size="small" color="#fff" />
-        ) : (
-          <>
-            <Text style={styles.generateIcon}>🔄</Text>
-            <Text style={styles.generateText}>Generate Brief</Text>
-          </>
-        )}
-      </TouchableOpacity>
+      </View>
 
       {/* Brief Content */}
       {selectedBrief ? (
@@ -430,6 +507,23 @@ export default function BriefingsScreen() {
               </View>
             )}
           </View>
+
+          {briefReaderText ? (
+            <View style={styles.readerActions}>
+              <TouchableOpacity
+                onPress={() => setReaderVisible(true)}
+                style={[styles.readerActionButton, styles.readerActionPrimary]}
+              >
+                <Text style={styles.readerActionText}>Open Full Brief</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={copyReaderText}
+                style={[styles.readerActionButton, styles.readerActionSecondary]}
+              >
+                <Text style={styles.readerActionText}>Copy Text</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
 
           {/* Brief Content */}
           {selectedBrief.full_text ? (
@@ -478,6 +572,50 @@ export default function BriefingsScreen() {
         </View>
       )}
 
+      <Modal
+        visible={readerVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setReaderVisible(false)}
+      >
+        <SafeAreaView style={styles.readerModal}>
+          <View style={styles.readerModalHeader}>
+            <TouchableOpacity onPress={() => setReaderVisible(false)}>
+              <Text style={styles.readerModalControl}>Close</Text>
+            </TouchableOpacity>
+            <Text style={styles.readerModalTitle}>
+              {selectedBrief ? `${formatDate(selectedBrief.brief_date)} Brief` : 'Full Brief'}
+            </Text>
+            <TouchableOpacity onPress={copyReaderText}>
+              <Text style={styles.readerModalControl}>Copy</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.readerScroll}
+            contentContainerStyle={styles.readerScrollContent}
+            showsVerticalScrollIndicator
+          >
+            {splitReaderBlocks(briefReaderText).map((block, index) => (
+              <Text key={`brief-block-${index}`} selectable style={styles.readerParagraph}>
+                {block}
+              </Text>
+            ))}
+
+            {recoveryReaderText ? (
+              <View style={styles.readerRecoverySection}>
+                <Text style={styles.readerSectionLabel}>Recovery</Text>
+                {splitReaderBlocks(recoveryReaderText).map((block, index) => (
+                  <Text key={`recovery-block-${index}`} selectable style={styles.readerParagraph}>
+                    {block}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       {/* Recent Briefs List */}
       {briefs.length > 0 && (
         <View style={styles.briefsList}>
@@ -519,62 +657,104 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.background,
   },
-  weatherWidget: {
+  heroWrap: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
+  },
+  heroTitle: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+  },
+  heroSubtitle: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+    marginTop: spacing.xs,
+  },
+  heroStatsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    margin: spacing.md,
-    padding: spacing.md,
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    flexWrap: 'wrap',
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
     borderRadius: borderRadius.lg,
     borderWidth: 1,
-    borderColor: colors.border,
-  },
-  weatherEmoji: {
-    fontSize: 40,
-    marginRight: spacing.md,
-  },
-  weatherInfo: {
-    flex: 1,
-  },
-  weatherTemp: {
-    fontSize: fontSizes.xl,
-    fontWeight: 'bold',
-    color: colors.text,
-  },
-  weatherDesc: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    textTransform: 'capitalize',
-  },
-  weatherDetails: {
-    alignItems: 'flex-end',
-  },
-  weatherLocation: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-  },
-  weatherFeels: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-  },
-  generateButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.primary,
-    marginHorizontal: spacing.md,
-    marginBottom: spacing.md,
+    borderColor: colors.assistant.border,
     padding: spacing.md,
-    borderRadius: borderRadius.lg,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  heroActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
+    marginTop: spacing.md,
   },
-  generateIcon: {
-    fontSize: 18,
+  heroActionButton: {
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
   },
-  generateText: {
+  heroActionPrimary: {
+    backgroundColor: colors.assistant.action,
+    borderColor: colors.assistant.action,
+  },
+  heroActionSecondary: {
+    backgroundColor: colors.assistant.panelRaised,
+    borderColor: colors.assistant.border,
+  },
+  heroActionDisabled: {
+    opacity: 0.7,
+  },
+  heroActionPrimaryText: {
     color: '#fff',
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+  },
+  heroActionSecondaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
     fontWeight: '600',
-    fontSize: fontSizes.md,
   },
   contentArea: {
     flex: 1,
@@ -628,6 +808,29 @@ const styles = StyleSheet.create({
   briefContent: {
     paddingBottom: spacing.lg,
   },
+  readerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  readerActionButton: {
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  readerActionPrimary: {
+    backgroundColor: colors.primary,
+  },
+  readerActionSecondary: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  readerActionText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
   sectionTitle: {
     fontSize: fontSizes.lg,
     fontWeight: '600',
@@ -660,6 +863,60 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
     color: colors.textMuted,
     marginTop: spacing.xs,
+  },
+  readerModal: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  readerModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  readerModalControl: {
+    color: colors.primary,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  readerModalTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: spacing.md,
+  },
+  readerScroll: {
+    flex: 1,
+  },
+  readerScrollContent: {
+    padding: spacing.lg,
+    paddingBottom: spacing.xxl,
+  },
+  readerParagraph: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    lineHeight: 26,
+    marginBottom: spacing.md,
+  },
+  readerRecoverySection: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  readerSectionLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: spacing.md,
   },
   briefsList: {
     backgroundColor: colors.surface,

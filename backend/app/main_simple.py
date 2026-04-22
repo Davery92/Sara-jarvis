@@ -5749,6 +5749,10 @@ app.include_router(acs_router)
 from app.routes.metrics import router as metrics_router
 app.include_router(metrics_router)
 
+# Assistant UX analytics
+from app.routes.assistant_analytics import router as assistant_analytics_router
+app.include_router(assistant_analytics_router)
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -8761,6 +8765,26 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"📥 Injected inbox item context: {inbox_row.title} ({len(truncated)} chars)")
                 except Exception as e:
                     logger.warning(f"⚠️ Inbox context injection failed (non-critical): {e}")
+
+            # NOTE CONTEXT: Inject note content when discussing a note/report from iOS.
+            if request.note_id:
+                try:
+                    note_row = db.execute(text("""
+                        SELECT id, title, content
+                        FROM note
+                        WHERE id = :id AND user_id = :uid
+                        LIMIT 1
+                    """), {"id": request.note_id, "uid": current_user.id}).fetchone()
+                    if note_row and note_row.content:
+                        truncated_note = note_row.content[:12000]
+                        note_ctx = "\n\n## Note David Wants to Discuss\n"
+                        note_ctx += f"**Title:** {note_row.title}\n\n"
+                        note_ctx += truncated_note
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + note_ctx)
+                        logger.info(f"📝 Injected note context: {note_row.title} ({len(truncated_note)} chars)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Note context injection failed (non-critical): {e}")
 
             # SESSION GAP DETECTION: Detect gaps and summarize for day layer
             try:

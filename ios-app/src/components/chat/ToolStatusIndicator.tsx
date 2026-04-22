@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Animated } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 interface ToolStatusIndicatorProps {
@@ -41,10 +42,24 @@ function getToolDescription(toolName: string): string {
   return 'Working on it...';
 }
 
+function getToolHint(toolName: string): string {
+  if (toolName.startsWith('search_') || toolName.startsWith('web_') || toolName === 'open_page') {
+    return 'Gathering context before replying.';
+  }
+  if (toolName.startsWith('calendar_') || toolName.startsWith('list_events')) {
+    return 'Checking timing and details for you.';
+  }
+  if (toolName.startsWith('log_') || toolName.startsWith('food_log_')) {
+    return 'Updating the right place in the background.';
+  }
+  return 'You can keep typing while this finishes.';
+}
+
 export default function ToolStatusIndicator({ toolName, status }: ToolStatusIndicatorProps) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const [visible, setVisible] = useState(true);
   const description = getToolDescription(toolName);
+  const hint = getToolHint(toolName);
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -76,12 +91,22 @@ export default function ToolStatusIndicator({ toolName, status }: ToolStatusIndi
   return (
     <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
       <View style={styles.content}>
-        {status === 'executing' ? (
-          <ActivityIndicator size="small" color={colors.primary} style={styles.indicator} />
-        ) : (
-          <Text style={styles.checkmark}>{'✓'}</Text>
-        )}
-        <Text style={styles.description}>{description}</Text>
+        <View style={styles.badge}>
+          {status === 'executing' ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : (
+            <Ionicons name="checkmark" size={14} color={colors.success} />
+          )}
+        </View>
+        <View style={styles.copy}>
+          <Text style={styles.eyebrow}>
+            {status === 'executing' ? 'Sara is working' : 'Done'}
+          </Text>
+          <Text style={styles.description}>{description}</Text>
+          <Text style={styles.hint}>
+            {status === 'executing' ? hint : 'The result is ready to use in the conversation.'}
+          </Text>
+        </View>
       </View>
     </Animated.View>
   );
@@ -94,25 +119,45 @@ const styles = StyleSheet.create({
   },
   content: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.lg,
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-    alignSelf: 'flex-start',
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: spacing.sm,
   },
-  indicator: {
-    marginRight: spacing.sm,
+  badge: {
+    width: 28,
+    height: 28,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.background,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 2,
   },
-  checkmark: {
-    color: colors.success,
-    fontSize: fontSizes.sm,
+  copy: {
+    flex: 1,
+  },
+  eyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
     fontWeight: '700',
-    marginRight: spacing.sm,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 2,
   },
   description: {
-    color: colors.textSecondary,
+    color: colors.text,
     fontSize: fontSizes.sm,
-    fontStyle: 'italic',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  hint: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 17,
   },
 });

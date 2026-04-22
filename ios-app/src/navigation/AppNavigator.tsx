@@ -8,9 +8,10 @@ import BriefingsScreen from '../screens/briefings/BriefingsScreen';
 import HealthDataScreen from '../screens/health/HealthDataScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import ProjectsScreen from '../screens/projects/ProjectsScreen';
+import AssistantAnalyticsScreen from '../screens/analytics/AssistantAnalyticsScreen';
+import AssistantInboxScreen from '../screens/inbox/AssistantInboxScreen';
 import InboxScreen from '../screens/inbox/InboxScreen';
 import KnowledgeScreen from '../screens/knowledge/KnowledgeScreen';
-import IntelligenceScreen from '../screens/intelligence/IntelligenceScreen';
 import NotesListScreen from '../screens/notes/NotesListScreen';
 import AgentTasksScreen from '../screens/agents/AgentTasksScreen';
 import DailyTasksScreen from '../screens/tasks/DailyTasksScreen';
@@ -32,9 +33,10 @@ export type AppStackParamList = {
   Health: undefined;
   Settings: undefined;
   Projects: undefined;
+  AssistantAnalytics: undefined;
+  AssistantInbox: { focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived' } | undefined;
   Inbox: { tab?: 'content' | 'attention' } | undefined;
   Knowledge: undefined;
-  Intelligence: undefined;
   AgentTasks: undefined;
   DailyTasks: undefined;
   Automations: undefined;
@@ -107,19 +109,24 @@ export default function AppNavigator() {
         options={{ title: 'Projects' }}
       />
       <Stack.Screen
+        name="AssistantAnalytics"
+        component={AssistantAnalyticsScreen}
+        options={{ title: 'Assistant Usage' }}
+      />
+      <Stack.Screen
+        name="AssistantInbox"
+        component={AssistantInboxScreen}
+        options={{ title: 'Inbox' }}
+      />
+      <Stack.Screen
         name="Inbox"
         component={InboxScreen}
-        options={{ title: 'Inbox' }}
+        options={{ title: 'Captured Content' }}
       />
       <Stack.Screen
         name="Knowledge"
         component={KnowledgeScreen}
         options={{ title: 'Knowledge' }}
-      />
-      <Stack.Screen
-        name="Intelligence"
-        component={IntelligenceScreen}
-        options={{ title: 'Intelligence Feed' }}
       />
       <Stack.Screen
         name="AgentTasks"

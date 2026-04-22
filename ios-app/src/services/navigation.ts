@@ -109,6 +109,7 @@ export function navigateToChat(params?: {
   quickReply?: { message: string; nudgeType?: string; title?: string };
   heartbeat?: { title: string; message: string; priority: string };
   inboxItem?: { id: string; title: string };
+  noteContext?: { id: string; title: string; prompt?: string; preview?: string };
   taskInject?: { taskId: string; conversationId?: string; noteId?: string };
   notification?: { id: string; title: string; message: string; category: string; item_type: string };
 }) {
@@ -120,9 +121,13 @@ export function navigateToChat(params?: {
  * Navigate to Inbox screen
  */
 export function navigateToInbox(
-  params: { tab?: 'content' | 'attention' } = { tab: 'content' }
+  params: { tab?: 'content' | 'attention'; focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived' } = { focus: 'new' }
 ) {
-  navigateToStackScreen('Inbox', params);
+  const focus =
+    params.focus ||
+    (params.tab === 'attention' ? 'waiting' : 'new');
+
+  navigateToTab('AssistantInboxTab', { focus });
 }
 
 export function navigateToNotifications(params?: { notificationId?: number }) {

@@ -1,87 +1,247 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { useFocusEffect } from '@react-navigation/native';
-import apiClient from '../../services/api';
-import { colors, fontSizes } from '../../styles/theme';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 
 interface MenuItem {
   name: string;
-  icon: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
   screen: string;
+  description: string;
 }
 
-const menuItems: MenuItem[] = [
-  { name: 'Notes', icon: '📝', label: 'Notes', screen: 'Notes' },
-  { name: 'Email', icon: '📧', label: 'Email', screen: 'Email' },
-  { name: 'DailyTasks', icon: '✅', label: 'Daily Tasks', screen: 'DailyTasks' },
-  { name: 'Calendar', icon: '📅', label: 'Calendar', screen: 'Calendar' },
-  { name: 'Notifications', icon: '🔔', label: 'Notifications', screen: 'Notifications' },
-  { name: 'Inbox', icon: '📥', label: 'Inbox', screen: 'Inbox' },
-  { name: 'Learning', icon: '🎓', label: 'Learning', screen: 'Learning' },
-  { name: 'Automations', icon: '⚡', label: 'Automations', screen: 'Automations' },
-  { name: 'AgentTasks', icon: '🤖', label: 'Agent Tasks', screen: 'AgentTasks' },
-  { name: 'ACS', icon: '🧠', label: 'ACS', screen: 'ACS' },
-  { name: 'Knowledge', icon: '🧬', label: 'Knowledge', screen: 'Knowledge' },
-  { name: 'Documents', icon: '📄', label: 'Documents', screen: 'Documents' },
-  { name: 'Projects', icon: '📋', label: 'Projects', screen: 'Projects' },
-  { name: 'Recipes', icon: '🍳', label: 'Recipes', screen: 'Recipes' },
-  { name: 'Intelligence', icon: '📡', label: 'Intelligence', screen: 'Intelligence' },
-{ name: 'Briefings', icon: '☀️', label: 'Morning Brief', screen: 'Briefings' },
-  { name: 'Health', icon: '⚕️', label: 'Apple Health', screen: 'Health' },
-  { name: 'Settings', icon: '⚙️', label: 'Settings', screen: 'Settings' },
+interface MenuSection {
+  title: string;
+  description: string;
+  items: MenuItem[];
+}
+
+const menuSections: MenuSection[] = [
+  {
+    title: 'Assistant',
+    description: 'Review what Sara has surfaced, delegated, or queued for your attention.',
+    items: [
+      {
+        name: 'AssistantAnalytics',
+        icon: 'analytics-outline',
+        label: 'Assistant Usage',
+        screen: 'AssistantAnalytics',
+        description: 'See whether the redesign is changing actual behavior.',
+      },
+      {
+        name: 'Notifications',
+        icon: 'notifications-outline',
+        label: 'Notifications',
+        screen: 'Notifications',
+        description: 'Recent nudges, discoveries, and alerts from Sara.',
+      },
+      {
+        name: 'Briefings',
+        icon: 'sunny-outline',
+        label: 'Morning Brief',
+        screen: 'Briefings',
+        description: 'Your daily summary with weather, calendar, and recovery.',
+      },
+      {
+        name: 'AgentTasks',
+        icon: 'git-network-outline',
+        label: 'Agent Tasks',
+        screen: 'AgentTasks',
+        description: 'Background jobs, clarifications, and task outcomes.',
+      },
+      {
+        name: 'ACS',
+        icon: 'layers-outline',
+        label: 'ACS',
+        screen: 'ACS',
+        description: 'Autonomous cognition sessions, interests, and deliverables.',
+      },
+      {
+        name: 'Automations',
+        icon: 'flash-outline',
+        label: 'Automations',
+        screen: 'Automations',
+        description: 'Recurring flows and assistant-triggered actions.',
+      },
+    ],
+  },
+  {
+    title: 'Planning',
+    description: 'The places where you organize today, upcoming work, and commitments.',
+    items: [
+      {
+        name: 'DailyTasks',
+        icon: 'checkbox-outline',
+        label: 'Daily Tasks',
+        screen: 'DailyTasks',
+        description: 'Today’s checklist, focus items, and execution view.',
+      },
+      {
+        name: 'Calendar',
+        icon: 'calendar-outline',
+        label: 'Calendar',
+        screen: 'Calendar',
+        description: 'Events, reminders, and iOS calendar sync.',
+      },
+      {
+        name: 'Projects',
+        icon: 'folder-open-outline',
+        label: 'Projects',
+        screen: 'Projects',
+        description: 'Project boards, QA queues, and files.',
+      },
+      {
+        name: 'Recipes',
+        icon: 'restaurant-outline',
+        label: 'Recipes',
+        screen: 'Recipes',
+        description: 'Saved meals and planning around nutrition.',
+      },
+    ],
+  },
+  {
+    title: 'Knowledge',
+    description: 'Your captured material, reference memory, and working context.',
+    items: [
+      {
+        name: 'Learning',
+        icon: 'school-outline',
+        label: 'Learning',
+        screen: 'Learning',
+        description: 'Courses, prompts, and guided knowledge-building flows.',
+      },
+      {
+        name: 'Notes',
+        icon: 'document-text-outline',
+        label: 'Notes',
+        screen: 'Notes',
+        description: 'Quick notes, folders, and markdown content.',
+      },
+      {
+        name: 'Email',
+        icon: 'mail-outline',
+        label: 'Email',
+        screen: 'Email',
+        description: 'Email triage and detailed message review.',
+      },
+      {
+        name: 'Documents',
+        icon: 'documents-outline',
+        label: 'Documents',
+        screen: 'Documents',
+        description: 'Uploaded files, previews, and search.',
+      },
+      {
+        name: 'Knowledge',
+        icon: 'library-outline',
+        label: 'Knowledge',
+        screen: 'Knowledge',
+        description: 'Structured memory, extracted facts, and PKG views.',
+      },
+    ],
+  },
+  {
+    title: 'System',
+    description: 'Personal data sources, health context, and app controls.',
+    items: [
+      {
+        name: 'Health',
+        icon: 'heart-outline',
+        label: 'Apple Health',
+        screen: 'Health',
+        description: 'HealthKit sync, recovery signals, and metrics.',
+      },
+      {
+        name: 'Settings',
+        icon: 'settings-outline',
+        label: 'Settings',
+        screen: 'Settings',
+        description: 'Profile, preferences, memory, and integrations.',
+      },
+    ],
+  },
 ];
 
 export default function MoreScreen() {
   const navigation = useNavigation();
-  const [inboxUnread, setInboxUnread] = useState(0);
-  useFocusEffect(
-    React.useCallback(() => {
-      const loadBadges = async () => {
-        try {
-          const [stats, attention] = await Promise.all([
-            apiClient.getInboxStats(),
-            apiClient.getAttentionCount(),
-          ]);
-          const contentUnread = stats?.unread || 0;
-          const attentionUnread = attention?.unread || 0;
-          setInboxUnread(contentUnread + attentionUnread);
-        } catch {}
-      };
-      loadBadges();
-    }, [])
-  );
+  const totalDestinations = menuSections.reduce((sum, section) => sum + section.items.length, 0);
 
   const handleItemPress = (screen: string) => {
     (navigation as any).navigate(screen);
   };
 
-  const visibleMenuItems = menuItems;
-
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>More</Text>
-      <View style={styles.menuGrid}>
-        {visibleMenuItems.map((item) => (
-          <TouchableOpacity
-            key={item.name}
-            style={styles.menuItem}
-            onPress={() => handleItemPress(item.screen)}
-          >
-            <View>
-              <Text style={styles.menuIcon}>{item.icon}</Text>
-              {item.name === 'Inbox' && inboxUnread > 0 && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{inboxUnread}</Text>
-                </View>
-              )}
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>Secondary Spaces</Text>
+          <Text style={styles.title}>More</Text>
+          <Text style={styles.subtitle}>
+            Use this area for specialist tools, deeper review, and system controls beyond the core Sara, Inbox, and Fitness flow.
+          </Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Sections</Text>
+              <Text style={styles.heroStatValue}>{menuSections.length}</Text>
+              <Text style={styles.heroStatMeta}>grouped around intent</Text>
             </View>
-            <Text style={styles.menuLabel}>{item.label}</Text>
-          </TouchableOpacity>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Spaces</Text>
+              <Text style={styles.heroStatValue}>{totalDestinations}</Text>
+              <Text style={styles.heroStatMeta}>secondary destinations</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Primary</Text>
+              <Text style={styles.heroStatValue}>3</Text>
+              <Text style={styles.heroStatMeta}>surfaces stay out of here</Text>
+            </View>
+          </View>
+        </View>
+
+        {menuSections.map((section) => (
+          <View key={section.title} style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionTitleRow}>
+                <Text style={styles.sectionTitle}>{section.title}</Text>
+                <View style={styles.sectionCountPill}>
+                  <Text style={styles.sectionCountText}>{section.items.length}</Text>
+                </View>
+              </View>
+              <Text style={styles.sectionDescription}>{section.description}</Text>
+            </View>
+
+            <View style={styles.sectionCard}>
+              {section.items.map((item, index) => (
+                <TouchableOpacity
+                  key={item.name}
+                  style={[
+                    styles.menuRow,
+                    index < section.items.length - 1 && styles.menuRowBorder,
+                  ]}
+                  onPress={() => handleItemPress(item.screen)}
+                  activeOpacity={0.75}
+                >
+                  <View style={styles.menuIconWrap}>
+                    <Ionicons name={item.icon} size={22} color={colors.primary} />
+                  </View>
+
+                  <View style={styles.menuCopy}>
+                    <Text style={styles.menuLabel}>{item.label}</Text>
+                    <Text style={styles.menuDescription}>{item.description}</Text>
+                  </View>
+
+                  <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
         ))}
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
@@ -91,53 +251,146 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   content: {
-    padding: 20,
+    padding: spacing.lg,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    marginBottom: spacing.xl,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
   },
   title: {
     fontSize: fontSizes.xxl,
     fontWeight: 'bold',
     color: colors.text,
-    marginBottom: 24,
   },
-  menuGrid: {
+  subtitle: {
+    marginTop: spacing.sm,
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  heroStatsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 16,
+    gap: spacing.sm,
+    marginTop: spacing.md,
   },
-  menuItem: {
-    width: '47%',
-    backgroundColor: colors.surface,
-    borderRadius: 12,
-    padding: 20,
-    alignItems: 'center',
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
   },
-  menuIcon: {
-    fontSize: 40,
-    marginBottom: 8,
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  section: {
+    marginBottom: spacing.xl,
+  },
+  sectionHeader: {
+    marginBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  sectionTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+  },
+  sectionCountPill: {
+    minWidth: 28,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.panelRaised,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    alignItems: 'center',
+  },
+  sectionCountText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+  },
+  sectionDescription: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    lineHeight: 19,
+  },
+  sectionCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    overflow: 'hidden',
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  menuRowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: colors.assistant.border,
+  },
+  menuIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.panelRaised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuCopy: {
+    flex: 1,
+    gap: 2,
   },
   menuLabel: {
     fontSize: fontSizes.md,
     color: colors.text,
-    textAlign: 'center',
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  badge: {
-    position: 'absolute',
-    top: -4,
-    right: -8,
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: colors.error,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 4,
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '700',
+  menuDescription: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    lineHeight: 18,
   },
 });

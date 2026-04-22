@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../services/api';
-import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
+import { colors, spacing, fontSizes, borderRadius, shadows } from '../../styles/theme';
 
 interface MissionStep {
   id: string;
@@ -48,6 +48,20 @@ const STATE_CONFIG: Record<string, { color: string; icon: string; label: string 
   failed: { color: colors.error, icon: 'X', label: 'Failed' },
   cancelled: { color: colors.textMuted, icon: '-', label: 'Cancelled' },
 };
+
+function formatRelativeTime(dateStr: string | null): string {
+  if (!dateStr) return 'Recently';
+
+  const diffMs = Date.now() - new Date(dateStr).getTime();
+  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
+
+  if (diffMinutes < 1) return 'Just now';
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
 
 export default function AgentTasksScreen() {
   const [missions, setMissions] = useState<Mission[]>([]);
@@ -161,6 +175,31 @@ export default function AgentTasksScreen() {
     { label: 'Failed', value: 'failed' },
   ];
 
+  const activeMissionCount = useMemo(
+    () => missions.filter((mission) => ['pending', 'running'].includes(mission.state)).length,
+    [missions],
+  );
+  const needsInputCount = useMemo(
+    () => missions.filter((mission) => ['needs_clarification', 'awaiting_confirm'].includes(mission.state)).length,
+    [missions],
+  );
+  const completedCount = useMemo(
+    () => missions.filter((mission) => mission.state === 'done').length,
+    [missions],
+  );
+  const heroSummary = useMemo(() => {
+    if (needsInputCount > 0) {
+      return `${needsInputCount} task${needsInputCount === 1 ? '' : 's'} need your input before Sara can continue.`;
+    }
+    if (activeMissionCount > 0) {
+      return `Sara is actively working through ${activeMissionCount} task${activeMissionCount === 1 ? '' : 's'} right now.`;
+    }
+    if (completedCount > 0) {
+      return `${completedCount} task${completedCount === 1 ? '' : 's'} have completed and are ready for review.`;
+    }
+    return 'Background work, clarifications, and outcomes from agent tasks will show up here once Sara starts working for you.';
+  }, [activeMissionCount, completedCount, needsInputCount]);
+
   const renderStatusIcon = (state: string) => {
     const config = STATE_CONFIG[state] || STATE_CONFIG.pending;
 
@@ -236,6 +275,13 @@ export default function AgentTasksScreen() {
             <Text style={styles.missionTitle} numberOfLines={isExpanded ? 0 : 2}>
               {mission.title.replace(/^Agent:\s*/, '')}
             </Text>
+            <View style={styles.missionMetaRow}>
+              <Text style={styles.missionMeta}>{mission.source || 'Agent task'}</Text>
+              <Text style={styles.missionMetaDot}>•</Text>
+              <Text style={styles.missionMeta}>
+                {formatRelativeTime(mission.completed_at || mission.created_at)}
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -358,8 +404,38 @@ export default function AgentTasksScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
-      {/* Filter tabs */}
-      <View style={styles.filterRow}>
+      <View style={styles.header}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>Background Work</Text>
+          <Text style={styles.heroTitle}>Agent Tasks</Text>
+          <Text style={styles.heroSubtitle}>{heroSummary}</Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Running</Text>
+              <Text style={styles.heroStatValue}>{activeMissionCount}</Text>
+              <Text style={styles.heroStatMeta}>tasks in flight</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Need You</Text>
+              <Text style={styles.heroStatValue}>{needsInputCount}</Text>
+              <Text style={styles.heroStatMeta}>clarify or confirm</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Completed</Text>
+              <Text style={styles.heroStatValue}>{completedCount}</Text>
+              <Text style={styles.heroStatMeta}>ready to review</Text>
+            </View>
+          </View>
+        </View>
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filterStrip}
+        contentContainerStyle={styles.filterRow}
+      >
         {filters.map((f) => (
           <TouchableOpacity
             key={f.label}
@@ -376,7 +452,7 @@ export default function AgentTasksScreen() {
             </Text>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
 
       <ScrollView
         style={styles.scrollView}
@@ -387,7 +463,7 @@ export default function AgentTasksScreen() {
       >
         {missions.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyIcon}>{'(agent)'}</Text>
+            <Text style={styles.emptyIcon}>No active agent work</Text>
             <Text style={styles.emptyText}>No agent tasks</Text>
             <Text style={styles.emptySubtext}>
               Agent tasks dispatched from chat will appear here
@@ -412,28 +488,100 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.background,
   },
-  filterRow: {
-    flexDirection: 'row',
+  header: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+  },
+  heroTitle: {
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  heroSubtitle: {
+    marginTop: spacing.xs,
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  filterStrip: {
+    flexGrow: 0,
+  },
+  filterRow: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
     gap: spacing.xs,
-    backgroundColor: colors.surface,
+    alignItems: 'center',
   },
   filterTab: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.panelRaised,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   filterTabActive: {
-    backgroundColor: colors.primary + '33',
+    backgroundColor: colors.assistant.actionSoft,
+    borderColor: colors.assistant.borderStrong,
   },
   filterTabText: {
     fontSize: fontSizes.sm,
     color: colors.textSecondary,
+    fontWeight: '600',
   },
   filterTabTextActive: {
     color: colors.primary,
-    fontWeight: '600',
   },
   scrollView: {
     flex: 1,
@@ -442,12 +590,13 @@ const styles = StyleSheet.create({
     padding: spacing.md,
   },
   missionCard: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panel,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
     marginBottom: spacing.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.assistant.border,
+    ...shadows.sm,
   },
   missionCardRunning: {
     borderColor: colors.info + '40',
@@ -486,8 +635,22 @@ const styles = StyleSheet.create({
   missionTitle: {
     fontSize: fontSizes.md,
     color: colors.text,
-    fontWeight: '500',
+    fontWeight: '600',
     lineHeight: 22,
+  },
+  missionMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  missionMeta: {
+    fontSize: fontSizes.xs,
+    color: colors.textMuted,
+  },
+  missionMetaDot: {
+    fontSize: fontSizes.xs,
+    color: colors.textMuted,
   },
   progressContainer: {
     flexDirection: 'row',
@@ -498,7 +661,7 @@ const styles = StyleSheet.create({
   progressBar: {
     flex: 1,
     height: 4,
-    backgroundColor: colors.surfaceLight,
+    backgroundColor: colors.assistant.panelMuted,
     borderRadius: 2,
     overflow: 'hidden',
   },
@@ -523,7 +686,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     paddingTop: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
+    borderTopColor: colors.assistant.border,
   },
   missionDescription: {
     fontSize: fontSizes.sm,
@@ -649,9 +812,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xxl,
   },
   emptyIcon: {
-    fontSize: fontSizes.xxl,
-    color: colors.textMuted,
-    marginBottom: spacing.sm,
+    fontSize: fontSizes.md,
+    color: colors.textSecondary,
+    marginBottom: spacing.xs,
+    fontWeight: '600',
   },
   emptyText: {
     fontSize: fontSizes.lg,

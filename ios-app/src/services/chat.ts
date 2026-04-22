@@ -9,6 +9,7 @@ export interface SendMessageParams {
   model?: string;  // Optional model override
   ephemeral?: boolean;  // If true, chat won't be saved to memory
   inboxItemId?: string;  // Pre-load inbox item content for discussion
+  noteId?: string;  // Pre-load note content for discussion
   source?: string;  // 'ios' | 'ios_overlay'
   currentScreen?: string;  // Current screen for context-aware tool loading
   onContentCard?: (card: any) => void;
@@ -78,6 +79,9 @@ class ChatService {
       }
       if (params.inboxItemId) {
         chatOptions.inboxItemId = params.inboxItemId;
+      }
+      if (params.noteId) {
+        chatOptions.noteId = params.noteId;
       }
       if (params.source) {
         chatOptions.source = params.source;

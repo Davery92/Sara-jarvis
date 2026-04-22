@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 import SimpleMarkdown from '../../components/chat/SimpleMarkdown';
 
 // ─── Types ───────────────────────────────────────────
@@ -182,6 +182,29 @@ function timeAgo(dateStr: string | null | undefined): string {
 export default function ACSScreen() {
   const [activeTab, setActiveTab] = useState<TabType>('status');
   const [refreshing, setRefreshing] = useState(false);
+  const [overviewSnapshot, setOverviewSnapshot] = useState<ACSSnapshot | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchOverviewSnapshot = async () => {
+      try {
+        const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
+        if (mounted) {
+          setOverviewSnapshot(data as ACSSnapshot);
+        }
+      } catch {
+        // silent
+      }
+    };
+
+    fetchOverviewSnapshot();
+    const interval = setInterval(fetchOverviewSnapshot, 15000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -190,8 +213,48 @@ export default function ACSScreen() {
     setTimeout(() => setRefreshing(false), 500);
   }, []);
 
+  const overviewState = STATE_CONFIG[overviewSnapshot?.state || 'idle'] || STATE_CONFIG.idle;
+  const activeTabLabel = TABS.find((tab) => tab.key === activeTab)?.label || 'Status';
+  const overviewSummary = overviewSnapshot?.live_session
+    ? `ACS is currently ${overviewState.label.toLowerCase()} with a live ${overviewSnapshot.live_session.mode} session underway.`
+    : overviewSnapshot?.last_session
+      ? `ACS is currently ${overviewState.label.toLowerCase()}. The last ${overviewSnapshot.last_session.mode} session ended ${timeAgo(overviewSnapshot.last_session.ended_at)}.`
+      : 'ACS handles long-horizon planning, reflection, and autonomous cognition when Sara is working beyond the main chat.';
+
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
+      <View style={styles.header}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>Autonomous Cognition</Text>
+          <Text style={styles.heroTitle}>ACS</Text>
+          <Text style={styles.heroSubtitle}>{overviewSummary}</Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>State</Text>
+              <Text style={[styles.heroStatValue, { color: overviewState.color }]}>{overviewState.label}</Text>
+              <Text style={styles.heroStatMeta}>current ACS posture</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Live Session</Text>
+              <Text style={styles.heroStatValue}>
+                {overviewSnapshot?.live_session ? `${overviewSnapshot.live_session.turns} turns` : 'None'}
+              </Text>
+              <Text style={styles.heroStatMeta}>
+                {overviewSnapshot?.live_session
+                  ? `${overviewSnapshot.live_session.mode} mode`
+                  : 'no active session right now'}
+              </Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>View</Text>
+              <Text style={styles.heroStatValue}>{activeTabLabel}</Text>
+              <Text style={styles.heroStatMeta}>current ACS section</Text>
+            </View>
+          </View>
+        </View>
+      </View>
+
       {/* Tab bar */}
       <ScrollView
         horizontal
@@ -1254,15 +1317,86 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  header: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+  },
+  heroTitle: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+  },
+  heroSubtitle: {
+    marginTop: spacing.xs,
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
   tabBar: {
     flexGrow: 0,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   tabBarContent: {
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.xs,
     gap: spacing.xs,
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.xs,
+    alignItems: 'center',
   },
   tab: {
     flexDirection: 'row',
@@ -1270,13 +1404,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: borderRadius.full,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panelMuted,
     gap: 4,
   },
   tabActive: {
-    backgroundColor: colors.primary + '20',
+    backgroundColor: colors.assistant.actionSoft,
     borderWidth: 1,
-    borderColor: colors.primary + '40',
+    borderColor: colors.assistant.borderStrong,
   },
   tabIcon: {
     fontSize: 14,
@@ -1305,12 +1439,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   card: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panel,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
     marginBottom: spacing.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.assistant.border,
+    ...shadows.sm,
   },
   liveCard: {
     borderColor: colors.success + '60',

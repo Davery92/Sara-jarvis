@@ -29,6 +29,49 @@ async def _exec(db, stmt, params=None):
 class AttentionQueueService:
     """CRUD + delivery logic for the attention queue."""
 
+    async def _resolve_note_context(
+        self,
+        db,
+        *,
+        user_id: str,
+        title: str,
+        payload: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, str]]:
+        note_id = str((payload or {}).get("note_id") or "").strip()
+        note_row = None
+
+        if note_id:
+            note_row = await _exec(db, text("""
+                SELECT id::text, title, content
+                FROM note
+                WHERE id = :note_id AND user_id = :user_id
+                LIMIT 1
+            """), {"note_id": note_id, "user_id": user_id})
+            note_row = note_row.fetchone()
+
+        if not note_row and title.startswith("Sara's Daily Report"):
+            note_row = await _exec(db, text("""
+                SELECT id::text, title, content
+                FROM note
+                WHERE user_id = :user_id AND title = :title
+                ORDER BY created_at DESC
+                LIMIT 1
+            """), {"user_id": user_id, "title": title})
+            note_row = note_row.fetchone()
+
+        if not note_row:
+            return None
+
+        preview = (note_row[2] or "").strip()
+        if len(preview) > 1800:
+            preview = preview[:1800].rstrip() + "…"
+
+        return {
+            "note_id": note_row[0],
+            "title": note_row[1] or title,
+            "preview": preview,
+        }
+
     async def create_item(
         self,
         db,
@@ -548,15 +591,27 @@ class AttentionQueueService:
         if kind == "chat":
             await self.mark_engaged(db=db, item_id=item_id, user_id=user_id)
             prompt = str(action.get("prompt") or f"Help me with: {item.get('title', 'this')}")
+            note_context = await self._resolve_note_context(
+                db,
+                user_id=user_id,
+                title=str(item.get("title") or ""),
+                payload=payload if isinstance(payload, dict) else None,
+            )
             await self._log_action(db, item_id, action_id, kind, "Started chat")
+            directive: Dict[str, Any] = {
+                "type": "chat",
+                "prompt": prompt,
+                "title": str(item.get("title") or ""),
+            }
+            if note_context:
+                directive["note_id"] = note_context["note_id"]
+                directive["note_title"] = note_context["title"]
+                directive["note_preview"] = note_context["preview"]
             return {
                 "success": True,
                 "action_id": action_id,
                 "kind": kind,
-                "directive": {
-                    "type": "chat",
-                    "prompt": prompt,
-                },
+                "directive": directive,
             }
 
         if kind == "hitl_reply":

@@ -1,31 +1,45 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { colors } from '../styles/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { borderRadius, colors, fontSizes, shadows, spacing } from '../styles/theme';
+import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 import apiClient from '../services/api';
 
 // Hook to poll for badge data
 function useSaraBadges() {
+  const { tasks } = useBackgroundTasks();
   const [chatBadge, setChatBadge] = useState(false);
-  const [moreBadge, setMoreBadge] = useState(0);
+  const [assistantInboxBadge, setAssistantInboxBadge] = useState(0);
+  const taskSignals = tasks.filter(
+    (task) =>
+      task.status === 'pending' ||
+      task.status === 'running' ||
+      task.status === 'needs_clarification',
+  ).length;
 
   const fetchBadges = useCallback(async () => {
     try {
-      const [statusData, inboxData] = await Promise.allSettled([
+      const [statusData, inboxData, attentionData, notificationData] = await Promise.allSettled([
         apiClient.get('/api/sara/status'),
         apiClient.getInboxStats(),
+        apiClient.getAttentionCount(),
+        apiClient.get('/api/notifications?limit=30'),
       ]);
 
       if (statusData.status === 'fulfilled') {
         const status = statusData.value as any;
         setChatBadge((status?.pending_observations || 0) > 0);
       }
-      if (inboxData.status === 'fulfilled') {
-        const inbox = inboxData.value as any;
-        setMoreBadge(inbox?.unread || 0);
-      }
+      const inboxUnread = inboxData.status === 'fulfilled' ? ((inboxData.value as any)?.unread || 0) : 0;
+      const attentionUnread = attentionData.status === 'fulfilled' ? ((attentionData.value as any)?.unread || 0) : 0;
+      const notificationUnread = notificationData.status === 'fulfilled'
+        ? ((((notificationData.value as any)?.notifications) || []).filter((item: any) => !item?.read_at && !item?.engaged).length)
+        : 0;
+
+      setAssistantInboxBadge(inboxUnread + attentionUnread + notificationUnread + taskSignals);
     } catch {}
-  }, []);
+  }, [taskSignals]);
 
   useEffect(() => {
     fetchBadges();
@@ -33,128 +47,153 @@ function useSaraBadges() {
     return () => clearInterval(interval);
   }, [fetchBadges]);
 
-  return { chatBadge, moreBadge };
+  return { chatBadge, assistantInboxBadge };
 }
 
 export default function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
-  const { chatBadge, moreBadge } = useSaraBadges();
+  const { chatBadge, assistantInboxBadge } = useSaraBadges();
+  const insets = useSafeAreaInsets();
 
   return (
-    <View style={styles.tabBar}>
-      {state.routes.map((route, index) => {
-        const { options } = descriptors[route.key];
-        const rawLabel = options.tabBarLabel ?? options.title ?? route.name;
-        const label = typeof rawLabel === 'string' ? rawLabel : route.name;
-        const isFocused = state.index === index;
+    <View
+      style={[
+        styles.tabBarContainer,
+        { paddingBottom: Math.max(insets.bottom, spacing.sm) },
+      ]}
+    >
+      <View style={styles.tabBar}>
+        {state.routes.map((route, index) => {
+          const { options } = descriptors[route.key];
+          const rawLabel = options.tabBarLabel ?? options.title ?? route.name;
+          const label = typeof rawLabel === 'string' ? rawLabel : route.name;
+          const isFocused = state.index === index;
 
-        const icon = options.tabBarIcon
-          ? options.tabBarIcon({
-              focused: isFocused,
-              color: isFocused ? colors.primary : colors.textMuted,
-              size: 28,
-            })
-          : null;
+          const icon = options.tabBarIcon
+            ? options.tabBarIcon({
+                focused: isFocused,
+                color: isFocused ? colors.primary : colors.textMuted,
+                size: 24,
+              })
+            : null;
 
-        // Determine badge for this tab
-        const showDot = route.name === 'Sara' && chatBadge;
-        const badgeCount = route.name === 'More' ? moreBadge : 0;
+          // Determine badge for this tab
+          const showDot = route.name === 'Sara' && chatBadge;
+          const badgeCount = route.name === 'AssistantInboxTab' ? assistantInboxBadge : 0;
 
-        const onPress = () => {
-          const event = navigation.emit({
-            type: 'tabPress',
-            target: route.key,
-            canPreventDefault: true,
-          });
+          const onPress = () => {
+            const event = navigation.emit({
+              type: 'tabPress',
+              target: route.key,
+              canPreventDefault: true,
+            });
 
-          if (!isFocused && !event.defaultPrevented) {
-            navigation.navigate(route.name);
-          }
-        };
+            if (!isFocused && !event.defaultPrevented) {
+              navigation.navigate(route.name);
+            }
+          };
 
-        return (
-          <TouchableOpacity
-            key={route.key}
-            accessibilityRole="button"
-            accessibilityState={isFocused ? { selected: true } : {}}
-            accessibilityLabel={options.tabBarAccessibilityLabel}
-            testID={options.tabBarTestID}
-            onPress={onPress}
-            style={styles.tabItem}
-          >
-            <View style={styles.iconContainer}>
-              {icon}
-              {showDot && <View style={styles.badgeDot} />}
-              {badgeCount > 0 && (
-                <View style={styles.badgeCount}>
-                  <Text style={styles.badgeCountText}>
-                    {badgeCount > 99 ? '99+' : badgeCount}
-                  </Text>
-                </View>
-              )}
-            </View>
-            <Text
-              style={[
-                styles.label,
-                { color: isFocused ? colors.primary : colors.textMuted },
-              ]}
+          return (
+            <TouchableOpacity
+              key={route.key}
+              accessibilityRole="button"
+              accessibilityState={isFocused ? { selected: true } : {}}
+              accessibilityLabel={options.tabBarAccessibilityLabel}
+              testID={options.tabBarTestID}
+              onPress={onPress}
+              style={[styles.tabItem, isFocused && styles.tabItemActive]}
             >
-              {label}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
+              <View style={[styles.iconContainer, isFocused && styles.iconContainerActive]}>
+                {icon}
+                {showDot && <View style={styles.badgeDot} />}
+                {badgeCount > 0 && (
+                  <View style={styles.badgeCount}>
+                    <Text style={styles.badgeCountText}>
+                      {badgeCount > 99 ? '99+' : badgeCount}
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <Text
+                style={[
+                  styles.label,
+                  { color: isFocused ? colors.text : colors.textMuted },
+                ]}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  tabBarContainer: {
+    backgroundColor: colors.background,
+    paddingHorizontal: spacing.sm,
+    paddingTop: spacing.xs,
+  },
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panel,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
-    height: 85,
-    paddingBottom: 8,
-    paddingTop: 8,
-    paddingHorizontal: 8,
+    borderTopColor: colors.assistant.border,
+    borderRadius: borderRadius.xl,
+    minHeight: 72,
+    paddingBottom: spacing.xs,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    ...shadows.sm,
   },
   tabItem: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 4,
+    paddingVertical: spacing.xs,
+    marginHorizontal: spacing.xs,
+    borderRadius: borderRadius.lg,
+  },
+  tabItemActive: {
+    backgroundColor: colors.assistant.actionSoft,
   },
   iconContainer: {
-    height: 40,
+    width: 36,
+    height: 30,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 2,
+    marginBottom: spacing.xs,
+    borderRadius: borderRadius.full,
+  },
+  iconContainerActive: {
+    backgroundColor: colors.assistant.panelRaised,
   },
   label: {
-    fontSize: 12,
+    fontSize: fontSizes.xs,
     fontWeight: '600',
     textAlign: 'center',
   },
   badgeDot: {
     position: 'absolute',
-    top: 4,
-    right: -2,
+    top: 0,
+    right: -4,
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: colors.error,
+    backgroundColor: colors.assistant.alert,
   },
   badgeCount: {
     position: 'absolute',
-    top: 0,
-    right: -8,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: colors.error,
+    top: -2,
+    right: -10,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.assistant.alert,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 3,
+    paddingHorizontal: 4,
   },
   badgeCountText: {
     color: '#fff',

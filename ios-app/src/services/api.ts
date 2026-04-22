@@ -25,6 +25,7 @@ export interface ChatOptions {
   ephemeral?: boolean;
   notifyOnComplete?: boolean;  // Send push notification when response is ready (for background completion)
   inboxItemId?: string;  // Pre-load inbox item content for discussion
+  noteId?: string;  // Pre-load note content for discussion
   source?: string;  // 'ios' | 'ios_overlay' | 'workspace'
   currentScreen?: string;  // Current iOS screen for context-aware tool loading
   onContentCard?: (card: any) => void;  // Content card callback
@@ -490,6 +491,9 @@ class ApiClient {
         }
         if (options?.inboxItemId) {
           requestBody.inbox_item_id = options.inboxItemId;
+        }
+        if (options?.noteId) {
+          requestBody.note_id = options.noteId;
         }
         if (options?.source) {
           requestBody.source = options.source;

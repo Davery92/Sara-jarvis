@@ -13,6 +13,7 @@ import {
   ActionSheetIOS,
   Alert,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { voiceService } from '../../services/voice';
 import { imagePickerService, ImageAttachment } from '../../services/imagePicker';
@@ -20,6 +21,7 @@ import { imagePickerService, ImageAttachment } from '../../services/imagePicker'
 interface ChatInputProps {
   onSend: (message: string, images?: ImageAttachment[]) => void;
   onVoiceMessage?: (audioUri: string) => void;
+  onHoldToTalkStart?: () => void;
   disabled?: boolean;
   placeholder?: string;
   voiceEnabled?: boolean;
@@ -31,6 +33,7 @@ interface ChatInputProps {
 export default function ChatInput({
   onSend,
   onVoiceMessage,
+  onHoldToTalkStart,
   disabled = false,
   placeholder = 'Ask Sara anything...',
   voiceEnabled = true,
@@ -115,6 +118,7 @@ export default function ChatInput({
     try {
       await voiceService.startRecording();
       setIsRecording(true);
+      onHoldToTalkStart?.();
 
       // Pulse animation
       Animated.loop(
@@ -159,28 +163,54 @@ export default function ChatInput({
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       <View style={styles.container}>
-        {/* Continuous Voice Mode Toggle */}
-        {voiceEnabled && onToggleContinuousVoice && (
-          <TouchableOpacity
-            style={[
-              styles.continuousModeToggle,
-              continuousVoiceMode && styles.continuousModeActive
-            ]}
-            onPress={onToggleContinuousVoice}
-          >
-            <Text style={styles.toggleIcon}>{continuousVoiceMode ? '🔊' : '🔇'}</Text>
-            <Text style={styles.toggleText}>
-              {continuousVoiceMode ? 'Continuous Voice: ON' : 'Continuous Voice: OFF'}
-            </Text>
-          </TouchableOpacity>
+        {voiceEnabled && (
+          <View style={styles.voiceModesRow}>
+            {!continuousVoiceMode && (
+              <View style={styles.voiceHintChip}>
+                <Ionicons name="mic-outline" size={15} color={colors.textSecondary} />
+                <Text style={styles.voiceHintText}>Hold mic to talk</Text>
+              </View>
+            )}
+            {voiceEnabled && onToggleContinuousVoice && (
+              <TouchableOpacity
+                style={[
+                  styles.handsFreeChip,
+                  continuousVoiceMode && styles.handsFreeChipActive,
+                ]}
+                onPress={onToggleContinuousVoice}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name={continuousVoiceMode ? 'radio-outline' : 'headset-outline'}
+                  size={15}
+                  color={continuousVoiceMode ? colors.primary : colors.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.handsFreeChipText,
+                    continuousVoiceMode && styles.handsFreeChipTextActive,
+                  ]}
+                >
+                  {continuousVoiceMode
+                    ? (isListeningContinuous ? 'Hands-free listening' : 'Hands-free on')
+                    : 'Hands-free'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         )}
 
         {showRecording && (
           <View style={styles.recordingIndicator}>
             <Animated.View style={[styles.recordingDot, { transform: [{ scale: scaleAnim }] }]} />
-            <Text style={styles.recordingText}>
-              {continuousVoiceMode ? 'Listening... (speak now)' : 'Recording... Release to send'}
-            </Text>
+            <View style={styles.recordingCopy}>
+              <Text style={styles.recordingLabel}>
+                {continuousVoiceMode ? 'Hands-free is listening' : 'Recording your message'}
+              </Text>
+              <Text style={styles.recordingText}>
+                {continuousVoiceMode ? 'Speak naturally. Sara will reply, then listen again.' : 'Lift your finger to send.'}
+              </Text>
+            </View>
           </View>
         )}
 
@@ -213,7 +243,7 @@ export default function ChatInput({
             onPress={handleAddImage}
             disabled={disabled}
           >
-            <Text style={styles.imageButtonText}>📎</Text>
+            <Ionicons name="attach-outline" size={18} color={colors.textSecondary} />
           </TouchableOpacity>
 
           <TextInput
@@ -240,9 +270,11 @@ export default function ChatInput({
               disabled={disabled}
               activeOpacity={1}
             >
-              <Text style={styles.voiceButtonText}>
-                {isRecording ? '🎙️' : '🎤'}
-              </Text>
+              <Ionicons
+                name={isRecording ? 'mic' : 'mic-outline'}
+                size={18}
+                color={colors.text}
+              />
             </TouchableOpacity>
           ) : (message.trim() || attachedImages.length > 0) && !continuousVoiceMode ? (
             <TouchableOpacity
@@ -253,7 +285,7 @@ export default function ChatInput({
               onPress={handleSend}
               disabled={(!message.trim() && attachedImages.length === 0) || disabled}
             >
-              <Text style={styles.sendButtonText}>➤</Text>
+              <Ionicons name="arrow-up" size={18} color={colors.text} />
             </TouchableOpacity>
           ) : null}
         </View>
@@ -270,36 +302,61 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
   },
-  continuousModeToggle: {
+  voiceModesRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  voiceHintChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  voiceHintText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '500',
+  },
+  handsFreeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  handsFreeChipActive: {
+    backgroundColor: 'rgba(13, 127, 242, 0.12)',
+    borderColor: colors.primary,
+  },
+  handsFreeChipText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  handsFreeChipTextActive: {
+    color: colors.primary,
+  },
+  recordingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
     backgroundColor: colors.background,
     borderRadius: borderRadius.md,
     marginBottom: spacing.sm,
-    borderWidth: 2,
-    borderColor: colors.border,
-  },
-  continuousModeActive: {
-    backgroundColor: colors.primary + '20',
-    borderColor: colors.primary,
-  },
-  toggleIcon: {
-    fontSize: 20,
-    marginRight: spacing.sm,
-  },
-  toggleText: {
-    color: colors.text,
-    fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  recordingIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
   },
   recordingDot: {
     width: 12,
@@ -308,10 +365,19 @@ const styles = StyleSheet.create({
     backgroundColor: colors.error,
     marginRight: spacing.sm,
   },
-  recordingText: {
-    color: colors.error,
+  recordingCopy: {
+    flex: 1,
+  },
+  recordingLabel: {
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '600',
+    marginBottom: 2,
+  },
+  recordingText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 17,
   },
   inputContainer: {
     flexDirection: 'row',

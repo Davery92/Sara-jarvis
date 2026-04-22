@@ -11,27 +11,30 @@ import {
   ActivityIndicator,
   Modal,
   Pressable,
+  ScrollView,
+  Switch,
   AppState,
   AppStateStatus,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext } from '../../types/navigation';
+import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext, NoteContext } from '../../types/navigation';
 import { Message } from '../../types/api';
 import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
+import { assistantAnalytics } from '../../services/assistantAnalytics';
 import { chatService } from '../../services/chat';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
+import notesService from '../../services/notes';
 import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
 import ContentCard from '../../components/cards/ContentCard';
 import SuggestedActions from '../../components/chat/SuggestedActions';
 import ToolStatusIndicator from '../../components/chat/ToolStatusIndicator';
-import { colors, spacing } from '../../styles/theme';
+import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
 
 type Props = MainTabScreenProps<'Sara'> | MainTabScreenProps<'Chat'> | {
@@ -40,6 +43,44 @@ type Props = MainTabScreenProps<'Sara'> | MainTabScreenProps<'Chat'> | {
   navigation?: any;
   route?: any;
 };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: 'Claude',
+  google: 'Gemini',
+  openai: 'OpenAI',
+  codex: 'ChatGPT Codex',
+  local: 'Local',
+};
+
+type ConversationContextState = {
+  kind: 'inbox' | 'notification' | 'note';
+  title: string;
+  summary: string;
+  sourceLabel: string;
+  primaryActionLabel: string;
+  primaryPrompt: string;
+  inboxItemId?: string;
+  noteId?: string;
+  previewText?: string;
+};
+
+type PendingMessageSourceState = {
+  entryPoint: string;
+  label?: string;
+  target?: string;
+  contextKind?: ConversationContextState['kind'];
+};
+
+function normalizeNoteReaderText(text?: string | null): string {
+  return (text || '').replace(/\r\n/g, '\n').trim();
+}
+
+function splitNoteReaderBlocks(text?: string | null): string[] {
+  return normalizeNoteReaderText(text)
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
 
 function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   // Handle both standalone and embedded modes
@@ -63,7 +104,12 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
   const [isEphemeral, setIsEphemeral] = useState(false);
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
-  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showConversationControls, setShowConversationControls] = useState(false);
+  const [conversationContext, setConversationContext] = useState<ConversationContextState | null>(null);
+  const [noteReaderVisible, setNoteReaderVisible] = useState(false);
+  const [noteReaderTitle, setNoteReaderTitle] = useState('');
+  const [noteReaderContent, setNoteReaderContent] = useState('');
+  const [noteReaderLoading, setNoteReaderLoading] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const messagesRef = useRef<Message[]>([]);
   const streamingMessageRef = useRef('');
@@ -88,13 +134,80 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [pendingContextTrigger, setPendingContextTrigger] = useState(0);
   const pendingInboxItemRef = useRef<{ id: string; title: string } | null>(null);
   const handledInboxItemRef = useRef<string | null>(null);
+  const pendingNoteContextRef = useRef<NoteContext | null>(null);
+  const handledNoteContextRef = useRef<string | null>(null);
   const pendingNotificationRef = useRef<NotificationContext | null>(null);
   const handledNotificationRef = useRef<string | null>(null);
+  const pendingMessageSourceRef = useRef<PendingMessageSourceState | null>(null);
+  const lastChatOpenedAtRef = useRef(0);
+
+  const fetchFullNoteText = useCallback(async (noteId?: string, fallbackText?: string) => {
+    const parsedId = Number(noteId);
+    const fallback = normalizeNoteReaderText(fallbackText);
+
+    if (!Number.isFinite(parsedId) || parsedId <= 0) {
+      return fallback;
+    }
+
+    try {
+      const note = await notesService.getNote(parsedId);
+      return normalizeNoteReaderText(note.content) || fallback;
+    } catch (error) {
+      console.error('[Chat] Failed to load full note content:', error);
+      return fallback;
+    }
+  }, []);
+
+  const hydrateNoteConversationContext = useCallback(async (noteContext: NoteContext) => {
+    const fullText = await fetchFullNoteText(noteContext.id, noteContext.preview);
+    if (!fullText) return;
+
+    setConversationContext((current) => {
+      if (!current || current.kind !== 'note' || current.noteId !== noteContext.id) {
+        return current;
+      }
+      if (current.previewText === fullText) {
+        return current;
+      }
+      return {
+        ...current,
+        previewText: fullText,
+      };
+    });
+  }, [fetchFullNoteText]);
+
+  const openNoteReader = useCallback(async () => {
+    if (!conversationContext || conversationContext.kind !== 'note') return;
+
+    const fallbackText = conversationContext.previewText || '';
+    setNoteReaderTitle(conversationContext.title);
+    setNoteReaderContent(fallbackText);
+    setNoteReaderVisible(true);
+    setNoteReaderLoading(true);
+
+    const fullText = await fetchFullNoteText(conversationContext.noteId, fallbackText);
+    setNoteReaderContent(fullText || 'No report content is available yet.');
+    setNoteReaderLoading(false);
+  }, [conversationContext, fetchFullNoteText]);
 
   // Keep latest messages in a ref so async voice/text handlers don't use stale closures.
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const now = Date.now();
+      if (now - lastChatOpenedAtRef.current > 15000) {
+        lastChatOpenedAtRef.current = now;
+        assistantAnalytics.track('assistant.chat_opened', {
+          screen: isEmbedded ? 'sara_embedded' : 'chat',
+          resumed_conversation: Boolean(conversationId),
+          has_messages: messagesRef.current.length > 0,
+        });
+      }
+    }, [conversationId, isEmbedded]),
+  );
 
   // Handle inbox item discussion from navigation params
   useEffect(() => {
@@ -111,6 +224,21 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
 
     navigation.setParams({ inboxItem: undefined });
   }, [route?.params?.inboxItem, navigation]);
+
+  useEffect(() => {
+    if (!route || !navigation) return;
+    const noteContext = route.params?.noteContext as NoteContext | undefined;
+    if (!noteContext) return;
+
+    if (handledNoteContextRef.current === noteContext.id) return;
+    handledNoteContextRef.current = noteContext.id;
+
+    console.log('[Chat] Note context received, queuing for discussion:', noteContext);
+    pendingNoteContextRef.current = noteContext;
+    setPendingContextTrigger(t => t + 1);
+
+    navigation.setParams({ noteContext: undefined });
+  }, [route?.params?.noteContext, navigation]);
 
   // Handle health alert from push notification
   useEffect(() => {
@@ -488,11 +616,25 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     return '';
   };
 
-  const handleSendMessage = async (messageText: string, images?: ImageAttachment[], inboxItemId?: string) => {
+  const handleSendMessage = async (
+    messageText: string,
+    images?: ImageAttachment[],
+    inboxItemId?: string,
+    noteId?: string,
+  ) => {
+    const activeConversationContext = conversationContext;
+    const pendingMessageSource = pendingMessageSourceRef.current;
+    pendingMessageSourceRef.current = null;
+    const resolvedInboxItemId = inboxItemId || activeConversationContext?.inboxItemId;
+    const resolvedNoteId = noteId || activeConversationContext?.noteId;
+
     // Clear previous suggestions when sending new message
     setSuggestedActions([]);
     setPendingCards([]);
     setActiveToolStatus(null);
+    if (activeConversationContext) {
+      setConversationContext(null);
+    }
 
     // Collapse brief when typing (embedded mode)
     if (isEmbedded && onBriefCollapse) {
@@ -509,6 +651,18 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       content: messageText,
       created_at: new Date().toISOString(),
     };
+
+    assistantAnalytics.track('assistant.message_sent', {
+      input_mode: 'text',
+      has_images: Boolean(images?.length),
+      has_context: Boolean(activeConversationContext),
+      context_kind: activeConversationContext?.kind || pendingMessageSource?.contextKind || null,
+      entry_point: pendingMessageSource?.entryPoint || 'composer',
+      label: pendingMessageSource?.label || null,
+      target: pendingMessageSource?.target || null,
+      inbox_item_id: resolvedInboxItemId || null,
+      note_id: resolvedNoteId || null,
+    });
 
     const updatedMessages = [...messagesRef.current, userMessage];
     setMessages(updatedMessages);
@@ -529,7 +683,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         images,  // Pass images to the service
         model: selectedModel,  // Pass selected model
         ephemeral: isEphemeral,  // Pass ephemeral mode
-        inboxItemId,  // Pass inbox item for discussion context
+        inboxItemId: resolvedInboxItemId,  // Pass inbox item for discussion context
+        noteId: resolvedNoteId,  // Pass note for report/note discussion context
         source: isEmbedded ? 'ios' : 'ios',
         onContentCard: (card: any) => {
           setPendingCards(prev => [...prev, card]);
@@ -666,6 +821,9 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
 
       setTimeout(() => {
         console.log('[Chat] Sending quick reply:', quickReply.message);
+        pendingMessageSourceRef.current = {
+          entryPoint: 'quick_reply',
+        };
         handleSendMessage(quickReply.message);
       }, 300);
       return;
@@ -697,17 +855,50 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
 
       setTimeout(() => {
         const isACS = notification.item_type === 'acs_discovery';
-        const emoji = isACS ? '🔬' : '💬';
-        const label = isACS ? 'Discovery' : 'Notification';
+        setConversationContext({
+          kind: 'notification',
+          title: notification.title,
+          summary: notification.message || (isACS ? 'Sara surfaced a discovery worth reviewing.' : 'Sara brought a notification into the conversation.'),
+          sourceLabel: isACS ? 'Reviewing a discovery' : 'Reviewing a notification',
+          primaryActionLabel: isACS ? 'Why it matters' : 'Discuss this',
+          primaryPrompt: isACS
+            ? `Give me the short version of "${notification.title}" and explain why it matters.`
+            : `Help me think through "${notification.title}" and decide what to do next.`,
+        });
+        assistantAnalytics.track('assistant.proactive_context_opened', {
+          source: 'notification',
+          item_type: notification.item_type || null,
+          category: notification.category || null,
+          title: notification.title,
+        });
+        console.log('[Chat] Loaded notification context into chat:', notification.id);
+      }, 300);
+      return;
+    }
 
-        const saraMessage: Message = {
-          id: `sara-notification-${Date.now()}`,
-          role: 'assistant',
-          content: `${emoji} **${label}: ${notification.title}**\n\n${notification.message}\n\nWould you like to discuss this further or take any action?`,
-          created_at: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, saraMessage]);
-        console.log('[Chat] Added notification message from Sara:', notification.id);
+    // Process note/report discussion
+    if (pendingNoteContextRef.current) {
+      const noteContext = pendingNoteContextRef.current;
+      pendingNoteContextRef.current = null;
+
+      setTimeout(() => {
+        setConversationContext({
+          kind: 'note',
+          title: noteContext.title,
+          summary: 'Sara attached this full report as context for your next reply.',
+          sourceLabel: 'Reviewing a report',
+          primaryActionLabel: 'Discuss this report',
+          primaryPrompt: noteContext.prompt || `Help me review "${noteContext.title}" and tell me what matters.`,
+          noteId: noteContext.id,
+          previewText: noteContext.preview,
+        });
+        assistantAnalytics.track('assistant.proactive_context_opened', {
+          source: 'note',
+          item_id: noteContext.id,
+          title: noteContext.title,
+        });
+        void hydrateNoteConversationContext(noteContext);
+        console.log('[Chat] Loaded note context into chat:', noteContext.id);
       }, 300);
       return;
     }
@@ -718,9 +909,21 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       pendingInboxItemRef.current = null;
 
       setTimeout(() => {
-        const userMessage = `Let's talk about this: ${inboxItem.title}`;
-        console.log('[Chat] Sending inbox item discussion:', inboxItem.id);
-        handleSendMessage(userMessage, undefined, inboxItem.id);
+        setConversationContext({
+          kind: 'inbox',
+          title: inboxItem.title,
+          summary: 'Sara has this captured item ready as context for your next reply.',
+          sourceLabel: 'Reviewing a captured item',
+          primaryActionLabel: 'Review with Sara',
+          primaryPrompt: `Help me review "${inboxItem.title}" and tell me what matters.`,
+          inboxItemId: inboxItem.id,
+        });
+        assistantAnalytics.track('assistant.proactive_context_opened', {
+          source: 'inbox',
+          item_id: inboxItem.id,
+          title: inboxItem.title,
+        });
+        console.log('[Chat] Loaded inbox item context into chat:', inboxItem.id);
       }, 300);
       return;
     }
@@ -758,6 +961,13 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         content: transcribedText,
         created_at: new Date().toISOString(),
       };
+
+      const inputMode = shouldResumeListening.current ? 'voice_hands_free' : 'voice_hold_to_talk';
+      assistantAnalytics.track('assistant.message_sent', {
+        input_mode: inputMode,
+        entry_point: inputMode === 'voice_hands_free' ? 'hands_free' : 'hold_to_talk',
+        transcript_length: transcribedText.length,
+      });
 
       setMessages((prev) => [...prev, userMessage]);
       setStreamingMessage('Thinking...');
@@ -881,6 +1091,10 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   // Toggle continuous voice mode
   const handleToggleContinuousVoice = async () => {
     console.log('[Chat] Toggle continuous voice. Current mode:', continuousVoiceMode);
+    assistantAnalytics.track('assistant.voice_hands_free_toggled', {
+      enabled: !continuousVoiceMode,
+      screen: isEmbedded ? 'sara_embedded' : 'chat',
+    });
 
     if (continuousVoiceMode) {
       // Turn off continuous mode
@@ -926,6 +1140,10 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             setMessages([]);
             setConversationId(null);
             setStreamingMessage('');
+            setConversationContext(null);
+            setSuggestedActions([]);
+            setPendingCards([]);
+            setActiveToolStatus(null);
 
             // Clear active conversation on backend
             try {
@@ -972,22 +1190,60 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     if (action.action === 'navigate' && action.target && navigation) {
       navigation.navigate(action.target, action.params || {});
     } else if (action.message) {
+      pendingMessageSourceRef.current = {
+        entryPoint: 'content_card',
+        label: action.label || undefined,
+        target: action.target || undefined,
+      };
       handleSendMessage(action.message);
     }
   }, [navigation]);
 
   // Handle suggested action tap
   const handleSuggestedAction = useCallback((action: SuggestedAction) => {
+    assistantAnalytics.track('assistant.suggested_action_tapped', {
+      label: action.label,
+      action: action.action || (action.message ? 'message' : 'unknown'),
+      target: action.target || null,
+      has_message: Boolean(action.message),
+    });
     if (action.action === 'navigate' && action.target && navigation) {
       navigation.navigate(action.target);
     } else if (action.message) {
+      pendingMessageSourceRef.current = {
+        entryPoint: 'suggested_action',
+        label: action.label,
+        target: action.target || undefined,
+      };
       handleSendMessage(action.message);
     }
     setSuggestedActions([]);
   }, [navigation]);
 
+  const handleConversationContextAction = useCallback(() => {
+    if (!conversationContext) return;
+    assistantAnalytics.track('assistant.proactive_context_prompt_used', {
+      source: conversationContext.kind,
+      title: conversationContext.title,
+      label: conversationContext.primaryActionLabel,
+    });
+    pendingMessageSourceRef.current = {
+      entryPoint: 'proactive_context',
+      label: conversationContext.primaryActionLabel,
+      contextKind: conversationContext.kind,
+    };
+    handleSendMessage(
+      conversationContext.primaryPrompt,
+      undefined,
+      conversationContext.inboxItemId,
+      conversationContext.noteId,
+    );
+  }, [conversationContext, handleSendMessage]);
+
   // Get display name for selected model
-  const selectedModelName = availableModels?.models?.find(m => m.id === selectedModel)?.name || selectedModel;
+  const selectedModelDetails = availableModels?.models?.find(m => m.id === selectedModel);
+  const selectedModelName = selectedModelDetails?.name || selectedModel;
+  const selectedProviderLabel = PROVIDER_LABELS[selectedModelDetails?.provider || 'local'] || 'Local';
 
   // Group models by provider
   const groupedModels = availableModels?.models?.reduce((acc, model) => {
@@ -1003,86 +1259,108 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
-        {/* Header with Model Selector and Ghost Toggle */}
+        {/* Conversation header */}
         <View style={[styles.header, isEphemeral && styles.ephemeralHeader]}>
-          {/* Model Selector */}
-          <TouchableOpacity
-            style={styles.modelSelector}
-            onPress={() => setShowModelPicker(true)}
-          >
-            <Text style={styles.modelSelectorText} numberOfLines={1}>
-              {selectedModelName}
+          <View style={styles.headerCopy}>
+            <Text style={styles.headerEyebrow}>
+              {isEmbedded ? 'Sara conversation' : 'Sara'}
             </Text>
-            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          {/* Ghost/Ephemeral Toggle */}
+            <Text style={styles.headerTitle}>
+              {isEphemeral ? 'Private mode is on for this conversation.' : 'Ask, speak, or pick up where you left off.'}
+            </Text>
+          </View>
           <TouchableOpacity
-            style={[styles.ghostButton, isEphemeral && styles.ghostButtonActive]}
-            onPress={() => setIsEphemeral(!isEphemeral)}
+            style={[styles.controlsButton, isEphemeral && styles.controlsButtonActive]}
+            onPress={() => setShowConversationControls(true)}
           >
             <Ionicons
-              name="eye-off-outline"
-              size={20}
-              color={isEphemeral ? '#a855f7' : colors.textMuted}
+              name={isEphemeral ? 'shield-checkmark-outline' : 'options-outline'}
+              size={18}
+              color={isEphemeral ? colors.secondary : colors.textMuted}
             />
+            <Text style={[styles.controlsButtonText, isEphemeral && styles.controlsButtonTextActive]}>
+              {isEphemeral ? 'Private' : 'Controls'}
+            </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Model Picker Modal */}
+        {/* Conversation Controls Modal */}
         <Modal
-          visible={showModelPicker}
+          visible={showConversationControls}
           transparent
           animationType="fade"
-          onRequestClose={() => setShowModelPicker(false)}
+          onRequestClose={() => setShowConversationControls(false)}
         >
           <Pressable
             style={styles.modalOverlay}
-            onPress={() => setShowModelPicker(false)}
+            onPress={() => setShowConversationControls(false)}
           >
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>Select Model</Text>
-              {Object.entries(groupedModels).map(([provider, models]) => (
-                <View key={provider}>
-                  <Text style={styles.providerLabel}>
-                    {provider === 'anthropic'
-                      ? 'Claude'
-                      : provider === 'google'
-                      ? 'Gemini'
-                      : provider === 'openai'
-                      ? 'OpenAI'
-                      : provider === 'codex'
-                      ? 'ChatGPT Codex'
-                      : 'Local'}
-                  </Text>
-                  {models.map((model) => (
-                    <TouchableOpacity
-                      key={model.id}
-                      style={[
-                        styles.modelOption,
-                        model.id === selectedModel && styles.modelOptionSelected,
-                      ]}
-                      onPress={() => {
-                        setSelectedModel(model.id);
-                        setShowModelPicker(false);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.modelOptionText,
-                          model.id === selectedModel && styles.modelOptionTextSelected,
-                        ]}
-                      >
-                        {model.name}
-                      </Text>
-                      {model.id === selectedModel && (
-                        <Ionicons name="checkmark" size={18} color={colors.primary} />
-                      )}
-                    </TouchableOpacity>
-                  ))}
+            <Pressable style={styles.modalContent} onPress={(event) => event.stopPropagation()}>
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={styles.modalEyebrow}>Conversation</Text>
+                <Text style={styles.modalTitle}>Conversation controls</Text>
+                <Text style={styles.modalDescription}>
+                  Keep this chat private when needed, or switch the model Sara uses for this conversation.
+                </Text>
+
+                <View style={styles.controlCard}>
+                  <View style={styles.controlCopy}>
+                    <Text style={styles.controlTitle}>Private mode</Text>
+                    <Text style={styles.controlDescription}>
+                      Useful for one-off chats you do not want Sara to retain.
+                    </Text>
+                  </View>
+                  <Switch
+                    value={isEphemeral}
+                    onValueChange={setIsEphemeral}
+                    trackColor={{ false: colors.surfaceLight, true: 'rgba(139, 92, 246, 0.45)' }}
+                    thumbColor={isEphemeral ? colors.secondary : '#f4f4f5'}
+                  />
                 </View>
-              ))}
-            </View>
+
+                <View style={styles.selectedModelCard}>
+                  <Text style={styles.selectedModelLabel}>Current model</Text>
+                  <Text style={styles.selectedModelName}>{selectedModelName}</Text>
+                  <Text style={styles.selectedModelProvider}>{selectedProviderLabel}</Text>
+                </View>
+
+                {Object.entries(groupedModels).map(([provider, models]) => (
+                  <View key={provider} style={styles.providerGroup}>
+                    <Text style={styles.providerLabel}>
+                      {PROVIDER_LABELS[provider] || 'Local'}
+                    </Text>
+                    {models.map((model) => (
+                      <TouchableOpacity
+                        key={model.id}
+                        style={[
+                          styles.modelOption,
+                          model.id === selectedModel && styles.modelOptionSelected,
+                        ]}
+                        onPress={() => {
+                          setSelectedModel(model.id);
+                          setShowConversationControls(false);
+                        }}
+                      >
+                        <View style={styles.modelOptionCopy}>
+                          <Text
+                            style={[
+                              styles.modelOptionText,
+                              model.id === selectedModel && styles.modelOptionTextSelected,
+                            ]}
+                          >
+                            {model.name}
+                          </Text>
+                          <Text style={styles.modelOptionMeta}>{PROVIDER_LABELS[model.provider] || 'Local'}</Text>
+                        </View>
+                        {model.id === selectedModel && (
+                          <Ionicons name="checkmark-circle" size={18} color={colors.primary} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ))}
+              </ScrollView>
+            </Pressable>
           </Pressable>
         </Modal>
 
@@ -1092,18 +1370,12 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         {/* Messages List */}
         <FlatList
           ref={flatListRef}
+          style={styles.messageListContainer}
           data={messages}
           renderItem={renderMessage}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.messageList}
           ListFooterComponent={renderStreamingMessage}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>
-                Start a conversation with Sara
-              </Text>
-            </View>
-          }
           onContentSizeChange={() => {
             flatListRef.current?.scrollToEnd({ animated: true });
           }}
@@ -1119,6 +1391,72 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           </TouchableOpacity>
         )}
 
+        {conversationContext && (
+          <View style={styles.contextBanner}>
+            <View style={styles.contextBannerHeader}>
+              <View style={styles.contextIconWrap}>
+                <Ionicons
+                  name={
+                    conversationContext.kind === 'inbox' || conversationContext.kind === 'note'
+                      ? 'document-text-outline'
+                      : 'notifications-outline'
+                  }
+                  size={16}
+                  color={colors.accent}
+                />
+              </View>
+              <View style={styles.contextCopy}>
+                <Text style={styles.contextEyebrow}>{conversationContext.sourceLabel}</Text>
+                <Text style={styles.contextTitle} numberOfLines={2}>{conversationContext.title}</Text>
+                <Text style={styles.contextSummary} numberOfLines={2}>{conversationContext.summary}</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.contextDismiss}
+                onPress={() => setConversationContext(null)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Ionicons name="close" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            {conversationContext.previewText || conversationContext.kind === 'note' ? (
+              <View style={styles.contextPreviewCard}>
+                <Text style={styles.contextPreviewLabel}>
+                  {conversationContext.kind === 'note' ? 'Report Preview' : 'Preview'}
+                </Text>
+                {conversationContext.previewText ? (
+                  <Text style={styles.contextPreviewText} numberOfLines={8}>
+                    {conversationContext.previewText}
+                  </Text>
+                ) : (
+                  <Text style={styles.contextPreviewText}>
+                    Loading the report content...
+                  </Text>
+                )}
+                {conversationContext.kind === 'note' ? (
+                  <TouchableOpacity
+                    style={styles.contextReaderButton}
+                    onPress={openNoteReader}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="document-outline" size={14} color={colors.primary} />
+                    <Text style={styles.contextReaderButtonText}>Read Full Report</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ) : null}
+            <View style={styles.contextActions}>
+              <TouchableOpacity
+                style={styles.contextPrimaryButton}
+                onPress={handleConversationContextAction}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.contextPrimaryButtonText}>{conversationContext.primaryActionLabel}</Text>
+              </TouchableOpacity>
+              <Text style={styles.contextHint}>Or just type naturally below.</Text>
+            </View>
+          </View>
+        )}
+
         {/* Suggested Actions */}
         {suggestedActions.length > 0 && !isStreaming && (
           <SuggestedActions actions={suggestedActions} onAction={handleSuggestedAction} />
@@ -1128,13 +1466,60 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         <ChatInput
           onSend={handleSendMessage}
           onVoiceMessage={handleVoiceMessage}
+          onHoldToTalkStart={() => {
+            assistantAnalytics.track('assistant.voice_hold_to_talk_started', {
+              screen: isEmbedded ? 'sara_embedded' : 'chat',
+            });
+          }}
           disabled={isStreaming || isPlayingAudio}
+          placeholder={conversationContext?.kind === 'note'
+            ? 'Ask about this report or tell Sara what you want to understand...'
+            : conversationContext
+              ? 'Reply about this item or ask what to do next...'
+              : 'Ask Sara anything...'}
           voiceEnabled={voiceInitialized}
           continuousVoiceMode={continuousVoiceMode}
           onToggleContinuousVoice={handleToggleContinuousVoice}
           isListeningContinuous={isListening}
         />
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={noteReaderVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setNoteReaderVisible(false)}
+      >
+        <SafeAreaView style={styles.noteReaderModal} edges={['top', 'bottom']}>
+          <View style={styles.noteReaderHeader}>
+            <TouchableOpacity onPress={() => setNoteReaderVisible(false)}>
+              <Text style={styles.noteReaderControl}>Close</Text>
+            </TouchableOpacity>
+            <Text style={styles.noteReaderTitle} numberOfLines={2}>
+              {noteReaderTitle || 'Report'}
+            </Text>
+            <View style={styles.noteReaderControlSpacer} />
+          </View>
+
+          {noteReaderLoading && !noteReaderContent ? (
+            <View style={styles.noteReaderLoading}>
+              <ActivityIndicator size="large" color={colors.primary} />
+            </View>
+          ) : (
+            <ScrollView
+              style={styles.noteReaderScroll}
+              contentContainerStyle={styles.noteReaderScrollContent}
+              showsVerticalScrollIndicator
+            >
+              {splitNoteReaderBlocks(noteReaderContent).map((block, index) => (
+                <Text key={`note-reader-${index}`} selectable style={styles.noteReaderParagraph}>
+                  {block}
+                </Text>
+              ))}
+            </ScrollView>
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1143,9 +1528,16 @@ const ChatScreen = forwardRef(ChatScreenInner);
 export default ChatScreen;
 
 // --- Sara Status Bar Component ---
-const EMOTION_EMOJI: Record<string, string> = {
-  curious: '🤔', calm: '😌', alert: '⚡', concerned: '😟',
-  happy: '😊', focused: '🎯', neutral: '😐', reflective: '🪞', attentive: '👀',
+const STATUS_LABELS: Record<string, string> = {
+  curious: 'looking into something',
+  calm: 'ready',
+  alert: 'watching closely',
+  concerned: 'flagging something important',
+  happy: 'in a good groove',
+  focused: 'working through something',
+  neutral: 'available',
+  reflective: 'connecting context',
+  attentive: 'paying attention',
 };
 
 function SaraStatusBar() {
@@ -1168,7 +1560,7 @@ function SaraStatusBar() {
 
   if (!status) return null;
 
-  const emoji = EMOTION_EMOJI[status.emotional_state] || '🤖';
+  const statusLabel = STATUS_LABELS[status.emotional_state] || 'available';
   const thought = status.latest_thought
     ? (status.latest_thought.length > 60 ? status.latest_thought.slice(0, 60) + '...' : status.latest_thought)
     : null;
@@ -1180,24 +1572,26 @@ function SaraStatusBar() {
       activeOpacity={0.7}
     >
       <View style={statusBarStyles.row}>
-        <Text style={statusBarStyles.emoji}>{emoji}</Text>
-        <Text style={statusBarStyles.state}>Sara is {status.emotional_state}</Text>
+        <View style={statusBarStyles.statusBadge}>
+          <Ionicons name="sparkles-outline" size={13} color={colors.accent} />
+        </View>
+        <Text style={statusBarStyles.state}>Sara is {statusLabel}</Text>
         {thought && <Text style={statusBarStyles.thought} numberOfLines={1}>{thought}</Text>}
-        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color="rgba(255,255,255,0.3)" />
+        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color={colors.textMuted} />
       </View>
       {expanded && (
         <View style={statusBarStyles.details}>
           {status.watching_for && (
-            <Text style={statusBarStyles.detail}>👀 {status.watching_for}</Text>
+            <Text style={statusBarStyles.detail}>Watching for: {status.watching_for}</Text>
           )}
           {status.last_action && (
-            <Text style={statusBarStyles.detail}>⚡ Last: {status.last_action.slice(0, 80)}</Text>
+            <Text style={statusBarStyles.detail}>Recently: {status.last_action.slice(0, 80)}</Text>
           )}
           {status.david_energy != null && (
-            <Text style={statusBarStyles.detail}>🔋 Your energy: {(status.david_energy * 100).toFixed(0)}%</Text>
+            <Text style={statusBarStyles.detail}>Energy estimate: {(status.david_energy * 100).toFixed(0)}%</Text>
           )}
           {status.pkg_facts_count > 0 && (
-            <Text style={statusBarStyles.detail}>🧠 {status.pkg_facts_count} facts about you</Text>
+            <Text style={statusBarStyles.detail}>Loaded context: {status.pkg_facts_count} memory item{status.pkg_facts_count === 1 ? '' : 's'}</Text>
           )}
         </View>
       )}
@@ -1207,22 +1601,29 @@ function SaraStatusBar() {
 
 const statusBarStyles = StyleSheet.create({
   container: {
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    backgroundColor: colors.assistant.panel,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderBottomColor: colors.assistant.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: spacing.xs,
   },
-  emoji: { fontSize: 14 },
-  state: { color: 'rgba(255,255,255,0.5)', fontSize: 12 },
-  thought: { flex: 1, color: 'rgba(255,255,255,0.3)', fontSize: 11, fontStyle: 'italic' },
-  details: { marginTop: 6, gap: 3 },
-  detail: { color: 'rgba(255,255,255,0.4)', fontSize: 11 },
+  statusBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.passiveSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  state: { color: colors.textSecondary, fontSize: fontSizes.xs, fontWeight: '600' },
+  thought: { flex: 1, color: colors.textMuted, fontSize: 11, fontStyle: 'italic' },
+  details: { marginTop: spacing.xs, gap: 3 },
+  detail: { color: colors.textMuted, fontSize: 11 },
 });
 
 const styles = StyleSheet.create({
@@ -1231,41 +1632,60 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   ephemeralContainer: {
-    backgroundColor: '#1a0a2e',  // Subtle purple tint
+    backgroundColor: colors.assistant.panelMuted,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    borderBottomColor: colors.assistant.border,
+    backgroundColor: colors.assistant.panel,
   },
   ephemeralHeader: {
-    backgroundColor: 'rgba(168, 85, 247, 0.1)',
+    backgroundColor: 'rgba(139, 92, 246, 0.12)',
   },
-  modelSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.card,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: 8,
-    gap: 4,
-    maxWidth: 150,
+  headerCopy: {
+    flex: 1,
+    paddingRight: spacing.md,
   },
-  modelSelectorText: {
+  headerEyebrow: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  headerTitle: {
     color: colors.text,
-    fontSize: 14,
+    fontSize: fontSizes.sm,
     fontWeight: '500',
   },
-  ghostButton: {
-    padding: spacing.xs,
-    borderRadius: 8,
+  controlsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    backgroundColor: colors.assistant.panelMuted,
   },
-  ghostButtonActive: {
-    backgroundColor: 'rgba(168, 85, 247, 0.2)',
+  controlsButtonActive: {
+    borderColor: colors.secondary,
+    backgroundColor: 'rgba(139, 92, 246, 0.16)',
+  },
+  controlsButtonText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    fontWeight: '500',
+  },
+  controlsButtonTextActive: {
+    color: colors.secondary,
   },
   modalOverlay: {
     flex: 1,
@@ -1274,27 +1694,94 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalContent: {
-    backgroundColor: colors.card,
-    borderRadius: 16,
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
     padding: spacing.lg,
-    width: '80%',
-    maxWidth: 300,
+    width: '88%',
+    maxWidth: 360,
     maxHeight: '70%',
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+  },
+  modalEyebrow: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
   },
   modalTitle: {
     color: colors.text,
-    fontSize: 18,
+    fontSize: fontSizes.xl,
     fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  modalDescription: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+    marginBottom: spacing.lg,
+  },
+  controlCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.panelMuted,
     marginBottom: spacing.md,
-    textAlign: 'center',
+  },
+  controlCopy: {
+    flex: 1,
+  },
+  controlTitle: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  controlDescription: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  selectedModelCard: {
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    marginBottom: spacing.lg,
+  },
+  selectedModelLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: spacing.xs,
+  },
+  selectedModelName: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  selectedModelProvider: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    marginTop: spacing.xs,
+  },
+  providerGroup: {
+    marginBottom: spacing.md,
   },
   providerLabel: {
     color: colors.textMuted,
-    fontSize: 12,
+    fontSize: fontSizes.xs,
     fontWeight: '600',
     textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginTop: spacing.sm,
+    letterSpacing: 0.8,
     marginBottom: spacing.xs,
   },
   modelOption: {
@@ -1303,43 +1790,208 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.sm,
-    borderRadius: 8,
+    borderRadius: borderRadius.md,
+    gap: spacing.sm,
   },
   modelOptionSelected: {
-    backgroundColor: 'rgba(20, 184, 166, 0.1)',
+    backgroundColor: colors.assistant.passiveSoft,
+  },
+  modelOptionCopy: {
+    flex: 1,
   },
   modelOptionText: {
     color: colors.text,
-    fontSize: 15,
+    fontSize: fontSizes.sm,
   },
   modelOptionTextSelected: {
     color: colors.primary,
     fontWeight: '500',
   },
+  modelOptionMeta: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
+  },
+  messageListContainer: {
+    flex: 1,
+  },
   messageList: {
     paddingVertical: spacing.md,
     flexGrow: 1,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: spacing.xl,
-  },
-  emptyText: {
-    color: colors.textMuted,
-    fontSize: 16,
-    textAlign: 'center',
   },
   clearButton: {
     alignSelf: 'center',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     marginBottom: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.panel,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   clearButtonText: {
-    color: colors.error,
+    color: colors.textSecondary,
     fontSize: 14,
-    fontWeight: '500',
+    fontWeight: '600',
+  },
+  contextBanner: {
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.panel,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    ...shadows.sm,
+  },
+  contextBannerHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  contextIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.passiveSoft,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  contextCopy: {
+    flex: 1,
+  },
+  contextEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 2,
+  },
+  contextTitle: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  contextSummary: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 17,
+  },
+  contextPreviewCard: {
+    marginTop: spacing.sm,
+    marginLeft: 36,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.panelMuted,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+  },
+  contextPreviewLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: spacing.xs,
+  },
+  contextPreviewText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    lineHeight: 21,
+  },
+  contextReaderButton: {
+    marginTop: spacing.md,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+  },
+  contextReaderButtonText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  contextDismiss: {
+    paddingTop: 2,
+  },
+  contextActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  contextPrimaryButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary,
+  },
+  noteReaderModal: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  noteReaderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.assistant.border,
+    backgroundColor: colors.assistant.panel,
+  },
+  noteReaderControl: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+  },
+  noteReaderControlSpacer: {
+    width: 44,
+  },
+  noteReaderTitle: {
+    flex: 1,
+    marginHorizontal: spacing.md,
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  noteReaderLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteReaderScroll: {
+    flex: 1,
+  },
+  noteReaderScrollContent: {
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  noteReaderParagraph: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    lineHeight: 24,
+    marginBottom: spacing.md,
+  },
+  contextPrimaryButtonText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+  },
+  contextHint: {
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    textAlign: 'right',
   },
 });

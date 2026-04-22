@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   FlatList,
@@ -11,7 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
 import { useToast } from '../../context/ToastContext';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 
 // --- Types ---
 
@@ -151,6 +151,21 @@ export default function AutomationsScreen() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const activeAutomationCount = useMemo(() => {
+    if (stats?.active != null) return stats.active;
+    return tasks.filter((task) => ['active', 'running'].includes(task.status.toLowerCase())).length;
+  }, [stats, tasks]);
+  const standingOrderCount = useMemo(() => orders.length, [orders]);
+  const heroSummary = useMemo(() => {
+    if (activeAutomationCount > 0) {
+      return `${activeAutomationCount} automation${activeAutomationCount === 1 ? '' : 's'} are active right now. Use this screen to pause, resume, and inspect background routines.`;
+    }
+    if (standingOrderCount > 0) {
+      return `${standingOrderCount} standing order${standingOrderCount === 1 ? '' : 's'} are configured, but nothing is actively running right now.`;
+    }
+    return 'Recurring assistant routines and standing orders live here once Sara starts automating work for you.';
+  }, [activeAutomationCount, standingOrderCount]);
 
   const handleTaskAction = useCallback(
     (task: AutomationTask) => {
@@ -311,7 +326,32 @@ export default function AutomationsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
-      {/* Tab Bar */}
+      <View style={styles.header}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>Recurring Work</Text>
+          <Text style={styles.heroTitle}>Automations</Text>
+          <Text style={styles.heroSubtitle}>{heroSummary}</Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Active</Text>
+              <Text style={styles.heroStatValue}>{activeAutomationCount}</Text>
+              <Text style={styles.heroStatMeta}>running now</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Runs</Text>
+              <Text style={styles.heroStatValue}>{stats?.executions_24h ?? 0}</Text>
+              <Text style={styles.heroStatMeta}>last 24 hours</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Standing</Text>
+              <Text style={styles.heroStatValue}>{standingOrderCount}</Text>
+              <Text style={styles.heroStatMeta}>long-lived instructions</Text>
+            </View>
+          </View>
+        </View>
+      </View>
+
       <View style={styles.tabBar}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'automations' && styles.tabActive]}
@@ -382,26 +422,95 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  header: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+  },
+  heroTitle: {
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  heroSubtitle: {
+    marginTop: spacing.xs,
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    padding: spacing.xs,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   tab: {
     flex: 1,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm + 2,
     alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
+    borderRadius: borderRadius.lg,
   },
   tabActive: {
-    borderBottomColor: colors.primary,
+    backgroundColor: colors.assistant.actionSoft,
   },
   tabText: {
-    fontSize: fontSizes.md,
-    fontWeight: '500',
-    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+    color: colors.textSecondary,
   },
   tabTextActive: {
     color: colors.primary,
@@ -417,7 +526,7 @@ const styles = StyleSheet.create({
   },
   statsBar: {
     flexDirection: 'row',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panel,
     borderRadius: borderRadius.lg,
     marginTop: spacing.md,
     marginBottom: spacing.sm,
@@ -425,6 +534,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     alignItems: 'center',
     justifyContent: 'space-around',
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   statItem: {
     alignItems: 'center',
@@ -442,13 +553,16 @@ const styles = StyleSheet.create({
   statDivider: {
     width: 1,
     height: 28,
-    backgroundColor: colors.border,
+    backgroundColor: colors.assistant.border,
   },
   card: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.assistant.panel,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
     marginTop: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    ...shadows.sm,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -493,6 +607,6 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: fontSizes.md,
-    color: colors.textMuted,
+    color: colors.textSecondary,
   },
 });

@@ -127,6 +127,19 @@ function getDomain(url: string | null): string {
   }
 }
 
+function normalizeExtractedText(text?: string): string {
+  return (text || '').replace(/\r\n/g, '\n').trim();
+}
+
+function splitTextBlocks(text?: string): string[] {
+  const normalized = normalizeExtractedText(text);
+  if (!normalized) return [];
+  return normalized
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
+
 function SwipeableArchiveRow({ children, onArchive }: { children: React.ReactNode; onArchive: () => void }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const panResponder = useRef(
@@ -387,19 +400,42 @@ export default function InboxScreen() {
 
   const handleDiscuss = (item: InboxItem) => {
     setSelectedItem(null);
-    // Navigate to Chat with inboxItem context
-    navigateToChat({
+    const chatParams = {
       inboxItem: {
         id: item.id,
         title: item.title || 'Shared content',
       },
-    });
+    };
+
+    // Route back through the tab stack first so the Sara chat surface is visible.
+    setTimeout(() => {
+      try {
+        (navigation as any).navigate('MainTabs', {
+          screen: 'Sara',
+          params: chatParams,
+        });
+      } catch {
+        navigateToChat(chatParams);
+      }
+    }, 0);
   };
 
   const handleOpenUrl = (url: string) => {
     ExpoLinking.openURL(url).catch(() => {
       showToast('error', 'Failed to open URL');
     });
+  };
+
+  const handleCopyExtractedText = async (text?: string) => {
+    const normalized = normalizeExtractedText(text);
+    if (!normalized) return;
+
+    try {
+      await ExpoClipboard.setStringAsync(normalized);
+      showToast('success', 'Copied full text');
+    } catch {
+      showToast('error', 'Failed to copy text');
+    }
   };
 
   const getAttentionActions = (item: AttentionItem): AttentionAction[] => {
@@ -441,7 +477,16 @@ export default function InboxScreen() {
     }
   };
 
-  const handleAttentionDirective = (directive?: { type?: string; target?: string; prompt?: string; url?: string }) => {
+  const handleAttentionDirective = (directive?: {
+    type?: string;
+    target?: string;
+    prompt?: string;
+    url?: string;
+    note_id?: string;
+    note_title?: string;
+    note_preview?: string;
+    title?: string;
+  }) => {
     if (!directive?.type) return;
     if (directive.type === 'navigate') {
       const target = (directive.target || '').toLowerCase();
@@ -463,6 +508,18 @@ export default function InboxScreen() {
     }
 
     if (directive.type === 'chat') {
+      if (directive.note_id) {
+        navigateToChat({
+          noteContext: {
+            id: directive.note_id,
+            title: directive.note_title || directive.title || 'Shared note',
+            prompt: directive.prompt,
+            preview: directive.note_preview,
+          },
+        });
+        return;
+      }
+
       navigateToChat({
         heartbeat: {
           title: 'Attention item',
@@ -908,18 +965,26 @@ export default function InboxScreen() {
       <Modal
         visible={selectedItem !== null}
         animationType="slide"
-        presentationStyle="pageSheet"
+        presentationStyle="fullScreen"
         onRequestClose={() => setSelectedItem(null)}
       >
         <SafeAreaView style={styles.modalContainer}>
           {selectedItem && (
             <>
               {/* Modal Header */}
-              <View style={styles.modalHeader}>
+                <View style={styles.modalHeader}>
                 <TouchableOpacity onPress={() => setSelectedItem(null)}>
                   <Text style={styles.modalClose}>Close</Text>
                 </TouchableOpacity>
                 <View style={styles.modalActions}>
+                  {selectedItem.extracted_text ? (
+                    <TouchableOpacity
+                      style={[styles.actionButton, styles.copyButton]}
+                      onPress={() => handleCopyExtractedText(selectedItem.extracted_text)}
+                    >
+                      <Text style={styles.actionButtonText}>Copy</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   {selectedItem.status !== 'kept' && (
                     <TouchableOpacity
                       style={[styles.actionButton, styles.keepButton]}
@@ -982,13 +1047,35 @@ export default function InboxScreen() {
                   </View>
                 )}
 
+                {selectedItem.description ? (
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionLabel}>Summary</Text>
+                    <View style={styles.detailTextCard}>
+                      <Text style={styles.detailSummaryText}>{selectedItem.description}</Text>
+                    </View>
+                  </View>
+                ) : null}
+
                 {detailLoading ? (
                   <View style={styles.detailLoading}>
                     <ActivityIndicator size="large" color={colors.primary} />
                     <Text style={styles.detailLoadingText}>Loading content...</Text>
                   </View>
                 ) : selectedItem.extraction_status === 'extracted' && selectedItem.extracted_text ? (
-                  <Text style={styles.detailText}>{selectedItem.extracted_text}</Text>
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionLabel}>Captured content</Text>
+                    <View style={styles.detailTextCard}>
+                      {splitTextBlocks(selectedItem.extracted_text).map((block, index) => (
+                        <Text
+                          key={`${selectedItem.id}-block-${index}`}
+                          selectable
+                          style={[styles.detailText, index > 0 && styles.detailTextBlock]}
+                        >
+                          {block}
+                        </Text>
+                      ))}
+                    </View>
+                  </View>
                 ) : selectedItem.extraction_status === 'failed' ? (
                   <Text style={styles.detailError}>Content extraction failed</Text>
                 ) : (
@@ -1332,6 +1419,8 @@ const styles = StyleSheet.create({
   modalActions: {
     flexDirection: 'row',
     gap: spacing.sm,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
   },
   actionButton: {
     paddingHorizontal: spacing.md,
@@ -1340,6 +1429,9 @@ const styles = StyleSheet.create({
   },
   keepButton: {
     backgroundColor: colors.success,
+  },
+  copyButton: {
+    backgroundColor: colors.surfaceLight,
   },
   discardButton: {
     backgroundColor: colors.surfaceLight,
@@ -1359,6 +1451,7 @@ const styles = StyleSheet.create({
   },
   modalBodyContent: {
     padding: spacing.md,
+    paddingBottom: spacing.xxl,
   },
   detailTitle: {
     color: colors.text,
@@ -1418,6 +1511,29 @@ const styles = StyleSheet.create({
   },
 
   // Detail content
+  detailSection: {
+    marginTop: spacing.md,
+  },
+  detailSectionLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: spacing.sm,
+  },
+  detailTextCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+  },
+  detailSummaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 22,
+  },
   detailLoading: {
     padding: spacing.xl,
     alignItems: 'center',
@@ -1429,8 +1545,11 @@ const styles = StyleSheet.create({
   },
   detailText: {
     color: colors.text,
-    fontSize: fontSizes.md,
+    fontSize: fontSizes.sm,
     lineHeight: 24,
+  },
+  detailTextBlock: {
+    marginTop: spacing.md,
   },
   detailError: {
     color: colors.error,

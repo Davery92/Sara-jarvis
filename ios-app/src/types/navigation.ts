@@ -82,6 +82,13 @@ export type NotificationContext = {
   item_type: string;  // 'notification' | 'acs_discovery'
 };
 
+export type NoteContext = {
+  id: string;
+  title: string;
+  prompt?: string;
+  preview?: string;
+};
+
 // Chat screen params (used by Sara tab)
 export type ChatScreenParams = {
   healthAlert?: HealthAlertContext;
@@ -89,14 +96,17 @@ export type ChatScreenParams = {
   quickReply?: QuickReplyContext;
   heartbeat?: HeartbeatContext;
   inboxItem?: { id: string; title: string };
+  noteContext?: NoteContext;
   notification?: NotificationContext;
 };
 
 // Main Tab Navigator
 export type MainTabParamList = {
   Sara: ChatScreenParams | undefined;
+  AssistantInboxTab: {
+    focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
+  } | undefined;
   Fitness: undefined;
-  Learning: undefined;
   More: undefined;
 };
 

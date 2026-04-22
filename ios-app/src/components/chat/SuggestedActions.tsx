@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Animated } from 'react-native';
+import React from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 export interface SuggestedAction {
@@ -17,104 +18,138 @@ interface SuggestedActionsProps {
 
 const MAX_DISPLAYED = 4;
 
-function AnimatedChip({
-  action,
-  onPress,
-  index,
-}: {
-  action: SuggestedAction;
-  onPress: () => void;
-  index: number;
-}) {
-  const translateX = useRef(new Animated.Value(40)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const delay = index * 50;
-    Animated.parallel([
-      Animated.timing(translateX, {
-        toValue: 0,
-        duration: 250,
-        delay,
-        useNativeDriver: true,
-      }),
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 250,
-        delay,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, []);
-
-  return (
-    <Animated.View style={{ transform: [{ translateX }], opacity }}>
-      <TouchableOpacity
-        style={styles.chip}
-        onPress={onPress}
-        activeOpacity={0.7}
-      >
-        {action.icon && <Text style={styles.chipIcon}>{action.icon}</Text>}
-        <Text style={styles.chipLabel} numberOfLines={1}>
-          {action.label}
-        </Text>
-      </TouchableOpacity>
-    </Animated.View>
-  );
-}
-
 export default function SuggestedActions({ actions, onAction }: SuggestedActionsProps) {
   if (!actions || actions.length === 0) {
     return null;
   }
 
   const displayedActions = actions.slice(0, MAX_DISPLAYED);
+  const [primaryAction, ...secondaryActions] = displayedActions;
 
   return (
     <View style={styles.container}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
+      <View style={styles.header}>
+        <Text style={styles.eyebrow}>Try next</Text>
+        <Text style={styles.description}>Sara can take one of these follow-up steps right away.</Text>
+      </View>
+
+      <TouchableOpacity
+        style={styles.primaryAction}
+        onPress={() => onAction(primaryAction)}
+        activeOpacity={0.85}
       >
-        {displayedActions.map((action, index) => (
-          <AnimatedChip
-            key={`${action.label}-${index}`}
-            action={action}
-            onPress={() => onAction(action)}
-            index={index}
-          />
-        ))}
-      </ScrollView>
+        <View style={styles.primaryCopy}>
+          <View style={styles.primaryLabelRow}>
+            {primaryAction.icon ? <Text style={styles.primaryIcon}>{primaryAction.icon}</Text> : null}
+            <Text style={styles.primaryLabel}>{primaryAction.label}</Text>
+          </View>
+          <Text style={styles.primaryCaption}>Use this as the next step in the conversation.</Text>
+        </View>
+        <Ionicons name="arrow-forward" size={18} color={colors.text} />
+      </TouchableOpacity>
+
+      {secondaryActions.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.secondaryRow}
+        >
+          {secondaryActions.map((action, index) => (
+            <TouchableOpacity
+              key={`${action.label}-${index}`}
+              style={styles.secondaryChip}
+              onPress={() => onAction(action)}
+              activeOpacity={0.75}
+            >
+              {action.icon ? <Text style={styles.secondaryChipIcon}>{action.icon}</Text> : null}
+              <Text style={styles.secondaryChipText} numberOfLines={1}>
+                {action.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    paddingVertical: spacing.sm,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.sm,
   },
-  scrollContent: {
+  header: {
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  eyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 2,
+  },
+  description: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 19,
+  },
+  primaryAction: {
+    marginHorizontal: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.primary,
+  },
+  primaryCopy: {
+    flex: 1,
+  },
+  primaryLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  primaryIcon: {
+    fontSize: fontSizes.md,
+  },
+  primaryLabel: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  primaryCaption: {
+    color: 'rgba(248, 250, 252, 0.78)',
+    fontSize: fontSizes.sm,
+    lineHeight: 18,
+  },
+  secondaryRow: {
     paddingHorizontal: spacing.md,
     gap: spacing.sm,
+    marginTop: spacing.sm,
   },
-  chip: {
+  secondaryChip: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: borderRadius.full,
     borderWidth: 1,
-    borderColor: 'rgba(13, 127, 242, 0.15)',
-    backgroundColor: 'rgba(13, 127, 242, 0.06)',
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    gap: spacing.xs,
   },
-  chipIcon: {
+  secondaryChipIcon: {
     fontSize: fontSizes.sm,
-    marginRight: spacing.xs,
   },
-  chipLabel: {
-    color: colors.primary,
+  secondaryChipText: {
+    color: colors.textSecondary,
     fontSize: fontSizes.sm,
-    fontWeight: '500',
+    fontWeight: '600',
   },
 });

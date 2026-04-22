@@ -3,7 +3,7 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import apiClient from './api';
-import { navigateToInbox, navigateToNotifications } from './navigation';
+import { navigateToChat, navigateToInbox } from './navigation';
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
@@ -367,10 +367,14 @@ class PushNotificationService {
         Vibration.vibrate([0, 500, 200, 500]);
         break;
       case 'reminder':
-        // Navigate to reminders
+        // Reminder-style notifications belong in the assistant inbox
+        console.log('[PushNotifications] Reminder notification:', data);
+        navigateToInbox({ focus: 'new' });
         break;
       case 'message':
-        // Navigate to chat
+        // Direct conversational messages should land in chat
+        console.log('[PushNotifications] Message notification:', data);
+        navigateToChat();
         break;
       case 'health_sync':
         // Navigate to health/fitness screen
@@ -426,6 +430,7 @@ class PushNotificationService {
         if (this.onBackgroundTaskComplete) {
           this.onBackgroundTaskComplete(data.task_id, data.result_note_id);
         }
+        navigateToInbox({ focus: 'done' });
         break;
       case 'agent_clarification':
         // Agent needs clarification
@@ -433,17 +438,18 @@ class PushNotificationService {
         if (this.onAgentClarificationNeeded) {
           this.onAgentClarificationNeeded(data.task_id);
         }
+        navigateToInbox({ focus: 'waiting' });
         break;
       case 'chat_response':
-        // Background chat response is ready - just open the app
-        // ChatScreen's AppState listener will reload the conversation
+        // Background chat response is ready - return to Sara chat
         console.log('[PushNotifications] Chat response ready:', data.conversation_id);
+        navigateToChat();
         break;
       case 'sara_insight':
       case 'observation':
-        // Sara proactive insight — open notifications screen
+        // Sara proactive insight — open the assistant inbox
         console.log('[PushNotifications] Sara insight notification:', data);
-        navigateToNotifications({ notificationId: data.notification_id });
+        navigateToInbox({ focus: 'new' });
         break;
       case 'thread_followup':
         // Thread follow-up — Sara following up on a prior conversation topic
@@ -472,24 +478,24 @@ class PushNotificationService {
       case 'inbox':
         // Morning inbox summary - open Inbox directly
         console.log('[PushNotifications] Inbox digest notification:', data);
-        navigateToInbox({ tab: 'content' });
+        navigateToInbox({ focus: 'new' });
         break;
       case 'attention_digest':
         // Attention backlog summary - open Inbox Attention tab
         console.log('[PushNotifications] Attention digest notification:', data);
-        navigateToInbox({ tab: 'attention' });
+        navigateToInbox({ focus: 'waiting' });
         break;
       case 'heartbeat':
       case 'unified_heartbeat':
       case 'checkin':
         // Heartbeat/check-in notification from Sara
         console.log('[PushNotifications] Heartbeat notification:', data);
-        navigateToNotifications({ notificationId: data.notification_id });
+        navigateToInbox({ focus: 'new' });
         break;
       default:
-        // Any other notification type — open notifications screen
-        console.log('[PushNotifications] Notification tapped, opening notifications:', data.type);
-        navigateToNotifications({ notificationId: data.notification_id });
+        // Unknown async notifications should still land in the assistant inbox
+        console.log('[PushNotifications] Notification tapped, opening assistant inbox:', data.type);
+        navigateToInbox({ focus: 'new' });
         break;
     }
   }

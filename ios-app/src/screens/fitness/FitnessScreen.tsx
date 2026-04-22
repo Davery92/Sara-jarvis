@@ -34,6 +34,7 @@ import FoodLogModal from '../../components/fitness/FoodLogModal';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { Ionicons } from '@expo/vector-icons';
+import { navigateToChat } from '../../services/navigation';
 import Markdown from 'react-native-markdown-display';
 
 type Props = MainTabScreenProps<'Fitness'>;
@@ -388,6 +389,16 @@ export default function FitnessScreen({ navigation }: Props) {
     );
   };
 
+  const openFitnessPrompt = (message: string) => {
+    navigateToChat({
+      quickReply: {
+        title: 'Fitness',
+        message,
+        nudgeType: 'fitness_focus',
+      },
+    });
+  };
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -418,6 +429,16 @@ export default function FitnessScreen({ navigation }: Props) {
     const hasActivePlan = !!activePhase;
     const hasWorkoutToday = todaysTemplates.length > 0;
     const firstTemplate = todaysTemplates[0];
+    const guidanceTitle = !hasActivePlan
+      ? 'Next move: set a training direction'
+      : hasWorkoutToday
+        ? `Next move: ${hasActiveWorkout ? 'resume' : 'start'} ${firstTemplate.name}`
+        : 'Next move: recover and stay on target';
+    const guidanceBody = !hasActivePlan
+      ? 'You need a plan before the rest of this screen becomes useful.'
+      : hasWorkoutToday
+        ? 'Your main win today is getting the scheduled work done and staying close to nutrition targets.'
+        : 'No training block is scheduled, so the best use of this screen is recovery and nutrition.';
 
     return (
       <ScrollView
@@ -570,6 +591,75 @@ export default function FitnessScreen({ navigation }: Props) {
                 : 'No workout scheduled for today.'}
             </Text>
           )}
+        </View>
+
+        <View style={styles.guidanceCard}>
+          <View style={styles.guidanceHeader}>
+            <View style={styles.guidanceIcon}>
+              <Ionicons name="compass-outline" size={18} color={colors.accent} />
+            </View>
+            <View style={styles.guidanceCopy}>
+              <Text style={styles.guidanceEyebrow}>What can I do next?</Text>
+              <Text style={styles.guidanceTitle}>{guidanceTitle}</Text>
+              <Text style={styles.guidanceBody}>{guidanceBody}</Text>
+            </View>
+          </View>
+          <View style={styles.guidanceActions}>
+            {!hasActivePlan ? (
+              <>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonPrimary]}
+                  onPress={() => openFitnessPrompt('Build me a training plan that fits my current goals and schedule.')}
+                >
+                  <Text style={styles.guidanceButtonPrimaryText}>Ask Sara for a Plan</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonSecondary]}
+                  onPress={() => setViewMode('programs')}
+                >
+                  <Text style={styles.guidanceButtonSecondaryText}>Open Programs</Text>
+                </TouchableOpacity>
+              </>
+            ) : hasWorkoutToday ? (
+              <>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonPrimary]}
+                  onPress={() => {
+                    if (hasActiveWorkout) {
+                      navigation.navigate('WorkoutMode' as any);
+                    } else {
+                      handleStartWorkout(firstTemplate.id);
+                    }
+                  }}
+                >
+                  <Text style={styles.guidanceButtonPrimaryText}>
+                    {hasActiveWorkout ? 'Resume Workout' : 'Start Workout'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonSecondary]}
+                  onPress={() => setViewMode('nutrition')}
+                >
+                  <Text style={styles.guidanceButtonSecondaryText}>Open Nutrition</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonPrimary]}
+                  onPress={handleLogRecovery}
+                >
+                  <Text style={styles.guidanceButtonPrimaryText}>Log Recovery</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.guidanceButton, styles.guidanceButtonSecondary]}
+                  onPress={() => openFitnessPrompt('What should I focus on today for recovery, food, and training readiness?')}
+                >
+                  <Text style={styles.guidanceButtonSecondaryText}>Ask Sara</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
         </View>
 
         {/* Today's macros */}
@@ -1806,6 +1896,78 @@ const styles = StyleSheet.create({
   },
   quickActionText: {
     color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  guidanceCard: {
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guidanceHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  guidanceIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: borderRadius.full,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: `${colors.accent}1a`,
+  },
+  guidanceCopy: {
+    flex: 1,
+  },
+  guidanceEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  guidanceTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  guidanceBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  guidanceActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  guidanceButton: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  guidanceButtonPrimary: {
+    backgroundColor: colors.primary,
+  },
+  guidanceButtonSecondary: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guidanceButtonPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  guidanceButtonSecondaryText: {
+    color: colors.textSecondary,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },

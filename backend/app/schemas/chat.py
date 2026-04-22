@@ -35,6 +35,7 @@ class ChatRequest(BaseModel):
     ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
     source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
     inbox_item_id: Optional[str] = None  # Pre-load inbox item content for discussion
+    note_id: Optional[str] = None  # Pre-load note content for discussion
     notify_on_complete: Optional[bool] = False  # Send push notification when response is ready
     current_screen: Optional[str] = None  # iOS current screen name for context-aware tool loading
     workspace_context: Optional[dict] = None  # Canvas workspace context (open windows, active scene)

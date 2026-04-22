@@ -12,8 +12,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../services/api';
-import { navigateToChat } from '../../services/navigation';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { navigateToChat, navigateToInbox } from '../../services/navigation';
+import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 
 interface Notification {
   id: string;
@@ -163,6 +163,35 @@ export default function NotificationsScreen() {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]);
   }, [notifications]);
 
+  const unreadCount = React.useMemo(
+    () => notifications.filter((item) => !item.read_at && !item.engaged).length,
+    [notifications],
+  );
+  const discoveryCount = React.useMemo(
+    () =>
+      notifications.filter(
+        (item) =>
+          item.item_type === 'acs_discovery' ||
+          item.category === 'acs_discovery' ||
+          item.category === 'discovery',
+      ).length,
+    [notifications],
+  );
+  const repliedCount = React.useMemo(
+    () => notifications.filter((item) => Boolean(item.response_text)).length,
+    [notifications],
+  );
+  const heroSummary = React.useMemo(() => {
+    if (activeFilter) {
+      const meta = CATEGORY_META[activeFilter] || { label: activeFilter };
+      return `Showing ${notifications.length} ${meta.label.toLowerCase()} notification${notifications.length === 1 ? '' : 's'} from your history.`;
+    }
+    if (unreadCount > 0) {
+      return `${unreadCount} still feel fresh. Use Inbox to decide what needs action now, and use this screen when you want the full history.`;
+    }
+    return 'This is Sara’s notification history: nudges, alerts, and discoveries after they have already landed.';
+  }, [activeFilter, notifications.length, unreadCount]);
+
   const renderNotification = ({ item }: { item: Notification }) => {
     const meta = CATEGORY_META[item.category] || { emoji: '🔔', label: item.category };
     const isUnread = !item.read_at && !item.engaged;
@@ -248,6 +277,54 @@ export default function NotificationsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
+      <View style={styles.header}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>History</Text>
+          <Text style={styles.headerTitle}>Notifications</Text>
+          <Text style={styles.headerSubtitle}>{heroSummary}</Text>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Fresh</Text>
+              <Text style={styles.heroStatValue}>{unreadCount}</Text>
+              <Text style={styles.heroStatMeta}>not yet reviewed</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Discoveries</Text>
+              <Text style={styles.heroStatValue}>{discoveryCount}</Text>
+              <Text style={styles.heroStatMeta}>ACS or surfaced signals</Text>
+            </View>
+            <View style={styles.heroStatCard}>
+              <Text style={styles.heroStatLabel}>Replies</Text>
+              <Text style={styles.heroStatValue}>{repliedCount}</Text>
+              <Text style={styles.heroStatMeta}>with your response</Text>
+            </View>
+          </View>
+
+          <View style={styles.heroActions}>
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => navigateToInbox({ focus: 'new' })}
+            >
+              <Text style={styles.headerButtonText}>Open Inbox</Text>
+            </TouchableOpacity>
+            {activeFilter ? (
+              <TouchableOpacity
+                style={[styles.headerButton, styles.headerButtonSecondary]}
+                onPress={() => {
+                  setActiveFilter(null);
+                  setExpandedId(null);
+                  setLoading(true);
+                  loadNotifications(null);
+                }}
+              >
+                <Text style={[styles.headerButtonText, styles.headerButtonTextSecondary]}>Clear Filter</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+      </View>
+
       {/* Filter chips */}
       <FlatList
         horizontal
@@ -301,14 +378,108 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  header: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
+  },
+  headerTitle: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+  },
+  headerSubtitle: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+    marginTop: spacing.xs,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    flexWrap: 'wrap',
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
+    gap: 2,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+  },
+  heroActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  headerButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+  },
+  headerButtonSecondary: {
+    backgroundColor: colors.assistant.panelRaised,
+    borderColor: colors.assistant.border,
+  },
+  headerButtonText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  headerButtonTextSecondary: {
+    color: colors.textSecondary,
+  },
   filterList: {
-    maxHeight: 48,
     flexGrow: 0,
+    minHeight: 60,
   },
   filterContent: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
     gap: spacing.sm,
+    alignItems: 'center',
   },
   filterChip: {
     paddingHorizontal: spacing.md,
@@ -333,14 +504,15 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xl,
   },
   notificationCard: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
   },
   unreadCard: {
-    borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
+    borderColor: colors.assistant.borderStrong,
   },
   expandedCard: {
     borderColor: colors.primary,
@@ -365,6 +537,7 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.xs,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+    fontWeight: '700',
   },
   acsBadge: {
     backgroundColor: colors.secondary + '30',

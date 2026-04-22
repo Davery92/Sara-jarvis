@@ -28,6 +28,22 @@ export const colors = {
   shadow: '#000000',
   overlay: 'rgba(0, 0, 0, 0.5)',
 
+  // Assistant product palette
+  assistant: {
+    panel: '#1b2230',
+    panelRaised: '#232c3c',
+    panelMuted: '#141a24',
+    border: 'rgba(148, 163, 184, 0.14)',
+    borderStrong: 'rgba(6, 182, 212, 0.22)',
+    action: '#0d7ff2',
+    actionSoft: 'rgba(13, 127, 242, 0.16)',
+    passive: '#06b6d4',
+    passiveSoft: 'rgba(6, 182, 212, 0.14)',
+    alert: '#f59e0b',
+    alertSoft: 'rgba(245, 158, 11, 0.16)',
+    successSoft: 'rgba(16, 185, 129, 0.16)',
+  },
+
   // Fitness colors
   fitness: {
     calories: '#f59e0b',
