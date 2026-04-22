@@ -1,50 +1,59 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { AppState, DeviceEventEmitter } from 'react-native';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../styles/theme';
-import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 import apiClient from '../services/api';
 
 // Hook to poll for badge data
 function useSaraBadges() {
-  const { tasks } = useBackgroundTasks();
   const [chatBadge, setChatBadge] = useState(false);
   const [assistantInboxBadge, setAssistantInboxBadge] = useState(0);
-  const taskSignals = tasks.filter(
-    (task) =>
-      task.status === 'pending' ||
-      task.status === 'running' ||
-      task.status === 'needs_clarification',
-  ).length;
+  const appStateRef = useRef(AppState.currentState);
 
   const fetchBadges = useCallback(async () => {
     try {
-      const [statusData, inboxData, attentionData, notificationData] = await Promise.allSettled([
+      const [statusData, attentionData, notificationData] = await Promise.allSettled([
         apiClient.get('/api/sara/status'),
-        apiClient.getInboxStats(),
         apiClient.getAttentionCount(),
-        apiClient.get('/api/notifications?limit=30'),
+        apiClient.get('/api/notifications?limit=100'),
       ]);
 
       if (statusData.status === 'fulfilled') {
         const status = statusData.value as any;
         setChatBadge((status?.pending_observations || 0) > 0);
       }
-      const inboxUnread = inboxData.status === 'fulfilled' ? ((inboxData.value as any)?.unread || 0) : 0;
       const attentionUnread = attentionData.status === 'fulfilled' ? ((attentionData.value as any)?.unread || 0) : 0;
       const notificationUnread = notificationData.status === 'fulfilled'
-        ? ((((notificationData.value as any)?.notifications) || []).filter((item: any) => !item?.read_at && !item?.engaged).length)
+        ? ((((notificationData.value as any)?.notifications) || []).filter((item: any) => !item?.read_at && !item?.engaged && !item?.dismissed_at).length)
         : 0;
 
-      setAssistantInboxBadge(inboxUnread + attentionUnread + notificationUnread + taskSignals);
+      setAssistantInboxBadge(attentionUnread + notificationUnread);
     } catch {}
-  }, [taskSignals]);
+  }, []);
 
   useEffect(() => {
     fetchBadges();
-    const interval = setInterval(fetchBadges, 60000);
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchBadges, 15000);
+    const badgeRefreshSubscription = DeviceEventEmitter.addListener(
+      'assistantInboxBadgeRefresh',
+      fetchBadges,
+    );
+    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+      const wasBackgrounded = appStateRef.current.match(/inactive|background/);
+      appStateRef.current = nextState;
+
+      if (wasBackgrounded && nextState === 'active') {
+        fetchBadges();
+      }
+    });
+
+    return () => {
+      clearInterval(interval);
+      badgeRefreshSubscription.remove();
+      appStateSubscription.remove();
+    };
   }, [fetchBadges]);
 
   return { chatBadge, assistantInboxBadge };

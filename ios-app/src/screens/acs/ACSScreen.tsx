@@ -356,6 +356,52 @@ function StatusTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: 
 
   const stateConfig = STATE_CONFIG[snapshot.state] || STATE_CONFIG.idle;
   const isLive = !!snapshot.live_session;
+  const primaryAction = (() => {
+    switch (snapshot.state) {
+      case 'idle':
+        return {
+          key: 'start',
+          label: 'Start Session',
+          action: 'start' as const,
+          style: styles.actionBtnPrimary,
+          disabled: false,
+        };
+      case 'autonomous':
+        return {
+          key: 'pause',
+          label: 'Pause',
+          action: 'pause' as const,
+          style: styles.actionBtnWarning,
+          disabled: false,
+        };
+      case 'cooldown':
+      case 'conversational':
+      case 'paused':
+        return {
+          key: 'resume',
+          label: 'Resume',
+          action: 'resume' as const,
+          style: styles.actionBtnPrimary,
+          disabled: false,
+        };
+      case 'pausing':
+        return {
+          key: 'pausing',
+          label: 'Pausing…',
+          action: null,
+          style: styles.actionBtnMuted,
+          disabled: true,
+        };
+      default:
+        return {
+          key: 'refresh',
+          label: 'Refresh',
+          action: null,
+          style: styles.actionBtnMuted,
+          disabled: true,
+        };
+    }
+  })();
 
   return (
     <ScrollView
@@ -373,60 +419,36 @@ function StatusTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: 
           <Text style={styles.emotionalState}>Emotional state: {snapshot.emotional_state}</Text>
         )}
 
+        {!snapshot.daily_plan ? (
+          <View style={styles.planHintCard}>
+            <Text style={styles.planHintTitle}>No daily plan loaded yet</Text>
+            <Text style={styles.planHintText}>
+              ACS usually generates a new daily plan each morning around 7 AM. If it is later and this is still empty, the planner likely has not run yet.
+            </Text>
+          </View>
+        ) : null}
+
         {/* Action buttons */}
         <View style={styles.actionRow}>
-          {snapshot.state === 'idle' && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.actionBtnPrimary]}
-              onPress={() => handleAction('start')}
-              disabled={actionLoading}
-            >
-              {actionLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>Start Session</Text>
-              )}
-            </TouchableOpacity>
-          )}
-          {(snapshot.state === 'cooldown' || snapshot.state === 'conversational') && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.actionBtnPrimary]}
-              onPress={() => handleAction('resume')}
-              disabled={actionLoading}
-            >
-              {actionLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>Resume</Text>
-              )}
-            </TouchableOpacity>
-          )}
-          {snapshot.state === 'autonomous' && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.actionBtnWarning]}
-              onPress={() => handleAction('pause')}
-              disabled={actionLoading}
-            >
-              {actionLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>Pause</Text>
-              )}
-            </TouchableOpacity>
-          )}
-          {snapshot.state === 'paused' && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.actionBtnPrimary]}
-              onPress={() => handleAction('resume')}
-              disabled={actionLoading}
-            >
-              {actionLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.actionBtnText}>Resume</Text>
-              )}
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            style={[
+              styles.actionBtn,
+              primaryAction.style,
+              (actionLoading || primaryAction.disabled) && styles.actionBtnDisabled,
+            ]}
+            onPress={() => {
+              if (primaryAction.action) {
+                handleAction(primaryAction.action);
+              }
+            }}
+            disabled={actionLoading || primaryAction.disabled}
+          >
+            {actionLoading && primaryAction.action ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Text style={styles.actionBtnText}>{primaryAction.label}</Text>
+            )}
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -476,12 +498,15 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function PlanTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
   const [plan, setPlan] = useState<string | null>(null);
+  const [state, setState] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchPlan = useCallback(async () => {
     try {
       const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
-      setPlan((data as ACSSnapshot).daily_plan || null);
+      const snapshot = data as ACSSnapshot;
+      setPlan(snapshot.daily_plan || null);
+      setState(snapshot.state || null);
     } catch {
       // silent
     } finally {
@@ -515,7 +540,12 @@ function PlanTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: ()
         {plan ? (
           <SimpleMarkdown>{plan}</SimpleMarkdown>
         ) : (
-          <Text style={styles.emptyText}>No plan generated yet</Text>
+          <View style={styles.planEmptyState}>
+            <Text style={styles.planEmptyTitle}>No daily plan generated yet</Text>
+            <Text style={styles.planEmptyText}>
+              ACS usually creates a new plan each morning around 7 AM. Right now it is {state || 'idle'}, so there is nothing loaded for today.
+            </Text>
+          </View>
         )}
       </View>
     </ScrollView>
@@ -1401,24 +1431,30 @@ const styles = StyleSheet.create({
   tab: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: borderRadius.full,
     backgroundColor: colors.assistant.panelMuted,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    minHeight: 38,
     gap: 4,
   },
   tabActive: {
     backgroundColor: colors.assistant.actionSoft,
-    borderWidth: 1,
     borderColor: colors.assistant.borderStrong,
+    ...shadows.sm,
   },
   tabIcon: {
     fontSize: 14,
+    lineHeight: 16,
   },
   tabLabel: {
     fontSize: fontSizes.xs,
     color: colors.textMuted,
     fontWeight: '600',
+    lineHeight: 16,
   },
   tabLabelActive: {
     color: colors.primary,
@@ -1498,10 +1534,48 @@ const styles = StyleSheet.create({
   actionBtnWarning: {
     backgroundColor: colors.warning,
   },
+  actionBtnMuted: {
+    backgroundColor: colors.surfaceLight,
+  },
+  actionBtnDisabled: {
+    opacity: 0.7,
+  },
   actionBtnText: {
     color: '#fff',
     fontWeight: '700',
     fontSize: fontSizes.sm,
+  },
+  planHintCard: {
+    marginTop: spacing.sm,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    padding: spacing.md,
+  },
+  planHintTitle: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  planHintText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  planEmptyState: {
+    gap: spacing.xs,
+  },
+  planEmptyTitle: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+  },
+  planEmptyText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
   },
   liveBadge: {
     flexDirection: 'row',

@@ -116,6 +116,31 @@ async def inbox_stats(
     )
 
 
+@router.post("/mark-all-read")
+async def mark_all_inbox_read(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark all unread inbox items as read."""
+    now = datetime.now(timezone.utc)
+    updated = (
+        db.query(SharedContent)
+        .filter(
+            SharedContent.user_id == current_user.id,
+            SharedContent.status == "unread",
+        )
+        .update(
+            {
+                SharedContent.status: "read",
+                SharedContent.read_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    return {"success": True, "updated": updated}
+
+
 @router.get("/search")
 async def search_inbox(
     q: str = Query(..., min_length=1, description="Search query"),

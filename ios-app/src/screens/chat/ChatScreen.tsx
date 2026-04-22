@@ -20,7 +20,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { MainTabScreenProps, HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext, NoteContext } from '../../types/navigation';
+import { HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext, NoteContext } from '../../types/navigation';
 import { Message } from '../../types/api';
 import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
@@ -36,8 +36,9 @@ import SuggestedActions from '../../components/chat/SuggestedActions';
 import ToolStatusIndicator from '../../components/chat/ToolStatusIndicator';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
+import { navigateToNoteEditor } from '../../services/navigation';
 
-type Props = MainTabScreenProps<'Sara'> | MainTabScreenProps<'Chat'> | {
+type Props = {
   isEmbedded?: boolean;
   onBriefCollapse?: () => void;
   navigation?: any;
@@ -141,25 +142,47 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const pendingMessageSourceRef = useRef<PendingMessageSourceState | null>(null);
   const lastChatOpenedAtRef = useRef(0);
 
-  const fetchFullNoteText = useCallback(async (noteId?: string, fallbackText?: string) => {
-    const parsedId = Number(noteId);
+  const resolveNoteId = useCallback(async (noteId?: string, noteTitle?: string) => {
+    const normalizedId = (noteId || '').trim();
+    if (normalizedId) {
+      return normalizedId;
+    }
+
+    const normalizedTitle = (noteTitle || '').trim();
+    if (!normalizedTitle) {
+      return null;
+    }
+
+    try {
+      const note = normalizedTitle.startsWith("Sara's Daily Report")
+        ? await notesService.findDailyReportNote({ title: normalizedTitle })
+        : await notesService.findBestMatchingNoteByTitle(normalizedTitle);
+      return note?.id ?? null;
+    } catch (error) {
+      console.error('[Chat] Failed to resolve note by title:', error);
+      return null;
+    }
+  }, []);
+
+  const fetchFullNoteText = useCallback(async (noteId?: string, fallbackText?: string, noteTitle?: string) => {
     const fallback = normalizeNoteReaderText(fallbackText);
 
-    if (!Number.isFinite(parsedId) || parsedId <= 0) {
+    const resolvedId = await resolveNoteId(noteId, noteTitle);
+    if (!resolvedId) {
       return fallback;
     }
 
     try {
-      const note = await notesService.getNote(parsedId);
+      const note = await notesService.getNote(resolvedId);
       return normalizeNoteReaderText(note.content) || fallback;
     } catch (error) {
       console.error('[Chat] Failed to load full note content:', error);
       return fallback;
     }
-  }, []);
+  }, [resolveNoteId]);
 
   const hydrateNoteConversationContext = useCallback(async (noteContext: NoteContext) => {
-    const fullText = await fetchFullNoteText(noteContext.id, noteContext.preview);
+    const fullText = await fetchFullNoteText(noteContext.id, noteContext.preview, noteContext.title);
     if (!fullText) return;
 
     setConversationContext((current) => {
@@ -185,10 +208,27 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     setNoteReaderVisible(true);
     setNoteReaderLoading(true);
 
-    const fullText = await fetchFullNoteText(conversationContext.noteId, fallbackText);
+    const fullText = await fetchFullNoteText(
+      conversationContext.noteId,
+      fallbackText,
+      conversationContext.title,
+    );
     setNoteReaderContent(fullText || 'No report content is available yet.');
     setNoteReaderLoading(false);
   }, [conversationContext, fetchFullNoteText]);
+
+  const openFullNote = useCallback(async () => {
+    if (!conversationContext || conversationContext.kind !== 'note') return;
+
+    const resolvedId = await resolveNoteId(conversationContext.noteId, conversationContext.title);
+    if (resolvedId) {
+      setNoteReaderVisible(false);
+      navigateToNoteEditor(resolvedId);
+      return;
+    }
+
+    await openNoteReader();
+  }, [conversationContext, openNoteReader, resolveNoteId]);
 
   // Keep latest messages in a ref so async voice/text handlers don't use stale closures.
   useEffect(() => {
@@ -1252,8 +1292,19 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     return acc;
   }, {} as Record<string, ChatModel[]>) || {};
 
+  const handleExitChat = useCallback(() => {
+    if (!navigation) return;
+
+    if (typeof navigation.canGoBack === 'function' && navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+
+    navigation.navigate?.('MainTabs', { screen: 'Sara' });
+  }, [navigation]);
+
   return (
-    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={isEmbedded ? [] : ['bottom']}>
+    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={isEmbedded ? [] : ['top', 'bottom']}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -1261,6 +1312,16 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       >
         {/* Conversation header */}
         <View style={[styles.header, isEphemeral && styles.ephemeralHeader]}>
+          {!isEmbedded ? (
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={handleExitChat}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="chevron-back" size={18} color={colors.textSecondary} />
+              <Text style={styles.backButtonText}>Back</Text>
+            </TouchableOpacity>
+          ) : null}
           <View style={styles.headerCopy}>
             <Text style={styles.headerEyebrow}>
               {isEmbedded ? 'Sara conversation' : 'Sara'}
@@ -1375,9 +1436,11 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           renderItem={renderMessage}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.messageList}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           ListFooterComponent={renderStreamingMessage}
           onContentSizeChange={() => {
-            flatListRef.current?.scrollToEnd({ animated: true });
+            flatListRef.current?.scrollToEnd({ animated: false });
           }}
         />
 
@@ -1435,11 +1498,11 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
                 {conversationContext.kind === 'note' ? (
                   <TouchableOpacity
                     style={styles.contextReaderButton}
-                    onPress={openNoteReader}
+                    onPress={openFullNote}
                     activeOpacity={0.85}
                   >
                     <Ionicons name="document-outline" size={14} color={colors.primary} />
-                    <Text style={styles.contextReaderButtonText}>Read Full Report</Text>
+                    <Text style={styles.contextReaderButtonText}>Open Full Report</Text>
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -1637,12 +1700,25 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
+    gap: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: colors.assistant.border,
     backgroundColor: colors.assistant.panel,
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.full,
+  },
+  backButtonText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
   ephemeralHeader: {
     backgroundColor: 'rgba(139, 92, 246, 0.12)',

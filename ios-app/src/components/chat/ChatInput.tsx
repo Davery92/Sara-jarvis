@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
   Animated,
   Image,
@@ -22,6 +21,7 @@ interface ChatInputProps {
   onSend: (message: string, images?: ImageAttachment[]) => void;
   onVoiceMessage?: (audioUri: string) => void;
   onHoldToTalkStart?: () => void;
+  onFocus?: () => void;
   disabled?: boolean;
   placeholder?: string;
   voiceEnabled?: boolean;
@@ -34,6 +34,7 @@ export default function ChatInput({
   onSend,
   onVoiceMessage,
   onHoldToTalkStart,
+  onFocus,
   disabled = false,
   placeholder = 'Ask Sara anything...',
   voiceEnabled = true,
@@ -158,10 +159,6 @@ export default function ChatInput({
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
       <View style={styles.container}>
         {voiceEnabled && (
           <View style={styles.voiceModesRow}>
@@ -249,12 +246,13 @@ export default function ChatInput({
           <TextInput
             style={styles.input}
             value={message}
-            onChangeText={setMessage}
-            placeholder={placeholder}
-            placeholderTextColor={colors.textMuted}
-            multiline
-            maxLength={2000}
-            editable={!disabled && !isRecording && !continuousVoiceMode}
+          onChangeText={setMessage}
+          placeholder={placeholder}
+          placeholderTextColor={colors.textMuted}
+          onFocus={onFocus}
+          multiline
+          maxLength={2000}
+          editable={!disabled && !isRecording && !continuousVoiceMode}
             onSubmitEditing={handleSend}
             blurOnSubmit={false}
           />
@@ -290,7 +288,6 @@ export default function ChatInput({
           ) : null}
         </View>
       </View>
-    </KeyboardAvoidingView>
   );
 }
 

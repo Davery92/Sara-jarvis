@@ -28,7 +28,7 @@ import { apiClient } from '../../services/api';
 import MessageBubble from '../chat/MessageBubble';
 import StreamingIndicator from '../chat/StreamingIndicator';
 import { colors, spacing, shadows } from '../../styles/theme';
-import { navigateToTab } from '../../services/navigation';
+import { navigateToChat } from '../../services/navigation';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const MINI_CHAT_HEIGHT = SCREEN_HEIGHT * 0.55;
@@ -205,7 +205,7 @@ export default function FloatingAssistant() {
 
   const handleExpand = useCallback(() => {
     setMode('orb');
-    navigateToTab('Sara');
+    navigateToChat();
   }, [setMode]);
 
   const handleSend = useCallback(() => {

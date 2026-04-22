@@ -19,8 +19,8 @@ export type RootStackParamList = {
     onSave?: () => void;
   };
   NoteEditor: {
-    noteId?: number;
-    folderId?: number;
+    noteId?: string | number;
+    folderId?: string | number;
     onSave?: () => void;
   };
   NutritionGoalsForm: {
@@ -98,11 +98,12 @@ export type ChatScreenParams = {
   inboxItem?: { id: string; title: string };
   noteContext?: NoteContext;
   notification?: NotificationContext;
+  taskInject?: { taskId: string; conversationId?: string; noteId?: string };
 };
 
 // Main Tab Navigator
 export type MainTabParamList = {
-  Sara: ChatScreenParams | undefined;
+  Sara: undefined;
   AssistantInboxTab: {
     focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
   } | undefined;

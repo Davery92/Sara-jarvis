@@ -23,7 +23,8 @@ import * as ExpoLinking from 'expo-linking';
 import { useToast } from '../../context/ToastContext';
 import { SkeletonList } from '../../components/SkeletonLoader';
 import apiClient from '../../services/api';
-import { navigateToChat, navigateToTab } from '../../services/navigation';
+import notesService from '../../services/notes';
+import { navigateToChat, navigateToNoteEditor, navigateToTab } from '../../services/navigation';
 import type { AppStackParamList } from '../../navigation/AppNavigator';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
@@ -477,6 +478,28 @@ export default function InboxScreen() {
     }
   };
 
+  const openAttentionNote = async (item: AttentionItem) => {
+    try {
+      const rawNoteId = String(item.payload?.note_id || '').trim();
+      if (rawNoteId) {
+        navigateToNoteEditor(rawNoteId);
+        return;
+      }
+
+      const note = item.title.startsWith("Sara's Daily Report")
+        ? await notesService.findDailyReportNote({ title: item.title })
+        : await notesService.findBestMatchingNoteByTitle(item.title);
+      if (note?.id) {
+        navigateToNoteEditor(note.id);
+        return;
+      }
+
+      showToast('error', 'Full report is not ready yet');
+    } catch {
+      showToast('error', 'Failed to open full report');
+    }
+  };
+
   const handleAttentionDirective = (directive?: {
     type?: string;
     target?: string;
@@ -634,6 +657,7 @@ export default function InboxScreen() {
     const isExpanded = expandedAttentionId === item.id;
     const isUnread = item.status === 'new' || item.status === 'sent';
     const isHitl = item.payload?.type === 'human_input_request';
+    const hasDirectReport = Boolean(item.payload?.note_id) || item.title.startsWith("Sara's Daily Report");
 
     return (
       <SwipeableArchiveRow onArchive={() => handleArchiveItem(item.id)}>
@@ -687,6 +711,16 @@ export default function InboxScreen() {
 
         {!isCompleted && actions.length > 0 && (
           <View style={styles.attentionActionsRow}>
+            {hasDirectReport ? (
+              <TouchableOpacity
+                style={[styles.attentionActionChip, styles.completeActionChip]}
+                onPress={() => openAttentionNote(item)}
+              >
+                <Text style={[styles.attentionActionText, styles.completeActionText]}>
+                  Open Full Report
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             {actions.map((action) => {
               const busy = attentionActionBusy === `${item.id}:${action.id}`;
               const isComplete = action.kind === 'complete';

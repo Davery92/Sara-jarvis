@@ -18,8 +18,8 @@ import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 interface NoteEditorScreenProps {
   route?: {
     params?: {
-      noteId?: number;
-      folderId?: number;
+      noteId?: string | number;
+      folderId?: string | number;
       onSave?: () => void;
     };
   };
@@ -96,7 +96,7 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container} edges={['bottom']}>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.loadingContainer}>
           <Text style={styles.loadingText}>Loading...</Text>
         </View>
@@ -105,7 +105,7 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['bottom']}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.container}

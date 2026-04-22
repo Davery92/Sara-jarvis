@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
+  DeviceEventEmitter,
   View,
   FlatList,
   StyleSheet,
@@ -12,7 +13,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../services/api';
-import { navigateToChat, navigateToInbox } from '../../services/navigation';
+import notesService from '../../services/notes';
+import { navigateToChat, navigateToInbox, navigateToNoteEditor } from '../../services/navigation';
 import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 
 interface Notification {
@@ -22,9 +24,11 @@ interface Notification {
   category: string;
   priority: string;
   source: string;
+  topic?: string | null;
   item_type: string; // 'notification' | 'acs_discovery'
   created_at: string;
   read_at: string | null;
+  dismissed_at: string | null;
   engaged: boolean;
   response_text: string | null;
 }
@@ -120,6 +124,27 @@ export default function NotificationsScreen() {
     loadNotifications(activeFilter);
   };
 
+  const handleMarkAllSeen = async () => {
+    const unreadNotifications = notifications.filter(
+      (item) => !item.read_at && !item.engaged && !item.dismissed_at,
+    );
+    try {
+      await apiClient.markAllNotificationsRead();
+    } catch {
+      try {
+        await Promise.all(
+          unreadNotifications.map((item) => apiClient.markNotificationRead(item.id, item.item_type)),
+        );
+      } catch {
+        setRefreshing(false);
+        return;
+      }
+    }
+    setRefreshing(true);
+    loadNotifications(activeFilter);
+    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+  };
+
   const handleTap = async (notification: Notification) => {
     const isExpanding = expandedId !== notification.id;
     setExpandedId(isExpanding ? notification.id : null);
@@ -127,16 +152,13 @@ export default function NotificationsScreen() {
     // Mark as read when expanding
     if (isExpanding && !notification.engaged) {
       try {
-        if (notification.item_type === 'acs_discovery') {
-          await apiClient.post(`/api/notifications/acs/${notification.id}/mark-read`, {});
-        } else {
-          await apiClient.post(`/api/notifications/${notification.id}/feedback`, { action: 'read' });
-        }
+        await apiClient.markNotificationRead(notification.id, notification.item_type);
         setNotifications((prev) =>
           prev.map((n) =>
             n.id === notification.id ? { ...n, read_at: new Date().toISOString(), engaged: true } : n
           )
         );
+        DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
       } catch {}
     }
   };
@@ -153,6 +175,18 @@ export default function NotificationsScreen() {
     });
   };
 
+  const handleOpenFullReport = async (notification: Notification) => {
+    try {
+      const note = await notesService.findDailyReportNote({
+        title: notification.title,
+        topic: notification.topic,
+      });
+      if (note?.id) {
+        navigateToNoteEditor(note.id);
+      }
+    } catch {}
+  };
+
   // Build category counts from current data
   const categories = React.useMemo(() => {
     const counts: Record<string, number> = {};
@@ -164,7 +198,7 @@ export default function NotificationsScreen() {
   }, [notifications]);
 
   const unreadCount = React.useMemo(
-    () => notifications.filter((item) => !item.read_at && !item.engaged).length,
+    () => notifications.filter((item) => !item.read_at && !item.engaged && !item.dismissed_at).length,
     [notifications],
   );
   const discoveryCount = React.useMemo(
@@ -194,10 +228,11 @@ export default function NotificationsScreen() {
 
   const renderNotification = ({ item }: { item: Notification }) => {
     const meta = CATEGORY_META[item.category] || { emoji: '🔔', label: item.category };
-    const isUnread = !item.read_at && !item.engaged;
+    const isUnread = !item.read_at && !item.engaged && !item.dismissed_at;
     const isExpanded = expandedId === item.id;
     const priorityColor = PRIORITY_COLORS[item.priority] || colors.textMuted;
     const isACS = item.item_type === 'acs_discovery';
+    const isDailyReport = item.title.startsWith("Sara's Daily Report");
 
     return (
       <TouchableOpacity
@@ -257,10 +292,19 @@ export default function NotificationsScreen() {
               </View>
             ) : null}
 
-            {/* Chat button */}
-            <TouchableOpacity style={styles.chatButton} onPress={() => handleChat(item)}>
-              <Text style={styles.chatButtonText}>Chat with Sara about this</Text>
-            </TouchableOpacity>
+            <View style={styles.actionRow}>
+              {isDailyReport ? (
+                <TouchableOpacity
+                  style={[styles.chatButton, styles.reportButton]}
+                  onPress={() => handleOpenFullReport(item)}
+                >
+                  <Text style={styles.reportButtonText}>Open Full Report</Text>
+                </TouchableOpacity>
+              ) : null}
+              <TouchableOpacity style={styles.chatButton} onPress={() => handleChat(item)}>
+                <Text style={styles.chatButtonText}>Chat with Sara about this</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       </TouchableOpacity>
@@ -308,6 +352,16 @@ export default function NotificationsScreen() {
             >
               <Text style={styles.headerButtonText}>Open Inbox</Text>
             </TouchableOpacity>
+            {unreadCount > 0 ? (
+              <TouchableOpacity
+                style={[styles.headerButton, styles.headerButtonSecondary]}
+                onPress={handleMarkAllSeen}
+              >
+                <Text style={[styles.headerButtonText, styles.headerButtonTextSecondary]}>
+                  Mark All Seen
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             {activeFilter ? (
               <TouchableOpacity
                 style={[styles.headerButton, styles.headerButtonSecondary]}
@@ -626,15 +680,30 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: fontSizes.sm,
   },
+  actionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
   chatButton: {
+    flex: 1,
     backgroundColor: colors.primary,
     borderRadius: borderRadius.md,
     paddingVertical: spacing.sm + 2,
     alignItems: 'center',
-    marginTop: spacing.xs,
+  },
+  reportButton: {
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
   },
   chatButtonText: {
     color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  reportButtonText: {
+    color: colors.primary,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },

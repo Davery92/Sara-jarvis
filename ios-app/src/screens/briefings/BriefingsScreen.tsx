@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { Audio } from 'expo-av';
 import * as ExpoClipboard from 'expo-clipboard';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiClient } from '../../services/api';
 import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 import Markdown from 'react-native-markdown-display';
@@ -89,6 +89,7 @@ const getAuthHeaders = async () => {
 };
 
 export default function BriefingsScreen() {
+  const insets = useSafeAreaInsets();
   const [briefs, setBriefs] = useState<BriefSummary[]>([]);
   const [selectedBrief, setSelectedBrief] = useState<BriefDetail | null>(null);
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -578,8 +579,8 @@ export default function BriefingsScreen() {
         presentationStyle="fullScreen"
         onRequestClose={() => setReaderVisible(false)}
       >
-        <SafeAreaView style={styles.readerModal}>
-          <View style={styles.readerModalHeader}>
+        <SafeAreaView style={styles.readerModal} edges={['bottom']}>
+          <View style={[styles.readerModalHeader, { paddingTop: insets.top + spacing.sm }]}>
             <TouchableOpacity onPress={() => setReaderVisible(false)}>
               <Text style={styles.readerModalControl}>Close</Text>
             </TouchableOpacity>

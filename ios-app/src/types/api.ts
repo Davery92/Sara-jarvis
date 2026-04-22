@@ -68,18 +68,18 @@ export interface Attachment {
 }
 
 export interface Note {
-  id: number;
+  id: string | number;
   title: string;
   content: string;
   created_at: string;
   updated_at: string;
-  folder_id?: number;
+  folder_id?: string | number | null;
 }
 
 export interface Folder {
-  id: number;
+  id: string | number;
   name: string;
-  parent_id?: number;
+  parent_id?: string | number | null;
   notes_count?: number;
   subfolders_count?: number;
   updated_at?: string;

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  DeviceEventEmitter,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -18,7 +20,8 @@ import type { BackgroundTask } from '../../types/api';
 import type { AppStackParamList } from '../../navigation/AppNavigator';
 import apiClient from '../../services/api';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
-import { navigateToChat } from '../../services/navigation';
+import notesService from '../../services/notes';
+import { navigateToChat, navigateToNoteEditor } from '../../services/navigation';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 
 type AssistantInboxFocus = 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
@@ -51,9 +54,11 @@ interface NotificationItem {
   category: string;
   priority: string;
   source: string;
+  topic?: string | null;
   item_type: string;
   created_at: string;
   read_at: string | null;
+  dismissed_at: string | null;
   engaged: boolean;
 }
 
@@ -261,9 +266,12 @@ export default function AssistantInboxScreen() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   const [acsSnapshot, setAcsSnapshot] = useState<ACSSnapshot | null>(null);
+  const [attentionUnreadCount, setAttentionUnreadCount] = useState(0);
+  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
   const [contentUnread, setContentUnread] = useState(0);
   const lastInboxOpenedAtRef = useRef(0);
   const hasWaitingItemsRef = useRef(false);
+  const appStateRef = useRef(AppState.currentState);
 
   useEffect(() => {
     if (route.params?.focus) {
@@ -283,6 +291,7 @@ export default function AssistantInboxScreen() {
       await refreshTasks();
       const [
         attentionResult,
+        attentionCountResult,
         notificationsResult,
         missionsResult,
         inboxResult,
@@ -290,7 +299,8 @@ export default function AssistantInboxScreen() {
         acsSnapshotResult,
       ] = await Promise.allSettled([
         apiClient.getAttentionItems(undefined, 12),
-        apiClient.get('/api/notifications?limit=20'),
+        apiClient.getAttentionCount(),
+        apiClient.get('/api/notifications?limit=100'),
         apiClient.getMissions(),
         apiClient.getInboxItems(undefined, 12),
         apiClient.getInboxStats(),
@@ -300,8 +310,15 @@ export default function AssistantInboxScreen() {
       if (attentionResult.status === 'fulfilled') {
         setAttentionItems(sortByTimestamp(attentionResult.value || []));
       }
+      if (attentionCountResult.status === 'fulfilled') {
+        setAttentionUnreadCount((attentionCountResult.value as any)?.unread || 0);
+      }
       if (notificationsResult.status === 'fulfilled') {
-        setNotifications(sortByTimestamp((notificationsResult.value as any)?.notifications || []));
+        const nextNotifications = sortByTimestamp((notificationsResult.value as any)?.notifications || []);
+        setNotifications(nextNotifications);
+        setNotificationUnreadCount(
+          nextNotifications.filter((item) => !item.read_at && !item.engaged && !item.dismissed_at).length,
+        );
       }
       if (missionsResult.status === 'fulfilled') {
         setMissions(sortByTimestamp(missionsResult.value || []));
@@ -334,7 +351,25 @@ export default function AssistantInboxScreen() {
           has_waiting_items: hasWaitingItemsRef.current,
         });
       }
+
       loadAssistantActivity();
+      const pollInterval = setInterval(() => {
+        loadAssistantActivity(false);
+      }, 15000);
+
+      const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+        const wasBackgrounded = appStateRef.current.match(/inactive|background/);
+        appStateRef.current = nextState;
+
+        if (wasBackgrounded && nextState === 'active') {
+          loadAssistantActivity(false);
+        }
+      });
+
+      return () => {
+        clearInterval(pollInterval);
+        appStateSubscription.remove();
+      };
     }, [focus, loadAssistantActivity]),
   );
 
@@ -342,6 +377,113 @@ export default function AssistantInboxScreen() {
     setRefreshing(true);
     loadAssistantActivity(false);
   }, [loadAssistantActivity]);
+
+  const handleArchiveAllAttention = useCallback(async () => {
+    try {
+      await apiClient.archiveAllAttention();
+      loadAssistantActivity(false);
+      DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+    } catch {
+      Alert.alert('Error', 'Unable to clear attention items right now.');
+    }
+  }, [loadAssistantActivity]);
+
+  const handleMarkAllNotificationsSeen = useCallback(async () => {
+    const unreadNotifications = notifications.filter(
+      (item) => !item.read_at && !item.engaged && !item.dismissed_at,
+    );
+    try {
+      await apiClient.markAllNotificationsRead();
+    } catch {
+      try {
+        await Promise.all(
+          unreadNotifications.map((item) => apiClient.markNotificationRead(item.id, item.item_type)),
+        );
+      } catch {
+        Alert.alert('Error', 'Unable to clear notifications right now.');
+        return;
+      }
+    }
+    loadAssistantActivity(false);
+    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+  }, [loadAssistantActivity, notifications]);
+
+  const handleMarkAllCapturesReviewed = useCallback(async () => {
+    const unreadCaptures = inboxItems.filter((item) => item.status.toLowerCase() === 'unread');
+    try {
+      await apiClient.markAllInboxRead();
+    } catch {
+      try {
+        await Promise.all(unreadCaptures.map((item) => apiClient.getInboxItem(item.id)));
+      } catch {
+        Alert.alert('Error', 'Unable to clear captured items right now.');
+        return;
+      }
+    }
+    loadAssistantActivity(false);
+    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+  }, [inboxItems, loadAssistantActivity]);
+
+  const sourceCounts = useMemo(() => ({
+    attention: attentionUnreadCount,
+    notifications: notificationUnreadCount,
+    captures: contentUnread,
+    clarifications: tasks.filter((task) => task.status === 'needs_clarification').length,
+  }), [attentionUnreadCount, contentUnread, notificationUnreadCount, tasks]);
+
+  const remainingBadgeSummary = useMemo(() => {
+    const parts = [
+      sourceCounts.notifications > 0
+        ? `${sourceCounts.notifications} notification${sourceCounts.notifications === 1 ? '' : 's'}`
+        : null,
+      sourceCounts.attention > 0
+        ? `${sourceCounts.attention} attention item${sourceCounts.attention === 1 ? '' : 's'}`
+        : null,
+      sourceCounts.captures > 0
+        ? `${sourceCounts.captures} capture${sourceCounts.captures === 1 ? '' : 's'}`
+        : null,
+    ].filter(Boolean);
+
+    if (parts.length === 0) {
+      return 'The inbox badge is clear.';
+    }
+
+    if (parts.length === 1) {
+      return `That remaining badge count is ${parts[0]}.`;
+    }
+
+    return `The remaining badge count is coming from ${parts.join(', ')}.`;
+  }, [sourceCounts.attention, sourceCounts.captures, sourceCounts.notifications]);
+
+  const handleClearAllSignals = useCallback(async () => {
+    const jobs: Promise<unknown>[] = [];
+    if (sourceCounts.notifications > 0) {
+      jobs.push(handleMarkAllNotificationsSeen());
+    }
+    if (sourceCounts.attention > 0) {
+      jobs.push(apiClient.archiveAllAttention());
+    }
+    if (sourceCounts.captures > 0) {
+      jobs.push(handleMarkAllCapturesReviewed());
+    }
+
+    try {
+      const results = await Promise.allSettled(jobs);
+      if (results.length > 0 && results.every((result) => result.status === 'rejected')) {
+        throw new Error('all clear actions failed');
+      }
+      loadAssistantActivity(false);
+    } catch {
+      Alert.alert('Error', 'Unable to clear assistant inbox items right now.');
+    }
+  }, [
+    handleMarkAllCapturesReviewed,
+    handleMarkAllNotificationsSeen,
+    loadAssistantActivity,
+    sourceCounts.attention,
+    sourceCounts.captures,
+    sourceCounts.notifications,
+  ]);
 
   const unifiedItems = useMemo<UnifiedItem[]>(() => {
     const items: UnifiedItem[] = [];
@@ -397,7 +539,8 @@ export default function AssistantInboxScreen() {
     });
 
     notifications.forEach((item) => {
-      const notificationState: ItemState = !item.read_at && !item.engaged ? 'new' : 'archived';
+      const notificationState: ItemState = !item.read_at && !item.engaged && !item.dismissed_at ? 'new' : 'archived';
+      const isDailyReport = item.title.startsWith("Sara's Daily Report");
 
         items.push({
           id: `notification-${item.id}`,
@@ -407,9 +550,28 @@ export default function AssistantInboxScreen() {
           summary: item.message || 'Sara sent a new update.',
           timestamp: item.created_at,
           sourceLabel: item.source || item.category || 'Notification',
-          cta: notificationState === 'new' ? 'Chat with Sara' : 'Review notification',
+          cta: isDailyReport
+            ? 'Open full report'
+            : notificationState === 'new'
+              ? 'Chat with Sara'
+              : 'Review notification',
           color: STATE_META[notificationState].color,
-          onPress: () => {
+          onPress: async () => {
+            if (isDailyReport) {
+              const note = await notesService.findDailyReportNote({
+                title: item.title,
+                topic: item.topic,
+              });
+
+              if (note?.id) {
+                navigateToNoteEditor(note.id);
+                return;
+              }
+
+              Alert.alert('Full report unavailable', 'Sara saved the daily report, but the note could not be resolved yet.');
+              return;
+            }
+
             if (notificationState === 'new') {
               navigateToChat({
                 notification: {
@@ -543,14 +705,14 @@ export default function AssistantInboxScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.loadingContainer} edges={['bottom']}>
+      <SafeAreaView style={styles.loadingContainer} edges={['top', 'bottom']}>
         <ActivityIndicator size="large" color={colors.primary} />
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['bottom']}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={
@@ -568,6 +730,85 @@ export default function AssistantInboxScreen() {
           <Text style={styles.helperText}>
             Captures, delegated work, and notifications are grouped by what you should do next.
           </Text>
+          <Text style={styles.remainingText}>{remainingBadgeSummary}</Text>
+          <View style={styles.heroBreakdown}>
+            <TouchableOpacity
+              style={styles.breakdownCard}
+              activeOpacity={0.82}
+              onPress={() => navigation.navigate('Notifications')}
+            >
+              <Text style={styles.breakdownLabel}>Notifications</Text>
+              <Text style={styles.breakdownValue}>{sourceCounts.notifications}</Text>
+              <Text style={styles.breakdownMeta}>fresh and not dismissed</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.breakdownCard}
+              activeOpacity={0.82}
+              onPress={() => navigation.navigate('Inbox', { tab: 'attention' })}
+            >
+              <Text style={styles.breakdownLabel}>Attention</Text>
+              <Text style={styles.breakdownValue}>{sourceCounts.attention}</Text>
+              <Text style={styles.breakdownMeta}>waiting on you</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.breakdownCard}
+              activeOpacity={0.82}
+              onPress={() => navigation.navigate('Inbox', { tab: 'content' })}
+            >
+              <Text style={styles.breakdownLabel}>Captures</Text>
+              <Text style={styles.breakdownValue}>{sourceCounts.captures}</Text>
+              <Text style={styles.breakdownMeta}>unread items</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.breakdownCard}
+              activeOpacity={0.82}
+              onPress={() => navigation.navigate('AgentTasks')}
+            >
+              <Text style={styles.breakdownLabel}>Needs input</Text>
+              <Text style={styles.breakdownValue}>{sourceCounts.clarifications}</Text>
+              <Text style={styles.breakdownMeta}>task clarifications</Text>
+            </TouchableOpacity>
+          </View>
+          {(sourceCounts.notifications > 0 || sourceCounts.attention > 0 || sourceCounts.captures > 0) ? (
+            <View style={styles.heroActions}>
+              <TouchableOpacity
+                style={styles.heroButton}
+                onPress={handleClearAllSignals}
+              >
+                <Text style={styles.heroButtonText}>Clear All</Text>
+              </TouchableOpacity>
+              {sourceCounts.notifications > 0 ? (
+                <TouchableOpacity
+                  style={[styles.heroButton, styles.heroButtonSecondary]}
+                  onPress={handleMarkAllNotificationsSeen}
+                >
+                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
+                    Clear Notifications
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+              {sourceCounts.attention > 0 ? (
+                <TouchableOpacity
+                  style={[styles.heroButton, styles.heroButtonSecondary]}
+                  onPress={handleArchiveAllAttention}
+                >
+                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
+                    Archive Attention
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+              {sourceCounts.captures > 0 ? (
+                <TouchableOpacity
+                  style={[styles.heroButton, styles.heroButtonSecondary]}
+                  onPress={handleMarkAllCapturesReviewed}
+                >
+                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
+                    Clear Captures
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.summaryGrid}>
@@ -808,6 +1049,72 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
     lineHeight: 20,
     marginTop: spacing.sm,
+  },
+  remainingText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+    marginTop: spacing.sm,
+    fontWeight: '600',
+  },
+  heroBreakdown: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  breakdownCard: {
+    flexGrow: 1,
+    minWidth: 140,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.assistant.panelRaised,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+  },
+  breakdownLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  breakdownValue: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+  },
+  breakdownMeta: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: spacing.xs,
+  },
+  heroActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  heroButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary,
+  },
+  heroButtonSecondary: {
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+  },
+  heroButtonText: {
+    color: '#fff',
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  heroButtonTextSecondary: {
+    color: colors.primary,
   },
   summaryGrid: {
     flexDirection: 'row',

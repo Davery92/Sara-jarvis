@@ -692,6 +692,11 @@ class ApiClient {
     return response.data;
   }
 
+  async markAllInboxRead(): Promise<{ success: boolean; updated: number }> {
+    const response = await this.client.post('/api/inbox/mark-all-read');
+    return response.data as any;
+  }
+
   async getInboxItem(id: string): Promise<any> {
     const response = await this.client.get(`/api/inbox/${id}`);
     return response.data;
@@ -760,6 +765,11 @@ class ApiClient {
     await this.client.post(`/autonomy/attention/${id}/archive`);
   }
 
+  async archiveAllAttention(): Promise<{ archived: number }> {
+    const response = await this.client.post('/autonomy/attention/archive-all');
+    return response.data as any;
+  }
+
   async runAttentionAction(id: string, actionId: string, params?: Record<string, any>): Promise<any> {
     const response = await this.client.post(
       `/autonomy/attention/${id}/actions/${actionId}`,
@@ -790,6 +800,19 @@ class ApiClient {
       // Best-effort — don't fail the calling flow
       console.log('[API] Notification feedback failed (non-critical):', error);
     }
+  }
+
+  async markNotificationRead(notificationId: string | number, itemType?: string): Promise<void> {
+    if (itemType === 'acs_discovery') {
+      await this.client.post(`/api/notifications/acs/${notificationId}/mark-read`, {});
+      return;
+    }
+    await this.client.post(`/api/notifications/${notificationId}/feedback`, { action: 'read' });
+  }
+
+  async markAllNotificationsRead(): Promise<{ success: boolean; updated: number; acs_updated: number }> {
+    const response = await this.client.post('/api/notifications/mark-all-read');
+    return response.data as any;
   }
 
   async getMissions(state?: string): Promise<any[]> {

@@ -21,6 +21,8 @@ import EmailDetailScreen from '../screens/email/EmailDetailScreen';
 import LearningScreen from '../screens/learning/LearningScreen';
 import NotificationsScreen from '../screens/notifications/NotificationsScreen';
 import ACSScreen from '../screens/acs/ACSScreen';
+import ChatScreen from '../screens/chat/ChatScreen';
+import { ChatScreenParams } from '../types/navigation';
 import { colors, fontSizes } from '../styles/theme';
 
 export type AppStackParamList = {
@@ -33,6 +35,7 @@ export type AppStackParamList = {
   Health: undefined;
   Settings: undefined;
   Projects: undefined;
+  Chat: ChatScreenParams | undefined;
   AssistantAnalytics: undefined;
   AssistantInbox: { focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived' } | undefined;
   Inbox: { tab?: 'content' | 'attention' } | undefined;
@@ -107,6 +110,11 @@ export default function AppNavigator() {
         name="Projects"
         component={ProjectsScreen}
         options={{ title: 'Projects' }}
+      />
+      <Stack.Screen
+        name="Chat"
+        component={ChatScreen}
+        options={{ headerShown: false }}
       />
       <Stack.Screen
         name="AssistantAnalytics"

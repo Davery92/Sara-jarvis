@@ -319,9 +319,11 @@ async def list_notifications(
                     category,
                     COALESCE(priority, 'normal') as priority,
                     source,
+                    topic,
                     'notification' as item_type,
                     sent_at as created_at,
                     read_at,
+                    dismissed_at,
                     engaged,
                     response_text
                 FROM notification_log
@@ -341,9 +343,11 @@ async def list_notifications(
                         ELSE 'low'
                     END as priority,
                     'acs_session' as source,
+                    NULL as topic,
                     'acs_discovery' as item_type,
                     created_at,
                     shown_at as read_at,
+                    NULL as dismissed_at,
                     shown as engaged,
                     NULL as response_text
                 FROM acs_show_david_buffer
@@ -377,9 +381,11 @@ async def list_notifications(
                 "category": r.category,
                 "priority": r.priority,
                 "source": r.source,
+                "topic": getattr(r, "topic", None),
                 "item_type": r.item_type,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "read_at": r.read_at.isoformat() if hasattr(r.read_at, 'isoformat') and r.read_at else None,
+                "dismissed_at": r.dismissed_at.isoformat() if hasattr(r.dismissed_at, 'isoformat') and r.dismissed_at else None,
                 "engaged": bool(r.engaged),
                 "response_text": r.response_text,
             })
@@ -391,6 +397,44 @@ async def list_notifications(
 
     except Exception as e:
         logger.error(f"Error listing notifications: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/notifications/mark-all-read")
+async def mark_all_notifications_read(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark all active notifications and ACS discoveries as seen for the current user."""
+    try:
+        user_id = current_user.id
+
+        notifications_result = db.execute(text("""
+            UPDATE notification_log
+            SET read_at = COALESCE(read_at, NOW())
+            WHERE user_id = :user_id
+              AND sent = TRUE
+              AND read_at IS NULL
+              AND dismissed_at IS NULL
+        """), {"user_id": user_id})
+
+        acs_result = db.execute(text("""
+            UPDATE acs_show_david_buffer
+            SET shown = TRUE,
+                shown_at = COALESCE(shown_at, NOW())
+            WHERE user_id = :user_id
+              AND COALESCE(shown, FALSE) = FALSE
+        """), {"user_id": user_id})
+
+        db.commit()
+        return {
+            "success": True,
+            "updated": notifications_result.rowcount if hasattr(notifications_result, "rowcount") else 0,
+            "acs_updated": acs_result.rowcount if hasattr(acs_result, "rowcount") else 0,
+        }
+    except Exception as e:
+        logger.error(f"Error marking all notifications read: {e}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 

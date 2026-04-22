@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  DeviceEventEmitter,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -13,6 +14,7 @@ import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/
 
 interface SaraOverviewPanelProps {
   onPrompt: (prompt: string) => void;
+  onOpenChat: () => void;
   onOpenCalendar: () => void;
   onOpenTasks: () => void;
   onOpenInbox: () => void;
@@ -29,6 +31,8 @@ interface OverviewState {
   openTasks: number;
   nextEvent: CalendarEvent | null;
   inboxUnread: number;
+  captureUnread: number;
+  notificationUnread: number;
   weather: WeatherData | null;
 }
 
@@ -49,6 +53,7 @@ function findNextEvent(events: CalendarEvent[]): CalendarEvent | null {
 
 export default function SaraOverviewPanel({
   onPrompt,
+  onOpenChat,
   onOpenCalendar,
   onOpenTasks,
   onOpenInbox,
@@ -59,6 +64,8 @@ export default function SaraOverviewPanel({
     openTasks: 0,
     nextEvent: null,
     inboxUnread: 0,
+    captureUnread: 0,
+    notificationUnread: 0,
     weather: null,
   });
 
@@ -67,13 +74,14 @@ export default function SaraOverviewPanel({
       setLoading(true);
       const today = new Date().toISOString().split('T')[0];
 
-      const [tasksResult, eventsResult, weatherResult, inboxStatsResult, attentionResult] =
+      const [tasksResult, eventsResult, weatherResult, inboxStatsResult, attentionResult, notificationsResult] =
         await Promise.allSettled([
           apiClient.getDailyTasks(today) as Promise<DailyTask[]>,
           calendarService.getEvents(today, today),
           weatherService.getCurrentWeather(),
           apiClient.getInboxStats(),
           apiClient.getAttentionCount(),
+          apiClient.get('/api/notifications?limit=30'),
         ]);
 
       const tasks =
@@ -85,15 +93,23 @@ export default function SaraOverviewPanel({
           ? eventsResult.value
           : [];
       const weather = weatherResult.status === 'fulfilled' ? weatherResult.value : null;
-      const inboxUnread =
-        (inboxStatsResult.status === 'fulfilled' ? inboxStatsResult.value?.unread || 0 : 0) +
-        (attentionResult.status === 'fulfilled' ? attentionResult.value?.unread || 0 : 0);
+      const contentUnread = inboxStatsResult.status === 'fulfilled' ? inboxStatsResult.value?.unread || 0 : 0;
+      const attentionUnread = attentionResult.status === 'fulfilled' ? attentionResult.value?.unread || 0 : 0;
+      const notificationUnread =
+        notificationsResult.status === 'fulfilled'
+          ? ((((notificationsResult.value as any)?.notifications) || []).filter(
+              (item: any) => !item?.read_at && !item?.engaged && !item?.dismissed_at,
+            ).length)
+          : 0;
+      const inboxUnread = attentionUnread + notificationUnread;
 
       setOverview({
         totalTasks: tasks.length,
         openTasks: tasks.filter((task) => !task.is_completed).length,
         nextEvent: findNextEvent(events),
         inboxUnread,
+        captureUnread: contentUnread,
+        notificationUnread,
         weather: weather || null,
       });
     } catch (error) {
@@ -106,7 +122,14 @@ export default function SaraOverviewPanel({
   useEffect(() => {
     loadOverview();
     const interval = setInterval(loadOverview, 60_000);
-    return () => clearInterval(interval);
+    const overviewRefreshSubscription = DeviceEventEmitter.addListener(
+      'assistantInboxBadgeRefresh',
+      loadOverview,
+    );
+    return () => {
+      clearInterval(interval);
+      overviewRefreshSubscription.remove();
+    };
   }, [loadOverview]);
 
   const summaryText = useMemo(() => {
@@ -134,6 +157,10 @@ export default function SaraOverviewPanel({
       return `${overview.inboxUnread} items still need attention.`;
     }
 
+    if (overview.captureUnread > 0) {
+      return `${overview.captureUnread} capture${overview.captureUnread === 1 ? '' : 's'} still waiting in your inbox.`;
+    }
+
     return 'The surface is clear. Use Sara to plan, triage, or capture what matters next.';
   }, [loading, overview]);
 
@@ -144,13 +171,18 @@ export default function SaraOverviewPanel({
           <Text style={styles.title}>Today</Text>
           <Text style={styles.subtitle}>{summaryText}</Text>
         </View>
-        <TouchableOpacity style={styles.refreshButton} onPress={loadOverview} disabled={loading}>
-          {loading ? (
-            <ActivityIndicator size="small" color={colors.primary} />
-          ) : (
-            <Text style={styles.refreshButtonText}>Refresh</Text>
-          )}
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.chatButton} onPress={onOpenChat} activeOpacity={0.85}>
+            <Text style={styles.chatButtonText}>Open Chat</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.refreshButton} onPress={loadOverview} disabled={loading}>
+            {loading ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <Text style={styles.refreshButtonText}>Refresh</Text>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.summaryGrid}>
@@ -187,7 +219,11 @@ export default function SaraOverviewPanel({
             {overview.inboxUnread > 0 ? overview.inboxUnread : 'Quiet'}
           </Text>
           <Text style={styles.summaryMeta}>
-            {overview.inboxUnread > 0 ? 'Items need attention' : 'Nothing urgent right now'}
+            {overview.inboxUnread > 0
+              ? 'Assistant alerts need attention'
+              : overview.captureUnread > 0
+                ? `${overview.captureUnread} capture${overview.captureUnread === 1 ? '' : 's'} waiting`
+                : 'Nothing urgent right now'}
           </Text>
         </TouchableOpacity>
 
@@ -258,6 +294,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: spacing.md,
+  },
+  headerActions: {
+    alignItems: 'flex-end',
+    gap: spacing.sm,
+  },
+  chatButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+  },
+  chatButtonText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
   },
   headerCopy: {
     flex: 1,

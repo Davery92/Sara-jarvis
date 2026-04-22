@@ -114,7 +114,7 @@ export function navigateToChat(params?: {
   notification?: { id: string; title: string; message: string; category: string; item_type: string };
 }) {
   console.log('[Navigation] navigateToChat called with params:', params);
-  navigateToTab('Sara', params);
+  navigateToStackScreen('Chat', params);
 }
 
 /**
@@ -132,6 +132,13 @@ export function navigateToInbox(
 
 export function navigateToNotifications(params?: { notificationId?: number }) {
   navigateToStackScreen('Notifications', params);
+}
+
+export function navigateToNoteEditor(noteId: string | number, params?: { onSave?: () => void }) {
+  navigate('NoteEditor', {
+    noteId,
+    ...params,
+  });
 }
 
 /**
