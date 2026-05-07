@@ -12,8 +12,8 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     ai_provider: str = "local"  # Options: local, gemini, openai, claude, codex, custom
-    openai_base_url: str = "http://100.104.68.115:8080/v1"
-    openai_model: str = "Qwen3.5-122B-A10B"
+    openai_base_url: str = "http://100.104.68.115:8081/v1"
+    openai_model: str = "mlx-community/Qwen3.6-27B-8bit"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
@@ -22,28 +22,31 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
 
     # LLM Failover Configuration
-    llm_primary_url: str = "http://100.104.68.115:8080/v1"
-    llm_fallback_url: str = "http://10.185.1.8:8686/v1"
-    llm_fallback_model: str = "Qwen3.5-35B-A3B"
+    llm_primary_url: str = "http://100.104.68.115:8081/v1"
+    llm_fallback_url: str = "http://100.104.68.115:8081/v1"
+    llm_fallback_model: str = "mlx-community/Qwen3.6-27B-8bit"
     llm_request_timeout: float = 60.0  # Timeout for LLM requests (120B model needs time)
     llm_health_check_interval: int = 30  # seconds between health checks
     llm_health_check_timeout: float = 5.0  # timeout for health check requests
     llm_recovery_checks_required: int = 3  # successful checks to mark as healthy
 
     # Background LLM Configuration (separate from chat - always uses local models)
-    bg_llm_primary_url: str = "http://100.104.68.115:8080/v1"
-    bg_llm_primary_model: str = "Qwen3.5-122B-A10B"
-    bg_llm_fallback_url: str = "http://10.185.1.8:8686/v1"
-    bg_llm_fallback_model: str = "Qwen3.5-35B-A3B"
-    bg_llm_request_timeout: float = 180.0
+    bg_llm_primary_url: str = "http://100.104.68.115:8081/v1"
+    bg_llm_primary_model: str = "mlx-community/Qwen3.6-27B-8bit"
+    bg_llm_fallback_url: str = "http://100.104.68.115:8081/v1"
+    bg_llm_fallback_model: str = "mlx-community/Qwen3.6-27B-8bit"
+    bg_llm_request_timeout: float = 600.0  # 10min — 27B reasoning model on ~10k-token ACS payloads needs the headroom
     bg_llm_connect_timeout: float = 6.0
     bg_llm_num_ctx: int = 32768
     bg_llm_fallback_max_tokens: int = 24000  # Max input tokens for fallback model (leave headroom from 32k window)
     learning_guide_num_ctx: int = 32768
 
-    # Research Executor LLM Configuration (dedicated Qwen3.5-27B on 10.185.1.8)
-    research_llm_url: str = "http://10.185.1.8:8686/v1"
-    research_llm_model: str = "Qwen3.5-27B"
+    # Research Executor LLM Configuration
+    # Default: shares the BG LLM endpoint (whatever is currently loaded on it).
+    # The actual model name is discovered via /v1/models at plan-create time, so
+    # `research_llm_model` here is only a fallback if discovery fails.
+    research_llm_url: str = "http://100.104.68.115:8081/v1"
+    research_llm_model: str = "mlx-community/Qwen3.6-27B-8bit"
     research_llm_timeout: float = 300.0
     research_llm_max_tokens: int = 4096
     learning_lesson_num_ctx: int = 49152
@@ -160,6 +163,19 @@ class Settings(BaseSettings):
     proxmox_max_memory_mb: int = 16384
     proxmox_default_storage: str = "local-lvm"
 
+    # ACS v2 — in-VM cognition daemon. Shared bearer secret between backend and daemon.
+    acs_daemon_token: str = ""  # from .env: ACS_DAEMON_TOKEN
+    # The single user Sara is owned by; she notifies them via /api/acs/v2/notify.
+    acs_owner_user_id: str = "64f37c56-85cb-4590-8de9-adfc17d343ed"  # from .env: ACS_OWNER_USER_ID
+    # Default folder for notes Sara writes via the daemon (write_note tool).
+    # Falls back to no-folder if unset or the folder no longer exists.
+    acs_default_note_folder_id: str = "36ca18ea-7b4b-4b48-ac60-95e1b720ec57"  # "Sara's Notes"
+    # Sandbox runner for user-defined tools (acs_user_tools.invoke). Empty
+    # means /invoke records the call but returns 503 — the API contract is
+    # sealed so the daemon can develop the rest of the loop while the
+    # sidecar is being built/deployed.
+    acs_tool_runner_url: str = ""  # from .env: ACS_TOOL_RUNNER_URL
+
     # GPU compute host — accessible from containers for training/inference
     gpu_host: str = "10.185.1.8"
     gpu_host_user: str = "david"
@@ -168,12 +184,14 @@ class Settings(BaseSettings):
     gpu_host_llm_model: str = "Qwen3.5-35B-A3B"
 
     # ACS v2 Feature Flags
+    # Setting this False reverts ACS to the v1 flat curiosity queue path,
+    # which is untested in this deployment. v2 is the live path; leave True.
     acs_v2_enabled: bool = True                     # Master toggle for all v2 features
     acs_v2_max_session_minutes: int = 360           # Hard ceiling (6 hours)
     acs_v2_min_session_minutes: int = 15            # Hard floor
     acs_v2_low_engagement_threshold: float = 0.3
     acs_v2_low_engagement_streak: int = 3           # Consecutive low turns before early end
-    acs_v2_decay_half_life_days: int = 7            # Fascination half-life
+    acs_v2_decay_half_life_days: int = 14           # Fascination half-life (was 7 — collapsed working graph to 8 active nodes)
     acs_v2_similarity_dedup_threshold: float = 0.85 # Cosine threshold for node dedup
     acs_v2_bridge_threshold: float = 0.78           # Cosine threshold for bridge opportunities
     acs_v2_max_context_nodes: int = 15              # Max interest nodes in prompt context

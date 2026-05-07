@@ -60,14 +60,15 @@ celery_app = Celery(
         "app.tasks.content_inbox",
         "app.tasks.learning",
         "app.tasks.intelligence",
-        "app.tasks.acs",
         "app.tasks.notes",
         "app.tasks.attention",
-        "app.tasks.acs_auditor",
         "app.tasks.morning_brief",
         "app.tasks.inproc_schedulers",
         "app.tasks.research",
         "app.tasks.calendar_prep",
+        "app.tasks.pkg_sync",
+        "app.tasks.health_weekly",
+        "app.tasks.health_baselines",
     ]
 )
 
@@ -122,23 +123,25 @@ celery_app.conf.task_routes = {
     "app.tasks.content_inbox.*": {"queue": "cognitive"},
     "app.tasks.learning.*": {"queue": "cognitive"},
     "app.tasks.intelligence.*": {"queue": "low_priority"},
-    "app.tasks.acs.*": {"queue": "acs"},
     "app.tasks.notes.*": {"queue": "maintenance"},
+    # research.* defaults to cognitive; run_research_plan picks david_priority
+    # at apply time when origin='david_chat' (see app.tasks.research).
     "app.tasks.research.*": {"queue": "cognitive"},
     "app.tasks.attention.*": {"queue": "cognitive"},
-    "app.tasks.acs_auditor.*": {"queue": "acs"},
+    "app.tasks.health_weekly.*": {"queue": "cognitive"},
+    "app.tasks.health_baselines.*": {"queue": "health"},
 }
 
 # Define queues with priorities
 celery_app.conf.task_queues = {
     "critical": {"exchange": "critical", "routing_key": "critical"},
+    "david_priority": {"exchange": "david_priority", "routing_key": "david_priority"},
     "cognitive": {"exchange": "cognitive", "routing_key": "cognitive"},
     "health": {"exchange": "health", "routing_key": "health"},
     "input": {"exchange": "input", "routing_key": "input"},
     "reflection": {"exchange": "reflection", "routing_key": "reflection"},
     "maintenance": {"exchange": "maintenance", "routing_key": "maintenance"},
     "low_priority": {"exchange": "low_priority", "routing_key": "low_priority"},
-    "acs": {"exchange": "acs", "routing_key": "acs"},
 }
 
 # Default queue

@@ -1,105 +1,24 @@
-import { useState, Component, type ReactNode } from 'react'
-import ACSStatusSection from '../components/acs/ACSStatusSection'
-import ACSDailyPlanSection from '../components/acs/ACSDailyPlanSection'
-import ACSInterestGraphSection from '../components/acs/ACSInterestGraphSection'
-import ACSCuriositySection from '../components/acs/ACSCuriositySection'
-import ACSShowDavidSection from '../components/acs/ACSShowDavidSection'
-import ACSDirectivesSection from '../components/acs/ACSDirectivesSection'
-import ACSSessionHistorySection from '../components/acs/ACSSessionHistorySection'
-import ACSSelfModelSection from '../components/acs/ACSSelfModelSection'
-import ACSDeliverablesSection from '../components/acs/ACSDeliverablesSection'
+import ACSMindSection from '../components/acs/ACSMindSection'
+import InterestsPanel from '../components/acs/InterestsPanel'
+import UserToolsPanel from '../components/acs/UserToolsPanel'
 
-class ErrorBoundary extends Component<
-  { children: ReactNode; fallback?: string },
-  { error: Error | null }
-> {
-  state: { error: Error | null } = { error: null }
-  static getDerivedStateFromError(error: Error) { return { error } }
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="bg-red-900/20 border border-red-900/30 rounded-lg p-4">
-          <p className="text-red-400 text-sm font-medium">Failed to load {this.props.fallback || 'section'}</p>
-          <p className="text-red-400/60 text-xs mt-1">{this.state.error.message}</p>
-          <button
-            onClick={() => this.setState({ error: null })}
-            className="mt-2 text-xs text-indigo-400 hover:text-indigo-300"
-          >
-            Retry
-          </button>
-        </div>
-      )
-    }
-    return this.props.children
-  }
-}
-
-const TABS = [
-  { key: 'status', label: 'Status' },
-  { key: 'plan', label: 'Plan' },
-  { key: 'interests', label: 'Interests' },
-  { key: 'curiosity', label: 'Curiosity' },
-  { key: 'show-david', label: 'Show David' },
-  { key: 'directives', label: 'Directives' },
-  { key: 'sessions', label: 'Sessions' },
-  { key: 'deliverables', label: 'Deliverables' },
-  { key: 'self-model', label: 'Self-Model' },
-] as const
-
-type TabKey = typeof TABS[number]['key']
-
+/**
+ * ACS page — direct view of Sara's daemon.
+ *
+ * Mind section: liveness, focus, queue, activity.
+ * Interests: what she's been gravitating toward; David can prune.
+ * Tools: her self-authored toolkit; David approves new tools and can disable.
+ *
+ * The legacy v1 tabs (Status / Plan / Curiosity / Show David / Directives /
+ * Sessions / Deliverables / Self-Model) are gone — those read from v1 ACS
+ * tables that the new daemon doesn't write to anymore.
+ */
 export default function ACSPage() {
-  const [activeTab, setActiveTab] = useState<TabKey>('status')
-
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
-      <h1 className="text-2xl font-bold text-white mb-6">Autonomous Cognition System</h1>
-
-      <div className="flex gap-1 mb-6 overflow-x-auto pb-1">
-        {TABS.map(tab => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap ${
-              activeTab === tab.key
-                ? 'bg-gray-800 text-white border-b-2 border-indigo-500'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      <div>
-        <ErrorBoundary fallback="status" key={activeTab === 'status' ? 'status' : undefined}>
-          {activeTab === 'status' && <ACSStatusSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="plan" key={activeTab === 'plan' ? 'plan' : undefined}>
-          {activeTab === 'plan' && <ACSDailyPlanSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="interests" key={activeTab === 'interests' ? 'interests' : undefined}>
-          {activeTab === 'interests' && <ACSInterestGraphSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="curiosity" key={activeTab === 'curiosity' ? 'curiosity' : undefined}>
-          {activeTab === 'curiosity' && <ACSCuriositySection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="show david" key={activeTab === 'show-david' ? 'show-david' : undefined}>
-          {activeTab === 'show-david' && <ACSShowDavidSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="directives" key={activeTab === 'directives' ? 'directives' : undefined}>
-          {activeTab === 'directives' && <ACSDirectivesSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="sessions" key={activeTab === 'sessions' ? 'sessions' : undefined}>
-          {activeTab === 'sessions' && <ACSSessionHistorySection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="deliverables" key={activeTab === 'deliverables' ? 'deliverables' : undefined}>
-          {activeTab === 'deliverables' && <ACSDeliverablesSection />}
-        </ErrorBoundary>
-        <ErrorBoundary fallback="self-model" key={activeTab === 'self-model' ? 'self-model' : undefined}>
-          {activeTab === 'self-model' && <ACSSelfModelSection />}
-        </ErrorBoundary>
-      </div>
+    <div className="mx-auto max-w-6xl px-4 py-3 sm:px-6 lg:px-8 space-y-4">
+      <ACSMindSection />
+      <InterestsPanel />
+      <UserToolsPanel />
     </div>
   )
 }

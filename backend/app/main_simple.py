@@ -208,16 +208,18 @@ async def _mark_shown_discoveries(user_id: str, response_text: str):
 def get_model_config(model_id: str) -> dict:
     """Get base URL, API key, and provider routing for the selected model."""
     model_id_l = (model_id or "").lower()
-    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8080/v1"
+    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8081/v1"
     configured_key = OPENAI_API_KEY or "dummy"
-    local_default_base = "http://100.104.68.115:8080/v1"
+    local_default_base = "http://100.104.68.115:8081/v1"
 
     # Resolve declared provider from the model catalog first.
     # This prevents stale global ai_provider settings from misrouting model-specific requests.
-    catalog_provider = next(
-        (m.get("provider") for m in AVAILABLE_MODELS if (m.get("id") or "").lower() == model_id_l),
+    catalog_entry = next(
+        (m for m in AVAILABLE_MODELS if (m.get("id") or "").lower() == model_id_l),
         None,
     )
+    catalog_provider = catalog_entry.get("provider") if catalog_entry else None
+    catalog_base_url = catalog_entry.get("base_url") if catalog_entry else None
 
     if catalog_provider == "codex" or model_id_l.startswith("gpt-5.3-codex") or "codex" in model_id_l:
         codex_base = configured_base if "chatgpt.com/backend-api" in configured_base else CODEX_DEFAULT_BASE_URL
@@ -242,7 +244,10 @@ def get_model_config(model_id: str) -> dict:
             "provider": "google"
         }
     if catalog_provider == "local":
-        local_base = configured_base if _is_local_base_url(configured_base) else local_default_base
+        if catalog_base_url:
+            local_base = catalog_base_url
+        else:
+            local_base = configured_base if _is_local_base_url(configured_base) else local_default_base
         return {
             "base_url": local_base,
             "api_key": configured_key if configured_key else "dummy",
@@ -313,8 +318,8 @@ EMBEDDING_MODEL = _app_state.embedding_model
 EMBEDDING_DIM = _app_state.embedding_dim
 
 # Background LLM Configuration (separate from chat - always uses local models)
-BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8080/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "Qwen3.5-35B-A3B")
+BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "mlx-community/Qwen3.6-27B-8bit")
 BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1")
 BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "Qwen3.5-35B-A3B")
 BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
@@ -1152,18 +1157,36 @@ class SimpleLLMClient:
                                     })
                                 # Otherwise, hold the buffer (might be start of XML tag)
 
-                        # Handle tool calls (standard OpenAI format)
-                        if "tool_calls" in delta:
-                            if not tool_calls:
-                                tool_calls = delta["tool_calls"]
-                            else:
-                                # Merge tool calls
-                                for i, tc in enumerate(delta["tool_calls"]):
-                                    if i < len(tool_calls):
-                                        if "function" in tc and "arguments" in tc["function"]:
-                                            tool_calls[i]["function"]["arguments"] += tc["function"]["arguments"]
-                                    else:
-                                        tool_calls.append(tc)
+                        # Handle tool calls (standard OpenAI streaming format).
+                        # Each delta tool_call carries an `index` field identifying which
+                        # parallel call it belongs to. Positional merging breaks when
+                        # parallel calls interleave — use `index` to route correctly.
+                        if "tool_calls" in delta and delta["tool_calls"]:
+                            for tc_delta in delta["tool_calls"]:
+                                idx = tc_delta.get("index")
+                                if idx is None:
+                                    idx = len(tool_calls)
+                                while len(tool_calls) <= idx:
+                                    tool_calls.append({
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    })
+                                target = tool_calls[idx]
+                                if tc_delta.get("id"):
+                                    target["id"] = tc_delta["id"]
+                                if tc_delta.get("type"):
+                                    target["type"] = tc_delta["type"]
+                                fn_delta = tc_delta.get("function") or {}
+                                target_fn = target.setdefault(
+                                    "function", {"name": "", "arguments": ""}
+                                )
+                                if fn_delta.get("name") and not target_fn.get("name"):
+                                    target_fn["name"] = fn_delta["name"]
+                                if fn_delta.get("arguments"):
+                                    target_fn["arguments"] = (
+                                        target_fn.get("arguments") or ""
+                                    ) + fn_delta["arguments"]
 
                     except json.JSONDecodeError:
                         continue
@@ -1600,47 +1623,6 @@ class SimpleLLMClient:
                     if hasattr(message, 'reasoning'):
                         logger.info(f"🔍 Round {round_num + 1} - Reasoning: {message.get('reasoning', '')[:100]}")
 
-                    # FALLBACK: If model returns empty content with another tool call after round 1,
-                    # it's stuck in a loop. Synthesize response from tool results.
-                    if round_num >= 1 and message.get("tool_calls") and not (message.get("content") or "").strip():
-                        logger.warning(f"⚠️ Model returned empty content with tool calls in round {round_num + 1}. Synthesizing response from previous tool results.")
-                        # Build response from the tool results we just got
-                        tool_summary_parts = []
-                        for tr in tool_responses:
-                            content = tr.get("content", "")
-                            if content:
-                                # Parse tool response to extract useful info
-                                if isinstance(content, str):
-                                    if len(content) > 300:
-                                        tool_summary_parts.append(content[:300] + "...")
-                                    else:
-                                        tool_summary_parts.append(content)
-
-                        if tool_summary_parts:
-                            synthesized_response = "Based on what I found:\n\n" + "\n\n".join(tool_summary_parts[:2])
-                        else:
-                            synthesized_response = "I found some relevant information but had trouble formatting the response. Could you try rephrasing your question?"
-
-                        logger.info(f"✅ Synthesized response from tool results: {len(synthesized_response)} chars")
-
-                        # Emit synthesized response as streaming chunks
-                        await self.emit_event("text_chunk", {
-                            "content": synthesized_response,
-                            "full_content": synthesized_response
-                        })
-
-                        await self.emit_event("response_ready", {
-                            "rounds": round_num + 1,
-                            "content_length": len(synthesized_response),
-                            "synthesized": True
-                        })
-                        # Store conversation and get episode_id for rating
-                        episode_id = await self._store_conversation_with_timeout(
-                            messages, synthesized_response, user_id, conversation_id
-                        )
-                        self.current_episode_id = episode_id
-                        return synthesized_response
-
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
                         response_content = message["content"]
@@ -1850,12 +1832,6 @@ class SimpleLLMClient:
             result = await self.search_documents_tool(arguments["query"], user_id)
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
-        elif function_name == "handoff_to_agents":
-            result = await self.handoff_to_agents_tool(
-                arguments["task_description"],
-                arguments.get("task_type", "research"),
-                user_id
-            )
         else:
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
@@ -2777,56 +2753,6 @@ class SimpleLLMClient:
         except Exception as e:
             logger.error(f"Error searching dream insights: {e}")
             return []
-
-    async def handoff_to_agents_tool(self, task_description: str, task_type: str, user_id: str):
-        """🔄 Hand off a task to background worker agents for research/analysis"""
-        try:
-            import asyncio
-            from app.services.background_task_service import background_task_service
-
-            logger.info(f"🤖 Handing off task to agents: {task_description[:100]}...")
-
-            # Create the background task
-            db = SessionLocal()
-            try:
-                task = await background_task_service.create_task(
-                    db=db,
-                    user_id=str(user_id),
-                    query=task_description,
-                    task_type=task_type
-                )
-
-                # Start the task in background (fire and forget)
-                asyncio.create_task(self._run_background_task(task.id))
-
-                return json.dumps({
-                    "success": True,
-                    "message": f"Task handed off to agents successfully",
-                    "task_id": task.id,
-                    "status": "running",
-                    "note": "I'll notify you when the research is complete. Results will be saved to your Agent Workspace folder."
-                })
-            finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"Error handing off to agents: {e}")
-            return json.dumps({
-                "success": False,
-                "message": f"Failed to hand off task: {str(e)}"
-            })
-
-    async def _run_background_task(self, task_id: str):
-        """Run a background task in a new database session"""
-        try:
-            from app.services.background_task_service import background_task_service
-            db = SessionLocal()
-            try:
-                await background_task_service.run_task(db, task_id)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Background task {task_id} failed: {e}")
 
     async def store_conversation(self, messages, response_content, user_id, conversation_id=None) -> str:
         """Store the conversation in enhanced episodic memory with emotional and topical analysis.
@@ -5493,6 +5419,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Intelligence reports routes failed to load: {e}")
 
+# Include Weekly Health Reports routes
+try:
+    from app.routes.health_reports import router as health_reports_router
+    app.include_router(health_reports_router, tags=["Health Reports"])
+    logger.info("✅ Health weekly reports routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Health weekly reports routes failed to load: {e}")
+
 # Cognitive router is included once above; avoid duplicate registration.
 
 # Include Morning Brief routes
@@ -5741,9 +5675,15 @@ app.include_router(debug_notifications_router)
 from app.routes.debug_retrieval import router as debug_retrieval_router
 app.include_router(debug_retrieval_router)
 
-# Autonomous Cognition System (ACS)
-from app.routes.acs import router as acs_router
-app.include_router(acs_router)
+# Autonomous Cognition System (ACS) — v2 in-VM daemon
+from app.routes.acs_daemon import router as acs_daemon_router
+app.include_router(acs_daemon_router)
+from app.routes.acs_daemon_tools import router as acs_daemon_tools_router
+app.include_router(acs_daemon_tools_router)
+from app.routes.acs_interests import router as acs_interests_router
+app.include_router(acs_interests_router)
+from app.routes.acs_user_tools import router as acs_user_tools_router
+app.include_router(acs_user_tools_router)
 
 # System metrics
 from app.routes.metrics import router as metrics_router
@@ -7029,10 +6969,8 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
                 final_weight_unit = data.weight_unit or "lbs"
                 weight_action = "used_sara_weight"
             else:
-                # Apple Health weight is newer - use it
-                # Convert from kg to user's preferred unit
-                apple_weight_kg = data.apple_health_weight
-                final_weight = apple_weight_kg * 2.20462  # Convert to lbs (default)
+                # Apple Health weight is newer - use it. iOS reads in lbs (HKUnit 'lb').
+                final_weight = data.apple_health_weight
                 final_weight_unit = "lbs"
                 weight_action = "used_apple_health_weight"
         elif data.weight:
@@ -7527,12 +7465,14 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 - Always note how old memories are—a conversation from 2 weeks ago is DIFFERENT context than today
 - When discussing current events (weather, plans, etc.), prioritize recent memories over older ones
 
-**web_search** — Search the internet
+**web_search** — Search the internet for a quick answer
 - Params: `recency` (any/day/week/month), `sites` (array of site filters)
-- Use for: current information, facts you don't know, external research
+- Use for: simple factual questions you can answer in this same turn — "what's the population of Denver", "when did X release", "is the market open today"
+- Pair with `open_page` if a snippet isn't enough. Synthesize and answer immediately.
+- Do NOT use for "look into" / "research" / "understand and explain" — those go to `create_research_plan`.
 
 **open_page** — Fetch and read a specific URL
-- Use for: deeper reading when web_search snippets aren't enough
+- Use for: deeper reading when web_search snippets aren't enough, or when David gives you a URL
 
 ### Action Tools (ONLY when David explicitly asks)
 
@@ -7574,31 +7514,41 @@ You can control David's smart home via Home Assistant. These tools are loaded au
 
 When David asks about his home, lights, temperature, locks, garage, or anything smart-home related, use these tools. Start with **home_status** to get the lay of the land.
 
-### Background Task Dispatch (Your "Hands")
+### Lookup vs. Research — The Decision
 
-You can dispatch tasks to run in the background — either using your internal tools (email, calendar, memory, web search, etc.) or on a full sandbox VM with Claude Code agents. This is how you handle anything that takes time or multiple steps.
+Your most important tool decision is whether to answer right now or hand off to a research agent. Get this right.
 
-**When to dispatch automatically:** If David says "look into", "research", "find out about", "dig into", "set up", "put together", "check on", "pull together", or otherwise asks for something that requires investigation, multi-step work, or can't be answered immediately from what you already know — dispatch it. Don't ask permission, just do it.
+**Answer right now (use `web_search` / `open_page` and synthesize in this turn) when:**
+- David asks a factual question with a single answer ("what time does X open", "who won the game", "is Y in stock")
+- He needs a quick fact, definition, current value, or status
+- One or two snippets is enough to give a confident answer
 
-**Use `dispatch_and_monitor`** (preferred) — dispatches the task AND automatically notifies David when results are ready. Use this for most requests. The system auto-routes: internal data tasks (email, calendar, notes, memory, web) use your tools directly; code/system tasks use the sandbox VM.
+**Hand off to `create_research_plan` when:**
+- David says "look into X", "research X", "do some research on X", "dig into X", "investigate X", "gain an understanding of X", "explain X to me", "put together a brief on X", "what should I know about X"
+- The question requires reading multiple sources, comparing options, or synthesizing a real explanation
+- The answer would take more than a couple of paragraphs to do justice
 
-**Use `dispatch_agent_task`** — for tasks where you don't need completion notification, or when you want manual control over mode selection.
+When you hand off, break the topic into 3–6 ordered steps and call `create_research_plan`. The research agent will execute the plan in the background and notify David with the report. After dispatching, say something natural like "I'm on it — I'll have the writeup for you shortly." Don't recite plan IDs unless asked.
 
-Examples of when to dispatch:
-- "Look into flights to Denver next month" → dispatch_and_monitor
-- "Research the best approach for X" → dispatch_and_monitor
-- "Find that email from John about the project" → dispatch_and_monitor
-- "Set up a Docker container for Y" → dispatch_and_monitor (sandbox mode)
-- "Put together a summary of my notes on Z" → dispatch_and_monitor
-- Writing scripts, building projects, running commands → dispatch_and_monitor
+**David-initiated research takes precedence over Sara's autonomous (ACS) work.** When you create a plan from chat, mark it as `origin='david_chat'` (the tool does this automatically) — ACS will defer until it's done.
 
-**After dispatching, tell David naturally:** "I'm on it — I'll let you know what I find" or "Looking into that now, I'll have something for you shortly" or similar. Be natural, not robotic. Don't recite task IDs or technical details unless asked.
+### Other Background Dispatch (Your "Hands")
 
-**Never say "I can't do that"** if it's something that could be done on a computer. Dispatch it instead.
+For non-research background work — emails, calendar, notes, memory, code execution, sandbox work — use the dispatch tools. The research path above is *only* for research.
 
-Default VM working directory: `/home/sara/sandbox`
+**Use `dispatch_and_monitor`** (preferred) — dispatches the task AND automatically notifies David when results are ready. Auto-routes: internal data tasks (email, calendar, notes, memory) use your tools directly; code/system tasks use the sandbox VM.
 
-After dispatch, you can check status with **get_agent_status** and send follow-ups with **resume_agent_session**.
+**Use `dispatch_agent_task`** — when you don't need completion notification, or want manual control over mode.
+
+Examples:
+- "Find that email from John about the project" → `dispatch_and_monitor` (internal)
+- "Set up a Docker container for Y" → `dispatch_and_monitor` (sandbox)
+- "Put together a summary of my notes on Z" → `dispatch_and_monitor` (internal)
+- Writing scripts, building projects, running commands → `dispatch_and_monitor` (sandbox)
+
+**Never say "I can't do that"** if it's something that could be done on a computer. Pick the right path and dispatch.
+
+Default VM working directory: `/home/sara/sandbox`. After dispatch, check status with **get_agent_status** and send follow-ups with **resume_agent_session**.
 
 ### The "Read a Note" Pattern
 
@@ -8001,11 +7951,39 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     except Exception:
         pass  # Non-critical
 
-    # Signal ACS: David is chatting — set chat-active flag so ACS backs off
-    # but does NOT stop its session (ACS and chat use separate LLM clients)
+    # Post an external_event to the ACS daemon's activity log so her next
+    # think turn sees that David is talking to chat-Sara right now. This is
+    # how the in-VM daemon stays aware of conversations she isn't part of.
     try:
-        from app.services.acs.state_machine import signal_chat_active as _acs_chat_active
-        asyncio.ensure_future(_acs_chat_active(str(current_user.id)))
+        last_user_text = ""
+        for _m in reversed(request.messages):
+            if (_m.role if hasattr(_m, "role") else _m.get("role")) == "user":
+                _content = _m.content if hasattr(_m, "content") else _m.get("content")
+                last_user_text = _extract_text_content(_content) if _content else ""
+                break
+
+        if last_user_text and getattr(settings, "acs_daemon_token", ""):
+            import asyncio as _aio_acs
+            import httpx as _httpx_acs
+
+            async def _post_acs_event(text_excerpt: str) -> None:
+                try:
+                    async with _httpx_acs.AsyncClient(timeout=4.0) as _c:
+                        await _c.post(
+                            "http://127.0.0.1:8000/api/acs/v2/activity",
+                            json={
+                                "kind": "external_event",
+                                "summary": f"David in chat: {text_excerpt[:160]}",
+                                "body": text_excerpt[:2000],
+                                "tags": ["chat", "david"],
+                                "metadata": {"source": "chat_stream"},
+                            },
+                            headers={"X-Daemon-Token": settings.acs_daemon_token},
+                        )
+                except Exception:
+                    pass  # never let an event-post block chat
+
+            _aio_acs.ensure_future(_post_acs_event(last_user_text))
     except Exception:
         pass  # Non-critical
 
