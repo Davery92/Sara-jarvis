@@ -64,9 +64,22 @@ class StableLayer:
                 ],
                 max_tokens=1500,
                 temperature=0.7,
-                model=resolved_model
+                model=resolved_model,
+                # Qwen3 reasoning models burn the entire token budget on `reasoning`
+                # and emit no `content` field — produces KeyError downstream and a
+                # silently-empty stable layer. Disable thinking for synthesis.
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
-            return response["choices"][0]["message"]["content"]
+            msg = response["choices"][0]["message"]
+            content = (msg.get("content") or "").strip()
+            if not content:
+                # Defensive fallback: some endpoints return reasoning_content / reasoning
+                content = (msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+            if not content:
+                raise RuntimeError(
+                    f"LLM returned empty content (finish_reason={response['choices'][0].get('finish_reason')})"
+                )
+            return content
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             raise
@@ -94,8 +107,10 @@ class StableLayer:
         try:
             from app.models.cognitive import SaraReflection, Hypothesis
 
+            # sara_reflection and hypothesis are Sara-global tables (no user_id column);
+            # they describe Sara's self-knowledge, not per-user data.
             reflections = db.query(SaraReflection).filter(
-                SaraReflection.user_id == user_id
+                SaraReflection.is_active == True  # noqa: E712
             ).order_by(SaraReflection.created_at.desc()).limit(15).all()
 
             if reflections:
@@ -104,13 +119,12 @@ class StableLayer:
                 ])
 
             hypotheses = db.query(Hypothesis).filter(
-                Hypothesis.user_id == user_id,
                 Hypothesis.status == "confirmed"
             ).limit(10).all()
 
             if hypotheses:
                 hypotheses_str = "\n".join([
-                    f"- {h.hypothesis} (confidence: {h.confidence})" for h in hypotheses
+                    f"- {h.statement} (confidence: {h.confidence})" for h in hypotheses
                 ])
         except Exception as e:
             logger.warning(f"Could not load cognitive models: {e}")

@@ -264,11 +264,15 @@ class CalendarCreateTool(BaseTool):
                 "recurrence_count": {
                     "type": "integer",
                     "description": "Number of occurrences (alternative to recurrence_until)"
+                },
+                "reminder_minutes": {
+                    "type": "integer",
+                    "description": "Send a push notification this many minutes before the event starts. Omit to skip notification. Use 0 to fire at event start."
                 }
             },
             "required": ["title", "starts_at", "ends_at"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Create a new calendar event"""
 
@@ -277,6 +281,7 @@ class CalendarCreateTool(BaseTool):
         ends_at_str = kwargs.get("ends_at")
         location = kwargs.get("location", "")
         description = kwargs.get("description", "")
+        reminder_minutes = kwargs.get("reminder_minutes")
 
         # Recurrence parameters
         recurrence = kwargs.get("recurrence")
@@ -387,12 +392,18 @@ class CalendarCreateTool(BaseTool):
                 location=location or "",
                 description=description or "",
                 source="sara",
-                rrule=rrule
+                rrule=rrule,
+                reminder_minutes=reminder_minutes,
             )
 
             db.add(event)
             db.commit()
             db.refresh(event)
+
+            if reminder_minutes is not None:
+                from app.services.calendar_reminders import sync_event_reminders
+                sync_event_reminders(db, event)
+                db.commit()
 
             # Times are stored as naive local — use directly for display
             local_start = event.start_time.replace(tzinfo=USER_TIMEZONE)
@@ -416,6 +427,9 @@ class CalendarCreateTool(BaseTool):
                 response_data["recurrence"] = recurrence
                 response_data["rrule"] = rrule
 
+            if reminder_minutes is not None:
+                response_data["reminder_minutes"] = reminder_minutes
+
             # Build message
             base_msg = f"Created event: {title} on {local_start.strftime('%A, %B %d at %I:%M %p')}"
             if recurrence:
@@ -427,6 +441,11 @@ class CalendarCreateTool(BaseTool):
                     "weekdays": "repeating on weekdays"
                 }.get(recurrence.lower(), f"repeating {recurrence}")
                 base_msg += f" ({recurrence_desc})"
+            if reminder_minutes is not None:
+                if reminder_minutes == 0:
+                    base_msg += " with a notification at start"
+                else:
+                    base_msg += f" with a {reminder_minutes}-minute notification"
 
             return ToolResult(
                 success=True,

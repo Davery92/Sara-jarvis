@@ -50,11 +50,6 @@ class SidecarConfig:
         # Heartbeat
         self.heartbeat_interval: int = 10  # seconds
 
-        # Voice bridge (connects to Jetson voice agent)
-        self.voice_bridge_enabled: bool = os.getenv("SARA_VOICE_ENABLED", "true").lower() == "true"
-        self.voice_bridge_host: str = os.getenv("SARA_VOICE_HOST", "10.185.1.155")
-        self.voice_bridge_port: int = int(os.getenv("SARA_VOICE_PORT", "8765"))
-
         # Paths
         self.settings_file: Path = Path.home() / ".sara" / "sidecar-settings.json"
 
@@ -71,12 +66,6 @@ class SidecarConfig:
                         self.backend_url = settings["backend_url"]
                     if "screenshot_interval" in settings:
                         self.screenshot_interval = settings["screenshot_interval"]
-                    if "voice_bridge_enabled" in settings:
-                        self.voice_bridge_enabled = settings["voice_bridge_enabled"]
-                    if "voice_bridge_host" in settings:
-                        self.voice_bridge_host = settings["voice_bridge_host"]
-                    if "voice_bridge_port" in settings:
-                        self.voice_bridge_port = settings["voice_bridge_port"]
             except Exception:
                 pass
 
@@ -88,9 +77,6 @@ class SidecarConfig:
             "auth_token": self.auth_token,
             "backend_url": self.backend_url,
             "screenshot_interval": self.screenshot_interval,
-            "voice_bridge_enabled": self.voice_bridge_enabled,
-            "voice_bridge_host": self.voice_bridge_host,
-            "voice_bridge_port": self.voice_bridge_port,
         }
         with open(self.settings_file, "w") as f:
             json.dump(settings, f, indent=2)

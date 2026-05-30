@@ -91,7 +91,7 @@ export const NotificationBanner: React.FC<NotificationBannerProps> = ({
 
   // Auto-dismiss notifications after 8 seconds
   useEffect(() => {
-    const timers: NodeJS.Timeout[] = []
+    const timers: Array<ReturnType<typeof setTimeout>> = []
 
     notifications.forEach(notif => {
       if (notif.shown && !notif.dismissed) {

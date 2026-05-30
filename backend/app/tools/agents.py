@@ -1,125 +1,17 @@
 """
-Agent Handoff Tools - Tools for delegating tasks to background worker agents
+Agent inspection tools — observe background worker tasks.
+
+NOTE: The old `handoff_to_agents` tool was removed in favor of:
+- `create_research_plan` for chat-initiated research (David asks "look into X")
+- `dispatch_agent_task` / `dispatch_and_monitor` for sandbox & internal-data work
 """
 
-import json
 import logging
-import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from app.tools.base import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
-
-
-class HandoffToAgentsTool(BaseTool):
-    """Hand off a research or analysis task to background worker agents"""
-
-    @property
-    def name(self) -> str:
-        return "handoff_to_agents"
-
-    @property
-    def description(self) -> str:
-        return """Hand off a WEB RESEARCH task to background worker agents.
-    Use ONLY for tasks that require searching the internet and reading web pages.
-
-    The agents will:
-    - Search the web for real-time information
-    - Read and analyze web pages
-    - Compile a comprehensive report
-    - Save results to the Agent Workspace folder
-
-    Best for: Web research, comparing products, learning about topics online.
-
-    DO NOT use this for tasks involving David's emails, calendar, notes, memory,
-    home control, or any of Sara's internal data. Use dispatch_agent_task instead
-    for those tasks — it has direct access to Sara's tools."""
-
-    @property
-    def parameters(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "task_description": {
-                    "type": "string",
-                    "description": "A clear description of the research task or question to investigate. Be specific about what you want to learn."
-                },
-                "task_type": {
-                    "type": "string",
-                    "description": "Type of task: 'research' for web research",
-                    "enum": ["research"],
-                    "default": "research"
-                }
-            },
-            "required": ["task_description"]
-        }
-
-    async def execute(self, user_id: str, **kwargs) -> ToolResult:
-        """Execute the handoff to background agents"""
-        task_description = kwargs.get("task_description", "")
-        task_type = kwargs.get("task_type", "research")
-
-        if not task_description:
-            return ToolResult(
-                success=False,
-                message="No task description provided",
-                data=None
-            )
-
-        try:
-            from app.services.background_task_service import background_task_service
-            from app.main_simple import SessionLocal
-
-            logger.info(f"Handing off task to agents: {task_description[:100]}...")
-
-            # Create the background task
-            db = SessionLocal()
-            try:
-                task = await background_task_service.create_task(
-                    db=db,
-                    user_id=str(user_id),
-                    query=task_description,
-                    task_type=task_type
-                )
-
-                # Start the task in background (fire and forget)
-                asyncio.create_task(self._run_task_with_new_session(task.id))
-
-                return ToolResult(
-                    success=True,
-                    message=f"Task handed off to agents successfully. Task ID: {task.id}",
-                    data={
-                        "task_id": task.id,
-                        "status": "running",
-                        "task_description": task_description[:200],
-                        "note": "I'll notify you when the research is complete. Results will be saved to your Agent Workspace folder."
-                    }
-                )
-            finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"Error handing off to agents: {e}")
-            return ToolResult(
-                success=False,
-                message=f"Failed to hand off task: {str(e)}",
-                data=None
-            )
-
-    async def _run_task_with_new_session(self, task_id: str):
-        """Run the background task with a fresh database session"""
-        try:
-            from app.services.background_task_service import background_task_service
-            from app.main_simple import SessionLocal
-
-            db = SessionLocal()
-            try:
-                await background_task_service.run_task(db, task_id)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Background task {task_id} failed: {e}")
 
 
 class GetBackgroundTasksTool(BaseTool):
@@ -222,6 +114,5 @@ class GetBackgroundTasksTool(BaseTool):
 
 # List of all agent-related tools
 AGENT_TOOLS = [
-    HandoffToAgentsTool,
     GetBackgroundTasksTool
 ]

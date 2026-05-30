@@ -143,7 +143,7 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
     }
     setDocxHtml(null);
     setViewMode(selectedItem?.storage_key ? 'original' : 'text');
-  }, [selectedItem?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedItem?.id]);
 
   // Fetch file blob when switching to original view
   useEffect(() => {
@@ -181,7 +181,7 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
     };
     fetchFile();
     return () => { cancelled = true; };
-  }, [viewMode, selectedItem?.id, selectedItem?.storage_key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [viewMode, selectedItem?.id, selectedItem?.storage_key]);
 
   // Cleanup blob URL on unmount
   useEffect(() => {

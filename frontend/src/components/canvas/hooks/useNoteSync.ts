@@ -41,7 +41,7 @@ export function useNoteSync({
   const [lastSaved, setLastSaved] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingSaveRef = useRef<{ content: string; title: string } | null>(null)
 
   // Reset state when noteId changes

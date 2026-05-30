@@ -28,6 +28,12 @@ class CommandType(str, Enum):
     SHOW_NOTIFICATION = "show_notification"
     START_LISTENING = "start_listening"
     OPEN_WORKSPACE = "open_workspace"  # Open the workbench-canvas in browser
+    # Desktop actuators — user-initiated only (enforced by BaseTool.requires_user_origin)
+    WRITE_CLIPBOARD = "write_clipboard"
+    FOCUS_WINDOW = "focus_window"
+    TYPE_INTO_WINDOW = "type_into_window"
+    # Narrator: render a System AI popup. Payload is a serialized SystemEvent.
+    SYSTEM_EVENT = "system_event"
 
 
 @dataclass
@@ -358,6 +364,65 @@ class CommandRouterService:
             payload={"url": workspace_url},
             source_device_id=source_device_id,
             target_device_id=target_device_id
+        )
+        return await self.send_command(db, user_id, command)
+
+    # ── Desktop actuators (user-originated only) ────────────────────────────
+
+    async def write_clipboard(
+        self,
+        db: Session,
+        user_id: str,
+        text: str,
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None,
+    ) -> bool:
+        """Write text to the clipboard on the specified or active device."""
+        command = CommandMessage(
+            command_type=CommandType.WRITE_CLIPBOARD,
+            payload={"text": text},
+            source_device_id=source_device_id,
+            target_device_id=target_device_id,
+        )
+        return await self.send_command(db, user_id, command)
+
+    async def focus_window(
+        self,
+        db: Session,
+        user_id: str,
+        title_match: str,
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None,
+    ) -> bool:
+        """Bring a window with a title containing `title_match` to the foreground."""
+        command = CommandMessage(
+            command_type=CommandType.FOCUS_WINDOW,
+            payload={"title_match": title_match},
+            source_device_id=source_device_id,
+            target_device_id=target_device_id,
+        )
+        return await self.send_command(db, user_id, command)
+
+    async def type_into_window(
+        self,
+        db: Session,
+        user_id: str,
+        title_match: str,
+        text: str,
+        source_device_id: Optional[str] = None,
+        target_device_id: Optional[str] = None,
+    ) -> bool:
+        """Atomically focus a window matching `title_match` and type `text` into it.
+
+        Bundles focus + type into a single sidecar op so the LLM never gets a
+        chance to insert a turn between the two — eliminates the Windows focus
+        race that the previous separate focus_window/type_text pair was vulnerable to.
+        """
+        command = CommandMessage(
+            command_type=CommandType.TYPE_INTO_WINDOW,
+            payload={"title_match": title_match, "text": text},
+            source_device_id=source_device_id,
+            target_device_id=target_device_id,
         )
         return await self.send_command(db, user_id, command)
 

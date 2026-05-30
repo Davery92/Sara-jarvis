@@ -14,18 +14,9 @@ httpx>=0.26.0
 # System metrics
 psutil>=5.9.0
 
-# Utilities
-numpy>=1.24.0
-
-# Voice bridge (audio playback from Jetson voice agent)
-sounddevice>=0.4.6
-
-# Audio playback detection (Linux)
-pulsectl>=23.5.0; sys_platform == "linux"
-
-# Audio playback detection (Windows)
-pycaw>=20230407; sys_platform == "win32"
-comtypes>=1.2.0; sys_platform == "win32"
+# Desktop actuators (clipboard, window focus). pynput above also handles keystrokes.
+pyperclip>=1.8.2
+pygetwindow>=0.0.9
 
 # For packaging
 pyinstaller>=6.0.0

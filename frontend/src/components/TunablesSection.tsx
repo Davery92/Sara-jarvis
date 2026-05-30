@@ -143,7 +143,7 @@ export default function TunablesSection() {
   }, [data])
 
   return (
-    <div className="mb-6 bg-card border border-card rounded-xl p-6">
+    <div className="mb-6 bg-card border border-card rounded-md p-6">
       <div className="mb-4">
         <h2 className="text-lg font-medium text-white mb-1">Behavior Tunables</h2>
         <p className="text-sm text-gray-400">

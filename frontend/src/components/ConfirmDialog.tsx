@@ -27,31 +27,32 @@ export default function ConfirmDialog({
 
   const confirmClass =
     tone === 'danger'
-      ? 'bg-red-600 hover:bg-red-700 text-white'
-      : 'bg-teal-600 hover:bg-teal-700 text-white'
+      ? 'border-rose-400/20 bg-rose-400/12 text-rose-100 hover:bg-rose-400/18'
+      : 'border-teal-300/20 bg-teal-300/12 text-teal-100 hover:bg-teal-300/18'
 
   return (
-    <div className="fixed inset-0 z-[120] bg-black/70 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/78 p-4 backdrop-blur-md">
       <div
-        className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-5"
+        className="assistant-panel w-full max-w-md rounded-md p-6 shadow-[0_30px_90px_rgba(2,8,23,0.48)]"
         role="dialog"
         aria-modal="true"
       >
-        <h3 className="text-lg font-semibold text-white">{title}</h3>
-        <p className="text-sm text-gray-300 mt-2 leading-relaxed">{message}</p>
+        <div className="assistant-kicker mb-3">{tone === 'danger' ? 'Confirm Destructive Action' : 'Confirm Action'}</div>
+        <h3 className="font-display text-2xl font-semibold text-white">{title}</h3>
+        <p className="mt-3 text-sm leading-relaxed text-slate-300">{message}</p>
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-6 flex justify-end gap-2">
           <button
             onClick={onCancel}
             disabled={busy}
-            className="px-4 py-2 rounded-lg border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500 disabled:opacity-50"
+            className="rounded-md border border-white/8 bg-white/[0.03] px-4 py-2.5 text-slate-300 transition hover:bg-white/[0.06] hover:text-white disabled:opacity-50"
           >
             {cancelLabel}
           </button>
           <button
             onClick={onConfirm}
             disabled={busy}
-            className={`px-4 py-2 rounded-lg disabled:opacity-50 ${confirmClass}`}
+            className={`rounded-md border px-4 py-2.5 transition disabled:opacity-50 ${confirmClass}`}
           >
             {busy ? 'Working...' : confirmLabel}
           </button>

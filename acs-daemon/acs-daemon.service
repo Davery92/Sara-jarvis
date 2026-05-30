@@ -1,0 +1,42 @@
+[Unit]
+Description=Sara ACS daemon (in-VM cognition)
+Documentation=file:///opt/acs-daemon/README.md
+After=network-online.target
+Wants=network-online.target
+# Don't restart-loop forever if config is broken — bail after 5 fails in 60s.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=acs
+Group=acs
+WorkingDirectory=/opt/acs-daemon
+EnvironmentFile=/etc/acs-daemon/config.env
+ExecStart=/opt/acs-daemon/venv/bin/python /opt/acs-daemon/daemon.py
+Restart=always
+RestartSec=5
+
+# Hardening (filesystem)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/log/acs-daemon /var/lib/acs-daemon
+
+# Hardening (kernel/network)
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=acs-daemon
+
+[Install]
+WantedBy=multi-user.target

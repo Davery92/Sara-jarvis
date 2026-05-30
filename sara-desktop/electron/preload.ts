@@ -49,10 +49,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Open URL in default browser
   openUrl: (url: string) => ipcRenderer.send('open-url', url),
-
-  // Microphone permission (macOS)
-  requestMicPermission: (): Promise<boolean> =>
-    ipcRenderer.invoke('request-mic-permission'),
-  getMicPermissionStatus: (): Promise<string> =>
-    ipcRenderer.invoke('get-mic-permission'),
 })

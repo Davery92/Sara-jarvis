@@ -178,12 +178,11 @@ const CalendarView: React.FC = () => {
 
   // Delete event
   const handleDeleteEvent = async (eventId: string) => {
-    // Don't allow deleting iOS events
-    if (selectedEvent?.read_only || selectedEvent?.source === 'ios_calendar') {
-      alert('This event is synced from iOS Calendar and cannot be deleted here. Delete it in your iOS Calendar app.');
-      return;
-    }
-    if (!confirm('Delete this event?')) return;
+    const isIOS = selectedEvent?.read_only || selectedEvent?.source === 'ios_calendar';
+    const confirmMsg = isIOS
+      ? 'Hide this iOS Calendar event from Sara?\n\nIt will stay on your iPhone. Sara will stop showing it and won\'t re-add it on next sync.'
+      : 'Delete this event?';
+    if (!confirm(confirmMsg)) return;
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events/${eventId}`, {
         method: 'DELETE',
@@ -192,6 +191,9 @@ const CalendarView: React.FC = () => {
       if (response.ok) {
         setSelectedEvent(null);
         fetchEvents();
+      } else {
+        const err = await response.json().catch(() => ({}));
+        alert(err.detail || 'Failed to delete event');
       }
     } catch (error) {
       alert('Error deleting event');
@@ -301,6 +303,15 @@ const CalendarView: React.FC = () => {
 
   // Check if event is from iOS
   const isIOSEvent = (event: CalendarEvent) => event.source === 'ios_calendar' || event.read_only;
+  const todayEventsCount = getEventsForDate(new Date()).length;
+  const selectedEventsCount = getEventsForDate(selectedDate).length;
+  const iosEventCount = events.filter(isIOSEvent).length;
+  const currentPeriodLabel =
+    view === 'day'
+      ? selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      : view === 'week'
+      ? `Week of ${weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+      : selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
   // Render event card
   const EventCard = ({ event, compact = false, forDate }: { event: CalendarEvent; compact?: boolean; forDate?: Date }) => {
@@ -474,34 +485,68 @@ const CalendarView: React.FC = () => {
   );
 
   return (
-    <div className="calendar-view h-full">
-      {/* Header */}
-      <div className="bg-card border border-card rounded-xl p-4 mb-4">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <h2 className="text-xl font-semibold">📅 Calendar</h2>
+    <div className="calendar-view h-full flex flex-col gap-3">
+      <section className="assistant-panel-soft rounded-md px-4 py-3.5 md:px-5">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="min-w-0 max-w-2xl">
+            <div className="assistant-kicker mb-2">Time & Commitments</div>
+            <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-3">
+              <h2 className="font-display text-2xl font-semibold text-white">Calendar</h2>
+              <p className="max-w-xl text-sm leading-6 text-[var(--assistant-text-soft)]">
+                Keep the schedule readable and move through day, week, and month context without extra chrome.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <div className="assistant-panel flex min-w-[144px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Current View</span>
+              <span className="text-sm font-medium text-white">{view.charAt(0).toUpperCase() + view.slice(1)}</span>
+            </div>
+            <div className="assistant-panel flex min-w-[104px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Today</span>
+              <span className="font-display text-lg text-white">{todayEventsCount}</span>
+            </div>
+            <div className="assistant-panel flex min-w-[156px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Selected Range</span>
+              <span className="font-display text-lg text-white">{selectedEventsCount}</span>
+            </div>
+            <div className="assistant-panel flex min-w-[124px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">iOS Sync</span>
+              <span className="font-display text-lg text-white">{iosEventCount}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="assistant-panel-soft rounded-md p-4">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <div className="assistant-kicker mb-2">Navigation</div>
+            <div className="font-display text-2xl text-white">{currentPeriodLabel}</div>
+          </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Navigation */}
-            <div className="flex items-center gap-1">
-              <button onClick={() => navigate(-1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">‹</button>
-              <button onClick={goToToday} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">Today</button>
-              <button onClick={() => navigate(1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">›</button>
+            <div className="flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.03] p-1">
+              <button onClick={() => navigate(-1)} className="rounded-md px-3 py-1.5 text-white transition hover:bg-white/[0.08]">‹</button>
+              <button onClick={goToToday} className="rounded-md px-3 py-1.5 text-sm text-white transition hover:bg-white/[0.08]">Today</button>
+              <button onClick={() => navigate(1)} className="rounded-md px-3 py-1.5 text-white transition hover:bg-white/[0.08]">›</button>
             </div>
 
-            {/* View Toggle */}
-            <div className="flex border border-gray-700 rounded overflow-hidden">
+            <div className="flex rounded-md border border-white/10 bg-white/[0.03] p-1">
               {(['day', 'week', 'month'] as const).map(v => (
                 <button
                   key={v}
                   onClick={() => setView(v)}
-                  className={`px-3 py-1 text-sm ${view === v ? 'bg-teal-600 text-white' : 'text-gray-400 hover:bg-gray-700'}`}
+                  className={`rounded-md px-3 py-1.5 text-sm transition ${
+                    view === v ? 'bg-cyan-500 text-slate-950 font-semibold' : 'text-[var(--assistant-text-soft)] hover:text-white'
+                  }`}
                 >
                   {v.charAt(0).toUpperCase() + v.slice(1)}
                 </button>
               ))}
             </div>
 
-            {/* New Event */}
             <button
               type="button"
               onClick={() => {
@@ -509,27 +554,20 @@ const CalendarView: React.FC = () => {
                 setCreateForm(f => ({ ...f, date: selectedDateStr }));
                 setShowCreateModal(true);
               }}
-              className="px-3 py-1 bg-teal-600 text-white font-medium rounded hover:bg-teal-700"
+              className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
             >
               + New Event
             </button>
           </div>
         </div>
-
-        {/* Current Period Display */}
-        <div className="text-center mt-2 text-lg font-medium text-white">
-          {view === 'day' && selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
-          {view === 'week' && `Week of ${weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
-          {view === 'month' && selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
-        </div>
-      </div>
+      </section>
 
       {/* Calendar Content */}
-      <div className="bg-card border border-card rounded-xl p-4">
+      <div className="assistant-panel-soft flex-1 rounded-md p-4">
         {loading ? (
           <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mx-auto mb-4"></div>
-            <p className="text-gray-400">Loading...</p>
+            <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-b-2 border-teal-500"></div>
+            <p className="text-[var(--assistant-text-soft)]">Loading calendar…</p>
           </div>
         ) : (
           <>
@@ -543,7 +581,7 @@ const CalendarView: React.FC = () => {
       {/* Event Detail Modal */}
       {selectedEvent && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedEvent(null)}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6" onClick={e => e.stopPropagation()}>
+          <div className="assistant-panel max-w-md w-full rounded-md p-6" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-2">
                 <h3 className="text-xl font-semibold text-white">{selectedEvent.title}</h3>
@@ -567,27 +605,20 @@ const CalendarView: React.FC = () => {
               )}
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
+              <button
+                onClick={() => handleDeleteEvent(selectedEvent.id)}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+              >
+                {isIOSEvent(selectedEvent) ? 'Hide from Sara' : 'Delete'}
+              </button>
               {!isIOSEvent(selectedEvent) && (
-                <>
-                  <button
-                    onClick={() => handleDeleteEvent(selectedEvent.id)}
-                    className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
-                  >
-                    Delete
-                  </button>
-                  <button
-                    onClick={() => openEditModal(selectedEvent)}
-                    className="flex-1 px-4 py-2 bg-teal-600 text-white rounded hover:bg-teal-700"
-                  >
-                    Edit
-                  </button>
-                </>
-              )}
-              {isIOSEvent(selectedEvent) && (
-                <p className="flex-1 text-sm text-gray-400 italic">
-                  Synced from iOS Calendar. Edit in your iOS Calendar app.
-                </p>
+                <button
+                  onClick={() => openEditModal(selectedEvent)}
+                  className="flex-1 px-4 py-2 bg-teal-600 text-white rounded hover:bg-teal-700"
+                >
+                  Edit
+                </button>
               )}
               <button
                 onClick={() => setSelectedEvent(null)}
@@ -596,6 +627,11 @@ const CalendarView: React.FC = () => {
                 Close
               </button>
             </div>
+            {isIOSEvent(selectedEvent) && (
+              <p className="mt-3 text-xs text-gray-400 italic">
+                To edit, use your iOS Calendar app. Hiding here keeps the event on iPhone but removes it from Sara.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -603,7 +639,7 @@ const CalendarView: React.FC = () => {
       {/* Create/Edit Event Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4" style={{ zIndex: 9999 }} onClick={() => { setShowCreateModal(false); setEditMode(false); }}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="assistant-panel max-w-md w-full rounded-md p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-start mb-4">
               <h3 className="text-xl font-semibold text-white">{editMode ? 'Edit Event' : 'New Event'}</h3>
               <button onClick={() => { setShowCreateModal(false); setEditMode(false); }} className="text-gray-400 hover:text-white">✕</button>

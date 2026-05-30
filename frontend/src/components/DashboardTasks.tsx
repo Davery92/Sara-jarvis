@@ -82,7 +82,7 @@ export default function DashboardTasks({ onNavigate }: { onNavigate: (view: AppV
   if (!loaded) return null
 
   return (
-    <div className="bg-card border border-card rounded-xl p-5">
+    <div className="assistant-panel-soft rounded-2xl p-5">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
           Today's Tasks

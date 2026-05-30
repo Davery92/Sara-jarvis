@@ -42,6 +42,53 @@ interface HITLReplyState {
 
 interface AttentionInboxProps {
   onStartChat?: (prompt: string) => void
+  onOpenNote?: (noteId: string) => void
+}
+
+const DAILY_REPORT_PREFIX = "Sara's Daily Report"
+
+async function findDailyReportNoteId(item: AttentionItem): Promise<string | null> {
+  // Notification title is "Sara's Daily Report — N sessions yesterday" (no date).
+  // The actual *note* title is "Sara's Daily Report — YYYY-MM-DD". The date
+  // lives in dedupe_key (e.g. "daily_report:2026-04-25"). Try keys in that
+  // order, then fall back to a prefix search.
+  try {
+    let reportDate = ''
+    const dedupeKey = item.dedupe_key || ''
+    if (dedupeKey.startsWith('daily_report:')) {
+      reportDate = dedupeKey.slice('daily_report:'.length).trim()
+    }
+    if (!reportDate) {
+      const m = (item.title || '').match(/\b\d{4}-\d{2}-\d{2}\b/)
+      if (m) reportDate = m[0]
+    }
+
+    const query = reportDate
+      ? `${DAILY_REPORT_PREFIX} — ${reportDate}`
+      : DAILY_REPORT_PREFIX
+
+    const res = await fetch(
+      `${APP_CONFIG.apiUrl}/notes/search?q=${encodeURIComponent(query)}`,
+      { credentials: 'include' },
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!Array.isArray(data) || data.length === 0) return null
+
+    // Prefer exact title match for the resolved date
+    if (reportDate) {
+      const target = `${DAILY_REPORT_PREFIX} — ${reportDate}`.trim().toLowerCase()
+      const exact = data.find((n: any) => (n.title || '').trim().toLowerCase() === target)
+      if (exact?.id) return String(exact.id)
+    }
+    // Fall back to most-recent matching prefix
+    const prefix = data.find((n: any) =>
+      (n.title || '').trim().startsWith(DAILY_REPORT_PREFIX),
+    )
+    return prefix?.id ? String(prefix.id) : (data[0]?.id ? String(data[0].id) : null)
+  } catch {
+    return null
+  }
 }
 
 // Quick-pick time helpers
@@ -56,7 +103,7 @@ function tomorrowAt9am(): string {
   return d.toISOString()
 }
 
-export default function AttentionInbox({ onStartChat }: AttentionInboxProps) {
+export default function AttentionInbox({ onStartChat, onOpenNote }: AttentionInboxProps) {
   const [items, setItems] = useState<AttentionItem[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -370,6 +417,28 @@ export default function AttentionInbox({ onStartChat }: AttentionInboxProps) {
 
                 {expandedId === item.id && (
                   <>
+                    {/* Daily-report shortcut — the daily-report notification's payload
+                        doesn't carry the note_id, so look it up by title. */}
+                    {item.title?.startsWith(DAILY_REPORT_PREFIX) && onOpenNote && (
+                      <div className="mt-2 pt-2 border-t border-white/10">
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            const noteId =
+                              (item.payload as any)?.note_id ||
+                              (await findDailyReportNoteId(item))
+                            if (noteId) {
+                              onOpenNote(noteId)
+                            } else {
+                              showToast("Couldn't find the report note")
+                            }
+                          }}
+                          className="px-3 py-1.5 text-xs rounded border border-teal-500/30 text-teal-300 hover:bg-teal-500/10"
+                        >
+                          Open full report
+                        </button>
+                      </div>
+                    )}
                     {item.body && (
                       <div className="mt-2 pt-2 border-t border-white/10 text-sm text-gray-300 whitespace-pre-wrap">
                         {item.body}

@@ -21,9 +21,9 @@ class LLMConfig:
 
     # Primary LLM (chat, tool use, main interactions)
     primary_url: str = field(default_factory=lambda: os.getenv(
-        "OPENAI_BASE_URL", "http://100.104.68.115:8080/v1"))
+        "OPENAI_BASE_URL", "http://100.104.68.115:8081/v1"))
     primary_model: str = field(default_factory=lambda: os.getenv(
-        "OPENAI_MODEL", "Qwen3.5-122B-A10B"))
+        "OPENAI_MODEL", "qwen3.6-27b"))
 
     # Fallback LLM (used when primary is down)
     fallback_url: str = field(default_factory=lambda: os.getenv(
@@ -39,9 +39,9 @@ class LLMConfig:
 
     # Background LLM (autonomy, deliberation, background tasks)
     bg_primary_url: str = field(default_factory=lambda: os.getenv(
-        "BG_LLM_PRIMARY_URL", "http://100.104.68.115:8080/v1"))
+        "BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1"))
     bg_primary_model: str = field(default_factory=lambda: os.getenv(
-        "BG_LLM_PRIMARY_MODEL", "Qwen3.5-35B-A3B"))
+        "BG_LLM_PRIMARY_MODEL", "qwen3.6-27b"))
     bg_fallback_url: str = field(default_factory=lambda: os.getenv(
         "BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1"))
     bg_fallback_model: str = field(default_factory=lambda: os.getenv(
@@ -53,11 +53,14 @@ class LLMConfig:
     embedding_model: str = field(default_factory=lambda: os.getenv(
         "EMBEDDING_MODEL", "bge-m3"))
 
-    # Vision
+    # Vision (OpenAI-compatible llama.cpp / vLLM / Ollama with VL).
+    # The endpoint can be either a llama.cpp-style server (/v1/chat/completions
+    # with image_url content parts) or a classic Ollama server (/api/chat with
+    # an images array). routes/vision.py picks the right caller per-flow.
     vision_url: str = field(default_factory=lambda: os.getenv(
-        "VISION_ENDPOINT", "http://10.185.1.8:11434"))
+        "VISION_ENDPOINT", "http://10.185.1.8:8686"))
     vision_model: str = field(default_factory=lambda: os.getenv(
-        "VISION_MODEL", "qwen3-vl:latest"))
+        "VISION_MODEL", "qwen3.6-35b-a3b"))
 
     # Reranker
     reranker_url: str = field(default_factory=lambda: os.getenv(

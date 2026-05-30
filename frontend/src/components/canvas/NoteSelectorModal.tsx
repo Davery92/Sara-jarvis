@@ -31,7 +31,7 @@ export function NoteSelectorModal({ isOpen, onClose, onSelectNote }: NoteSelecto
   const [isSearching, setIsSearching] = useState(false)
   const [activeTab, setActiveTab] = useState<'recent' | 'search'>('recent')
   const searchInputRef = useRef<HTMLInputElement>(null)
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Focus search input when modal opens
   useEffect(() => {
@@ -154,7 +154,7 @@ export function NoteSelectorModal({ isOpen, onClose, onSelectNote }: NoteSelecto
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-start justify-center pt-20 z-50">
-      <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-gray-700 overflow-hidden">
+      <div className="bg-gray-800 rounded-md shadow-2xl w-full max-w-lg mx-4 border border-gray-700 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <h2 className="text-lg font-semibold text-white">Open Note in Canvas</h2>

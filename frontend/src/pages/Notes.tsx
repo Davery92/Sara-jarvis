@@ -2,6 +2,8 @@ import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, use
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
+  ArrowsPointingInIcon,
+  ArrowsPointingOutIcon,
   ArrowPathIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -585,7 +587,7 @@ function CreateDialog({
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
-            className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+            className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
           />
         </div>
 
@@ -593,7 +595,7 @@ function CreateDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            className="rounded-md border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
           >
             Cancel
           </button>
@@ -601,7 +603,7 @@ function CreateDialog({
             type="button"
             onClick={onSubmit}
             disabled={pending || !value.trim()}
-            className="rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             {pending ? 'Saving...' : kind === 'note' ? 'Create note' : 'Create folder'}
           </button>
@@ -629,7 +631,7 @@ function FolderTree({
       <button
         type="button"
         onClick={() => onSelectFolder(null)}
-        className={`flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm transition ${
+        className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition ${
           selectedFolderId === null ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
         }`}
       >
@@ -654,7 +656,7 @@ function FolderTree({
       ))}
 
       {rootNotes.length > 0 && (
-        <div className="space-y-1 rounded-2xl border border-slate-200/80 bg-slate-50/80 p-2">
+        <div className="space-y-1 rounded-md border border-slate-200/80 bg-slate-50/80 p-2">
           <button
             type="button"
             onClick={() => setUnfiledCollapsed(c => !c)}
@@ -672,7 +674,7 @@ function FolderTree({
               key={note.id}
               type="button"
               onClick={() => onSelectNote(note.id)}
-              className={`flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-sm transition ${
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition ${
                 activeNoteId === note.id
                   ? 'bg-white text-slate-900 shadow-sm ring-1 ring-indigo-100'
                   : 'text-slate-600 hover:bg-white hover:text-slate-900'
@@ -724,7 +726,7 @@ function FolderBranchNode({
           onSelectFolder(branch.folder.id)
           onToggleFolder(branch.folder.id)
         }}
-        className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-left text-sm transition ${
+        className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
           selectedFolderId === branch.folder.id
             ? 'bg-indigo-50 text-indigo-700'
             : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
@@ -780,7 +782,7 @@ function FolderBranchNode({
                   key={note.id}
                   type="button"
                   onClick={() => onSelectNote(note.id)}
-                  className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition ${
+                  className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
                     activeNoteId === note.id
                       ? 'bg-white text-slate-900 shadow-sm ring-1 ring-indigo-100'
                       : 'text-slate-600 hover:bg-white hover:text-slate-900'
@@ -875,7 +877,7 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
         onClick={(event) => event.stopPropagation()}
       >
         <div className="border-b border-slate-200 px-5 py-4">
-          <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
             <MagnifyingGlassIcon className="h-5 w-5 text-slate-400" />
             <input
               ref={inputRef}
@@ -901,7 +903,7 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
 
         <div className="max-h-[26rem] overflow-y-auto p-3">
           {results.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-10 text-center text-sm text-slate-500">
+            <div className="rounded-md border border-dashed border-slate-200 px-4 py-10 text-center text-sm text-slate-500">
               No notes matched that search.
             </div>
           ) : (
@@ -917,7 +919,7 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
                       onSelect(note.id)
                       onClose()
                     }}
-                    className="flex w-full items-start justify-between gap-4 rounded-2xl px-4 py-3 text-left transition hover:bg-slate-50"
+                    className="flex w-full items-start justify-between gap-4 rounded-md px-4 py-3 text-left transition hover:bg-slate-50"
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold text-slate-900">{note.title.trim() || 'Untitled'}</div>
@@ -978,7 +980,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
             }
 
             return (
-              <pre className="my-4 overflow-x-auto rounded-2xl border border-slate-200 bg-slate-950 px-4 py-4 text-sm text-slate-100">
+              <pre className="my-4 overflow-x-auto rounded-md border border-slate-200 bg-slate-950 px-4 py-4 text-sm text-slate-100">
                 <code className={className} {...props}>
                   {children}
                 </code>
@@ -1025,7 +1027,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
             )
           },
           table: ({ children }) => (
-            <div className="my-5 overflow-x-auto rounded-2xl border border-slate-200">
+            <div className="my-5 overflow-x-auto rounded-md border border-slate-200">
               <table className="w-full border-collapse text-sm">{children}</table>
             </div>
           ),
@@ -1361,8 +1363,9 @@ export default function Notes() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [showGraph, setShowGraph] = useState(false)
   const [showPalette, setShowPalette] = useState(false)
-  const [showRightPanel, setShowRightPanel] = useState(true)
-  const [editorMode, setEditorMode] = useState<'preview' | 'edit'>('preview')
+  const [showRightPanel, setShowRightPanel] = useState(false)
+  const [isFocusMode, setIsFocusMode] = useState(false)
+  const [editorMode, setEditorMode] = useState<'preview' | 'edit'>('edit')
   const [draftTitle, setDraftTitle] = useState('')
   const [draftContent, setDraftContent] = useState('')
   const [draftTagsText, setDraftTagsText] = useState('')
@@ -1986,93 +1989,131 @@ export default function Notes() {
   return (
     <div className="notes-workspace-theme h-full min-h-0 bg-[radial-gradient(circle_at_top_right,_rgba(34,211,238,0.12),_transparent_30%),radial-gradient(circle_at_bottom_left,_rgba(20,184,166,0.10),_transparent_35%),linear-gradient(180deg,_#020617,_#0f172a_40%,_#020617)]">
       <style>{NOTES_THEME_OVERRIDES}</style>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden px-4 py-3 sm:px-6 lg:px-8">
-        <div className="flex min-h-0 flex-1 flex-col gap-3">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="max-w-3xl">
-                <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
-                  Notes
-                </h1>
+      <div className="flex h-full min-h-0 flex-col overflow-hidden px-4 pb-4 pt-3 sm:px-6 lg:px-8">
+        <div className={`flex min-h-0 flex-1 flex-col ${isFocusMode ? 'gap-2' : 'gap-3'}`}>
+          {!isFocusMode && (
+          <section className="assistant-panel-soft rounded-md px-4 py-3 sm:px-5">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0 max-w-3xl">
+                <div className="assistant-kicker mb-2">Knowledge Workspace</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">
+                    Notes
+                  </h1>
+                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    {notes.length} notes
+                  </span>
+                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    {folders.length} folders
+                  </span>
+                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    {graphData.edges.length} links
+                  </span>
+                </div>
                 <p className="mt-1 text-sm text-slate-500">
-                  {notes.length} notes • {folders.length} folders • {graphData.edges.length} links
+                  Vault on the side, note in the center.
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCreateName('')
-                    setShowCreateFolder(true)
-                    setShowCreateNote(false)
-                  }}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-200 hover:text-indigo-600"
-                >
-                  <FolderPlusIcon className="h-4 w-4" />
-                  Folder
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCreateName('')
-                    setShowCreateNote(true)
-                    setShowCreateFolder(false)
-                  }}
-                  className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
-                >
-                  <PlusIcon className="h-4 w-4" />
-                  New note
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowGraph((current) => !current)}
-                  className={`inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium transition ${
-                    showGraph
-                      ? 'bg-indigo-600 text-white'
-                      : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-200 hover:text-indigo-600'
-                  }`}
-                >
-                  <Squares2X2Icon className="h-4 w-4" />
-                  {showGraph ? 'Editor' : 'Graph'}
-                </button>
-                {!showGraph && (
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                   <button
                     type="button"
-                    onClick={() => setShowRightPanel((current) => !current)}
-                    className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
+                    onClick={() => {
+                      setCreateName('')
+                      setShowCreateFolder(true)
+                      setShowCreateNote(false)
+                    }}
+                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-200 hover:text-indigo-600"
                   >
-                    {showRightPanel ? 'Hide details' : 'Show details'}
+                    <FolderPlusIcon className="h-4 w-4" />
+                    Folder
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateName('')
+                      setShowCreateNote(true)
+                      setShowCreateFolder(false)
+                    }}
+                    className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                    New note
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowGraph((current) => !current)}
+                    className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
+                      showGraph
+                        ? 'bg-indigo-600 text-white'
+                        : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-200 hover:text-indigo-600'
+                    }`}
+                  >
+                    <Squares2X2Icon className="h-4 w-4" />
+                    {showGraph ? 'Editor' : 'Graph'}
+                  </button>
+                  {!showGraph && (
+                    <button
+                      type="button"
+                      onClick={() => setIsFocusMode(true)}
+                      className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
+                    >
+                      <ArrowsPointingOutIcon className="h-4 w-4" />
+                      Focus mode
+                    </button>
+                  )}
+                  {!showGraph && (
+                    <button
+                      type="button"
+                      onClick={() => setShowRightPanel((current) => !current)}
+                      className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
+                    >
+                      {showRightPanel ? 'Hide details' : 'Show details'}
+                    </button>
+                  )}
               </div>
             </div>
-
-            {errorMessage && (
-              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                {errorMessage}
+            <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium text-slate-500">
+              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
+                {showGraph ? 'Map view' : activeNote ? activeNote.title.trim() || 'Untitled note' : 'Vault'}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
+                {selectedFolderLabel}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
+                {editorMode === 'edit' ? 'Editing' : 'Previewing'}
+              </span>
               </div>
-            )}
+          </section>
+          )}
 
-            {loading ? (
-              <div className="flex min-h-[30rem] items-center justify-center rounded-[2rem] border border-slate-200 bg-slate-50">
+          {errorMessage && (
+            <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {errorMessage}
+            </div>
+          )}
+
+          {loading ? (
+              <div className="assistant-panel-soft flex min-h-[30rem] items-center justify-center rounded-md border border-slate-200 bg-slate-50">
                 <div className="flex items-center gap-3 text-sm font-medium text-slate-500">
                   <ArrowPathIcon className="h-5 w-5 animate-spin" />
                   Loading your vault...
                 </div>
               </div>
             ) : (
-              <div className="flex min-h-0 flex-1 overflow-hidden">
-                <div className="flex h-full min-h-0 flex-1 flex-col md:flex-row">
-                  <aside className="flex w-full min-h-[16rem] max-h-[48vh] shrink-0 flex-col overflow-hidden border-b border-slate-200 bg-slate-50/80 md:h-full md:max-h-none md:w-80 md:border-b-0 md:border-r">
+              <div className={`assistant-panel-soft flex min-h-0 flex-1 overflow-hidden ${isFocusMode ? 'rounded-md p-0.5' : 'rounded-md p-1.5'}`}>
+                <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-md md:flex-row">
+                  {!isFocusMode && (
+                  <aside className="flex w-full min-h-[14rem] max-h-[40vh] shrink-0 flex-col overflow-hidden border-b border-slate-200 bg-slate-50/80 md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r xl:w-[18rem]">
                     <div className="border-b border-slate-200 px-4 py-2">
-                      <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
                         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Context:</div>
                         <div className="text-sm font-medium text-slate-900">{selectedFolderLabel}</div>
                       </div>
                     </div>
 
                     <div className="border-b border-slate-200 px-4 py-3">
-                      <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
                         <MagnifyingGlassIcon className="h-4 w-4 text-slate-400" />
                         <input
                           value={searchQuery}
@@ -2093,7 +2134,7 @@ export default function Notes() {
                     <div className="max-h-24 overflow-y-auto border-b border-slate-200 px-4 py-2">
                       <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Starred</div>
                       {starredList.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500">
+                        <div className="rounded-md border border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500">
                           Star key notes to pin them here.
                         </div>
                       ) : (
@@ -2103,7 +2144,7 @@ export default function Notes() {
                               key={note.id}
                               type="button"
                               onClick={() => void selectNote(note.id)}
-                              className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-left text-sm transition ${
+                              className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
                                 activeNoteId === note.id
                                   ? 'bg-white text-slate-900 shadow-sm ring-1 ring-amber-100'
                                   : 'text-slate-600 hover:bg-white hover:text-slate-900'
@@ -2120,7 +2161,7 @@ export default function Notes() {
                     <div className="min-h-0 flex-[1.35] overflow-y-auto px-4 py-3">
                       <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Vault</div>
                       {treeData.rootNotes.length === 0 && treeData.branches.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-sm text-slate-500">
+                        <div className="rounded-md border border-dashed border-slate-200 bg-white px-4 py-5 text-sm text-slate-500">
                           {normalizedQuery ? 'No notes match that search.' : 'Create your first note to get started.'}
                         </div>
                       ) : (
@@ -2169,11 +2210,12 @@ export default function Notes() {
                       </div>
                     </div>
                   </aside>
+                  )}
 
                   <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
                     {showGraph ? (
                       <div className="flex min-h-[32rem] flex-1 flex-col p-5">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                           <span>Drag nodes to reorganize. Drag empty space to pan. Click a node to jump to that note.</span>
                           <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                             Cmd/Ctrl + G
@@ -2191,8 +2233,9 @@ export default function Notes() {
                     ) : activeNote ? (
                       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
                         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                          <div className="border-b border-slate-200 px-5 py-3">
+                          <div className={`border-b border-slate-200 ${isFocusMode ? 'px-6 py-4' : 'px-5 py-3'}`}>
                             <div className="flex flex-col gap-3">
+                              <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
                               <div className="min-w-0 flex-1">
                                 <input
                                   value={draftTitle}
@@ -2219,11 +2262,23 @@ export default function Notes() {
                                 </div>
                               </div>
 
-                              <div className="flex flex-wrap items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => setIsFocusMode((current) => !current)}
+                                  className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
+                                >
+                                  {isFocusMode ? (
+                                    <ArrowsPointingInIcon className="h-4 w-4" />
+                                  ) : (
+                                    <ArrowsPointingOutIcon className="h-4 w-4" />
+                                  )}
+                                  {isFocusMode ? 'Exit focus' : 'Focus'}
+                                </button>
                                 <button
                                   type="button"
                                   onClick={() => setDraftStarred((current) => !current)}
-                                  className={`inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                                  className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
                                     draftStarred
                                       ? 'bg-amber-50 text-amber-700'
                                       : 'border border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:text-amber-600'
@@ -2237,11 +2292,11 @@ export default function Notes() {
                                   {draftStarred ? 'Starred' : 'Star'}
                                 </button>
 
-                                <div className="inline-flex rounded-2xl border border-slate-200 bg-white p-1">
+                                <div className="inline-flex rounded-md border border-slate-200 bg-white p-1">
                                   <button
                                     type="button"
                                     onClick={() => setEditorMode('preview')}
-                                    className={`rounded-xl px-3 py-1.5 text-sm font-medium transition ${
+                                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
                                       editorMode === 'preview' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:text-indigo-600'
                                     }`}
                                   >
@@ -2250,7 +2305,7 @@ export default function Notes() {
                                   <button
                                     type="button"
                                     onClick={() => setEditorMode('edit')}
-                                    className={`rounded-xl px-3 py-1.5 text-sm font-medium transition ${
+                                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
                                       editorMode === 'edit' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:text-indigo-600'
                                     }`}
                                   >
@@ -2261,25 +2316,30 @@ export default function Notes() {
                                 <button
                                   type="button"
                                   onClick={() => void deleteCurrentNote()}
-                                  className="inline-flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-100"
+                                  className="inline-flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-100"
                                 >
                                   <TrashIcon className="h-4 w-4" />
                                   Delete
                                 </button>
                               </div>
+                              </div>
                             </div>
                           </div>
 
-                          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+                          <div className={`min-h-0 flex-1 overflow-y-auto ${isFocusMode ? 'px-0 py-0' : 'px-5 py-3'}`}>
                             {editorMode === 'edit' ? (
                               <textarea
                                 value={draftContent}
                                 onChange={(event) => setDraftContent(event.target.value)}
                                 placeholder="Write with markdown and [[wiki links]]..."
-                                className="min-h-[20rem] w-full resize-none rounded-3xl border border-slate-200 bg-slate-50 px-5 py-5 text-sm leading-7 text-slate-800 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100 md:h-full md:min-h-0"
+                                className={`w-full resize-none text-slate-800 outline-none transition focus:border-indigo-200 focus:ring-0 ${
+                                  isFocusMode
+                                    ? 'min-h-full border-0 bg-transparent px-10 py-8 text-lg leading-9 md:h-full md:min-h-0'
+                                    : 'min-h-[24rem] rounded-3xl border border-slate-200 bg-slate-50 px-6 py-6 text-base leading-8 md:h-full md:min-h-0'
+                                }`}
                               />
                             ) : (
-                              <div className="min-h-full rounded-3xl border border-slate-200 bg-white px-6 py-6 shadow-sm">
+                              <div className={`${isFocusMode ? 'min-h-full bg-transparent px-10 py-8' : 'min-h-full rounded-3xl border border-slate-200 bg-white px-8 py-7 shadow-sm'}`}>
                                 <NoteContent
                                   content={draftContent || 'No content yet.'}
                                   titleLookup={titleLookup}
@@ -2290,8 +2350,8 @@ export default function Notes() {
         </div>
       </div>
 
-                        {showRightPanel && (
-                          <aside className="w-full max-h-[38vh] overflow-y-auto border-t border-slate-200 bg-slate-50/70 p-5 md:max-h-none md:w-72 md:border-l md:border-t-0">
+                        {showRightPanel && !isFocusMode && (
+                          <aside className="w-full max-h-[34vh] overflow-y-auto border-t border-slate-200 bg-slate-50/70 p-5 md:max-h-none md:w-80 md:border-l md:border-t-0">
                             <div className="space-y-6">
                               <section>
                                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Properties</div>
@@ -2319,7 +2379,7 @@ export default function Notes() {
                                     <select
                                       value={activeNote.folder_id || ''}
                                       onChange={(event) => void moveNoteToFolder(activeNote.id, event.target.value || null)}
-                                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
+                                      className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
                                     >
                                       <option value="">Workspace root</option>
                                       {folderOptions.map((folder) => (
@@ -2342,7 +2402,7 @@ export default function Notes() {
                                     value={draftTagsText}
                                     onChange={(event) => setDraftTagsText(event.target.value)}
                                     placeholder="architecture, memory, research"
-                                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
+                                    className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
                                   />
                                   <div className="mt-3 flex flex-wrap gap-2">
                                     {draftTags.length === 0 ? (
@@ -2421,7 +2481,7 @@ export default function Notes() {
                     ) : (
                       <div className="flex flex-1 items-center justify-center p-8 text-center">
                         <div>
-                          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600">
+                          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-md bg-indigo-50 text-indigo-600">
                             <PlusIcon className="h-7 w-7" />
                           </div>
                           <h2 className="mt-4 text-xl font-semibold text-slate-900">Your vault is empty</h2>

@@ -931,7 +931,7 @@ class BackgroundLLMClient:
             timeout=request_timeout
         )
         self._started = True
-        logger.info(
+        logger.debug(
             f"Background LLM client started. Primary: {self.primary_url} ({self.primary_model}), "
             f"Fallback: {self.fallback_url} ({self.fallback_model}), num_ctx={self.default_num_ctx}, "
             f"timeouts(connect={self.connect_timeout}s, request={self.request_timeout}s)"
@@ -1044,11 +1044,21 @@ class BackgroundLLMClient:
                     )
 
                 if not allow_fallback:
-                    logger.warning(f"Background LLM primary failed with fallback disabled: {e}")
+                    logger.warning(f"Background LLM primary failed with fallback disabled ({type(e).__name__}): {e}")
                     raise
 
-                logger.warning(f"Background LLM primary failed: {e}, trying fallback")
+                logger.warning(f"Background LLM primary failed ({type(e).__name__}): {e}, trying fallback")
         else:
+            # Circuit breaker is open — primary is degraded. If the caller has
+            # opted out of fallback, refuse the request entirely rather than
+            # silently redirecting to the smaller model.
+            if not allow_fallback:
+                logger.warning(
+                    "Background LLM: primary degraded and fallback disabled — refusing request"
+                )
+                raise RuntimeError(
+                    "Background LLM primary is degraded and fallback is disabled"
+                )
             logger.debug("Background LLM: skipping degraded primary, going straight to fallback")
 
         # Try fallback — truncate messages to fit smaller context window

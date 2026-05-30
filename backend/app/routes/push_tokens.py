@@ -628,10 +628,16 @@ async def send_push_to_user(
     body: str,
     notification_data: dict = None,
     db: Session = None,
+    bypass_ban: bool = False,
 ):
     """
     Send a push notification through the unified notification pipeline.
     This preserves topic-based dedupe and notification_log observability.
+
+    `bypass_ban=True` skips the static banned-phrase filter — only set this for
+    notifications that are explicitly user-requested (e.g. the weekly health
+    debrief), where words like "calorie" are legitimate content, not an
+    unsolicited diet lecture from an autonomous worker.
     """
     try:
         # Get a database session if not provided
@@ -666,6 +672,7 @@ async def send_push_to_user(
                 cooldown_hours=payload.get("cooldown_hours"),
                 db=db,
                 _bypass_attention=True,
+                _bypass_ban=bypass_ban,
             )
 
             if close_db:

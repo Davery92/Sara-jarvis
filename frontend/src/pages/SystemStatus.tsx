@@ -17,14 +17,6 @@ interface MetricsData {
       fallback_url: string;
     };
   };
-  acs: {
-    state: string;
-    sessions_24h: number;
-    errors_24h: number;
-    error_rate_24h: number;
-    avg_turns_24h: number;
-    notes_24h: number;
-  };
   queues: Record<string, number>;
   notifications: {
     sent_24h: number;
@@ -49,6 +41,18 @@ const STATUS_COLORS: Record<string, string> = {
   critical: 'bg-red-600/20 text-red-300 border-red-600/30',
   unknown: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
 };
+
+function formatUptime(startedAt: string): string {
+  const ms = Date.now() - new Date(startedAt).getTime();
+  if (ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
 
 function StatusBadge({ status }: { status: string }) {
   return (
@@ -81,16 +85,31 @@ function Metric({ label, value, sub }: { label: string; value: string | number; 
   );
 }
 
+interface DaemonStatus {
+  state: string;
+  version: string;
+  is_alive: boolean;
+  last_heartbeat_at: string | null;
+  last_tick_summary: string | null;
+  started_at: string | null;
+  seconds_since_heartbeat: number | null;
+}
+
 export default function SystemStatus() {
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
+  const [daemon, setDaemon] = useState<DaemonStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 
   const fetchMetrics = async () => {
     try {
-      const resp = await fetch(`${APP_CONFIG.apiUrl}/api/metrics`, { credentials: 'include' });
-      const data = await resp.json();
-      setMetrics(data);
+      const [m, d] = await Promise.all([
+        fetch(`${APP_CONFIG.apiUrl}/api/metrics`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/daemon-status`, { credentials: 'include' }),
+      ]);
+      const mData = await m.json();
+      setMetrics(mData);
+      if (d.ok) setDaemon(await d.json());
       setLastRefresh(new Date());
     } catch (e) {
       console.error('Failed to fetch metrics:', e);
@@ -147,15 +166,24 @@ export default function SystemStatus() {
       </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* ACS */}
-        <Card title="ACS (Autonomous Cognition)" status={metrics.acs?.error_rate_24h > 0.3 ? 'warning' : 'healthy'}>
+        {/* ACS daemon (v2) — Sara's in-VM cognition process */}
+        <Card
+          title="ACS Daemon"
+          status={!daemon || daemon.state === 'never_started' ? 'unknown' : daemon.is_alive ? 'healthy' : 'error'}
+        >
           <div className="grid grid-cols-2 gap-3">
-            <Metric label="State" value={metrics.acs?.state || 'unknown'} />
-            <Metric label="Sessions (24h)" value={metrics.acs?.sessions_24h || 0} />
-            <Metric label="Error Rate" value={`${((metrics.acs?.error_rate_24h || 0) * 100).toFixed(0)}%`} />
-            <Metric label="Notes (24h)" value={metrics.acs?.notes_24h || 0} />
-            <Metric label="Avg Turns" value={metrics.acs?.avg_turns_24h || 0} />
-            <Metric label="Errors (24h)" value={metrics.acs?.errors_24h || 0} />
+            <Metric label="State" value={daemon?.state || 'unknown'} />
+            <Metric label="Alive" value={daemon?.is_alive ? 'yes' : 'no'} />
+            <Metric
+              label="Heartbeat (s)"
+              value={daemon?.seconds_since_heartbeat ?? '—'}
+            />
+            <Metric label="Version" value={daemon?.version || '—'} />
+            <Metric
+              label="Uptime"
+              value={daemon?.started_at ? formatUptime(daemon.started_at) : '—'}
+            />
+            <Metric label="Last tick" value={daemon?.last_tick_summary?.slice(0, 24) || '—'} />
           </div>
         </Card>
 

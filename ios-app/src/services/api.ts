@@ -252,12 +252,15 @@ class ApiClient {
             clearTimeout(postTextFinalizeTimer);
           }
           // If text has arrived but completion markers never come, recover automatically.
+          // Window must be longer than the longest expected silence between server events
+          // (tool runs can stall text for tens of seconds; heartbeats fire every 5s, so any
+          // gap > heartbeat cadence means the stream is genuinely dead).
           postTextFinalizeTimer = setTimeout(() => {
             if (!completed && emittedText.trim().length > 0) {
               console.warn('[API] No completion marker after streamed text; forcing complete');
               completeOnce();
             }
-          }, 20000);
+          }, 60000);
         };
 
         const completeOnce = () => {
@@ -328,6 +331,11 @@ class ApiClient {
 
               try {
                 const parsed = JSON.parse(data);
+                // Any parsed event proves the stream is alive — keep the post-text watchdog
+                // from firing during long tool runs or other non-text activity.
+                if (emittedText.trim().length > 0 && parsed.type !== 'final_response' && parsed.type !== 'done') {
+                  schedulePostTextFinalizeWatchdog();
+                }
                 // Handle text_chunk events from backend
                 if (parsed.type === 'text_chunk' && parsed.data?.content) {
                   const chunk = String(parsed.data.content);

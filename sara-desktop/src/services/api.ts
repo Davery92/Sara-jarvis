@@ -89,12 +89,19 @@ class ApiClient {
   }
 
   async streamChat(
-    message: string,
+    messagesOrText: string | Array<{ role: string; content: string }>,
     onChunk: (chunk: string) => void,
     onComplete: () => void,
     onToolActivity?: (tool: string) => void
   ): Promise<void> {
     const token = await this.getToken()
+
+    // Backward-compat: a single string becomes a one-turn user message;
+    // anything else is treated as the full conversation history.
+    const messages =
+      typeof messagesOrText === 'string'
+        ? [{ role: 'user', content: messagesOrText }]
+        : messagesOrText
 
     const response = await fetch(`${this.baseUrl}/chat/stream`, {
       method: 'POST',
@@ -103,9 +110,7 @@ class ApiClient {
         ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
       credentials: 'include',  // Send cookies for auth
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: message }]
-      }),
+      body: JSON.stringify({ messages }),
     })
 
     if (!response.ok) {
@@ -253,58 +258,6 @@ class ApiClient {
       }
       return { done: false }
     }
-  }
-
-  async transcribe(audioBlob: Blob): Promise<string> {
-    const token = await this.getToken()
-
-    const formData = new FormData()
-    formData.append('audio', audioBlob, 'recording.webm')
-
-    const response = await fetch(`${this.baseUrl}/api/voice-agent/transcribe`, {
-      method: 'POST',
-      headers: {
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: formData,
-    })
-
-    if (!response.ok) {
-      throw new Error(`Transcription failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    return data.transcription || data.text || ''
-  }
-
-  async speak(text: string): Promise<ArrayBuffer> {
-    console.log('[API] speak() called, text length:', text.length)
-    const token = await this.getToken()
-    console.log('[API] speak() token present:', !!token)
-
-    const url = `${this.baseUrl}/api/voice-agent/speak`
-    console.log('[API] speak() URL:', url)
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ text }),
-    })
-
-    console.log('[API] speak() response status:', response.status)
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('[API] speak() error response:', errorText)
-      throw new Error(`TTS failed: ${response.status} - ${errorText}`)
-    }
-
-    const buffer = await response.arrayBuffer()
-    console.log('[API] speak() got buffer, size:', buffer.byteLength)
-    return buffer
   }
 
   async getNotes(): Promise<Array<{ id: string; title: string; content: string }>> {

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -16,6 +17,58 @@ DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__f
 router = APIRouter(tags=["Downloads"])
 
 
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+
+
+def _version_key(v: str) -> tuple:
+    """Numeric tuple for proper semver comparison (1.0.30 < 1.0.51, not lex)."""
+    try:
+        return tuple(int(p) for p in v.split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _classify(filename: str) -> dict:
+    """Derive platform / arch / agent_type / file_type from filename."""
+    lower = filename.lower()
+
+    platform = "unknown"
+    arch = "x64"
+    agent_type = "desktop"
+
+    if "mac" in lower or lower.endswith(".dmg"):
+        platform = "macOS"
+        if "arm64" in lower:
+            arch = "arm64"
+    elif "linux" in lower or lower.startswith("sara-agent"):
+        platform = "Linux"
+        if "agent" in lower:
+            agent_type = "headless"
+    elif "win" in lower or lower.endswith(".exe") or lower.endswith(".asar"):
+        platform = "Windows"
+
+    if "arm64" in lower:
+        arch = "arm64"
+
+    if lower.endswith(".dmg") or (lower.endswith(".exe") and "setup" in lower):
+        file_type = "installer"
+    elif lower.endswith(".exe"):
+        file_type = "portable"
+    elif lower.endswith(".zip") or lower.endswith(".tar.gz"):
+        file_type = "portable"
+    elif lower.endswith(".asar"):
+        file_type = "update"
+    else:
+        file_type = "archive"
+
+    return {
+        "platform": platform,
+        "arch": arch,
+        "agent_type": agent_type,
+        "type": file_type,
+    }
+
+
 @router.get("/api/downloads")
 async def list_downloads(
     current_user: User = Depends(get_current_user)
@@ -28,66 +81,36 @@ async def list_downloads(
             filepath = os.path.join(DOWNLOADS_DIR, filename)
             if os.path.isfile(filepath):
                 stat = os.stat(filepath)
-
-                # Determine platform and arch
-                platform = "unknown"
-                arch = "x64"
-                agent_type = "desktop"
-
-                if "mac" in filename.lower():
-                    platform = "macOS"
-                    if "arm64" in filename.lower():
-                        arch = "arm64"
-                elif "win" in filename.lower():
-                    platform = "Windows"
-                elif "linux" in filename.lower() or "agent" in filename.lower():
-                    platform = "Linux"
-                    agent_type = "headless"
-                elif filename.endswith(".asar"):
-                    platform = "Windows"
-
-                # Determine file type
-                file_type = "archive"
-                if filename.endswith(".exe"):
-                    file_type = "installer"
-                elif filename.endswith(".dmg"):
-                    file_type = "installer"
-                elif filename.endswith(".zip") or filename.endswith(".tar.gz"):
-                    file_type = "portable"
-                elif filename.endswith(".asar"):
-                    file_type = "update"
-
+                classification = _classify(filename)
                 downloads.append({
                     "filename": filename,
-                    "platform": platform,
-                    "arch": arch,
-                    "type": file_type,
-                    "agent_type": agent_type,
+                    **classification,
                     "size_bytes": stat.st_size,
                     "size_mb": round(stat.st_size / (1024 * 1024), 1),
-                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 })
 
     downloads.sort(key=lambda x: (x["platform"], x["arch"]))
 
-    version = "1.0.36"
+    # Pick the highest version present anywhere in any filename.
+    version = "0.0.0"
     for d in downloads:
-        if "1.0." in d["filename"]:
-            try:
-                v = d["filename"].split("-")[1]
-                if v > version:
-                    version = v
-            except Exception:
-                pass
+        m = _VERSION_RE.search(d["filename"])
+        if m and _version_key(m.group(1)) > _version_key(version):
+            version = m.group(1)
 
-    # Only keep the latest version per platform+arch combo
+    # Dedup to the latest per (platform, arch, agent_type, type) — so the
+    # installer and portable for the same platform both survive.
     latest: dict = {}
     for d in downloads:
-        key = (d["platform"], d["arch"], d["agent_type"])
+        key = (d["platform"], d["arch"], d["agent_type"], d["type"])
         existing = latest.get(key)
         if not existing or d["modified"] > existing["modified"]:
             latest[key] = d
-    downloads = sorted(latest.values(), key=lambda x: (x["platform"], x["arch"]))
+    downloads = sorted(
+        latest.values(),
+        key=lambda x: (x["platform"], x["arch"], x["type"]),
+    )
 
     return {"downloads": downloads, "version": version}
 

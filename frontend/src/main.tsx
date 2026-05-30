@@ -3,8 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import { AuthProvider } from './contexts/AuthContext'
-import { DashboardProvider } from './contexts/DashboardContext'
-import App from './App-interactive.tsx'
+import App from './App'
 import 'katex/dist/katex.min.css'
 import './index.css'
 
@@ -22,9 +21,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
-          <DashboardProvider>
-            <App />
-          </DashboardProvider>
+          <App />
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

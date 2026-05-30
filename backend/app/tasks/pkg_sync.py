@@ -99,3 +99,56 @@ def reconcile_pkg(self):
         return result
     except Exception as e:
         logger.warning(f"PKG reconciliation failed: {e}")
+
+
+async def _stale_goal_sweep() -> dict:
+    """Mark active PKG_Goal nodes whose target_date passed >7 days ago as stale.
+
+    Goals don't auto-close themselves and re-mentioning a past goal used to
+    bump its last_confirmed (Sara would keep treating last quarter's "10:30
+    call with Matt" as upcoming). Combined with the upsert closed-status
+    guard and the context-query freshness filter, this sweep is the safety
+    net that prevents indefinite drift.
+    """
+    from app.services.personal_knowledge_graph import personal_kg
+    from datetime import datetime, timezone, timedelta
+
+    if not personal_kg._ensure_driver():
+        return {"checked": 0, "marked_stale": 0, "neo4j_unavailable": True}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    marked = 0
+    try:
+        with personal_kg.driver.session() as s:
+            row = s.run(
+                """
+                MATCH (g:PKG_Goal)
+                WHERE g.superseded_by IS NULL
+                  AND (g.status IS NULL OR toLower(g.status) = 'active')
+                  AND g.target_date IS NOT NULL
+                  AND g.target_date < $cutoff
+                SET g.status = 'stale',
+                    g.stale_at = $now,
+                    g.progress_notes = COALESCE(g.progress_notes, '') +
+                        ' [auto-stale: target_date passed >7 days ago]'
+                RETURN count(g) AS n
+                """,
+                {"cutoff": cutoff, "now": datetime.now(timezone.utc).isoformat()},
+            ).single()
+            if row:
+                marked = int(row["n"])
+        if marked:
+            logger.info(f"PKG stale-goal sweep: marked {marked} past-due goals as stale")
+    except Exception as e:
+        logger.warning(f"PKG stale-goal sweep failed: ({type(e).__name__}) {e}")
+
+    return {"marked_stale": marked, "cutoff_iso": cutoff}
+
+
+@celery_app.task(name="app.tasks.pkg_sync.stale_goal_sweep", bind=True, max_retries=0)
+def stale_goal_sweep(self):
+    """Daily: auto-stale PKG_Goal nodes whose target_date passed >7d ago."""
+    try:
+        return _run_async(_stale_goal_sweep())
+    except Exception as e:
+        logger.warning(f"PKG stale-goal sweep crashed: ({type(e).__name__}) {e}")

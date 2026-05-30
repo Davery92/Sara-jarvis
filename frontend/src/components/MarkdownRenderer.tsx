@@ -49,7 +49,8 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className 
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
       components={{
-        code({ node, inline, className, children, ...props }) {
+        code(props: any) {
+          const { inline, className, children, ...rest } = props
           const match = /language-(\w+)/.exec(className || '')
           const language = match ? match[1] : ''
           
@@ -73,7 +74,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className 
           if (!inline && match) {
             return (
               <pre className="bg-[#18181b] border border-[#3f3f46] rounded-lg p-4 overflow-x-auto my-2">
-                <code className={`${className} text-[#f8fafc]`} {...props}>
+                <code className={`${className} text-[#f8fafc]`} {...rest}>
                   {children}
                 </code>
               </pre>
@@ -82,7 +83,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className 
           
           // Inline code
           return (
-            <code className="bg-[#3f3f46] text-[#f8fafc] px-1 py-0.5 rounded text-sm" {...props}>
+            <code className="bg-[#3f3f46] text-[#f8fafc] px-1 py-0.5 rounded text-sm" {...rest}>
               {children}
             </code>
           )

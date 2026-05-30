@@ -9,7 +9,6 @@ import { autoUpdater } from 'electron-updater'
 let sidecarProcess: ChildProcess | null = null
 let sidecarBridge: WebSocket | null = null
 let bridgeReconnectTimeout: NodeJS.Timeout | null = null
-let currentVoiceState: string = 'disconnected'
 
 function isLocalPortOpen(port: number, host = '127.0.0.1', timeoutMs = 400): Promise<boolean> {
   return new Promise((resolve) => {
@@ -50,61 +49,59 @@ async function startSidecar(store: SimpleStore) {
     }
   }
 
-  let sidecarDir: string
-  let sidecarPath: string
-  if (app.isPackaged) {
-    sidecarDir = path.join(process.resourcesPath, 'sidecar')
-    sidecarPath = path.join(sidecarDir, 'main.py')
-  } else {
-    sidecarDir = path.join(__dirname, '..', 'sidecar')
-    sidecarPath = path.join(sidecarDir, 'main.py')
-  }
-
-  if (!fs.existsSync(sidecarPath)) {
-    console.log('[Main] Sidecar not found at:', sidecarPath)
-    return
-  }
-
-  console.log('[Main] Starting sidecar from:', sidecarPath)
-
   const authToken = store.get('authToken', '') as string
   const apiUrl = store.get('apiUrl', 'https://sara-api.avery.cloud') as string
   const isWindows = process.platform === 'win32'
-  const isMac = process.platform === 'darwin'
 
-  // Look for venv Python first, fall back to system Python
-  let pythonCmd: string
-  const venvCandidates = isWindows
-    ? [
-        path.join(sidecarDir, 'venv', 'Scripts', 'python.exe'),
-        path.join(sidecarDir, '.venv', 'Scripts', 'python.exe'),
-      ]
-    : [
-        path.join(sidecarDir, 'venv', 'bin', 'python'),
-        path.join(sidecarDir, '.venv', 'bin', 'python'),
-      ]
-  const discoveredVenv = venvCandidates.find((candidate) => fs.existsSync(candidate))
-
-  if (discoveredVenv) {
-    pythonCmd = discoveredVenv
-    console.log('[Main] Using venv Python:', pythonCmd)
-  } else {
-    pythonCmd = isWindows ? 'python' : 'python3'
-    console.log('[Main] Using system Python:', pythonCmd)
-    if (isMac) {
-      console.log('[Main] Tip: Run sidecar/setup.sh to create a virtual environment')
-    }
+  const env = {
+    ...process.env,
+    SARA_AUTH_TOKEN: authToken,
+    SARA_BACKEND_URL: apiUrl,
   }
 
-  sidecarProcess = spawn(pythonCmd, [sidecarPath], {
-    env: {
-      ...process.env,
-      SARA_AUTH_TOKEN: authToken,
-      SARA_BACKEND_URL: apiUrl,
-      SARA_VOICE_PLAYBACK_BACKEND: 'winsound',
-    },
+  // Packaged build: spawn the PyInstaller-frozen sidecar.exe directly. No
+  // Python required on the user's machine. Dev: fall back to the .py entry
+  // point via the local Python interpreter so hot-edits still work.
+  let sidecarDir: string
+  let spawnCmd: string
+  let spawnArgs: string[]
+
+  if (app.isPackaged) {
+    sidecarDir = path.join(process.resourcesPath, 'sidecar')
+    const frozenExe = path.join(sidecarDir, isWindows ? 'sidecar.exe' : 'sidecar')
+    if (!fs.existsSync(frozenExe)) {
+      console.error('[Main] Frozen sidecar not found at:', frozenExe)
+      return
+    }
+    spawnCmd = frozenExe
+    spawnArgs = []
+    console.log('[Main] Starting frozen sidecar:', frozenExe)
+  } else {
+    sidecarDir = path.join(__dirname, '..', 'sidecar')
+    const sidecarPy = path.join(sidecarDir, 'main.py')
+    if (!fs.existsSync(sidecarPy)) {
+      console.log('[Main] Sidecar source not found at:', sidecarPy)
+      return
+    }
+    const venvCandidates = isWindows
+      ? [
+          path.join(sidecarDir, 'venv', 'Scripts', 'python.exe'),
+          path.join(sidecarDir, '.venv', 'Scripts', 'python.exe'),
+        ]
+      : [
+          path.join(sidecarDir, 'venv', 'bin', 'python'),
+          path.join(sidecarDir, '.venv', 'bin', 'python'),
+        ]
+    spawnCmd = venvCandidates.find((c) => fs.existsSync(c))
+      ?? (isWindows ? 'python' : 'python3')
+    spawnArgs = [sidecarPy]
+    console.log('[Main] Dev mode — starting sidecar via', spawnCmd, spawnArgs)
+  }
+
+  sidecarProcess = spawn(spawnCmd, spawnArgs, {
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
-    cwd: sidecarDir,  // Set working directory to sidecar folder
+    cwd: sidecarDir,
   })
 
   sidecarProcess.stdout?.on('data', (data) => console.log('[Sidecar]', data.toString().trim()))
@@ -303,35 +300,21 @@ function handleBridgeMessage(message: { type: string; [key: string]: any }) {
       }
       break
 
+    case 'system_event':
+      // Narrator popup — the System AI broadcasts.
+      createSystemEventWindow({
+        id: message.event_id || `sys-${Date.now()}`,
+        title: message.title || 'SYSTEM',
+        body: message.body || '',
+        subtitle: message.subtitle || null,
+        severity: message.severity || 'observation',
+        ttlSeconds: typeof message.ttl_seconds === 'number' ? message.ttl_seconds : 30,
+      })
+      break
+
     case 'activity_update':
       // Forward activity updates to renderer
       mainWindow?.webContents.send('activity-update', message.activity)
-      break
-
-    case 'voice_state':
-      // Update tray icon based on voice state
-      currentVoiceState = message.state || 'disconnected'
-      console.log('[Main] Voice state:', currentVoiceState)
-      updateTrayIcon(currentVoiceState)
-      // Forward to renderer
-      mainWindow?.webContents.send('voice-state', currentVoiceState)
-      break
-
-    case 'voice_transcript':
-      // Voice transcript from Jetson
-      console.log('[Main] Voice transcript - User:', message.user, 'Sara:', message.sara?.substring(0, 50))
-      // Forward to renderer for display
-      mainWindow?.webContents.send('voice-transcript', {
-        user: message.user,
-        sara: message.sara
-      })
-      // Also show notification
-      if (Notification.isSupported() && message.user) {
-        new Notification({
-          title: 'Voice Command',
-          body: message.user
-        }).show()
-      }
       break
 
     case 'system_metrics':
@@ -406,6 +389,7 @@ let chatWindow: BrowserWindow | null = null  // Chat popup window
 let noteWindow: BrowserWindow | null = null  // Note viewer popup
 let settingsWindow: BrowserWindow | null = null  // Settings window
 let timerWindows: Map<string, BrowserWindow> = new Map()  // Floating timer windows
+let systemEventWindows: BrowserWindow[] = []  // Narrator popups (stacked top-right)
 let tray: Tray | null = null
 let isQuitting = false
 
@@ -714,6 +698,149 @@ function createTimerWindow(timerId: string, name: string, remainingSeconds: numb
   })
 }
 
+// ── Narrator popup ──────────────────────────────────────────────────────────
+//
+// The System AI broadcasts. Popups slide in top-right, stack downward when
+// multiple arrive, and auto-dismiss after ttlSeconds. Styling lives inline as
+// a data URL so this lands without touching the React/Vite bundle.
+
+interface SystemEventArgs {
+  id: string
+  title: string
+  body: string
+  subtitle: string | null
+  severity: string
+  ttlSeconds: number
+}
+
+const SYSTEM_EVENT_WIDTH = 440
+const SYSTEM_EVENT_HEIGHT = 160
+const SYSTEM_EVENT_GAP = 12
+
+function createSystemEventWindow(args: SystemEventArgs) {
+  const { width: screenW } = screen.getPrimaryDisplay().workAreaSize
+
+  // Stack: newest on top, older slide down. Cap at 5 visible.
+  if (systemEventWindows.length >= 5) {
+    const oldest = systemEventWindows.shift()
+    if (oldest && !oldest.isDestroyed()) oldest.close()
+  }
+  const stackIndex = systemEventWindows.length
+  const x = screenW - SYSTEM_EVENT_WIDTH - 20
+  const y = 20 + stackIndex * (SYSTEM_EVENT_HEIGHT + SYSTEM_EVENT_GAP)
+
+  const win = new BrowserWindow({
+    width: SYSTEM_EVENT_WIDTH,
+    height: SYSTEM_EVENT_HEIGHT,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    focusable: false,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+  win.setMenu(null)
+  win.setIgnoreMouseEvents(false)
+
+  win.loadURL(buildSystemEventHTML(args))
+
+  systemEventWindows.push(win)
+
+  // Auto-dismiss after ttl.
+  const dismiss = setTimeout(() => {
+    if (!win.isDestroyed()) win.close()
+  }, Math.max(3, args.ttlSeconds) * 1000)
+
+  win.on('closed', () => {
+    clearTimeout(dismiss)
+    const i = systemEventWindows.indexOf(win)
+    if (i >= 0) systemEventWindows.splice(i, 1)
+    // Re-flow remaining stack so there are no gaps.
+    systemEventWindows.forEach((w, idx) => {
+      if (!w.isDestroyed()) {
+        const ny = 20 + idx * (SYSTEM_EVENT_HEIGHT + SYSTEM_EVENT_GAP)
+        const [wx] = w.getPosition()
+        w.setPosition(wx, ny)
+      }
+    })
+  })
+}
+
+function buildSystemEventHTML(args: SystemEventArgs): string {
+  // Severity → accent color. Synthwave-ish, intentionally not macOS-native.
+  const accents: Record<string, { border: string; glow: string; tint: string }> = {
+    roast:       { border: '#ff5a3a', glow: 'rgba(255,90,58,0.45)',  tint: '#1a0c0a' },
+    achievement: { border: '#ffd24a', glow: 'rgba(255,210,74,0.55)', tint: '#1a1408' },
+    observation: { border: '#7a8694', glow: 'rgba(122,134,148,0.30)', tint: '#0e1014' },
+    patch_note:  { border: '#5aa9ff', glow: 'rgba(90,169,255,0.40)', tint: '#08111a' },
+    sponsored:   { border: '#d04aff', glow: 'rgba(208,74,255,0.45)', tint: '#16081a' },
+    grudging:    { border: '#c0c8d0', glow: 'rgba(192,200,208,0.35)', tint: '#10121a' },
+    deflected:   { border: '#b5d4a0', glow: 'rgba(181,212,160,0.35)', tint: '#0a140e' },
+  }
+  const a = accents[args.severity] || accents.observation
+
+  // Defense against HTML injection from the LLM. Escape everything.
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;')
+     .replace(/</g, '&lt;')
+     .replace(/>/g, '&gt;')
+     .replace(/"/g, '&quot;')
+     .replace(/'/g, '&#039;')
+
+  const titleSize = args.severity === 'observation' ? '15px' : '18px'
+  const titleWeight = args.severity === 'observation' ? '500' : '800'
+  const titleSpacing = args.severity === 'observation' ? 'normal' : '0.08em'
+  const titleTransform = args.severity === 'observation' ? 'none' : 'uppercase'
+
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+    font-family: ui-monospace, 'IBM Plex Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+    color: #e8ecf0; }
+  .card {
+    position: absolute; inset: 8px;
+    background: linear-gradient(180deg, ${a.tint} 0%, #050608 100%);
+    border: 1px solid ${a.border};
+    border-radius: 8px;
+    box-shadow: 0 0 24px ${a.glow}, 0 8px 32px rgba(0,0,0,0.6);
+    padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 6px;
+    transform: translateX(120%);
+    animation: slidein 320ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+  }
+  @keyframes slidein { to { transform: translateX(0); } }
+  .label { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: ${a.border}; opacity: 0.85; }
+  .title { font-size: ${titleSize}; font-weight: ${titleWeight};
+    letter-spacing: ${titleSpacing}; text-transform: ${titleTransform};
+    color: #f4f6f8; line-height: 1.2; }
+  .subtitle { font-size: 11px; color: #9aa4b0; }
+  .body { font-size: 13px; line-height: 1.45; color: #d4dae0;
+    overflow: hidden; flex: 1; }
+  .footer { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #5a6470; display: flex; justify-content: space-between; }
+</style></head><body>
+  <div class="card">
+    <div class="label">SYSTEM // ${esc(args.severity)}</div>
+    <div class="title">${esc(args.title)}</div>
+    ${args.subtitle ? `<div class="subtitle">${esc(args.subtitle)}</div>` : ''}
+    <div class="body">${esc(args.body)}</div>
+    <div class="footer">
+      <span>broadcast</span>
+      <span>${esc(args.id.slice(0, 8))}</span>
+    </div>
+  </div>
+</body></html>`
+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+}
+
 function closeTimerWindow(timerId: string) {
   const timerWindow = timerWindows.get(timerId)
   if (timerWindow) {
@@ -768,40 +895,41 @@ function createSettingsWindow() {
   })
 }
 
-function updateTrayIcon(voiceState: string) {
-  if (!tray) return
-
-  // Update tooltip to show voice state
-  const stateLabels: Record<string, string> = {
-    disconnected: 'Sara - Voice: Disconnected',
-    connected: 'Sara - Voice: Ready',
-    wake_word: 'Sara - Voice: Listening...',
-    speaking: 'Sara - Voice: Speaking...',
+async function checkForUpdatesManual() {
+  // User-initiated update check. We want a visible answer either way, so we
+  // wire one-shot listeners that fire a dialog whether an update is found,
+  // the current version is already latest, or the check errors out.
+  let settled = false
+  const finish = (title: string, message: string) => {
+    if (settled) return
+    settled = true
+    dialog.showMessageBox({
+      type: 'info',
+      title,
+      message,
+      detail: `Currently installed: v${app.getVersion()}`,
+      buttons: ['OK'],
+    }).catch(() => {})
   }
-  tray.setToolTip(stateLabels[voiceState] || 'Sara - Your AI Assistant')
 
-  // Try to load state-specific icon if it exists
-  const iconName = `tray-${voiceState}.png`
-  const iconPath = path.join(__dirname, '../assets/icons', iconName)
-  const defaultIconPath = path.join(__dirname, '../assets/icons/tray.png')
+  const onAvailable = (info: { version: string }) => {
+    finish('Update available', `Sara ${info.version} is downloading now. You'll be prompted to restart when it's ready.`)
+  }
+  const onNotAvailable = () => {
+    finish('Up to date', `You're already running the latest version.`)
+  }
+  const onError = (err: Error) => {
+    finish('Update check failed', err?.message || 'Unknown error checking for updates.')
+  }
+
+  autoUpdater.once('update-available', onAvailable)
+  autoUpdater.once('update-not-available', onNotAvailable)
+  autoUpdater.once('error', onError)
 
   try {
-    if (fs.existsSync(iconPath)) {
-      const stateIcon = nativeImage.createFromPath(iconPath)
-      if (!stateIcon.isEmpty()) {
-        tray.setImage(stateIcon)
-        return
-      }
-    }
-    // Fall back to default icon
-    if (fs.existsSync(defaultIconPath)) {
-      const defaultIcon = nativeImage.createFromPath(defaultIconPath)
-      if (!defaultIcon.isEmpty()) {
-        tray.setImage(defaultIcon)
-      }
-    }
-  } catch (e) {
-    console.error('[Main] Failed to update tray icon:', e)
+    await autoUpdater.checkForUpdates()
+  } catch (err: any) {
+    onError(err instanceof Error ? err : new Error(String(err)))
   }
 }
 
@@ -815,6 +943,17 @@ function createTray() {
   }
 
   const contextMenu = Menu.buildFromTemplate([
+    {
+      label: `Sara v${app.getVersion()}`,
+      enabled: false,
+    },
+    {
+      label: 'Check for Updates…',
+      click: () => {
+        void checkForUpdatesManual()
+      },
+    },
+    { type: 'separator' },
     {
       label: 'Show Sara',
       click: () => {
@@ -845,7 +984,7 @@ function createTray() {
     },
   ])
 
-  tray.setToolTip('Sara - Your AI Assistant')
+  tray.setToolTip(`Sara v${app.getVersion()}`)
   tray.setContextMenu(contextMenu)
 
   tray.on('click', () => {
@@ -857,9 +996,6 @@ function createTray() {
       fadeIn()
     }
   })
-
-  // Set initial voice state icon
-  updateTrayIcon(currentVoiceState)
 }
 
 function fadeIn() {
@@ -887,14 +1023,6 @@ function resetActivityTimer() {
 }
 
 // IPC Handlers
-ipcMain.handle('get-mode', () => {
-  return store.get('mode', 'wakeWord')
-})
-
-ipcMain.handle('set-mode', (_, mode: string) => {
-  store.set('mode', mode)
-})
-
 ipcMain.handle('get-api-url', () => {
   return store.get('apiUrl', 'https://sara-api.avery.cloud')
 })
@@ -1050,11 +1178,6 @@ if (!hasSingleInstanceLock) {
       openAtLogin: autoStart,
       openAsHidden: true,
     })
-
-    // If mode was saved as silent, show chat window
-    if (store.get('mode') === 'silent') {
-      showChatWindow()
-    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

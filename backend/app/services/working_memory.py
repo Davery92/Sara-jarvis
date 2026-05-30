@@ -116,54 +116,6 @@ async def increment_deliberation_count(user_id: str) -> None:
         logger.warning(f"Failed to increment deliberation count: {e}")
 
 
-async def inject_acs_signals(user_id: str) -> None:
-    """
-    Inject signals from the latest ACS session into working memory.
-    Called after ACS session finalization to bridge autonomous activity into
-    the salience/deliberation pipeline.
-    """
-    try:
-        from app.db.session import get_async_session_factory
-        from sqlalchemy import text
-
-        async_session = get_async_session_factory()
-        async with async_session() as db:
-            result = await db.execute(text("""
-                SELECT mode, avg_engagement, notes_written, nodes_created, summary
-                FROM acs_session_log
-                WHERE user_id = :uid
-                ORDER BY started_at DESC
-                LIMIT 1
-            """), {"uid": user_id})
-            row = result.fetchone()
-            if not row:
-                return
-
-            mode, avg_eng, notes, nodes, summary = row
-
-            # Only inject if session was productive
-            if (avg_eng or 0) < 0.4 and (notes or 0) == 0 and (nodes or 0) == 0:
-                return
-
-            # Build a curiosity list from high-engagement session topics
-            curiosities = []
-            if summary:
-                curiosities = [summary[:100]]
-
-            fields = {}
-            if curiosities:
-                fields["sara_curiosities"] = curiosities
-            if summary:
-                fields["sara_focus"] = f"ACS {mode}: {summary[:80]}" if summary else None
-
-            if fields:
-                await update_fields(user_id, source="acs_session", **fields)
-                logger.info(f"Injected ACS signals into working memory: mode={mode}, engagement={avg_eng:.2f}")
-
-    except Exception as e:
-        logger.warning(f"ACS signal injection failed: {e}")
-
-
 async def sync_observation_stats(user_id: str, count: int, high_water: float) -> None:
     """
     Update observation stats in working memory.

@@ -31,8 +31,6 @@ declare global {
       showContextMenu: () => void
       onOpenSettings: (callback: () => void) => void
       openUrl: (url: string) => void
-      requestMicPermission: () => Promise<boolean>
-      getMicPermissionStatus: () => Promise<string>
     }
   }
 }

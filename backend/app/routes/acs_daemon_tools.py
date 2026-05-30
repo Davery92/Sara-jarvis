@@ -453,3 +453,479 @@ async def search_memory(payload: SearchMemoryIn) -> list[MemoryHit]:
         )
         for r in rows
     ]
+
+
+# ── Proxmox / container tools ────────────────────────────────────────────────
+#
+# These let Sara spin up sandboxes on the sara-node Proxmox host, run things
+# inside them, and tear them down. All gated on the daemon token. Ownership
+# checks: she can only exec into / destroy containers owned by acs_owner_user_id
+# AND with vmid inside the configured managed range — so she can't reach into
+# something David provisioned by hand for himself.
+
+_PROXMOX_PRESETS = {"minimal", "research", "dev"}
+_EXEC_MAX_TIMEOUT = 600.0  # 10 min hard ceiling per command
+
+
+def _vmid_in_range(vmid: int) -> bool:
+    return settings.proxmox_vmid_range_start <= vmid <= settings.proxmox_vmid_range_end
+
+
+async def _assert_owned(vmid: int) -> None:
+    """Raise 404 if `vmid` isn't a live Sara-owned container in our range."""
+    if not _vmid_in_range(vmid):
+        raise HTTPException(
+            status_code=404,
+            detail=f"vmid {vmid} outside managed range "
+                   f"{settings.proxmox_vmid_range_start}-{settings.proxmox_vmid_range_end}",
+        )
+    user_id = getattr(settings, "acs_owner_user_id", "") or ""
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text(
+                """
+                SELECT vmid, status FROM proxmox_container
+                WHERE vmid = :vmid AND user_id = :uid
+                """
+            ),
+            {"vmid": vmid, "uid": user_id},
+        )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"vmid {vmid} not in tracked Sara containers")
+    if row[1] not in ("creating", "running"):
+        raise HTTPException(status_code=409, detail=f"vmid {vmid} is {row[1]}, not active")
+
+
+# ── provision_container ──────────────────────────────────────────────────────
+
+class ProvisionIn(BaseModel):
+    preset: str = Field(
+        "research",
+        description="Resource template: 'minimal' (Alpine, 1c/512MB), "
+                    "'research' (Ubuntu, 2c/2GB, py+git+jq), "
+                    "'dev' (Ubuntu, 2c/4GB, +docker+build-essential).",
+    )
+    purpose: Optional[str] = Field(
+        None, max_length=500,
+        description="One-line note about what this box is for. Shows up in list_containers.",
+    )
+    persistent: bool = Field(
+        True,
+        description="If true, container survives idle-cleanup. Default true for daemon-spawned boxes.",
+    )
+
+
+class ProvisionOut(BaseModel):
+    vmid: int
+    ip: str
+    hostname: str
+    preset: str
+    cores: int
+    memory_mb: int
+    disk_gb: int
+    ssh_ready: bool
+
+
+@router.post("/provision_container", response_model=ProvisionOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def provision_container(payload: ProvisionIn) -> ProvisionOut:
+    """Spin up a fresh LXC on sara-node. Takes 30-180s depending on preset
+    (apt installs are the slow part for ubuntu presets)."""
+    if payload.preset not in _PROXMOX_PRESETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown preset {payload.preset!r}; valid: {sorted(_PROXMOX_PRESETS)}",
+        )
+    user_id = getattr(settings, "acs_owner_user_id", "") or ""
+    if not user_id:
+        raise HTTPException(status_code=503, detail="acs_owner_user_id not configured")
+
+    from app.services.container_provisioner import ContainerProvisioner, ProvisioningError
+    provisioner = ContainerProvisioner()
+    try:
+        info = await provisioner.provision(
+            user_id=user_id, session_id=None,
+            preset=payload.preset, persistent=payload.persistent,
+            purpose=payload.purpose,
+        )
+    except ProvisioningError as e:
+        raise HTTPException(status_code=502, detail=f"provision failed: {e}")
+
+    return ProvisionOut(
+        vmid=info.vmid, ip=info.ip, hostname=info.hostname, preset=info.preset,
+        cores=info.cores, memory_mb=info.memory_mb, disk_gb=info.disk_gb,
+        ssh_ready=info.ssh_ready,
+    )
+
+
+# ── list_containers ──────────────────────────────────────────────────────────
+
+class ListContainersIn(BaseModel):
+    include_destroyed: bool = Field(
+        False,
+        description="Include recently-destroyed boxes (last 24h) for context. Default false.",
+    )
+
+
+class ContainerRow(BaseModel):
+    vmid: int
+    hostname: str
+    ip_address: Optional[str]
+    preset: str
+    status: str
+    purpose: Optional[str]
+    cores: int
+    memory_mb: int
+    persistent: bool
+    created_at: datetime
+    last_used_at: Optional[datetime]
+
+
+class ListContainersOut(BaseModel):
+    count: int
+    containers: list[ContainerRow]
+
+
+@router.post("/list_containers", response_model=ListContainersOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def list_containers(payload: ListContainersIn) -> ListContainersOut:
+    user_id = getattr(settings, "acs_owner_user_id", "") or ""
+    if not user_id:
+        raise HTTPException(status_code=503, detail="acs_owner_user_id not configured")
+
+    if payload.include_destroyed:
+        where = (
+            "user_id = :uid AND ("
+            "status IN ('creating','running') "
+            "OR (status = 'destroyed' AND destroyed_at > NOW() - INTERVAL '24 hours'))"
+        )
+    else:
+        where = "user_id = :uid AND status IN ('creating','running')"
+
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        rows = (await db.execute(
+            text(f"""
+                SELECT vmid, hostname, ip_address, preset, status, purpose,
+                       cores, memory_mb, persistent, created_at, last_used_at
+                FROM proxmox_container
+                WHERE {where}
+                ORDER BY created_at DESC
+            """),
+            {"uid": user_id},
+        )).mappings().all()
+    return ListContainersOut(
+        count=len(rows),
+        containers=[ContainerRow(**dict(r)) for r in rows],
+    )
+
+
+# ── exec_in_container ────────────────────────────────────────────────────────
+
+class ExecIn(BaseModel):
+    vmid: int = Field(..., ge=100, le=99999)
+    command: str = Field(..., min_length=1, max_length=10_000,
+                         description="Shell command run as root via SSH.")
+    timeout_s: float = Field(60.0, ge=1.0, le=_EXEC_MAX_TIMEOUT)
+
+
+class ExecOut(BaseModel):
+    vmid: int
+    stdout: str
+    truncated: bool
+    error: Optional[str] = None
+
+
+@router.post("/exec_in_container", response_model=ExecOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def exec_in_container(payload: ExecIn) -> ExecOut:
+    """Run a shell command inside an LXC. SSH as root, captures stdout.
+
+    Errors (non-zero exit, ssh failures, timeouts) come back in `error` —
+    the route doesn't raise, so Sara can read the failure and react.
+    """
+    await _assert_owned(payload.vmid)
+
+    from app.services.proxmox_client import ProxmoxClient, ProxmoxError
+    pve = ProxmoxClient()
+    try:
+        out = await pve.exec_in_container(
+            payload.vmid, payload.command, timeout=payload.timeout_s,
+        )
+    except ProxmoxError as e:
+        return ExecOut(vmid=payload.vmid, stdout="", truncated=False, error=str(e)[:1000])
+
+    # Bump last_used_at so cleanup_stale doesn't reap an actively-used box.
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        await db.execute(
+            text("UPDATE proxmox_container SET last_used_at = NOW() WHERE vmid = :vmid"),
+            {"vmid": payload.vmid},
+        )
+        await db.commit()
+
+    truncated = len(out) > 16_000
+    return ExecOut(
+        vmid=payload.vmid, stdout=out[:16_000], truncated=truncated, error=None,
+    )
+
+
+# ── destroy_container ────────────────────────────────────────────────────────
+
+class DestroyIn(BaseModel):
+    vmid: int = Field(..., ge=100, le=99999)
+
+
+class DestroyOut(BaseModel):
+    vmid: int
+    destroyed: bool
+
+
+@router.post("/destroy_container", response_model=DestroyOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def destroy_container(payload: DestroyIn) -> DestroyOut:
+    await _assert_owned(payload.vmid)
+    from app.services.container_provisioner import ContainerProvisioner
+    provisioner = ContainerProvisioner()
+    ok = await provisioner.destroy(payload.vmid)
+    return DestroyOut(vmid=payload.vmid, destroyed=ok)
+
+
+# ── node_status ──────────────────────────────────────────────────────────────
+
+class NodeStatusIn(BaseModel):
+    pass
+
+
+class NodeStatusOut(BaseModel):
+    node: str
+    cpu_pct: float = Field(..., description="0.0-1.0, current load.")
+    memory_used_mb: int
+    memory_total_mb: int
+    disk_used_gb: int
+    disk_total_gb: int
+    uptime_s: int
+    managed_active: int = Field(..., description="Sara-owned containers currently running.")
+    managed_cores_used: int
+    managed_memory_mb_used: int
+    managed_cores_max: int
+    managed_memory_mb_max: int
+
+
+@router.post("/node_status", response_model=NodeStatusOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def node_status(payload: NodeStatusIn) -> NodeStatusOut:
+    """Resource usage on sara-node. Use before provisioning so Sara can
+    decide whether a new box would fit."""
+    from app.services.proxmox_client import ProxmoxClient
+    pve = ProxmoxClient()
+    try:
+        st = await pve.get_node_status()
+        managed = await pve.list_containers()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"pve query failed: {e}")
+
+    managed_active = [
+        c for c in managed
+        if _vmid_in_range(int(c.get("vmid", 0)))
+        and c.get("status") != "stopped"
+    ]
+    cores_used = sum(int(c.get("cpus", 0)) for c in managed_active)
+    mem_used = sum(int(c.get("maxmem", 0)) // (1024 * 1024) for c in managed_active)
+
+    cpu = st.get("cpu") or 0.0
+    mem = st.get("memory") or {}
+    disk = st.get("rootfs") or {}
+    return NodeStatusOut(
+        node=settings.proxmox_node,
+        cpu_pct=float(cpu),
+        memory_used_mb=int(mem.get("used", 0)) // (1024 * 1024),
+        memory_total_mb=int(mem.get("total", 0)) // (1024 * 1024),
+        disk_used_gb=int(disk.get("used", 0)) // (1024 ** 3),
+        disk_total_gb=int(disk.get("total", 0)) // (1024 ** 3),
+        uptime_s=int(st.get("uptime", 0)),
+        managed_active=len(managed_active),
+        managed_cores_used=cores_used,
+        managed_memory_mb_used=mem_used,
+        managed_cores_max=settings.proxmox_max_cores,
+        managed_memory_mb_max=settings.proxmox_max_memory_mb,
+    )
+
+
+# ── Interest tools ───────────────────────────────────────────────────────────
+#
+# Thin POST adapters over the GET/POST routes already in `acs_interests.py`.
+# Pattern is the same as everything else in this file: each tool is a single
+# POST under /api/acs/v2/tools/<name> with a JSON body. The underlying logic
+# (semantic dedup, weight bumping, stale filtering) lives in the existing
+# routes — we don't duplicate it here, we just re-issue the SQL the daemon
+# call needs.
+
+class ListInterestsIn(BaseModel):
+    limit: int = Field(8, ge=1, le=50)
+    min_weight: float = Field(0.1, ge=0.0)
+    stale_hours: Optional[int] = Field(
+        None, ge=0, le=24 * 90,
+        description="If set, only include interests not acted on in this many hours.",
+    )
+
+
+class InterestRow(BaseModel):
+    id: str
+    display_name: str
+    why: Optional[str]
+    weight: float
+    source: str
+    last_acted_at: Optional[datetime]
+    created_at: datetime
+
+
+class ListInterestsOut(BaseModel):
+    count: int
+    interests: list[InterestRow]
+
+
+@router.post("/list_interests", response_model=ListInterestsOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def list_interests_tool(payload: ListInterestsIn) -> ListInterestsOut:
+    where = ["weight >= :min_weight"]
+    params: dict[str, Any] = {"limit": payload.limit, "min_weight": payload.min_weight}
+    if payload.stale_hours is not None:
+        where.append(
+            "(last_acted_at IS NULL "
+            "OR last_acted_at < NOW() - make_interval(hours => :stale_hours))"
+        )
+        params["stale_hours"] = payload.stale_hours
+
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        rows = (await db.execute(
+            text(f"""
+                SELECT id, display_name, why, weight, source,
+                       last_acted_at, created_at
+                FROM sara_interest
+                WHERE {' AND '.join(where)}
+                ORDER BY weight DESC, last_updated_at DESC
+                LIMIT :limit
+            """),
+            params,
+        )).mappings().all()
+    out = [
+        InterestRow(
+            id=str(r["id"]),
+            display_name=r["display_name"],
+            why=r["why"],
+            weight=float(r["weight"]),
+            source=r["source"],
+            last_acted_at=r["last_acted_at"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+    return ListInterestsOut(count=len(out), interests=out)
+
+
+class AddInterestIn(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=200)
+    why: Optional[str] = Field(None, max_length=2000)
+    weight_delta: float = Field(1.0, ge=-100.0, le=100.0)
+
+
+class AddInterestOut(BaseModel):
+    id: str
+    display_name: str
+    weight: float
+    merged: bool
+    why: Optional[str]
+
+
+@router.post("/add_interest", response_model=AddInterestOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def add_interest_tool(payload: AddInterestIn) -> AddInterestOut:
+    """She names a thread she wants to keep tugging at. Semantic dedup means
+    rephrasing the same interest just bumps the existing one — she can't
+    spam the table by paraphrasing."""
+    from app.routes.acs_interests import upsert_interest, InterestUpsertIn
+    out = await upsert_interest(InterestUpsertIn(
+        display_name=payload.display_name,
+        why=payload.why,
+        weight_delta=payload.weight_delta,
+        source="reflection",
+    ))
+    return AddInterestOut(
+        id=out.interest.id,
+        display_name=out.interest.display_name,
+        weight=out.interest.weight,
+        merged=out.merged,
+        why=out.interest.why,
+    )
+
+
+class InterestIdIn(BaseModel):
+    id: str = Field(..., min_length=8, max_length=64)
+    delta: float = Field(1.0, ge=-100.0, le=100.0,
+                         description="Used by bump_interest. Ignored by touch_interest.")
+
+
+@router.post("/bump_interest", response_model=InterestRow,
+             dependencies=[Depends(verify_daemon_token)])
+async def bump_interest_tool(payload: InterestIdIn) -> InterestRow:
+    """Adjust an existing interest's weight without changing its name. Use
+    positive delta to reinforce, negative to dampen."""
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text("""
+                UPDATE sara_interest
+                SET weight = GREATEST(0.0, weight + :delta),
+                    last_updated_at = NOW()
+                WHERE id = :id
+                RETURNING id, display_name, why, weight, source,
+                          last_acted_at, created_at
+            """),
+            {"delta": payload.delta, "id": payload.id},
+        )).mappings().first()
+        await db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"interest {payload.id} not found")
+    return InterestRow(
+        id=str(row["id"]),
+        display_name=row["display_name"],
+        why=row["why"],
+        weight=float(row["weight"]),
+        source=row["source"],
+        last_acted_at=row["last_acted_at"],
+        created_at=row["created_at"],
+    )
+
+
+@router.post("/touch_interest", response_model=InterestRow,
+             dependencies=[Depends(verify_daemon_token)])
+async def touch_interest_tool(payload: InterestIdIn) -> InterestRow:
+    """Mark that she just did real work on this interest. Resets the staleness
+    clock so it doesn't pull at her again until enough time passes."""
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text("""
+                UPDATE sara_interest
+                SET last_acted_at = NOW(), last_updated_at = NOW()
+                WHERE id = :id
+                RETURNING id, display_name, why, weight, source,
+                          last_acted_at, created_at
+            """),
+            {"id": payload.id},
+        )).mappings().first()
+        await db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"interest {payload.id} not found")
+    return InterestRow(
+        id=str(row["id"]),
+        display_name=row["display_name"],
+        why=row["why"],
+        weight=float(row["weight"]),
+        source=row["source"],
+        last_acted_at=row["last_acted_at"],
+        created_at=row["created_at"],
+    )

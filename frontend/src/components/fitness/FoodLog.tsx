@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { Plus, Calendar, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import AddMealForm from './AddMealForm'
+import type { SelectedFoodItem } from './FoodItemSelector'
 
 interface FoodItem {
   name: string
@@ -9,23 +10,10 @@ interface FoodItem {
   unit: string
 }
 
-interface SelectedFoodItem {
-  id: string
-  name: string
-  brand?: string
-  serving_size: number
-  serving_unit: string
-  quantity: number
-  calculated_calories?: number
-  calculated_protein?: number
-  calculated_carbs?: number
-  calculated_fats?: number
-}
-
 interface FoodLogEntry {
   log_id: string
   meal_type: string
-  food_items: FoodItem[]
+  food_items: FoodItem[] | string
   detailed_items?: SelectedFoodItem[]
   calories?: number
   protein?: number
@@ -357,7 +345,8 @@ export default function FoodLog() {
                       foodItems = JSON.parse(foodItems);
                     } catch {
                       // If parsing fails, treat as single item description
-                      foodItems = [{ name: foodItems, quantity: 1, unit: 'serving' }];
+                      const fallbackText = typeof foodItems === 'string' ? foodItems : 'Food item';
+                      foodItems = [{ name: fallbackText, quantity: 1, unit: 'serving' }];
                     }
                   }
 

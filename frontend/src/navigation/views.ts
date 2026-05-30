@@ -12,13 +12,11 @@ export type AppView =
   | 'recipes'
   | 'briefings'
   | 'sensory-monitor'
-  | 'saras-mind'
   | 'inbox'
   | 'workspace'
   | 'tasks'
   | 'settings'
   | 'knowledge'
-  | 'intelligence'
   | 'privacy-dashboard'
   | 'automations'
   | 'orchestrator-lab'
@@ -36,30 +34,28 @@ interface AppViewConfig {
 
 export const APP_VIEWS: AppViewConfig[] = [
   { view: 'login', path: '/login', title: 'Login', keywords: ['auth', 'signin'], includeInPalette: false },
-  { view: 'dashboard', path: '/', title: 'Home', icon: '🏠', keywords: ['home', 'dashboard'] },
-  { view: 'chat', path: '/chat', title: 'Chat', icon: '💬', keywords: ['chat', 'talk', 'conversation'] },
-  { view: 'notes', path: '/notes', title: 'Notes', icon: '📝', keywords: ['notes', 'knowledge', 'write'] },
-  { view: 'documents', path: '/documents', title: 'Documents', icon: '📄', keywords: ['documents', 'files', 'uploads'] },
-  { view: 'tasks', path: '/tasks', title: 'Tasks', icon: '✅', keywords: ['tasks', 'todo', 'daily', 'checklist'] },
-  { view: 'calendar', path: '/calendar', title: 'Calendar', icon: '📅', keywords: ['calendar', 'events', 'schedule'] },
-  { view: 'email', path: '/email', title: 'Email', icon: '📧', keywords: ['email', 'mail', 'inbox', 'messages'] },
-  { view: 'fitness', path: '/fitness', title: 'Fitness', icon: '💪', keywords: ['fitness', 'health', 'workout'] },
-  { view: 'learn', path: '/learn', title: 'Learn', icon: '🎓', keywords: ['learn', 'study', 'education'] },
-  { view: 'projects', path: '/projects', title: 'Projects', icon: '📁', keywords: ['projects', 'work', 'planning'] },
-  { view: 'recipes', path: '/recipes', title: 'Recipes', icon: '👨‍🍳', keywords: ['recipes', 'cooking', 'food'] },
-  { view: 'briefings', path: '/briefings', title: 'Morning Brief', icon: '🌅', keywords: ['brief', 'briefings', 'morning'] },
-  { view: 'sensory-monitor', path: '/sensory-monitor', title: 'Sensory', icon: '📡', keywords: ['sensory', 'monitor'] },
-  { view: 'saras-mind', path: '/saras-mind', title: "Sara's Mind", icon: '🧠', keywords: ['mind', 'thoughts', 'deliberation', 'inner', 'autonomy', 'observations'] },
-  { view: 'inbox', path: '/inbox', title: 'Inbox', icon: '📥', keywords: ['inbox', 'content'] },
-  { view: 'knowledge', path: '/knowledge', title: 'Knowledge', icon: '🧬', keywords: ['knowledge', 'pkg', 'personal', 'facts', 'preferences', 'people'] },
-  { view: 'intelligence', path: '/intelligence', title: 'Intelligence', icon: '📡', keywords: ['intelligence', 'news', 'tech', 'ai', 'research', 'feed'] },
-  { view: 'workspace', path: '/workspace', title: 'Canvas', icon: '🧩', keywords: ['canvas', 'workspace', 'workbench'] },
-  { view: 'automations', path: '/automations', title: 'Automations', icon: '⚡', keywords: ['automations', 'agent', 'background', 'dispatch', 'missions'] },
-  { view: 'settings', path: '/settings', title: 'Settings', icon: '⚙️', keywords: ['settings', 'preferences', 'config'] },
-  { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: '🔒', keywords: ['privacy', 'security'], includeInPalette: false },
-  { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: '🧠', keywords: ['orchestrator', 'automation', 'lab'] },
-  { view: 'acs', path: '/acs', title: 'ACS', icon: '🤖', keywords: ['acs', 'autonomous', 'cognition', 'session', 'interest', 'curiosity', 'directive'] },
-  { view: 'system-status', path: '/system-status', title: 'System Status', icon: '📊', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
+  { view: 'dashboard', path: '/', title: 'Home', icon: 'home', keywords: ['home', 'dashboard'] },
+  { view: 'chat', path: '/chat', title: 'Chat', icon: 'chat', keywords: ['chat', 'talk', 'conversation'] },
+  { view: 'notes', path: '/notes', title: 'Notes', icon: 'edit_note', keywords: ['notes', 'knowledge', 'write'] },
+  { view: 'documents', path: '/documents', title: 'Documents', icon: 'description', keywords: ['documents', 'files', 'uploads'] },
+  { view: 'tasks', path: '/tasks', title: 'Tasks', icon: 'check_circle', keywords: ['tasks', 'todo', 'daily', 'checklist'] },
+  { view: 'calendar', path: '/calendar', title: 'Calendar', icon: 'calendar_today', keywords: ['calendar', 'events', 'schedule'] },
+  { view: 'email', path: '/email', title: 'Email', icon: 'mail', keywords: ['email', 'mail', 'inbox', 'messages'] },
+  { view: 'fitness', path: '/fitness', title: 'Fitness', icon: 'fitness_center', keywords: ['fitness', 'health', 'workout'] },
+  { view: 'learn', path: '/learn', title: 'Learn', icon: 'school', keywords: ['learn', 'study', 'education'] },
+  { view: 'projects', path: '/projects', title: 'Projects', icon: 'work', keywords: ['projects', 'work', 'planning'] },
+  { view: 'recipes', path: '/recipes', title: 'Recipes', icon: 'restaurant_menu', keywords: ['recipes', 'cooking', 'food'] },
+  { view: 'briefings', path: '/briefings', title: 'Briefings', icon: 'wb_sunny', keywords: ['brief', 'briefings', 'morning', 'research', 'papers'] },
+  { view: 'sensory-monitor', path: '/sensory-monitor', title: 'Sensory', icon: 'sensors', keywords: ['sensory', 'monitor'] },
+  { view: 'inbox', path: '/inbox', title: 'Today', icon: 'inbox', keywords: ['today', 'inbox', 'priorities', 'attention', 'content'] },
+  { view: 'knowledge', path: '/knowledge', title: 'Knowledge', icon: 'psychology', keywords: ['knowledge', 'pkg', 'personal', 'facts', 'preferences', 'people'] },
+  { view: 'workspace', path: '/workspace', title: 'Canvas', icon: 'grid_view', keywords: ['canvas', 'workspace', 'workbench'] },
+  { view: 'automations', path: '/automations', title: 'Automations', icon: 'bolt', keywords: ['automations', 'agent', 'background', 'dispatch', 'missions'] },
+  { view: 'settings', path: '/settings', title: 'Settings', icon: 'settings', keywords: ['settings', 'preferences', 'config'] },
+  { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: 'lock', keywords: ['privacy', 'security'], includeInPalette: false },
+  { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: 'science', keywords: ['orchestrator', 'automation', 'lab'], includeInPalette: false },
+  { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
+  { view: 'system-status', path: '/system-status', title: 'System Status', icon: 'monitoring', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {

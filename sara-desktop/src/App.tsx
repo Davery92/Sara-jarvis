@@ -135,7 +135,6 @@ function App() {
     >
       <div className={`transition-opacity duration-500 ${isVisible ? 'opacity-100' : 'opacity-20'}`}>
         <FloatingCircle
-          chatOpen={chatOpen}
           onClick={handleCircleClick}
           onRightClick={handleRightClick}
         />

@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 import httpx
 from pydantic import BaseModel
 
@@ -254,6 +256,44 @@ async def transcribe(req: TranscribeRequest) -> TranscribeResponse:
     except Exception as exc:
         logger.error("ASR transcription failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/v1/audio/transcriptions")
+async def openai_transcriptions(
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
+    language: Optional[str] = Form("en"),
+    vad_filter: Optional[str] = Form("true"),
+    beam_size: Optional[int] = Form(1),
+    no_speech_threshold: Optional[str] = Form(None),
+    compression_ratio_threshold: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """OpenAI-compatible multipart shim that wraps the local path-based transcribe."""
+    suffix = Path(file.filename or "audio").suffix or ".bin"
+    tmp_path = Path(tempfile.gettempdir()) / f"asr_{uuid.uuid4().hex}{suffix}"
+    try:
+        contents = await file.read()
+        tmp_path.write_bytes(contents)
+        result = await transcribe(
+            TranscribeRequest(
+                audio_path=str(tmp_path),
+                language=language or "en",
+                beam_size=int(beam_size or 1),
+                vad_filter=str(vad_filter).lower() in ("1", "true", "yes"),
+            )
+        )
+        return {
+            "text": result.text,
+            "language": result.language,
+            "duration": result.duration,
+            "segments": [s.model_dump() for s in result.segments],
+            "backend": result.backend,
+        }
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

@@ -191,7 +191,7 @@ export default function SmartInsightsDashboard() {
   return (
     <div className="space-y-6">
       {/* Header with View Switcher */}
-      <div className="bg-card border border-card rounded-xl p-6">
+      <div className="bg-card border border-card rounded-md p-6">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">Smart Insights</h2>
@@ -242,7 +242,7 @@ export default function SmartInsightsDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Reports List */}
           <div className="lg:col-span-1 space-y-4">
-            <div className="bg-card border border-card rounded-xl p-4">
+            <div className="bg-card border border-card rounded-md p-4">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-white">Generate Report</h3>
               </div>
@@ -283,7 +283,7 @@ export default function SmartInsightsDashboard() {
               </div>
             </div>
 
-            <div className="bg-card border border-card rounded-xl p-4">
+            <div className="bg-card border border-card rounded-md p-4">
               <h3 className="text-lg font-semibold text-white mb-4">Recent Reports</h3>
               {reports.length === 0 ? (
                 <p className="text-gray-400 text-center py-8 text-sm">No reports yet</p>
@@ -321,7 +321,7 @@ export default function SmartInsightsDashboard() {
           </div>
 
           {/* Report Content */}
-          <div className="lg:col-span-2 bg-card border border-card rounded-xl p-6">
+          <div className="lg:col-span-2 bg-card border border-card rounded-md p-6">
             {selectedReport ? (
               <div>
                 <div className="flex items-center justify-between mb-6 pb-4 border-b border-gray-700">
@@ -425,7 +425,7 @@ export default function SmartInsightsDashboard() {
       {view === 'suggestions' && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {suggestions.length === 0 ? (
-            <div className="col-span-full bg-card border border-card rounded-xl p-12 text-center">
+            <div className="col-span-full bg-card border border-card rounded-md p-12 text-center">
               <span className="material-icons text-6xl text-gray-600 mb-4">auto_awesome</span>
               <p className="text-gray-400">No suggestions at this time</p>
               <p className="text-sm text-gray-500 mt-2">Sara will proactively suggest actions based on your patterns</p>
@@ -434,7 +434,7 @@ export default function SmartInsightsDashboard() {
             suggestions.map((suggestion) => (
               <div
                 key={suggestion.id}
-                className={`bg-card border-2 rounded-xl p-6 ${
+                className={`bg-card border-2 rounded-md p-6 ${
                   suggestion.status === 'pending' ? 'border-teal-500' : 'border-gray-700 opacity-60'
                 }`}
               >
@@ -480,14 +480,14 @@ export default function SmartInsightsDashboard() {
       {view === 'patterns' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {patterns.length === 0 ? (
-            <div className="col-span-full bg-card border border-card rounded-xl p-12 text-center">
+            <div className="col-span-full bg-card border border-card rounded-md p-12 text-center">
               <span className="material-icons text-6xl text-gray-600 mb-4">pattern</span>
               <p className="text-gray-400">No patterns detected yet</p>
               <p className="text-sm text-gray-500 mt-2">Sara will identify behavioral patterns over time</p>
             </div>
           ) : (
             patterns.map((pattern) => (
-              <div key={pattern.id} className="bg-card border border-card rounded-xl p-6">
+              <div key={pattern.id} className="bg-card border border-card rounded-md p-6">
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center space-x-2">
                     <span className="material-icons text-purple-400">pattern</span>

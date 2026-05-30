@@ -140,7 +140,7 @@ export default function ContextModeSwitcher() {
   return (
     <div className="space-y-6">
       {/* Header with current mode */}
-      <div className="bg-card border border-card rounded-xl p-6">
+      <div className="bg-card border border-card rounded-md p-6">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">Context Mode</h2>
@@ -158,7 +158,7 @@ export default function ContextModeSwitcher() {
 
       {/* Context Stats */}
       {stats && (
-        <div className="bg-card border border-card rounded-xl p-6">
+        <div className="bg-card border border-card rounded-md p-6">
           <h3 className="text-lg font-semibold text-white mb-4">Available Context</h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-gray-800 rounded-lg p-4 text-center">
@@ -196,7 +196,7 @@ export default function ContextModeSwitcher() {
               key={mode.mode}
               onClick={() => switchMode(mode.mode)}
               disabled={saving}
-              className={`text-left p-6 rounded-xl border-2 transition-all ${getColorClasses(mode.color, isActive)} ${
+              className={`text-left p-6 rounded-md border-2 transition-all ${getColorClasses(mode.color, isActive)} ${
                 isActive ? 'ring-2 ring-white/20' : 'bg-gray-800'
               } ${saving ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
             >
@@ -214,7 +214,7 @@ export default function ContextModeSwitcher() {
       </div>
 
       {/* Mode Details */}
-      <div className="bg-card border border-card rounded-xl p-6">
+      <div className="bg-card border border-card rounded-md p-6">
         <h3 className="text-lg font-semibold text-white mb-4">What's Included in {activeMode.name}?</h3>
         <div className="space-y-3">
           {currentMode === 'full' && (

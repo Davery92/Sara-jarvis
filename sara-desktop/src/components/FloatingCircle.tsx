@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface FloatingCircleProps {
-  chatOpen?: boolean
   onClick: () => void
   onRightClick: () => void
 }
 
 class SmokeRing {
-  private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private width: number
   private height: number
@@ -20,7 +18,6 @@ class SmokeRing {
   private animationId: number | null = null
 
   constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas
     this.ctx = canvas.getContext('2d')!
 
     const dpr = window.devicePixelRatio || 1
@@ -142,7 +139,7 @@ class SmokeRing {
   }
 }
 
-export default function FloatingCircle({ chatOpen, onClick, onRightClick }: FloatingCircleProps) {
+export default function FloatingCircle({ onClick, onRightClick }: FloatingCircleProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const smokeRingRef = useRef<SmokeRing | null>(null)
   const [attentionCount, setAttentionCount] = useState(0)

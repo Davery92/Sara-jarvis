@@ -452,7 +452,7 @@ function ProgramManager() {
     <div className="p-4 sm:p-6 space-y-4">
       {/* Program Header */}
       {activeProgram ? (
-        <div className="bg-gradient-to-br from-gray-800 to-gray-800/80 rounded-xl p-5 border border-gray-700">
+        <div className="bg-gradient-to-br from-gray-800 to-gray-800/80 rounded-md p-5 border border-gray-700">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex items-center gap-3 flex-wrap">
@@ -481,7 +481,7 @@ function ProgramManager() {
           </div>
         </div>
       ) : (
-        <div className="bg-gray-800 rounded-xl p-8 border border-gray-700 text-center">
+        <div className="bg-gray-800 rounded-md p-8 border border-gray-700 text-center">
           <Target className="w-10 h-10 text-gray-600 mx-auto mb-3" />
           <p className="text-gray-400 mb-4">No active program</p>
           <button
@@ -505,7 +505,7 @@ function ProgramManager() {
             return (
               <div
                 key={phase.id}
-                className={`rounded-xl border overflow-hidden transition-all ${
+                className={`rounded-md border overflow-hidden transition-all ${
                   isActive
                     ? 'bg-gray-800 border-blue-500/60 shadow-lg shadow-blue-500/5'
                     : 'bg-gray-800/60 border-gray-700'
@@ -736,7 +736,7 @@ function ProgramManager() {
           {showManageMode && (
             <button
               onClick={() => { setEditingPhase(null); setShowPhaseModal(true); }}
-              className="w-full py-3 border-2 border-dashed border-gray-700 hover:border-gray-500 rounded-xl text-gray-500 hover:text-gray-300 text-sm font-medium transition-colors"
+              className="w-full py-3 border-2 border-dashed border-gray-700 hover:border-gray-500 rounded-md text-gray-500 hover:text-gray-300 text-sm font-medium transition-colors"
             >
               + Add Phase
             </button>
@@ -746,7 +746,7 @@ function ProgramManager() {
 
       {/* All Programs (manage mode) */}
       {showManageMode && programs.length > 0 && (
-        <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
+        <div className="bg-gray-800 rounded-md p-5 border border-gray-700">
           <h3 className="text-lg font-semibold mb-3">All Programs</h3>
           <div className="space-y-2">
             {programs.map(program => (
@@ -785,7 +785,7 @@ function ProgramManager() {
       {/* Create Program Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 rounded-md p-6 w-full max-w-md border border-gray-700">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-semibold">Create Program</h3>
               <button onClick={() => setShowCreateModal(false)} className="p-2 hover:bg-gray-700 rounded-lg">
@@ -874,7 +874,7 @@ function ProgramManager() {
       {/* Create/Edit Phase Modal */}
       {showPhaseModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700 max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-md p-6 w-full max-w-md border border-gray-700 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-semibold">{editingPhase ? 'Edit Phase' : 'Add Phase'}</h3>
               <button onClick={() => { setShowPhaseModal(false); setEditingPhase(null); }} className="p-2 hover:bg-gray-700 rounded-lg">

@@ -612,7 +612,7 @@ export default function BlueprintImporter({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-      <div className="w-full max-w-5xl max-h-[88vh] bg-gray-900 border border-gray-700 rounded-xl overflow-hidden flex flex-col">
+      <div className="w-full max-w-5xl max-h-[88vh] bg-gray-900 border border-gray-700 rounded-md overflow-hidden flex flex-col">
         <div className="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-white flex items-center gap-2">

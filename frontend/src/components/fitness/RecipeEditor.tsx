@@ -68,7 +68,11 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
     }
   }
 
-  const handleIngredientChange = (index: number, field: keyof IngredientRow, value: string) => {
+  const handleIngredientChange = (
+    index: number,
+    field: Exclude<keyof IngredientRow, 'showNutrition'>,
+    value: string,
+  ) => {
     const updated = [...ingredients]
     updated[index][field] = value
     setIngredients(updated)

@@ -106,7 +106,7 @@ from app.tools.learning import (
 from app.tools.morning_brief import MorningBriefTool, WeatherTool
 from app.tools.projects import PROJECT_TOOLS
 from app.tools.home import HOME_TOOLS
-from app.tools.agents import HandoffToAgentsTool, GetBackgroundTasksTool
+from app.tools.agents import GetBackgroundTasksTool
 from app.tools.research_plan import CreateResearchPlanTool, ResearchPlanStatusTool
 from app.tools.health import HEALTH_TOOLS
 from app.tools.canvas import (
@@ -130,9 +130,7 @@ from app.tools.standing_orders import STANDING_ORDER_TOOLS
 from app.tools.content_inbox import CONTENT_INBOX_TOOLS
 from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
 from app.tools.shell import SHELL_TOOLS
-from app.tools.acs_research import ACS_RESEARCH_TOOLS
-from app.tools.acs_activity import ACS_ACTIVITY_TOOLS
-from app.tools.acs_directive import ACS_DIRECTIVE_TOOLS
+from app.tools.recipes import RECIPE_TOOLS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -251,9 +249,9 @@ class ToolRegistry:
             ]
         },
         'agents': {
-            'description': 'Hand off research tasks to background worker agents for autonomous investigation',
+            'description': 'Inspect background worker agents and tasks',
             'tools': [
-                'handoff_to_agents', 'get_background_tasks'
+                'get_background_tasks'
             ]
         },
         'health': {
@@ -277,10 +275,11 @@ class ToolRegistry:
             ]
         },
         'devices': {
-            'description': 'Control connected desktop agents - send notifications, open URLs, show notes, take screenshots, open workspace on user devices',
+            'description': 'Control connected desktop agents - send notifications, open URLs, show notes, take screenshots, open workspace, write clipboard, focus windows, and type into named windows on user devices. The clipboard/focus/typing tools only run when the user explicitly asks for them.',
             'tools': [
                 'device_list', 'device_send_notification', 'device_open_url',
-                'device_show_note', 'device_take_screenshot', 'device_open_workspace'
+                'device_show_note', 'device_take_screenshot', 'device_open_workspace',
+                'device_write_clipboard', 'device_focus_window', 'device_type_into_window'
             ]
         },
         'workspace': {
@@ -351,10 +350,14 @@ class ToolRegistry:
             'description': 'Execute shell commands, read and write files on the server. Use for code execution, scripting, system administration, file manipulation.',
             'tools': ['run_command', 'read_file', 'write_file']
         },
-        'acs': {
-            'description': "Sara's autonomous cognition — queue research topics, send directives, review own activity/sessions/notes/interests",
-            'tools': ['queue_research_topic', 'get_my_activity', 'send_acs_directive']
-        }
+        'recipes': {
+            'description': "Create, search, edit, and log David's recipes — structured ingredients, steps, servings, prep/cook time, macros. Use these instead of notes for any cooking recipe.",
+            'tools': [
+                'recipes_create', 'recipes_search', 'recipes_get',
+                'recipes_list', 'recipes_edit', 'recipes_delete',
+                'recipes_log_made'
+            ]
+        },
     }
 
     def __init__(self):
@@ -511,7 +514,6 @@ class ToolRegistry:
             *HOME_TOOLS,
 
             # Agent Handoff Tools
-            HandoffToAgentsTool(),
             GetBackgroundTasksTool(),
 
             # Health Monitoring Tools
@@ -566,14 +568,15 @@ class ToolRegistry:
             # Shell Tools (local command execution, file I/O)
             *SHELL_TOOLS,
 
-            # ACS Tools (queue topics, review activity, send directives)
-            *ACS_RESEARCH_TOOLS,
-            *ACS_ACTIVITY_TOOLS,
-            *ACS_DIRECTIVE_TOOLS,
+            # (Phase 6: legacy ACS chat tools removed; chat-side queueing into
+            # the new v2 inbox will be added separately.)
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),
             ResearchPlanStatusTool(),
+
+            # Recipe Tools (structured cooking recipes — not notes)
+            *RECIPE_TOOLS,
         ]
 
         for tool in tools:
@@ -703,6 +706,24 @@ class ToolRegistry:
             return ToolResult(
                 success=False,
                 message=f"Tool '{name}' not found"
+            )
+
+        # Origin gate: actuators that require a user-originated chat turn cannot
+        # be invoked by the autonomous loop. Default origin is "chat" because the
+        # tool_registry is currently only reached from the chat dispatch site; any
+        # future caller (e.g. ACS daemon) must pass an explicit origin.
+        origin = (context or {}).get("origin", "chat")
+        if getattr(tool, "requires_user_origin", False) and origin != "chat":
+            logger.warning(
+                f"Refusing tool '{name}' from origin '{origin}' "
+                f"(requires user-originated chat turn)"
+            )
+            return ToolResult(
+                success=False,
+                message=(
+                    f"Tool '{name}' can only be invoked from a user chat turn, "
+                    f"not from origin '{origin}'."
+                ),
             )
 
         # Inject context into parameters for tools that need it (e.g. shell tools)

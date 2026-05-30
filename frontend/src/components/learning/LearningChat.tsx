@@ -193,7 +193,7 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
               className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               <div
-                className={`max-w-[80%] rounded-xl px-4 py-3 ${
+                className={`max-w-[80%] rounded-md px-4 py-3 ${
                   message.role === 'user'
                     ? 'bg-teal-600 text-white'
                     : 'bg-gray-800 text-gray-100'
@@ -214,7 +214,7 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
           {/* Streaming Message */}
           {streamingContent && (
             <div className="flex justify-start">
-              <div className="max-w-[80%] rounded-xl px-4 py-3 bg-gray-800 text-gray-100">
+              <div className="max-w-[80%] rounded-md px-4 py-3 bg-gray-800 text-gray-100">
                 <MarkdownRenderer
                   content={streamingContent}
                   className="prose prose-invert prose-sm max-w-none"
@@ -227,7 +227,7 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
           {/* Typing Indicator */}
           {isStreaming && !streamingContent && (
             <div className="flex justify-start">
-              <div className="bg-gray-800 rounded-xl px-4 py-3">
+              <div className="bg-gray-800 rounded-md px-4 py-3">
                 <div className="flex gap-1">
                   <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                   <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -251,14 +251,14 @@ export default function LearningChat({ topicId, topicTitle }: LearningChatProps)
             onKeyDown={handleKeyDown}
             placeholder={topicTitle ? `Ask about ${topicTitle}...` : 'Select a topic to start learning...'}
             disabled={isStreaming}
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 resize-none focus:outline-none focus:border-teal-500 disabled:opacity-50"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-md px-4 py-3 text-white placeholder-gray-500 resize-none focus:outline-none focus:border-teal-500 disabled:opacity-50"
             rows={1}
             style={{ minHeight: '48px', maxHeight: '120px' }}
           />
           <button
             type="submit"
             disabled={!inputValue.trim() || isStreaming}
-            className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-700 disabled:text-gray-500 text-white px-6 py-3 rounded-xl transition-colors"
+            className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-700 disabled:text-gray-500 text-white px-6 py-3 rounded-md transition-colors"
           >
             <span className="material-icons">send</span>
           </button>

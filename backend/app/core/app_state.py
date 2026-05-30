@@ -26,14 +26,14 @@ class AppState:
 
         # ── AI Provider ──
         self.ai_provider: str = os.getenv("AI_PROVIDER", "local")
-        self.openai_base_url: str = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1")
+        self.openai_base_url: str = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
         self.openai_model: str = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "dummy")
         self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         self.google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
 
         # ── Fast / Voice / Notification models ──
-        self.fast_model_url: str = os.getenv("FAST_MODEL_URL", os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1"))
+        self.fast_model_url: str = os.getenv("FAST_MODEL_URL", os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1"))
         self.fast_model: str = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
         self.fast_model_api_key: str = os.getenv("FAST_MODEL_API_KEY", os.getenv("OPENAI_API_KEY", ""))
         self.voice_model: str = os.getenv("VOICE_MODEL", "Qwen3.5-35B-A3B")
@@ -96,8 +96,8 @@ class AppState:
             {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "provider": "anthropic"},
             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
             {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
-            {"id": "Qwen3.5-122B-A10B", "name": "Local 122B", "provider": "local"},
             {"id": "Qwen3.5-35B-A3B", "name": "Local 35B", "provider": "local"},
+            {"id": "qwen3.6-27b", "name": "Local MLX Qwen3.6 27B", "provider": "local", "base_url": "http://100.104.68.115:8081/v1"},
             {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
         ]
 
@@ -116,14 +116,16 @@ class AppState:
         from app.core.text_utils import is_local_base_url
 
         model_id_l = (model_id or "").lower()
-        configured_base = self.openai_base_url or "http://100.104.68.115:8080/v1"
+        configured_base = self.openai_base_url or "http://100.104.68.115:8081/v1"
         configured_key = self.openai_api_key or "dummy"
-        local_default_base = "http://100.104.68.115:8080/v1"
+        local_default_base = "http://100.104.68.115:8081/v1"
 
-        catalog_provider = next(
-            (m.get("provider") for m in self.available_models if (m.get("id") or "").lower() == model_id_l),
+        catalog_entry = next(
+            (m for m in self.available_models if (m.get("id") or "").lower() == model_id_l),
             None,
         )
+        catalog_provider = catalog_entry.get("provider") if catalog_entry else None
+        catalog_base_url = catalog_entry.get("base_url") if catalog_entry else None
 
         if catalog_provider == "codex" or model_id_l.startswith("gpt-5.3-codex") or "codex" in model_id_l:
             codex_base = configured_base if "chatgpt.com/backend-api" in configured_base else self.codex_default_base_url
@@ -134,7 +136,10 @@ class AppState:
         if catalog_provider == "google" or model_id_l.startswith("gemini"):
             return {"base_url": "https://generativelanguage.googleapis.com/v1beta", "api_key": self.google_api_key, "provider": "google"}
         if catalog_provider == "local":
-            local_base = configured_base if is_local_base_url(configured_base) else local_default_base
+            if catalog_base_url:
+                local_base = catalog_base_url
+            else:
+                local_base = configured_base if is_local_base_url(configured_base) else local_default_base
             return {"base_url": local_base, "api_key": configured_key or "dummy", "provider": "local"}
         if catalog_provider == "openai":
             return {"base_url": configured_base, "api_key": configured_key or "dummy", "provider": "openai"}

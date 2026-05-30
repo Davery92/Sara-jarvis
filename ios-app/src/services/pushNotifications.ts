@@ -3,7 +3,7 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import apiClient from './api';
-import { navigateToChat, navigateToInbox } from './navigation';
+import { navigateToChat, navigateToInbox, navigateToNoteEditor } from './navigation';
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
@@ -34,6 +34,7 @@ const NOTIFICATION_CATEGORIES = {
   ACS_DISCOVERY: 'ACS_DISCOVERY',
   THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
   LEARNING_REVIEW: 'LEARNING_REVIEW',
+  SYSTEM_EVENT: 'SYSTEM_EVENT',
 };
 
 // Set up interactive notification categories
@@ -147,6 +148,21 @@ async function setupNotificationCategories() {
     },
   ]);
 
+  // Narrator ("System AI") broadcasts. Tap or View opens the app to the
+  // event detail; Dismiss is a no-op so iOS still records the engagement.
+  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.SYSTEM_EVENT, [
+    {
+      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+      buttonTitle: 'View',
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: NOTIFICATION_ACTIONS.DISMISS,
+      buttonTitle: 'Dismiss',
+      options: { opensAppToForeground: false },
+    },
+  ]);
+
   console.log('[PushNotifications] Notification categories set up');
 }
 
@@ -222,7 +238,15 @@ class PushNotificationService {
       // Extract action identifier and user text
       const actionIdentifier = response.actionIdentifier;
       const userText = (response as any).userText;
-      const data = response.notification.request.content.data;
+      // Merge canonical title/body from the notification content into `data`
+      // so handlers can always rely on data.title / data.body, even when the
+      // backend didn't duplicate them into the data dict.
+      const content = response.notification.request.content;
+      const data = {
+        ...(content.data || {}),
+        ...(content.title && !((content.data || {}) as any).title ? { title: content.title } : {}),
+        ...(content.body && !((content.data || {}) as any).body ? { body: content.body } : {}),
+      };
 
       this.handleNotificationNavigation(data, actionIdentifier, userText);
     }
@@ -311,8 +335,16 @@ class PushNotificationService {
         const actionIdentifier = response.actionIdentifier;
         const userText = (response as any).userText; // Text from reply action
 
-        // Track notification feedback
-        const data = response.notification.request.content.data;
+        // Track notification feedback. Merge canonical title/body from the
+        // notification content into `data` so handlers can always rely on
+        // data.title / data.body — see the matching block in
+        // markCallbacksReady() for why.
+        const content = response.notification.request.content;
+        const data = {
+          ...(content.data || {}),
+          ...(content.title && !((content.data || {}) as any).title ? { title: content.title } : {}),
+          ...(content.body && !((content.data || {}) as any).body ? { body: content.body } : {}),
+        };
         if (data?.notification_id) {
           const notifId = Number(data.notification_id);
           if (!isNaN(notifId)) {
@@ -432,6 +464,87 @@ class PushNotificationService {
         }
         navigateToInbox({ focus: 'done' });
         break;
+      case 'research_complete':
+        // Chat-initiated research plan finished — open the report note directly.
+        console.log('[PushNotifications] Research complete:', data);
+        if (data.note_id) {
+          navigateToNoteEditor(data.note_id);
+        } else {
+          navigateToInbox({ focus: 'done' });
+        }
+        break;
+      case 'acs_daemon':
+        // The in-VM ACS daemon (Sara) is pinging David. If she included a
+        // note_id, deep-link to the note she just wrote. Otherwise route
+        // to chat — the conversation is the closest thing to "go talk to her."
+        console.log('[PushNotifications] ACS daemon notification:', data);
+        if (data.note_id) {
+          navigateToNoteEditor(data.note_id);
+        } else {
+          navigateToChat();
+        }
+        break;
+      case 'system_event': {
+        // Narrator broadcast — the System AI. Tapping pops a global overlay
+        // modal with the full body, regardless of how aggressively iOS
+        // truncates the banner. Dismiss action is a no-op.
+        console.log(
+          '[PushNotifications] System event tapped:',
+          { event_id: data.event_id, trigger: data.trigger_name, severity: data.severity,
+            has_body: !!(data.body || data.message), has_title: !!data.title }
+        );
+        if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
+          break;
+        }
+        if (!data.event_id) {
+          // No event id → fall back to opening chat so the tap isn't a dead-end.
+          navigateToChat();
+          break;
+        }
+        const payload = {
+          event_id: data.event_id as string,
+          title: (data.title as string) || 'System Broadcast',
+          body: (data.body as string) || (data.message as string) || '',
+          subtitle: (data.subtitle as string | null) ?? null,
+          severity: (data.severity as string) || 'observation',
+          trigger_name: data.trigger_name as string | undefined,
+        };
+        if (this.onSystemEventTapped) {
+          this.onSystemEventTapped(payload);
+        } else {
+          // App was launched cold by the tap — overlay isn't mounted yet.
+          // Stash the payload; setOnSystemEventTapped will flush it.
+          this.pendingSystemEventData = payload;
+        }
+        // Final safety net: if the body came through empty (broken push
+        // payload, stale build, exotic encoding), fetch the canonical row
+        // from the backend and re-fire the overlay with the real body.
+        if (!payload.body) {
+          (async () => {
+            try {
+              const fresh: any = await apiClient.get(
+                `/api/narrator/events/${payload.event_id}`
+              );
+              const refilled = {
+                ...payload,
+                title: fresh.title || payload.title,
+                body: fresh.body || payload.body,
+                subtitle: fresh.subtitle ?? payload.subtitle,
+                severity: fresh.severity || payload.severity,
+                trigger_name: fresh.trigger_name || payload.trigger_name,
+              };
+              if (this.onSystemEventTapped) {
+                this.onSystemEventTapped(refilled);
+              } else {
+                this.pendingSystemEventData = refilled;
+              }
+            } catch (e) {
+              console.warn('[PushNotifications] system_event refill failed:', e);
+            }
+          })();
+        }
+        break;
+      }
       case 'agent_clarification':
         // Agent needs clarification
         console.log('[PushNotifications] Agent clarification needed:', data);
@@ -516,6 +629,24 @@ class PushNotificationService {
   private onQuickReply: ((message: string, context?: { nudgeType?: string; title?: string }) => void) | null = null;
   // Callback for log meal action
   private onLogMealAction: (() => void) | null = null;
+  // Callback for narrator (System AI) broadcasts — opens the overlay modal.
+  private onSystemEventTapped: ((payload: {
+    event_id: string;
+    title: string;
+    body: string;
+    subtitle?: string | null;
+    severity: string;
+    trigger_name?: string;
+  }) => void) | null = null;
+  // Pending system_event data (if callback wasn't ready when tap happened).
+  private pendingSystemEventData: {
+    event_id: string;
+    title: string;
+    body: string;
+    subtitle?: string | null;
+    severity: string;
+    trigger_name?: string;
+  } | null = null;
 
   /**
    * Set callback for background task completion
@@ -597,6 +728,29 @@ class PushNotificationService {
     callback: (title: string, message: string, priority: string) => void
   ): void {
     this.onHeartbeatTapped = callback;
+  }
+
+  /**
+   * Set callback for narrator (System AI) broadcasts. When tapped, the
+   * callback fires with the event payload so a global overlay can render
+   * the full body. Flushes any pending tap captured before this setter ran.
+   */
+  setOnSystemEventTapped(
+    callback: (payload: {
+      event_id: string;
+      title: string;
+      body: string;
+      subtitle?: string | null;
+      severity: string;
+      trigger_name?: string;
+    }) => void
+  ): void {
+    this.onSystemEventTapped = callback;
+    if (this.pendingSystemEventData) {
+      const p = this.pendingSystemEventData;
+      this.pendingSystemEventData = null;
+      callback(p);
+    }
   }
 
   /**

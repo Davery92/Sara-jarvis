@@ -1526,7 +1526,7 @@ async def fitness_chat(
         import json
 
         # Get LLM configuration
-        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1")
+        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
         OPENAI_MODEL = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
 

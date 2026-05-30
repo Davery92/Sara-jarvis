@@ -29,7 +29,8 @@ class HAWebsocketService:
     DEFAULT_EXCLUDE_PATTERNS = {
         'sensor.cpu', 'sensor.memory', 'sensor.disk',
         'sensor.battery', 'sensor.uptime', 'sensor.last_boot',
-        'update.', 'sensor.sun_', 'weather.'
+        'update.', 'sensor.sun_', 'weather.',
+        'downstairs_light_box_kitchen_sensor',  # kitchen motion sensor — fires ~95x/hr for light automation, no signal value
     }
 
     def __init__(

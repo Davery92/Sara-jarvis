@@ -568,7 +568,7 @@ const SensoryControlPlane: React.FC = () => {
     datasetRecordingStatus?.speaker_id === normalizedSpeakerRecordId
 
   return (
-    <div className="mb-4 rounded-xl border border-cyan-500/30 bg-gradient-to-r from-cyan-900/20 via-gray-900 to-teal-900/20 p-3">
+    <div className="mb-4 rounded-md border border-cyan-500/30 bg-gradient-to-r from-cyan-900/20 via-gray-900 to-teal-900/20 p-3">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-xs uppercase tracking-wide text-cyan-300">Voice Control Plane</div>

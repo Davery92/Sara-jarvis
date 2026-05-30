@@ -112,7 +112,7 @@ services:
       # AI Provider - defaults to local Qwen via llama-server
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-mlx-community/Qwen3.6-27B-8bit}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
@@ -276,7 +276,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-mlx-community/Qwen3.6-27B-8bit}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -336,7 +336,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-mlx-community/Qwen3.6-27B-8bit}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -397,7 +397,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-mlx-community/Qwen3.6-27B-8bit}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -448,7 +448,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-mlx-community/Qwen3.6-27B-8bit}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}

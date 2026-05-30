@@ -21,6 +21,32 @@ def _get_db():
     return next(get_db())
 
 
+async def _resolve_research_model(base_url: str, fallback: str) -> str:
+    """Query the configured LLM endpoint for the actual loaded model name.
+
+    The endpoint may host a different model than what's hardcoded in config; we
+    want the row to reflect what actually ran the plan. Falls back to the
+    configured `research_llm_model` if discovery fails (offline, schema mismatch, etc.).
+    """
+    import httpx
+    try:
+        url = base_url.rstrip("/") + "/models"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        models = data.get("data") or data.get("models") or []
+        if models and isinstance(models, list):
+            first = models[0]
+            if isinstance(first, dict):
+                return first.get("id") or first.get("name") or fallback
+            if isinstance(first, str):
+                return first
+    except Exception as e:
+        logger.warning("Could not discover research model from %s: %s", base_url, e)
+    return fallback
+
+
 class CreateResearchPlanTool(BaseTool):
     """Create a research plan and optionally start execution."""
 
@@ -31,12 +57,18 @@ class CreateResearchPlanTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Create a structured research plan with ordered steps, then hand it off "
-            "to the dedicated research agent for execution. Use this when David asks "
-            "you to research something in depth. Break the topic into clear, "
-            "sequential steps that can each be researched independently. "
-            "The research agent will use web search, file I/O, and shell tools "
-            "to execute each step and report findings."
+            "Hand off a research task to the dedicated research agent. Use this — and only this — "
+            "when David asks you to look into, research, dig into, investigate, gain an "
+            "understanding of, or explain a topic. Trigger phrases include: 'look into X', "
+            "'research X', 'do some research on X', 'dig into X', 'investigate X', "
+            "'understand X and explain it', 'put together a brief on X'. "
+            "Break the topic into 3–6 ordered, independently-researchable steps. The agent "
+            "executes them in the background using web search, file I/O, and shell tools, "
+            "then writes a report. "
+            "DO NOT use for simple factual lookups (e.g. 'what time does X open', 'who is Y') — "
+            "use web_search inline and answer in the same turn instead. "
+            "Plans created from chat are marked origin='david_chat' and take precedence "
+            "over Sara's autonomous research."
         )
 
     @property
@@ -107,12 +139,17 @@ class CreateResearchPlanTool(BaseTool):
                 for i, s in enumerate(steps_raw)
             ]
 
+            # Resolve the actual model loaded on the research LLM endpoint at create time.
+            # Falls back to the configured default if discovery fails.
+            from app.core.config import settings
+            model_id = await _resolve_research_model(settings.research_llm_url, settings.research_llm_model)
+
             db.execute(
                 text("""
                     INSERT INTO research_plan
-                    (id, user_id, title, objective, steps, model_id, created_by, status)
+                    (id, user_id, title, objective, steps, model_id, created_by, origin, status)
                     VALUES (:id, :user_id, :title, :objective, CAST(:steps AS jsonb),
-                            'Qwen3.5-27B', 'sara', :status)
+                            :model_id, 'sara', 'david_chat', :status)
                 """),
                 {
                     "id": plan_id,
@@ -120,6 +157,7 @@ class CreateResearchPlanTool(BaseTool):
                     "title": title,
                     "objective": objective,
                     "steps": json.dumps(steps),
+                    "model_id": model_id,
                     "status": "draft",
                 },
             )
@@ -128,10 +166,18 @@ class CreateResearchPlanTool(BaseTool):
             # Auto-start if requested
             if auto_start:
                 from app.tasks.research import run_research_plan
-                run_research_plan.delay(plan_id, user_id)
+                # Chat-initiated plans run on the david_priority queue so they
+                # never share workers with ACS or other cognitive work.
+                run_research_plan.apply_async(
+                    args=[plan_id, user_id],
+                    queue="david_priority",
+                )
                 status_msg = "created and started"
             else:
                 status_msg = "created (draft — start manually)"
+
+            # (Phase 6: old ACS state-machine pause removed; the v2 daemon
+            # has its own continuous loop and doesn't need to be preempted.)
 
             step_list = "\n".join(
                 f"  {i+1}. {s['title']}" for i, s in enumerate(steps)

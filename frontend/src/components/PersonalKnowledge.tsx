@@ -300,7 +300,7 @@ export default function PersonalKnowledge() {
 
         {/* Summary bar */}
         {summary && (
-          <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl p-4 mb-4">
+          <div className="bg-gray-800/50 border border-gray-700/50 rounded-md p-4 mb-4">
             <p className="text-gray-300 text-sm">{summary.summary}</p>
             {summary.highlights.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
@@ -374,7 +374,7 @@ export default function PersonalKnowledge() {
             return (
               <div
                 key={fact.pkg_id}
-                className="bg-gray-800/60 border border-gray-700/50 rounded-xl overflow-hidden hover:border-gray-600/50 transition-colors"
+                className="bg-gray-800/60 border border-gray-700/50 rounded-md overflow-hidden hover:border-gray-600/50 transition-colors"
               >
                 {/* Row header */}
                 <button
@@ -506,7 +506,7 @@ export default function PersonalKnowledge() {
       {/* Add Fact Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowAddModal(false)}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-gray-900 border border-gray-700 rounded-md w-full max-w-lg p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-white">Add Knowledge</h3>
               <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-white">

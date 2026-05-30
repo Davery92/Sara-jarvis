@@ -9,7 +9,7 @@ import {
 } from '../api/client'
 
 const Section = ({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) => (
-  <section className="bg-card border border-card rounded-xl p-4">
+  <section className="bg-card border border-card rounded-md p-4">
     <div className="mb-3 flex items-center justify-between">
       <h2 className="text-base font-semibold text-white">{title}</h2>
       {right}
@@ -121,13 +121,13 @@ function TemerantRpgPage() {
   const relationships = useMemo(() => state?.relationships || [], [state])
 
   if (loading) {
-    return <div className="flex-1 min-h-0 p-6"><div className="bg-card border border-card rounded-xl p-6 text-gray-300">Loading scene engine...</div></div>
+    return <div className="flex-1 min-h-0 p-6"><div className="bg-card border border-card rounded-md p-6 text-gray-300">Loading scene engine...</div></div>
   }
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto p-6">
       <div className="mx-auto max-w-6xl space-y-4">
-        <section className="bg-card border border-card rounded-xl p-5">
+        <section className="bg-card border border-card rounded-md p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-widest text-amber-300">A Life in Temerant</p>
@@ -178,15 +178,15 @@ function TemerantRpgPage() {
         </section>
 
         {!state && (
-          <section className="rounded-xl border border-blue-800/40 bg-blue-950/20 p-4 text-sm text-blue-100">
+          <section className="rounded-md border border-blue-800/40 bg-blue-950/20 p-4 text-sm text-blue-100">
             <p className="font-medium">Quick start</p>
             <p className="mt-1 text-blue-200/90">1) Create your character. 2) Open your first scene. 3) Write one specific action and resolve it.</p>
             <p className="mt-2 text-xs text-blue-300/90">Tip: Specific actions produce better GM responses than vague commands.</p>
           </section>
         )}
 
-        {error && <div className="rounded-xl border border-red-700/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</div>}
-        {status && <div className="rounded-xl border border-emerald-700/40 bg-emerald-900/20 px-4 py-3 text-sm text-emerald-300">{status}</div>}
+        {error && <div className="rounded-md border border-red-700/50 bg-red-900/20 px-4 py-3 text-sm text-red-300">{error}</div>}
+        {status && <div className="rounded-md border border-emerald-700/40 bg-emerald-900/20 px-4 py-3 text-sm text-emerald-300">{status}</div>}
 
         {!state && (
           <Section title="Create Character">

@@ -182,6 +182,57 @@ async def device_websocket(
                 # Device has a screenshot ready to upload
                 logger.info(f"Screenshot ready from {device_id}")
 
+            elif msg_type == "focus_span":
+                # Desktop focus tracker emitted a completed span. Publish to the
+                # event bus so the salience subscriber can score it and feed
+                # ACS working memory.
+                try:
+                    from app.services.event_bus import event_bus, Event, EventType
+                    await event_bus.publish(Event(
+                        event_type=EventType.DESKTOP_FOCUS_SPAN,
+                        user_id=user_id,
+                        source="desktop",
+                        payload={
+                            "device_id": device_id,
+                            "app": data.get("app"),
+                            "window": data.get("window"),
+                            "start_ts": data.get("start_ts"),
+                            "end_ts": data.get("end_ts"),
+                            "duration_seconds": data.get("duration_seconds", 0),
+                            "keyboard_events": data.get("keyboard_events", 0),
+                            "mouse_events": data.get("mouse_events", 0),
+                            "derived_state": data.get("derived_state"),
+                            # Browser-extension enrichment (only present when
+                            # the focused app is a browser AND the extension
+                            # has been streaming).
+                            "url": data.get("url"),
+                            "domain": data.get("domain"),
+                            "page_title": data.get("page_title"),
+                        },
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to publish focus_span from {device_id}: {e}")
+
+            elif msg_type == "activity_state":
+                # Desktop activity state transition.
+                try:
+                    from app.services.event_bus import event_bus, Event, EventType
+                    await event_bus.publish(Event(
+                        event_type=EventType.DESKTOP_ACTIVITY_STATE,
+                        user_id=user_id,
+                        source="desktop",
+                        payload={
+                            "device_id": device_id,
+                            "state": data.get("state"),
+                            "previous_state": data.get("previous_state"),
+                            "since_ts": data.get("since_ts"),
+                            "active_app": data.get("active_app"),
+                            "active_window": data.get("active_window"),
+                        },
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to publish activity_state from {device_id}: {e}")
+
             else:
                 logger.warning(f"Unknown message type from {device_id}: {msg_type}")
 

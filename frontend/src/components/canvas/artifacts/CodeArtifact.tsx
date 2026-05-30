@@ -7,8 +7,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Play, Copy, Check, AlertCircle } from 'lucide-react';
 import { Artifact, CodeContent, ArtifactContent } from '../types';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 interface CodeArtifactProps {
   artifact: Artifact;
@@ -196,20 +194,9 @@ export const CodeArtifact: React.FC<CodeArtifactProps> = ({
             </div>
 
             {/* Syntax highlighted code */}
-            <SyntaxHighlighter
-              language={content.language}
-              style={oneDark}
-              customStyle={{
-                margin: 0,
-                padding: '1rem',
-                background: '#0d1117',
-                fontSize: '0.875rem',
-                minHeight: '200px',
-              }}
-              showLineNumbers
-            >
-              {code}
-            </SyntaxHighlighter>
+            <pre className="m-0 p-4 bg-[#0d1117] text-gray-100 text-sm min-h-[200px] overflow-auto font-mono whitespace-pre">
+              <code>{code}</code>
+            </pre>
           </div>
         )}
       </div>

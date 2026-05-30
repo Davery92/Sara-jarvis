@@ -95,8 +95,8 @@ TOOL_SUGGESTIONS: Dict[str, List[Dict[str, Any]]] = {
     "learning_topic_list": [
         {"label": "Continue Learning", "action": "navigate", "target": "Learning"},
     ],
-    "handoff_to_agents": [
-        {"label": "Check status", "message": "What's the status of my background tasks?"},
+    "create_research_plan": [
+        {"label": "Check status", "message": "What's the status of my research?"},
     ],
 }
 

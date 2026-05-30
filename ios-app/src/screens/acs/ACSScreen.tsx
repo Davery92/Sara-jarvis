@@ -4,7 +4,6 @@ import {
   Text,
   ScrollView,
   TouchableOpacity,
-  FlatList,
   TextInput,
   RefreshControl,
   ActivityIndicator,
@@ -13,1330 +12,1021 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
-import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
-import SimpleMarkdown from '../../components/chat/SimpleMarkdown';
+import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
-// ─── Types ───────────────────────────────────────────
+// ─── Types — match /api/acs/v2 ───────────────────────
 
-type TabType = 'status' | 'plan' | 'interests' | 'curiosity' | 'directives' | 'sessions' | 'show-david' | 'self-model';
+type TabType = 'mind' | 'interests' | 'tools';
 
-interface ACSSnapshot {
+interface DaemonStatus {
   state: string;
-  emotional_state?: string;
-  daily_plan?: string;
-  live_session?: {
-    id: string;
-    mode: string;
-    turns: number;
-    notes_created: number;
-    elapsed_minutes: number;
-  };
-  last_session?: {
-    mode: string;
-    turns: number;
-    notes_created: number;
-    started_at: string;
-    ended_at: string;
-    end_reason: string;
-  };
+  version: string;
+  pid: number | null;
+  hostname: string | null;
+  started_at: string | null;
+  last_heartbeat_at: string | null;
+  last_tick_summary: string | null;
+  is_alive: boolean;
+  seconds_since_heartbeat: number | null;
 }
 
-interface InterestNode {
+interface Focus {
+  topic: string | null;
+  why: string | null;
+  set_at: string | null;
+  updated_at: string | null;
+}
+
+type Urgency = 'low' | 'normal' | 'high';
+
+interface InboxItem {
   id: string;
-  label: string;
-  description?: string;
-  fascination: number;
-  depth: number;
-  confidence: number;
-  status: string;
-  source: string;
+  created_at: string;
+  created_by: string;
+  urgency: Urgency;
+  prompt: string;
+  context: string | null;
+  status: 'queued' | 'in_progress' | 'done' | 'dismissed';
+  picked_up_at: string | null;
+  completed_at: string | null;
+  completion_summary: string | null;
 }
 
-interface CuriosityItem {
+interface Activity {
+  id: string;
+  created_at: string;
+  kind: string;
+  summary: string;
+  body: string | null;
+  tags: string[];
+  metadata: Record<string, unknown>;
+}
+
+interface Interest {
   id: string;
   topic: string;
-  question?: string;
-  source?: string;
-  created_at?: string;
-}
-
-interface Directive {
-  id: string;
-  directive_type: string;
-  content: string;
-  priority: string;
-  status: string;
+  display_name: string;
+  why: string | null;
+  weight: number;
+  last_acted_at: string | null;
+  last_updated_at: string;
   source: string;
-  response?: string;
   created_at: string;
 }
 
-interface SessionSummary {
+interface ToolVersion {
   id: string;
-  cognitive_mode: string;
-  state: string;
-  turns_completed: number;
-  notes_created: number;
-  duration_minutes?: number;
-  duration_seconds?: number;
-  outcome_type?: string;
-  artifact_summary?: string;
-  started_at: string;
-  ended_at?: string;
-  context_summary?: string;
-}
-
-interface SessionDetail {
-  context_summary?: string;
-  token_usage?: number | Record<string, number>;
-  engagement_score?: number;
-  model_id?: string;
-  error_log?: string | null;
-  notes?: Array<{ id: string; title: string; folder?: string; created_at: string }>;
-  interest_nodes_created?: number;
-  interest_nodes_updated?: number;
-  interest_edges_created?: number;
-  outcome_type?: string;
-  artifact_summary?: string;
-  outbound_messages?: number;
-  suppressed_messages?: number;
-}
-
-interface ShowDavidItem {
-  id: string;
-  category: string;
-  title: string;
-  content: string;
-  shown: boolean;
-  created_at: string;
-}
-
-interface SelfModelVersion {
-  content: Record<string, any>;
   version: number;
+  notes: string | null;
   created_at: string;
 }
 
-// ─── Constants ───────────────────────────────────────
+interface ToolVersionFull extends ToolVersion {
+  code: string;
+}
 
-const TABS: { key: TabType; label: string; icon: string }[] = [
-  { key: 'status', label: 'Status', icon: '\u26A1' },
-  { key: 'plan', label: 'Plan', icon: '\uD83D\uDCCB' },
-  { key: 'interests', label: 'Interests', icon: '\uD83E\uDDE0' },
-  { key: 'curiosity', label: 'Curiosity', icon: '\uD83D\uDD2D' },
-  { key: 'directives', label: 'Directives', icon: '\uD83C\uDFAF' },
-  { key: 'sessions', label: 'Sessions', icon: '\uD83D\uDCC4' },
-  { key: 'show-david', label: 'Show David', icon: '\uD83D\uDCA1' },
-  { key: 'self-model', label: 'Self', icon: '\uD83E\uDE9E' },
-];
+interface Tool {
+  id: string;
+  name: string;
+  description: string;
+  args_schema: Record<string, unknown>;
+  enabled: boolean;
+  active_version: ToolVersion | null;
+  latest_version: ToolVersion | null;
+  invocation_count_24h: number;
+  last_invocation_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
-const STATE_CONFIG: Record<string, { label: string; color: string }> = {
-  autonomous: { label: 'Autonomous', color: colors.success },
-  cooldown: { label: 'Cooldown', color: colors.textMuted },
-  conversational: { label: 'Conversational', color: colors.info },
-  pausing: { label: 'Pausing', color: colors.warning },
-  paused: { label: 'Paused', color: colors.warning },
-  idle: { label: 'Idle', color: colors.textMuted },
-};
-
-const DIRECTIVE_TYPES = ['focus', 'stop', 'context', 'redirect', 'question'];
+interface Invocation {
+  id: string;
+  tool_id: string;
+  version_id: string;
+  args: Record<string, unknown>;
+  result: unknown;
+  error: string | null;
+  duration_ms: number | null;
+  started_at: string;
+  completed_at: string | null;
+}
 
 // ─── Helpers ─────────────────────────────────────────
 
-function formatDuration(seconds?: number, minutes?: number): string {
-  if ((!seconds || seconds <= 0) && minutes && minutes > 0) {
-    seconds = minutes * 60;
-  }
-  if (!seconds) return '--';
-  if (seconds < 60) return `${seconds}s`;
-  const mins = Math.floor(seconds / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ${mins % 60}m`;
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'just now';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
 }
 
-function formatTokenUsage(tokenUsage?: number | Record<string, number>): string {
-  if (tokenUsage == null) return '--';
-  if (typeof tokenUsage === 'number') return tokenUsage.toLocaleString();
-  const total = Object.values(tokenUsage).reduce((sum, value) => {
-    return sum + (typeof value === 'number' ? value : 0);
-  }, 0);
-  return total.toLocaleString();
+function uptime(startedAt: string | null | undefined): string {
+  if (!startedAt) return '—';
+  const ms = Date.now() - new Date(startedAt).getTime();
+  if (ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-function timeAgo(dateStr: string | null | undefined): string {
-  if (!dateStr) return '';
-  const now = new Date();
-  const date = new Date(dateStr);
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${Math.floor(diffHours / 24)}d ago`;
-}
+const KIND_LABEL: Record<string, string> = {
+  boot: 'boot',
+  shutdown: 'shutdown',
+  tick: 'tick',
+  thought: 'thought',
+  reflection: 'reflect',
+  focus_set: 'focus',
+  focus_clear: 'unfocus',
+  notify_david: 'notified',
+  inbox_pickup: 'pickup',
+  inbox_complete: 'done',
+  inbox_dismiss: 'dismiss',
+  tool_call: 'tool',
+  tool_result: 'result',
+  external_event: 'event',
+  error: 'error',
+};
+
+const KIND_COLOR: Record<string, string> = {
+  boot: '#10b981',
+  shutdown: '#71717a',
+  tick: '#52525b',
+  thought: '#818cf8',
+  reflection: '#a78bfa',
+  focus_set: '#38bdf8',
+  focus_clear: '#38bdf8',
+  notify_david: '#f59e0b',
+  inbox_pickup: '#22d3ee',
+  inbox_complete: '#10b981',
+  inbox_dismiss: '#fb923c',
+  tool_call: '#e879f9',
+  tool_result: '#e879f9',
+  external_event: '#a1a1aa',
+  error: '#ef4444',
+};
+
+const URGENCY_COLOR: Record<Urgency, string> = {
+  high: '#ef4444',
+  normal: '#a1a1aa',
+  low: '#71717a',
+};
+
+const SOURCE_COLOR: Record<string, string> = {
+  reflection: '#a78bfa',
+  external_event: '#a1a1aa',
+  manual: '#f59e0b',
+};
 
 // ─── Main Component ──────────────────────────────────
 
 export default function ACSScreen() {
-  const [activeTab, setActiveTab] = useState<TabType>('status');
+  const [activeTab, setActiveTab] = useState<TabType>('mind');
   const [refreshing, setRefreshing] = useState(false);
-  const [overviewSnapshot, setOverviewSnapshot] = useState<ACSSnapshot | null>(null);
+  const [, setTick] = useState(0);
 
+  // Re-render once a second so timeAgo refreshes
   useEffect(() => {
-    let mounted = true;
-
-    const fetchOverviewSnapshot = async () => {
-      try {
-        const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
-        if (mounted) {
-          setOverviewSnapshot(data as ACSSnapshot);
-        }
-      } catch {
-        // silent
-      }
-    };
-
-    fetchOverviewSnapshot();
-    const interval = setInterval(fetchOverviewSnapshot, 15000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
   }, []);
-
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    // Each tab handles its own data refresh via key prop or internal effect
-    // We just trigger re-render
-    setTimeout(() => setRefreshing(false), 500);
-  }, []);
-
-  const overviewState = STATE_CONFIG[overviewSnapshot?.state || 'idle'] || STATE_CONFIG.idle;
-  const activeTabLabel = TABS.find((tab) => tab.key === activeTab)?.label || 'Status';
-  const overviewSummary = overviewSnapshot?.live_session
-    ? `ACS is currently ${overviewState.label.toLowerCase()} with a live ${overviewSnapshot.live_session.mode} session underway.`
-    : overviewSnapshot?.last_session
-      ? `ACS is currently ${overviewState.label.toLowerCase()}. The last ${overviewSnapshot.last_session.mode} session ended ${timeAgo(overviewSnapshot.last_session.ended_at)}.`
-      : 'ACS handles long-horizon planning, reflection, and autonomous cognition when Sara is working beyond the main chat.';
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
-      <View style={styles.header}>
-        <View style={styles.heroCard}>
-          <Text style={styles.heroEyebrow}>Autonomous Cognition</Text>
-          <Text style={styles.heroTitle}>ACS</Text>
-          <Text style={styles.heroSubtitle}>{overviewSummary}</Text>
-
-          <View style={styles.heroStatsRow}>
-            <View style={styles.heroStatCard}>
-              <Text style={styles.heroStatLabel}>State</Text>
-              <Text style={[styles.heroStatValue, { color: overviewState.color }]}>{overviewState.label}</Text>
-              <Text style={styles.heroStatMeta}>current ACS posture</Text>
-            </View>
-            <View style={styles.heroStatCard}>
-              <Text style={styles.heroStatLabel}>Live Session</Text>
-              <Text style={styles.heroStatValue}>
-                {overviewSnapshot?.live_session ? `${overviewSnapshot.live_session.turns} turns` : 'None'}
-              </Text>
-              <Text style={styles.heroStatMeta}>
-                {overviewSnapshot?.live_session
-                  ? `${overviewSnapshot.live_session.mode} mode`
-                  : 'no active session right now'}
-              </Text>
-            </View>
-            <View style={styles.heroStatCard}>
-              <Text style={styles.heroStatLabel}>View</Text>
-              <Text style={styles.heroStatValue}>{activeTabLabel}</Text>
-              <Text style={styles.heroStatMeta}>current ACS section</Text>
-            </View>
-          </View>
-        </View>
-      </View>
-
-      {/* Tab bar */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.tabBar}
-        contentContainerStyle={styles.tabBarContent}
-      >
-        {TABS.map((tab) => (
+      <View style={styles.tabBar}>
+        {(['mind', 'interests', 'tools'] as TabType[]).map((t) => (
           <TouchableOpacity
-            key={tab.key}
-            style={[styles.tab, activeTab === tab.key && styles.tabActive]}
-            onPress={() => setActiveTab(tab.key)}
+            key={t}
+            style={[styles.tab, activeTab === t && styles.tabActive]}
+            onPress={() => setActiveTab(t)}
           >
-            <Text style={styles.tabIcon}>{tab.icon}</Text>
-            <Text style={[styles.tabLabel, activeTab === tab.key && styles.tabLabelActive]}>
-              {tab.label}
+            <Text
+              style={[
+                styles.tabLabel,
+                activeTab === t && styles.tabLabelActive,
+              ]}
+            >
+              {t === 'mind' ? 'Mind' : t === 'interests' ? 'Interests' : 'Tools'}
             </Text>
           </TouchableOpacity>
         ))}
-      </ScrollView>
+      </View>
 
-      {/* Tab content */}
-      {activeTab === 'status' && <StatusTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'plan' && <PlanTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'interests' && <InterestsTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'curiosity' && <CuriosityTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'directives' && <DirectivesTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'sessions' && <SessionsTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'show-david' && <ShowDavidTab refreshing={refreshing} onRefresh={onRefresh} />}
-      {activeTab === 'self-model' && <SelfModelTab refreshing={refreshing} onRefresh={onRefresh} />}
+      {activeTab === 'mind' && (
+        <MindTab refreshing={refreshing} setRefreshing={setRefreshing} />
+      )}
+      {activeTab === 'interests' && (
+        <InterestsTab refreshing={refreshing} setRefreshing={setRefreshing} />
+      )}
+      {activeTab === 'tools' && (
+        <ToolsTab refreshing={refreshing} setRefreshing={setRefreshing} />
+      )}
     </SafeAreaView>
   );
 }
 
-// ─── Status Tab ──────────────────────────────────────
+// ─── Mind tab ────────────────────────────────────────
 
-function StatusTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [snapshot, setSnapshot] = useState<ACSSnapshot | null>(null);
+function MindTab({
+  refreshing,
+  setRefreshing,
+}: {
+  refreshing: boolean;
+  setRefreshing: (b: boolean) => void;
+}) {
+  const [daemon, setDaemon] = useState<DaemonStatus | null>(null);
+  const [focus, setFocus] = useState<Focus | null>(null);
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
+  const [activity, setActivity] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const fetchSnapshot = useCallback(async () => {
-    try {
-      const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
-      setSnapshot(data as ACSSnapshot);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSnapshot();
-    const interval = setInterval(fetchSnapshot, 15_000);
-    return () => clearInterval(interval);
-  }, [fetchSnapshot]);
-
-  useEffect(() => {
-    if (refreshing) fetchSnapshot();
-  }, [refreshing, fetchSnapshot]);
-
-  const handleAction = async (action: 'start' | 'pause' | 'resume') => {
-    setActionLoading(true);
-    try {
-      if (action === 'start') {
-        await apiClient.post('/api/acs/start');
-      } else if (action === 'pause') {
-        await apiClient.post('/api/acs/pause');
-      } else if (action === 'resume') {
-        await apiClient.post('/api/acs/resume');
-      }
-      await fetchSnapshot();
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Action failed');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  if (!snapshot) {
-    return (
-      <ScrollView
-        style={styles.tabContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      >
-        <Text style={styles.emptyText}>Unable to load ACS status</Text>
-      </ScrollView>
-    );
-  }
-
-  const stateConfig = STATE_CONFIG[snapshot.state] || STATE_CONFIG.idle;
-  const isLive = !!snapshot.live_session;
-  const primaryAction = (() => {
-    switch (snapshot.state) {
-      case 'idle':
-        return {
-          key: 'start',
-          label: 'Start Session',
-          action: 'start' as const,
-          style: styles.actionBtnPrimary,
-          disabled: false,
-        };
-      case 'autonomous':
-        return {
-          key: 'pause',
-          label: 'Pause',
-          action: 'pause' as const,
-          style: styles.actionBtnWarning,
-          disabled: false,
-        };
-      case 'cooldown':
-      case 'conversational':
-      case 'paused':
-        return {
-          key: 'resume',
-          label: 'Resume',
-          action: 'resume' as const,
-          style: styles.actionBtnPrimary,
-          disabled: false,
-        };
-      case 'pausing':
-        return {
-          key: 'pausing',
-          label: 'Pausing…',
-          action: null,
-          style: styles.actionBtnMuted,
-          disabled: true,
-        };
-      default:
-        return {
-          key: 'refresh',
-          label: 'Refresh',
-          action: null,
-          style: styles.actionBtnMuted,
-          disabled: true,
-        };
-    }
-  })();
-
-  return (
-    <ScrollView
-      style={styles.tabContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-    >
-      {/* State card */}
-      <View style={styles.card}>
-        <View style={styles.stateHeader}>
-          <View style={[styles.stateDot, { backgroundColor: stateConfig.color }]} />
-          <Text style={[styles.stateText, { color: stateConfig.color }]}>{stateConfig.label}</Text>
-        </View>
-
-        {snapshot.emotional_state && (
-          <Text style={styles.emotionalState}>Emotional state: {snapshot.emotional_state}</Text>
-        )}
-
-        {!snapshot.daily_plan ? (
-          <View style={styles.planHintCard}>
-            <Text style={styles.planHintTitle}>No daily plan loaded yet</Text>
-            <Text style={styles.planHintText}>
-              ACS usually generates a new daily plan each morning around 7 AM. If it is later and this is still empty, the planner likely has not run yet.
-            </Text>
-          </View>
-        ) : null}
-
-        {/* Action buttons */}
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={[
-              styles.actionBtn,
-              primaryAction.style,
-              (actionLoading || primaryAction.disabled) && styles.actionBtnDisabled,
-            ]}
-            onPress={() => {
-              if (primaryAction.action) {
-                handleAction(primaryAction.action);
-              }
-            }}
-            disabled={actionLoading || primaryAction.disabled}
-          >
-            {actionLoading && primaryAction.action ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.actionBtnText}>{primaryAction.label}</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Live session card */}
-      {isLive && snapshot.live_session && (
-        <View style={[styles.card, styles.liveCard]}>
-          <View style={styles.liveBadge}>
-            <View style={styles.liveDot} />
-            <Text style={styles.liveLabel}>Live Session</Text>
-          </View>
-          <View style={styles.sessionDetails}>
-            <DetailRow label="Mode" value={snapshot.live_session.mode} />
-            <DetailRow label="Turns" value={String(snapshot.live_session.turns)} />
-            <DetailRow label="Notes Created" value={String(snapshot.live_session.notes_created)} />
-            <DetailRow label="Elapsed" value={`${Math.round(snapshot.live_session.elapsed_minutes)}m`} />
-          </View>
-        </View>
-      )}
-
-      {/* Last session card */}
-      {!isLive && snapshot.last_session && (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Last Session</Text>
-          <View style={styles.sessionDetails}>
-            <DetailRow label="Mode" value={snapshot.last_session.mode} />
-            <DetailRow label="Turns" value={String(snapshot.last_session.turns)} />
-            <DetailRow label="Notes" value={String(snapshot.last_session.notes_created)} />
-            <DetailRow label="Ended" value={timeAgo(snapshot.last_session.ended_at)} />
-            <DetailRow label="Reason" value={snapshot.last_session.end_reason} />
-          </View>
-        </View>
-      )}
-    </ScrollView>
-  );
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.detailRow}>
-      <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={styles.detailValue}>{value}</Text>
-    </View>
-  );
-}
-
-// ─── Plan Tab ────────────────────────────────────────
-
-function PlanTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [plan, setPlan] = useState<string | null>(null);
-  const [state, setState] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetchPlan = useCallback(async () => {
-    try {
-      const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
-      const snapshot = data as ACSSnapshot;
-      setPlan(snapshot.daily_plan || null);
-      setState(snapshot.state || null);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchPlan();
-  }, [fetchPlan]);
-
-  useEffect(() => {
-    if (refreshing) fetchPlan();
-  }, [refreshing, fetchPlan]);
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  return (
-    <ScrollView
-      style={styles.tabContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-    >
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Daily Plan</Text>
-        {plan ? (
-          <SimpleMarkdown>{plan}</SimpleMarkdown>
-        ) : (
-          <View style={styles.planEmptyState}>
-            <Text style={styles.planEmptyTitle}>No daily plan generated yet</Text>
-            <Text style={styles.planEmptyText}>
-              ACS usually creates a new plan each morning around 7 AM. Right now it is {state || 'idle'}, so there is nothing loaded for today.
-            </Text>
-          </View>
-        )}
-      </View>
-    </ScrollView>
-  );
-}
-
-// ─── Interests Tab ───────────────────────────────────
-
-function InterestsTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [nodes, setNodes] = useState<InterestNode[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchInterests = useCallback(async () => {
-    try {
-      const data = await apiClient.get<{ nodes: InterestNode[] }>('/api/acs/interest-graph');
-      const resp = data as any;
-      setNodes(resp?.nodes || []);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchInterests();
-  }, [fetchInterests]);
-
-  useEffect(() => {
-    if (refreshing) fetchInterests();
-  }, [refreshing, fetchInterests]);
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  const renderNode = ({ item }: { item: InterestNode }) => (
-    <View style={styles.card}>
-      <View style={styles.interestHeader}>
-        <Text style={styles.interestLabel}>{item.label}</Text>
-        <Text style={[styles.statusBadge, { color: item.status === 'active' ? colors.success : colors.textMuted }]}>
-          {item.status}
-        </Text>
-      </View>
-      {item.description ? (
-        <Text style={styles.interestDesc} numberOfLines={2}>{item.description}</Text>
-      ) : null}
-      <View style={styles.barsContainer}>
-        <ProgressBar label="Fascination" value={item.fascination} color={colors.secondary} />
-        <ProgressBar label="Depth" value={item.depth} color={colors.info} />
-        <ProgressBar label="Confidence" value={item.confidence} color={colors.success} />
-      </View>
-      <Text style={styles.sourceText}>Source: {item.source}</Text>
-    </View>
-  );
-
-  return (
-    <FlatList
-      data={nodes}
-      keyExtractor={(item) => item.id}
-      renderItem={renderNode}
-      contentContainerStyle={styles.listContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      ListEmptyComponent={<Text style={styles.emptyText}>No interests tracked yet</Text>}
-    />
-  );
-}
-
-function ProgressBar({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <View style={styles.progressRow}>
-      <Text style={styles.progressLabel}>{label}</Text>
-      <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${Math.min(value, 100)}%`, backgroundColor: color }]} />
-      </View>
-      <Text style={styles.progressValue}>{value}</Text>
-    </View>
-  );
-}
-
-// ─── Curiosity Tab ───────────────────────────────────
-
-function CuriosityTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [items, setItems] = useState<CuriosityItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [newTopic, setNewTopic] = useState('');
+  const [newPrompt, setNewPrompt] = useState('');
+  const [newUrgency, setNewUrgency] = useState<Urgency>('normal');
   const [submitting, setSubmitting] = useState(false);
-
-  const fetchCuriosity = useCallback(async () => {
-    try {
-      const data = await apiClient.get<any>('/api/acs/curiosity');
-      const resp = data as any;
-      setItems(Array.isArray(resp) ? resp : resp?.items || []);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchCuriosity();
-  }, [fetchCuriosity]);
-
-  useEffect(() => {
-    if (refreshing) fetchCuriosity();
-  }, [refreshing, fetchCuriosity]);
-
-  const handleAdd = async () => {
-    if (!newTopic.trim()) return;
-    setSubmitting(true);
-    try {
-      await apiClient.post('/api/acs/curiosity', { topic: newTopic.trim() });
-      setNewTopic('');
-      await fetchCuriosity();
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to add curiosity');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      await apiClient.delete(`/api/acs/curiosity/${id}`);
-      setItems((prev) => prev.filter((i) => i.id !== id));
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to delete');
-    }
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  return (
-    <FlatList
-      data={items}
-      keyExtractor={(item) => item.id}
-      contentContainerStyle={styles.listContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      ListHeaderComponent={
-        <View style={styles.addForm}>
-          <TextInput
-            style={styles.textInput}
-            placeholder="Add a curiosity topic..."
-            placeholderTextColor={colors.textMuted}
-            value={newTopic}
-            onChangeText={setNewTopic}
-            onSubmitEditing={handleAdd}
-            returnKeyType="send"
-          />
-          <TouchableOpacity
-            style={[styles.addBtn, (!newTopic.trim() || submitting) && styles.addBtnDisabled]}
-            onPress={handleAdd}
-            disabled={!newTopic.trim() || submitting}
-          >
-            {submitting ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.addBtnText}>Add</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      }
-      renderItem={({ item }) => (
-        <View style={styles.card}>
-          <View style={styles.curiosityRow}>
-            <View style={styles.curiosityContent}>
-              <Text style={styles.curiosityTopic}>{item.topic}</Text>
-              {item.question ? (
-                <Text style={styles.curiosityQuestion}>{item.question}</Text>
-              ) : null}
-              <Text style={styles.curiosityMeta}>
-                {item.source ? `${item.source} \u00B7 ` : ''}{timeAgo(item.created_at)}
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={styles.deleteBtn}
-              onPress={() => handleDelete(item.id)}
-            >
-              <Text style={styles.deleteBtnText}>\u2715</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-      ListEmptyComponent={<Text style={styles.emptyText}>No curiosity items yet</Text>}
-    />
+  const [expandedActivity, setExpandedActivity] = useState<Set<string>>(
+    new Set(),
   );
-}
 
-// ─── Directives Tab ──────────────────────────────────
-
-function DirectivesTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [directives, setDirectives] = useState<Directive[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [formType, setFormType] = useState('focus');
-  const [formContent, setFormContent] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-
-  const fetchDirectives = useCallback(async () => {
+  const fetchAll = useCallback(async () => {
     try {
-      const data = await apiClient.get<{ directives: Directive[] }>('/api/acs/directives');
-      const resp = data as any;
-      setDirectives(resp?.directives || []);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchDirectives();
-  }, [fetchDirectives]);
-
-  useEffect(() => {
-    if (refreshing) fetchDirectives();
-  }, [refreshing, fetchDirectives]);
-
-  const handleCreate = async () => {
-    if (!formContent.trim()) return;
-    setSubmitting(true);
-    try {
-      await apiClient.post('/api/acs/directive', {
-        directive_type: formType,
-        content: formContent.trim(),
-        priority: 'normal',
-        source: 'ios',
-      });
-      setFormContent('');
-      setShowForm(false);
-      await fetchDirectives();
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to create directive');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  return (
-    <FlatList
-      data={directives}
-      keyExtractor={(item) => item.id}
-      contentContainerStyle={styles.listContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      ListHeaderComponent={
-        <View>
-          {!showForm ? (
-            <TouchableOpacity style={styles.newDirectiveBtn} onPress={() => setShowForm(true)}>
-              <Text style={styles.newDirectiveBtnText}>+ New Directive</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.card}>
-              <Text style={styles.sectionTitle}>New Directive</Text>
-              {/* Type picker */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.typePicker}>
-                {DIRECTIVE_TYPES.map((t) => (
-                  <TouchableOpacity
-                    key={t}
-                    style={[styles.typeChip, formType === t && styles.typeChipActive]}
-                    onPress={() => setFormType(t)}
-                  >
-                    <Text style={[styles.typeChipText, formType === t && styles.typeChipTextActive]}>
-                      {t}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-              <TextInput
-                style={[styles.textInput, styles.textInputMultiline]}
-                placeholder="What should Sara do?"
-                placeholderTextColor={colors.textMuted}
-                value={formContent}
-                onChangeText={setFormContent}
-                multiline
-                numberOfLines={3}
-              />
-              <View style={styles.formActions}>
-                <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowForm(false)}>
-                  <Text style={styles.cancelBtnText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.addBtn, (!formContent.trim() || submitting) && styles.addBtnDisabled]}
-                  onPress={handleCreate}
-                  disabled={!formContent.trim() || submitting}
-                >
-                  {submitting ? (
-                    <ActivityIndicator color="#fff" size="small" />
-                  ) : (
-                    <Text style={styles.addBtnText}>Create</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-        </View>
-      }
-      renderItem={({ item }) => (
-        <View style={styles.card}>
-          <View style={styles.directiveHeader}>
-            <View style={styles.directiveTypeBadge}>
-              <Text style={styles.directiveTypeText}>{item.directive_type}</Text>
-            </View>
-            <Text style={[
-              styles.directiveStatus,
-              { color: item.status === 'completed' ? colors.success : item.status === 'active' ? colors.info : colors.textMuted },
-            ]}>
-              {item.status}
-            </Text>
-          </View>
-          <Text style={styles.directiveContent}>{item.content}</Text>
-          {item.response ? (
-            <Text style={styles.directiveResponse}>{item.response}</Text>
-          ) : null}
-          <Text style={styles.directiveMeta}>
-            {item.source} \u00B7 {item.priority} \u00B7 {timeAgo(item.created_at)}
-          </Text>
-        </View>
-      )}
-      ListEmptyComponent={<Text style={styles.emptyText}>No directives yet</Text>}
-    />
-  );
-}
-
-// ─── Sessions Tab ────────────────────────────────────
-
-function SessionsTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [expandedDetail, setExpandedDetail] = useState<SessionDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-
-  const fetchSessions = useCallback(async () => {
-    try {
-      const data = await apiClient.get<{ sessions: SessionSummary[] }>('/api/acs/sessions?limit=20');
-      const resp = data as any;
-      setSessions(resp?.sessions || []);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSessions();
-  }, [fetchSessions]);
-
-  useEffect(() => {
-    if (refreshing) fetchSessions();
-  }, [refreshing, fetchSessions]);
-
-  const toggleExpand = async (id: string) => {
-    if (expandedId === id) {
-      setExpandedId(null);
-      setExpandedDetail(null);
-      return;
-    }
-    setExpandedId(id);
-    setExpandedDetail(null);
-    setDetailLoading(true);
-    try {
-      const [detailData, notesData] = await Promise.all([
-        apiClient.get<any>(`/api/acs/sessions/${id}`),
-        apiClient.get<any>(`/api/acs/sessions/${id}/notes`).catch(() => ({ notes: [] })),
+      const [d, f, i, a] = await Promise.all([
+        apiClient.get<DaemonStatus>('/api/acs/v2/daemon-status'),
+        apiClient.get<Focus>('/api/acs/v2/focus'),
+        apiClient.get<InboxItem[]>('/api/acs/v2/inbox?limit=20'),
+        apiClient.get<Activity[]>('/api/acs/v2/activity?limit=50'),
       ]);
-      const resp = detailData as any;
-      const notesResp = notesData as any;
-      setExpandedDetail({
-        context_summary: resp?.context_summary || resp?.summary || undefined,
-        token_usage: resp?.token_usage,
-        engagement_score: resp?.engagement_score,
-        model_id: resp?.model_id,
-        error_log: resp?.error_log,
-        interest_nodes_created: resp?.interest_nodes_created,
-        interest_nodes_updated: resp?.interest_nodes_updated,
-        interest_edges_created: resp?.interest_edges_created,
-        outcome_type: resp?.outcome_type,
-        artifact_summary: resp?.artifact_summary,
-        outbound_messages: resp?.outbound_messages,
-        suppressed_messages: resp?.suppressed_messages,
-        notes: Array.isArray(notesResp) ? notesResp : notesResp?.notes || [],
-      });
-    } catch {
-      setExpandedDetail({ context_summary: 'Failed to load details' });
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
-      </View>
-    );
-  }
-
-  const stateColor = (state: string) => {
-    if (state === 'completed' || state === 'ended') return colors.success;
-    if (state === 'active' || state === 'running' || state === 'autonomous') return colors.info;
-    if (state === 'pausing') return colors.warning;
-    if (state === 'failed') return colors.error;
-    return colors.textMuted;
-  };
-
-  return (
-    <FlatList
-      data={sessions}
-      keyExtractor={(item) => item.id}
-      contentContainerStyle={styles.listContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      renderItem={({ item }) => (
-        <TouchableOpacity style={styles.card} onPress={() => toggleExpand(item.id)} activeOpacity={0.7}>
-          <View style={styles.sessionHeader}>
-            <Text style={styles.sessionMode}>{item.cognitive_mode}</Text>
-            <Text style={[styles.sessionState, { color: stateColor(item.state) }]}>{item.state}</Text>
-          </View>
-          <View style={styles.sessionStats}>
-            <Text style={styles.sessionStat}>{item.turns_completed} turns</Text>
-            <Text style={styles.sessionStatDot}>{'\u00B7'}</Text>
-            <Text style={styles.sessionStat}>{item.notes_created} notes</Text>
-            <Text style={styles.sessionStatDot}>{'\u00B7'}</Text>
-            <Text style={styles.sessionStat}>{formatDuration(item.duration_seconds, item.duration_minutes)}</Text>
-          </View>
-          <Text style={styles.sessionTime}>{timeAgo(item.started_at)}</Text>
-
-          {expandedId === item.id && (
-            <View style={styles.sessionExpanded}>
-              {detailLoading ? (
-                <ActivityIndicator color={colors.textMuted} size="small" />
-              ) : expandedDetail ? (
-                <View>
-                  {/* Stats grid */}
-                  {(expandedDetail.token_usage != null || expandedDetail.engagement_score != null || expandedDetail.model_id) && (
-                    <View style={styles.sessionDetailGrid}>
-                      {expandedDetail.model_id ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Model</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.model_id}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.token_usage != null ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Tokens</Text>
-                          <Text style={styles.sessionDetailValue}>{formatTokenUsage(expandedDetail.token_usage)}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.engagement_score != null ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Engagement</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.engagement_score}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.interest_nodes_created ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Nodes +</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.interest_nodes_created}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.interest_edges_created ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Edges +</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.interest_edges_created}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.outbound_messages != null ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Shared</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.outbound_messages}</Text>
-                        </View>
-                      ) : null}
-                      {expandedDetail.suppressed_messages != null ? (
-                        <View style={styles.sessionDetailCell}>
-                          <Text style={styles.sessionDetailLabel}>Suppressed</Text>
-                          <Text style={styles.sessionDetailValue}>{expandedDetail.suppressed_messages}</Text>
-                        </View>
-                      ) : null}
-                    </View>
-                  )}
-
-                  {/* Summary */}
-                  {expandedDetail.context_summary ? (
-                    <View style={{ marginTop: spacing.sm }}>
-                      <SimpleMarkdown>{expandedDetail.context_summary}</SimpleMarkdown>
-                    </View>
-                  ) : null}
-
-                  {expandedDetail.artifact_summary ? (
-                    <View style={{ marginTop: spacing.sm }}>
-                      <Text style={styles.sectionTitle}>Outcome</Text>
-                      <Text style={styles.interestDesc}>{expandedDetail.artifact_summary}</Text>
-                    </View>
-                  ) : null}
-
-                  {/* Error log */}
-                  {expandedDetail.error_log ? (
-                    <View style={styles.errorLogBox}>
-                      <Text style={styles.errorLogText}>{expandedDetail.error_log}</Text>
-                    </View>
-                  ) : null}
-
-                  {/* Notes */}
-                  {expandedDetail.notes && expandedDetail.notes.length > 0 ? (
-                    <View style={{ marginTop: spacing.sm }}>
-                      <Text style={styles.sectionTitle}>Notes Created</Text>
-                      {expandedDetail.notes.map((note) => (
-                        <View key={note.id} style={styles.noteItem}>
-                          <Text style={styles.noteItemTitle}>{note.title}</Text>
-                          <Text style={styles.noteItemMeta}>
-                            {note.folder ? `${note.folder} \u00B7 ` : ''}{timeAgo(note.created_at)}
-                          </Text>
-                        </View>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-              ) : null}
-            </View>
-          )}
-        </TouchableOpacity>
-      )}
-      ListEmptyComponent={<Text style={styles.emptyText}>No sessions recorded yet</Text>}
-    />
-  );
-}
-
-// ─── Show David Tab ─────────────────────────────────
-
-const CATEGORY_COLORS: Record<string, string> = {
-  discovery: '#10b981',
-  insight: '#6366f1',
-  connection: '#f59e0b',
-  question: '#3b82f6',
-};
-
-function ShowDavidTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [items, setItems] = useState<ShowDavidItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showAll, setShowAll] = useState(false);
-
-  const fetchItems = useCallback(async () => {
-    try {
-      const data = await apiClient.get<{ items: ShowDavidItem[]; count: number }>('/api/acs/show-david');
-      const resp = data as any;
-      setItems(resp?.items || []);
-    } catch {
-      // silent
+      setDaemon(d);
+      setFocus(f);
+      setInbox(i);
+      setActivity(a);
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchItems();
-  }, [fetchItems]);
+    fetchAll();
+    const refresh = setInterval(fetchAll, 8000);
+    return () => clearInterval(refresh);
+  }, [fetchAll]);
 
-  useEffect(() => {
-    if (refreshing) fetchItems();
-  }, [refreshing, fetchItems]);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchAll();
+    setRefreshing(false);
+  }, [fetchAll, setRefreshing]);
 
-  const markShown = async (id: string) => {
+  const submitInbox = async () => {
+    const text = newPrompt.trim();
+    if (!text || submitting) return;
+    setSubmitting(true);
     try {
-      await apiClient.post(`/api/acs/show-david/${id}/shown`, {});
-      setItems((prev) => prev.map((i) => (i.id === id ? { ...i, shown: true } : i)));
-    } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Failed to mark as shown');
+      await apiClient.post('/api/acs/v2/inbox', {
+        prompt: text,
+        urgency: newUrgency,
+        created_by: 'david_ios',
+      });
+      setNewPrompt('');
+      setNewUrgency('normal');
+      await fetchAll();
+    } catch (e: any) {
+      Alert.alert('Could not queue', e?.message || 'request failed');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  if (loading) {
+  const toggleActivity = (id: string) => {
+    setExpandedActivity((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  if (loading && !daemon) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
+      <View style={styles.centerFill}>
+        <ActivityIndicator color={colors.textMuted} />
       </View>
     );
   }
 
-  const filtered = showAll ? items : items.filter((i) => !i.shown);
+  const liveness = livenessLabel(daemon);
 
   return (
-    <FlatList
-      data={filtered}
-      keyExtractor={(item) => item.id}
-      contentContainerStyle={styles.listContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      ListHeaderComponent={
-        <TouchableOpacity
-          style={styles.showAllToggle}
-          onPress={() => setShowAll(!showAll)}
-        >
-          <Text style={styles.showAllToggleText}>
-            {showAll ? 'Show unread only' : `Show all (${items.length})`}
-          </Text>
-        </TouchableOpacity>
+    <ScrollView
+      style={styles.tabContent}
+      contentContainerStyle={styles.tabContentPad}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.textMuted}
+        />
       }
-      renderItem={({ item }) => {
-        const catColor = CATEGORY_COLORS[item.category] || colors.textMuted;
-        return (
-          <View style={[styles.card, !item.shown && styles.showDavidCardUnshown]}>
-            <View style={styles.showDavidHeader}>
-              <View style={[styles.categoryBadge, { backgroundColor: catColor + '20' }]}>
-                <Text style={[styles.categoryBadgeText, { color: catColor }]}>
-                  {item.category}
+    >
+      {/* Liveness card */}
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <View style={styles.rowStart}>
+            <View
+              style={[
+                styles.dot,
+                { backgroundColor: liveness.color },
+              ]}
+            />
+            <Text style={[styles.livenessText, { color: liveness.color }]}>
+              {liveness.text}
+            </Text>
+            {daemon?.version ? (
+              <Text style={styles.metaDim}>v{daemon.version}</Text>
+            ) : null}
+          </View>
+          <Text style={styles.metaDim}>
+            heartbeat {timeAgo(daemon?.last_heartbeat_at)}
+          </Text>
+        </View>
+        <View style={styles.statsGrid}>
+          <Stat label="host" value={daemon?.hostname || '—'} />
+          <Stat label="pid" value={daemon?.pid != null ? String(daemon.pid) : '—'} />
+          <Stat label="uptime" value={uptime(daemon?.started_at)} />
+          <Stat
+            label="last tick"
+            value={daemon?.last_tick_summary || '—'}
+            numberOfLines={1}
+          />
+        </View>
+      </View>
+
+      {/* Focus card */}
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Text style={styles.cardTitle}>Current focus</Text>
+          {focus?.set_at ? (
+            <Text style={styles.metaDim}>set {timeAgo(focus.set_at)}</Text>
+          ) : null}
+        </View>
+        {focus?.topic ? (
+          <>
+            <Text style={styles.focusTopic}>{focus.topic}</Text>
+            {focus.why ? (
+              <Text style={styles.focusWhy}>{focus.why}</Text>
+            ) : null}
+          </>
+        ) : (
+          <Text style={styles.empty}>between things</Text>
+        )}
+      </View>
+
+      {/* Queue */}
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Text style={styles.cardTitle}>Queue</Text>
+          <Text style={styles.metaDim}>{inbox.length} active</Text>
+        </View>
+
+        <View style={styles.formRow}>
+          <TextInput
+            value={newPrompt}
+            onChangeText={setNewPrompt}
+            placeholder="Queue something for Sara…"
+            placeholderTextColor={colors.textMuted}
+            style={styles.input}
+            multiline
+          />
+          <View style={styles.urgencyRow}>
+            {(['low', 'normal', 'high'] as Urgency[]).map((u) => (
+              <TouchableOpacity
+                key={u}
+                onPress={() => setNewUrgency(u)}
+                style={[
+                  styles.urgencyPill,
+                  newUrgency === u && styles.urgencyPillActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.urgencyPillText,
+                    newUrgency === u && styles.urgencyPillTextActive,
+                  ]}
+                >
+                  {u}
+                </Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              onPress={submitInbox}
+              disabled={!newPrompt.trim() || submitting}
+              style={[
+                styles.queueBtn,
+                (!newPrompt.trim() || submitting) && styles.queueBtnDisabled,
+              ]}
+            >
+              <Text style={styles.queueBtnText}>
+                {submitting ? '…' : 'Queue'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {inbox.length === 0 ? (
+          <Text style={styles.empty}>empty — nothing queued for her</Text>
+        ) : (
+          inbox.map((item) => (
+            <View key={item.id} style={styles.inboxItem}>
+              <View style={styles.rowStart}>
+                <Badge
+                  text={item.urgency}
+                  color={URGENCY_COLOR[item.urgency]}
+                />
+                <Badge
+                  text={
+                    item.status === 'in_progress' ? 'in progress' : 'queued'
+                  }
+                  color={item.status === 'in_progress' ? '#22d3ee' : '#71717a'}
+                />
+                <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
+                  {timeAgo(item.created_at)}
                 </Text>
               </View>
-              <Text style={styles.curiosityMeta}>{timeAgo(item.created_at)}</Text>
+              <Text style={styles.inboxPrompt}>{item.prompt}</Text>
+              {item.context ? (
+                <Text style={styles.inboxContext}>{item.context}</Text>
+              ) : null}
+              <Text style={styles.inboxMeta}>
+                id={item.id.slice(0, 8)} · from {item.created_by}
+              </Text>
             </View>
-            <Text style={styles.showDavidTitle}>{item.title}</Text>
-            <Text style={styles.showDavidContent}>{item.content}</Text>
-            {!item.shown && (
+          ))
+        )}
+      </View>
+
+      {/* Activity */}
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Text style={styles.cardTitle}>Activity</Text>
+          <Text style={styles.metaDim}>last {activity.length}</Text>
+        </View>
+        {activity.length === 0 ? (
+          <Text style={styles.empty}>no activity yet</Text>
+        ) : (
+          activity.map((a) => {
+            const expanded = expandedActivity.has(a.id);
+            const hasBody = !!a.body && a.body.trim().length > 0;
+            const color = KIND_COLOR[a.kind] || '#a1a1aa';
+            return (
               <TouchableOpacity
-                style={styles.markShownBtn}
-                onPress={() => markShown(item.id)}
+                key={a.id}
+                activeOpacity={hasBody ? 0.6 : 1}
+                onPress={() => hasBody && toggleActivity(a.id)}
+                style={styles.activityRow}
               >
-                <Text style={styles.markShownBtnText}>Mark Shown</Text>
+                <View style={styles.activityHeader}>
+                  <Badge text={KIND_LABEL[a.kind] || a.kind} color={color} />
+                  <Text style={[styles.metaDim, styles.activityTime]}>
+                    {timeAgo(a.created_at)}
+                  </Text>
+                  <Text style={styles.activitySummary} numberOfLines={2}>
+                    {a.summary}
+                  </Text>
+                  {hasBody ? (
+                    <Text style={styles.activityChevron}>
+                      {expanded ? '▾' : '▸'}
+                    </Text>
+                  ) : null}
+                </View>
+                {expanded && hasBody ? (
+                  <Text style={styles.activityBody}>{a.body}</Text>
+                ) : null}
               </TouchableOpacity>
-            )}
-          </View>
-        );
-      }}
-      ListEmptyComponent={
-        <Text style={styles.emptyText}>
-          {showAll ? 'No items yet' : 'All caught up!'}
-        </Text>
-      }
-    />
+            );
+          })
+        )}
+      </View>
+
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+    </ScrollView>
   );
 }
 
-// ─── Self Model Tab ─────────────────────────────────
+function livenessLabel(d: DaemonStatus | null): { text: string; color: string } {
+  if (!d) return { text: 'unknown', color: colors.textMuted };
+  if (d.state === 'never_started')
+    return { text: 'never started', color: colors.textMuted };
+  if (!d.is_alive) return { text: 'dead', color: colors.error };
+  if (d.state === 'thinking') return { text: 'thinking', color: '#818cf8' };
+  if (d.state === 'reflecting') return { text: 'reflecting', color: '#a78bfa' };
+  return { text: 'alive', color: colors.success };
+}
 
-function SelfModelTab({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
-  const [model, setModel] = useState<SelfModelVersion | null>(null);
-  const [history, setHistory] = useState<SelfModelVersion[]>([]);
+// ─── Interests tab ───────────────────────────────────
+
+function InterestsTab({
+  refreshing,
+  setRefreshing,
+}: {
+  refreshing: boolean;
+  setRefreshing: (b: boolean) => void;
+}) {
+  const [interests, setInterests] = useState<Interest[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showHistory, setShowHistory] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const fetchModel = useCallback(async () => {
+  const fetch = useCallback(async () => {
     try {
-      const [modelData, historyData] = await Promise.all([
-        apiClient.get<{ model: SelfModelVersion }>('/api/acs/self-model'),
-        apiClient.get<{ history: SelfModelVersion[] }>('/api/acs/self-model/history').catch(() => ({ history: [] })),
-      ]);
-      const modelResp = (modelData as any)?.model;
-      const historyResp = historyData as any;
-      if (modelResp && typeof modelResp === 'object') {
-        // API may return {content, version, created_at} or raw content dict
-        const hasContentKey = modelResp.content && typeof modelResp.content === 'object' && !Array.isArray(modelResp.content);
-        setModel({
-          content: hasContentKey ? modelResp.content : modelResp,
-          version: modelResp.version ?? 0,
-          created_at: modelResp.created_at || '',
-        });
-      } else {
-        setModel(null);
-      }
-      const histItems = historyResp?.history || [];
-      setHistory(histItems.map((h: any) => ({
-        content: h?.content && typeof h.content === 'object' ? h.content : {},
-        version: h?.version ?? 0,
-        created_at: h?.created_at || '',
-      })));
-    } catch {
-      // silent
+      const data = await apiClient.get<Interest[]>(
+        '/api/acs/v2/interests?limit=20',
+      );
+      setInterests(data);
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchModel();
-  }, [fetchModel]);
+    fetch();
+    const id = setInterval(fetch, 15000);
+    return () => clearInterval(id);
+  }, [fetch]);
 
-  useEffect(() => {
-    if (refreshing) fetchModel();
-  }, [refreshing, fetchModel]);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetch();
+    setRefreshing(false);
+  }, [fetch, setRefreshing]);
 
-  if (loading) {
+  const remove = (item: Interest) => {
+    Alert.alert(
+      'Remove interest?',
+      `"${item.display_name}" — Sara will stop seeding it.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await apiClient.delete(`/api/acs/v2/interests/${item.id}`);
+              await fetch();
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message || 'request failed');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const maxWeight = Math.max(1, ...interests.map((i) => i.weight));
+
+  if (loading && interests.length === 0) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={colors.primary} />
+      <View style={styles.centerFill}>
+        <ActivityIndicator color={colors.textMuted} />
       </View>
     );
   }
 
-  if (!model) {
+  return (
+    <ScrollView
+      style={styles.tabContent}
+      contentContainerStyle={styles.tabContentPad}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.textMuted}
+        />
+      }
+    >
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Text style={styles.cardTitle}>Interests</Text>
+          <Text style={styles.metaDim}>{interests.length} tracked</Text>
+        </View>
+
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        {interests.length === 0 && !error ? (
+          <Text style={styles.empty}>
+            nothing tracked yet — she'll seed these from her reflections
+          </Text>
+        ) : (
+          interests.map((i) => {
+            const pct = Math.round((i.weight / maxWeight) * 100);
+            return (
+              <View key={i.id} style={styles.interestItem}>
+                <View style={styles.rowStart}>
+                  <Badge
+                    text={i.source.replace('_', ' ')}
+                    color={SOURCE_COLOR[i.source] || '#a78bfa'}
+                  />
+                  <Text style={styles.interestName} numberOfLines={1}>
+                    {i.display_name}
+                  </Text>
+                  <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
+                    weight {i.weight.toFixed(2)}
+                  </Text>
+                </View>
+                <View style={styles.weightBarTrack}>
+                  <View
+                    style={[styles.weightBarFill, { width: `${pct}%` }]}
+                  />
+                </View>
+                {i.why ? (
+                  <Text style={styles.interestWhy} numberOfLines={2}>
+                    {i.why}
+                  </Text>
+                ) : null}
+                <View style={styles.row}>
+                  <Text style={styles.metaDim}>
+                    touched {timeAgo(i.last_acted_at)} · updated{' '}
+                    {timeAgo(i.last_updated_at)}
+                  </Text>
+                  <TouchableOpacity onPress={() => remove(i)}>
+                    <Text style={styles.removeBtn}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })
+        )}
+      </View>
+    </ScrollView>
+  );
+}
+
+// ─── Tools tab ───────────────────────────────────────
+
+function ToolsTab({
+  refreshing,
+  setRefreshing,
+}: {
+  refreshing: boolean;
+  setRefreshing: (b: boolean) => void;
+}) {
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [versions, setVersions] = useState<Record<string, ToolVersionFull[]>>(
+    {},
+  );
+  const [invocations, setInvocations] = useState<Record<string, Invocation[]>>(
+    {},
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const fetchTools = useCallback(async () => {
+    try {
+      const data = await apiClient.get<Tool[]>('/api/acs/v2/user_tools');
+      setTools(data);
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTools();
+    const id = setInterval(fetchTools, 15000);
+    return () => clearInterval(id);
+  }, [fetchTools]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchTools();
+    setRefreshing(false);
+  }, [fetchTools, setRefreshing]);
+
+  const fetchDetails = useCallback(async (name: string) => {
+    try {
+      const [v, inv] = await Promise.all([
+        apiClient.get<ToolVersionFull[]>(
+          `/api/acs/v2/user_tools/${name}/versions`,
+        ),
+        apiClient.get<Invocation[]>(
+          `/api/acs/v2/user_tools/${name}/invocations?limit=10`,
+        ),
+      ]);
+      setVersions((p) => ({ ...p, [name]: v }));
+      setInvocations((p) => ({ ...p, [name]: inv }));
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load details');
+    }
+  }, []);
+
+  const toggle = (name: string) => {
+    if (expanded === name) {
+      setExpanded(null);
+    } else {
+      setExpanded(name);
+      if (!versions[name]) fetchDetails(name);
+    }
+  };
+
+  const enable = async (name: string) => {
+    setBusy(name);
+    try {
+      await apiClient.post(`/api/acs/v2/user_tools/${name}/enable`);
+      await fetchTools();
+    } catch (e: any) {
+      Alert.alert('Failed', e?.message || 'request failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disable = async (name: string) => {
+    setBusy(name);
+    try {
+      await apiClient.post(`/api/acs/v2/user_tools/${name}/disable`);
+      await fetchTools();
+    } catch (e: any) {
+      Alert.alert('Failed', e?.message || 'request failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = (name: string) => {
+    Alert.alert(
+      `Delete tool "${name}"?`,
+      'This removes all versions and the invocation log.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(name);
+            try {
+              await apiClient.delete(`/api/acs/v2/user_tools/${name}`);
+              await fetchTools();
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message || 'request failed');
+            } finally {
+              setBusy(null);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  if (loading && tools.length === 0) {
     return (
-      <ScrollView
-        style={styles.tabContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
-      >
-        <Text style={styles.emptyText}>No self-model available yet</Text>
-      </ScrollView>
+      <View style={styles.centerFill}>
+        <ActivityIndicator color={colors.textMuted} />
+      </View>
     );
   }
 
-  const renderValue = (value: any): React.ReactNode => {
-    if (value == null) return <Text style={styles.selfModelValue}>--</Text>;
-    if (Array.isArray(value)) {
-      return (
-        <View style={styles.selfModelList}>
-          {value.map((item, i) => (
-            <View key={i} style={styles.selfModelListItem}>
-              <Text style={styles.selfModelBullet}>{'\u2022'}</Text>
-              <Text style={styles.selfModelValue}>
-                {typeof item === 'object' ? JSON.stringify(item) : String(item)}
+  const pending = tools.filter((t) => !t.enabled);
+  const active = tools.filter((t) => t.enabled);
+
+  const renderTool = (t: Tool) => {
+    const isExpanded = expanded === t.name;
+    const activeVersion = t.active_version?.version;
+    const v = versions[t.name] || [];
+    const inv = invocations[t.name] || [];
+    return (
+      <View key={t.id} style={styles.toolItem}>
+        <View style={styles.toolHeader}>
+          <View
+            style={[
+              styles.toolDot,
+              { backgroundColor: t.enabled ? colors.success : colors.warning },
+            ]}
+          />
+          <View style={{ flex: 1 }}>
+            <View style={styles.rowStart}>
+              <Text style={styles.toolName}>{t.name}</Text>
+              <Text style={styles.metaDim}>
+                v{activeVersion ?? '?'}
+              </Text>
+              {t.latest_version &&
+              t.latest_version.version !== activeVersion ? (
+                <Text style={styles.toolLatestWarn}>
+                  (latest v{t.latest_version.version})
+                </Text>
+              ) : null}
+              <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
+                {t.invocation_count_24h}/24h
               </Text>
             </View>
-          ))}
+            <Text style={styles.toolDesc}>{t.description}</Text>
+          </View>
         </View>
-      );
-    }
-    if (typeof value === 'object') {
-      return (
-        <View style={styles.selfModelNested}>
-          {Object.entries(value).map(([k, v]) => (
-            <View key={k} style={styles.selfModelRow}>
-              <Text style={styles.selfModelNestedKey}>{k}:</Text>
-              {renderValue(v)}
-            </View>
-          ))}
+
+        <View style={styles.toolActions}>
+          {t.enabled ? (
+            <TouchableOpacity
+              style={styles.btn}
+              disabled={busy === t.name}
+              onPress={() => disable(t.name)}
+            >
+              <Text style={styles.btnText}>Disable</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.btn, styles.btnSuccess]}
+              disabled={busy === t.name}
+              onPress={() => enable(t.name)}
+            >
+              <Text style={[styles.btnText, styles.btnTextOnSuccess]}>
+                Enable
+              </Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            style={styles.btn}
+            onPress={() => toggle(t.name)}
+          >
+            <Text style={styles.btnText}>
+              {isExpanded ? 'Hide' : 'Details'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.btn}
+            onPress={() => remove(t.name)}
+          >
+            <Text style={[styles.btnText, { color: colors.error }]}>
+              Delete
+            </Text>
+          </TouchableOpacity>
         </View>
-      );
-    }
-    return <Text style={styles.selfModelValue}>{String(value)}</Text>;
+
+        {isExpanded ? (
+          <View style={styles.toolDetails}>
+            <Text style={styles.detailHeader}>Args schema</Text>
+            <Text style={styles.codeBlock} selectable>
+              {JSON.stringify(t.args_schema, null, 2)}
+            </Text>
+
+            <Text style={styles.detailHeader}>Versions ({v.length})</Text>
+            {v.map((ver) => (
+              <View key={ver.id} style={styles.versionBlock}>
+                <View style={styles.rowStart}>
+                  <Text style={styles.versionLabel}>v{ver.version}</Text>
+                  {ver.version === activeVersion ? (
+                    <Text style={styles.activeBadge}>ACTIVE</Text>
+                  ) : null}
+                  <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
+                    {timeAgo(ver.created_at)}
+                  </Text>
+                </View>
+                {ver.notes ? (
+                  <Text style={styles.versionNotes}>"{ver.notes}"</Text>
+                ) : null}
+                <Text style={styles.codeBlock} selectable>
+                  {ver.code}
+                </Text>
+              </View>
+            ))}
+
+            <Text style={styles.detailHeader}>
+              Recent invocations ({inv.length})
+            </Text>
+            {inv.length === 0 ? (
+              <Text style={styles.empty}>no calls yet</Text>
+            ) : (
+              inv.map((iv) => (
+                <View key={iv.id} style={styles.invocationBlock}>
+                  <View style={styles.rowStart}>
+                    <Badge
+                      text={iv.error ? 'error' : 'ok'}
+                      color={iv.error ? colors.error : colors.success}
+                    />
+                    <Text style={styles.metaDim}>
+                      {timeAgo(iv.started_at)}
+                    </Text>
+                    {iv.duration_ms != null ? (
+                      <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
+                        {iv.duration_ms}ms
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={styles.codeBlock} selectable>
+                    args: {JSON.stringify(iv.args)}
+                  </Text>
+                  {iv.error ? (
+                    <Text
+                      style={[styles.codeBlock, { color: colors.error }]}
+                      selectable
+                    >
+                      {iv.error}
+                    </Text>
+                  ) : null}
+                  {iv.result !== null && iv.result !== undefined ? (
+                    <Text style={styles.codeBlock} selectable>
+                      → {JSON.stringify(iv.result)}
+                    </Text>
+                  ) : null}
+                </View>
+              ))
+            )}
+          </View>
+        ) : null}
+      </View>
+    );
   };
 
   return (
     <ScrollView
       style={styles.tabContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />}
+      contentContainerStyle={styles.tabContentPad}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.textMuted}
+        />
+      }
     >
-      {/* Header */}
       <View style={styles.card}>
-        <View style={styles.selfModelHeader}>
-          <Text style={styles.sectionTitle}>Self-Model</Text>
-          <Text style={styles.selfModelVersion}>
-            v{model.version} {'\u00B7'} {timeAgo(model.created_at)}
+        <View style={styles.row}>
+          <Text style={styles.cardTitle}>Tools</Text>
+          <Text style={styles.metaDim}>
+            {active.length} active
+            {pending.length > 0 ? ` · ${pending.length} pending` : ''}
           </Text>
         </View>
+
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        {pending.length > 0 ? (
+          <>
+            <Text style={styles.sectionHeader}>Pending review</Text>
+            {pending.map(renderTool)}
+          </>
+        ) : null}
+
+        {active.length > 0 ? (
+          <>
+            {pending.length > 0 ? (
+              <Text style={styles.sectionHeader}>Active</Text>
+            ) : null}
+            {active.map(renderTool)}
+          </>
+        ) : null}
+
+        {tools.length === 0 && !error ? (
+          <Text style={styles.empty}>
+            no user tools yet — Sara will propose these as she works
+          </Text>
+        ) : null}
       </View>
-
-      {/* Content */}
-      <View style={styles.card}>
-        {Object.entries(model.content || {}).map(([key, value]) => (
-          <View key={key} style={styles.selfModelSection}>
-            <Text style={styles.selfModelKey}>{key.replace(/_/g, ' ')}</Text>
-            {renderValue(value)}
-          </View>
-        ))}
-      </View>
-
-      {/* History */}
-      {history.length > 0 && (
-        <View style={styles.card}>
-          <TouchableOpacity onPress={() => setShowHistory(!showHistory)}>
-            <Text style={styles.sectionTitle}>
-              History ({history.length}) {showHistory ? '\u25B2' : '\u25BC'}
-            </Text>
-          </TouchableOpacity>
-          {showHistory && history.map((ver, i) => (
-            <View key={i} style={styles.historyItem}>
-              <Text style={styles.historyVersion}>v{ver.version}</Text>
-              <Text style={styles.historyDate}>{timeAgo(ver.created_at)}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-
-      <View style={{ height: spacing.xxl }} />
     </ScrollView>
+  );
+}
+
+// ─── Small bits ──────────────────────────────────────
+
+function Stat({
+  label,
+  value,
+  numberOfLines = 1,
+}: {
+  label: string;
+  value: string;
+  numberOfLines?: number;
+}) {
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statValue} numberOfLines={numberOfLines}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function Badge({ text, color }: { text: string; color: string }) {
+  return (
+    <View style={[styles.badge, { borderColor: color + '60', backgroundColor: color + '20' }]}>
+      <Text style={[styles.badgeText, { color }]}>{text}</Text>
+    </View>
   );
 }
 
@@ -1347,732 +1037,402 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  header: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
-  },
-  heroCard: {
-    backgroundColor: colors.assistant.panel,
-    borderRadius: borderRadius.xl,
-    borderWidth: 1,
-    borderColor: colors.assistant.borderStrong,
-    padding: spacing.lg,
-    ...shadows.sm,
-  },
-  heroEyebrow: {
-    color: colors.accent,
-    fontSize: fontSizes.xs,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: spacing.xs,
-  },
-  heroTitle: {
-    color: colors.text,
-    fontSize: fontSizes.xxl,
-    fontWeight: '700',
-  },
-  heroSubtitle: {
-    marginTop: spacing.xs,
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-  },
-  heroStatsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  heroStatCard: {
+  centerFill: {
     flex: 1,
-    minWidth: 96,
-    backgroundColor: colors.assistant.panelRaised,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    padding: spacing.md,
-  },
-  heroStatLabel: {
-    color: colors.textMuted,
-    fontSize: fontSizes.xs,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
-  heroStatValue: {
-    color: colors.text,
-    fontSize: fontSizes.lg,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  heroStatMeta: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.xs,
-    lineHeight: 16,
-    marginTop: 2,
-  },
-  tabBar: {
-    flexGrow: 0,
-    marginHorizontal: spacing.md,
-    marginBottom: spacing.sm,
-    backgroundColor: colors.assistant.panelRaised,
-    borderRadius: borderRadius.xl,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-  },
-  tabBarContent: {
-    paddingHorizontal: spacing.xs,
-    gap: spacing.xs,
-    paddingVertical: spacing.xs,
-    alignItems: 'center',
-  },
-  tab: {
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.assistant.panelMuted,
-    borderWidth: 1,
-    borderColor: 'transparent',
-    minHeight: 38,
-    gap: 4,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: spacing.sm + 2,
+    alignItems: 'center',
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
   },
   tabActive: {
-    backgroundColor: colors.assistant.actionSoft,
-    borderColor: colors.assistant.borderStrong,
-    ...shadows.sm,
-  },
-  tabIcon: {
-    fontSize: 14,
-    lineHeight: 16,
+    borderBottomColor: colors.primary,
   },
   tabLabel: {
-    fontSize: fontSizes.xs,
+    fontSize: fontSizes.sm,
     color: colors.textMuted,
     fontWeight: '600',
-    lineHeight: 16,
   },
   tabLabelActive: {
-    color: colors.primary,
+    color: colors.text,
   },
   tabContent: {
     flex: 1,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.sm,
   },
-  listContent: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xxl,
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+  tabContentPad: {
+    padding: spacing.md,
+    paddingBottom: spacing.xl,
   },
   card: {
-    backgroundColor: colors.assistant.panel,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    ...shadows.sm,
-  },
-  liveCard: {
-    borderColor: colors.success + '60',
-  },
-  sectionTitle: {
-    fontSize: fontSizes.sm,
-    fontWeight: '700',
-    color: colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: spacing.sm,
-  },
-
-  // Status tab
-  stateHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  stateDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  stateText: {
-    fontSize: fontSizes.lg,
-    fontWeight: '700',
-  },
-  emotionalState: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
-    marginBottom: spacing.md,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
-  },
-  actionBtn: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.md,
-    minWidth: 100,
-    alignItems: 'center',
-  },
-  actionBtnPrimary: {
-    backgroundColor: colors.primary,
-  },
-  actionBtnWarning: {
-    backgroundColor: colors.warning,
-  },
-  actionBtnMuted: {
-    backgroundColor: colors.surfaceLight,
-  },
-  actionBtnDisabled: {
-    opacity: 0.7,
-  },
-  actionBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: fontSizes.sm,
-  },
-  planHintCard: {
-    marginTop: spacing.sm,
-    backgroundColor: colors.assistant.panelRaised,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    padding: spacing.md,
-  },
-  planHintTitle: {
-    color: colors.text,
-    fontSize: fontSizes.sm,
-    fontWeight: '700',
-    marginBottom: spacing.xs,
-  },
-  planHintText: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-  },
-  planEmptyState: {
-    gap: spacing.xs,
-  },
-  planEmptyTitle: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '700',
-  },
-  planEmptyText: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-  },
-  liveBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: spacing.sm,
-  },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.success,
-  },
-  liveLabel: {
-    fontSize: fontSizes.sm,
-    color: colors.success,
-    fontWeight: '700',
-  },
-  sessionDetails: {
-    gap: 4,
-  },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 2,
-  },
-  detailLabel: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-  },
-  detailValue: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    fontWeight: '600',
-  },
-
-  // Plan tab
-  planText: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    lineHeight: 22,
-  },
-  emptyText: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    textAlign: 'center',
-    paddingVertical: spacing.xl,
-  },
-
-  // Interests tab
-  interestHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.xs,
-  },
-  interestLabel: {
-    fontSize: fontSizes.md,
-    color: colors.text,
-    fontWeight: '700',
-    flex: 1,
-  },
-  statusBadge: {
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-  },
-  interestDesc: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
-    marginBottom: spacing.sm,
-  },
-  barsContainer: {
-    gap: 6,
-    marginTop: spacing.xs,
-  },
-  progressRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  progressLabel: {
-    fontSize: 11,
-    color: colors.textMuted,
-    width: 80,
-  },
-  progressTrack: {
-    flex: 1,
-    height: 6,
-    backgroundColor: colors.surfaceLight,
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 3,
-  },
-  progressValue: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    width: 28,
-    textAlign: 'right',
-  },
-  sourceText: {
-    fontSize: 11,
-    color: colors.textMuted,
-    marginTop: spacing.sm,
-  },
-
-  // Curiosity tab
-  addForm: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.md,
-  },
-  textInput: {
-    flex: 1,
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    fontSize: fontSizes.sm,
-    color: colors.text,
-  },
-  textInputMultiline: {
-    minHeight: 80,
-    textAlignVertical: 'top',
-    marginBottom: spacing.sm,
-  },
-  addBtn: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.md,
-    justifyContent: 'center',
-    alignItems: 'center',
-    minWidth: 60,
-  },
-  addBtnDisabled: {
-    opacity: 0.5,
-  },
-  addBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: fontSizes.sm,
-  },
-  curiosityRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-  },
-  curiosityContent: {
-    flex: 1,
-  },
-  curiosityTopic: {
-    fontSize: fontSizes.md,
-    color: colors.text,
-    fontWeight: '600',
-  },
-  curiosityQuestion: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
-    marginTop: 2,
-    fontStyle: 'italic',
-  },
-  curiosityMeta: {
-    fontSize: 11,
-    color: colors.textMuted,
-    marginTop: 4,
-  },
-  deleteBtn: {
-    padding: spacing.sm,
-    marginLeft: spacing.sm,
-  },
-  deleteBtnText: {
-    fontSize: fontSizes.md,
-    color: colors.textMuted,
-  },
-
-  // Directives tab
-  newDirectiveBtn: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.primary + '40',
-    borderStyle: 'dashed',
     padding: spacing.md,
-    alignItems: 'center',
     marginBottom: spacing.md,
   },
-  newDirectiveBtnText: {
-    color: colors.primary,
-    fontWeight: '700',
+  cardTitle: {
     fontSize: fontSizes.sm,
+    fontWeight: '700',
+    color: colors.text,
   },
-  typePicker: {
-    flexGrow: 0,
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: spacing.sm,
   },
-  typeChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.surfaceLight,
-    marginRight: spacing.xs,
-  },
-  typeChipActive: {
-    backgroundColor: colors.primary + '30',
-    borderWidth: 1,
-    borderColor: colors.primary,
-  },
-  typeChipText: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    fontWeight: '600',
-  },
-  typeChipTextActive: {
-    color: colors.primary,
-  },
-  formActions: {
+  rowStart: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: spacing.sm,
-  },
-  cancelBtn: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.md,
-  },
-  cancelBtnText: {
-    color: colors.textMuted,
-    fontWeight: '600',
-    fontSize: fontSizes.sm,
-  },
-  directiveHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.xs,
+    gap: 6,
+    flex: 1,
   },
-  directiveTypeBadge: {
-    backgroundColor: colors.secondary + '20',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: borderRadius.sm,
+  metaDim: {
+    fontSize: 11,
+    color: colors.textMuted,
   },
-  directiveTypeText: {
-    fontSize: fontSizes.xs,
-    color: colors.secondary,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  directiveStatus: {
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-  },
-  directiveContent: {
+  empty: {
     fontSize: fontSizes.sm,
-    color: colors.text,
-    lineHeight: 20,
-    marginBottom: spacing.xs,
-  },
-  directiveResponse: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
+    color: colors.textMuted,
     fontStyle: 'italic',
-    lineHeight: 20,
-    marginBottom: spacing.xs,
-    paddingLeft: spacing.sm,
-    borderLeftWidth: 2,
-    borderLeftColor: colors.border,
+    paddingVertical: spacing.sm,
   },
-  directiveMeta: {
-    fontSize: 11,
-    color: colors.textMuted,
+  errorText: {
+    color: colors.error,
+    fontSize: fontSizes.sm,
+    paddingVertical: spacing.xs,
   },
-
-  // Sessions tab
-  sessionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.xs,
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
-  sessionMode: {
+  livenessText: {
     fontSize: fontSizes.md,
-    color: colors.text,
     fontWeight: '700',
-    textTransform: 'capitalize',
   },
-  sessionState: {
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-  },
-  sessionStats: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  sessionStat: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
-  },
-  sessionStatDot: {
-    color: colors.textMuted,
-  },
-  sessionTime: {
-    fontSize: 11,
-    color: colors.textMuted,
-    marginTop: 4,
-  },
-  sessionExpanded: {
-    marginTop: spacing.md,
-    paddingTop: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  sessionSummary: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
-    lineHeight: 20,
-  },
-  sessionDetailGrid: {
+  statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
+    gap: spacing.xs,
+    marginTop: spacing.xs,
   },
-  sessionDetailCell: {
-    backgroundColor: colors.surfaceLight,
-    borderRadius: borderRadius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    minWidth: 80,
+  stat: {
+    width: '48%',
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
   },
-  sessionDetailLabel: {
+  statLabel: {
     fontSize: 10,
     color: colors.textMuted,
     textTransform: 'uppercase',
-    fontWeight: '600',
+    letterSpacing: 0.5,
   },
-  sessionDetailValue: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  errorLogBox: {
-    backgroundColor: '#7f1d1d20',
-    borderRadius: borderRadius.md,
-    padding: spacing.sm,
-    marginTop: spacing.sm,
-    borderWidth: 1,
-    borderColor: '#ef444440',
-  },
-  errorLogText: {
-    fontSize: fontSizes.xs,
-    color: '#fca5a5',
-    fontFamily: 'monospace',
-  },
-  noteItem: {
-    paddingVertical: spacing.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  noteItemTitle: {
+  statValue: {
     fontSize: fontSizes.sm,
     color: colors.text,
     fontWeight: '600',
-  },
-  noteItemMeta: {
-    fontSize: 11,
-    color: colors.textMuted,
     marginTop: 2,
   },
-
-  // Show David tab
-  showAllToggle: {
-    alignSelf: 'flex-end',
-    marginBottom: spacing.sm,
-  },
-  showAllToggleText: {
-    fontSize: fontSizes.xs,
-    color: colors.primary,
-    fontWeight: '600',
-  },
-  showDavidCardUnshown: {
-    borderColor: colors.primary + '40',
-  },
-  showDavidHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.xs,
-  },
-  categoryBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: borderRadius.sm,
-  },
-  categoryBadgeText: {
-    fontSize: fontSizes.xs,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  showDavidTitle: {
+  focusTopic: {
     fontSize: fontSizes.md,
     color: colors.text,
-    fontWeight: '700',
-    marginBottom: spacing.xs,
+    marginTop: spacing.xs,
   },
-  showDavidContent: {
+  focusWhy: {
     fontSize: fontSizes.sm,
     color: colors.textSecondary,
-    lineHeight: 20,
+    fontStyle: 'italic',
+    marginTop: 4,
   },
-  markShownBtn: {
-    alignSelf: 'flex-start',
+  formRow: {
+    marginBottom: spacing.sm,
+  },
+  input: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    minHeight: 40,
+    maxHeight: 120,
+  },
+  urgencyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
     marginTop: spacing.sm,
-    backgroundColor: colors.primary + '20',
+  },
+  urgencyPill: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  urgencyPillActive: {
+    backgroundColor: colors.primary + '30',
+    borderColor: colors.primary,
+  },
+  urgencyPillText: {
+    fontSize: 11,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    fontWeight: '600',
+  },
+  urgencyPillTextActive: {
+    color: colors.text,
+  },
+  queueBtn: {
+    marginLeft: 'auto',
+    backgroundColor: colors.primary,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingVertical: 6,
     borderRadius: borderRadius.md,
   },
-  markShownBtnText: {
-    fontSize: fontSizes.xs,
-    color: colors.primary,
-    fontWeight: '700',
+  queueBtnDisabled: {
+    backgroundColor: colors.surfaceLight,
   },
-
-  // Self-Model tab
-  selfModelHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  selfModelVersion: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-  },
-  selfModelSection: {
-    marginBottom: spacing.md,
-  },
-  selfModelKey: {
+  queueBtnText: {
+    color: '#fff',
     fontSize: fontSizes.sm,
-    color: colors.primary,
-    fontWeight: '700',
-    textTransform: 'capitalize',
-    marginBottom: spacing.xs,
-  },
-  selfModelValue: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    lineHeight: 20,
-  },
-  selfModelList: {
-    gap: 4,
-  },
-  selfModelListItem: {
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  selfModelBullet: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-  },
-  selfModelNested: {
-    paddingLeft: spacing.sm,
-    borderLeftWidth: 2,
-    borderLeftColor: colors.border,
-    gap: spacing.xs,
-  },
-  selfModelNestedKey: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
     fontWeight: '600',
   },
-  selfModelRow: {
+  inboxItem: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  inboxPrompt: {
+    fontSize: fontSizes.sm,
+    color: colors.text,
+    marginTop: 6,
+  },
+  inboxContext: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  inboxMeta: {
+    fontSize: 10,
+    color: colors.textMuted,
+    marginTop: 4,
+  },
+  activityRow: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
     marginBottom: 4,
   },
-  historyItem: {
+  activityHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    alignItems: 'flex-start',
+    gap: 6,
   },
-  historyVersion: {
+  activityTime: {
+    width: 36,
+    marginTop: 2,
+  },
+  activitySummary: {
+    flex: 1,
     fontSize: fontSizes.sm,
+    color: colors.text,
+  },
+  activityChevron: {
+    color: colors.textMuted,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  activityBody: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    marginTop: 6,
+    paddingLeft: 36,
+  },
+  badge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  interestItem: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  interestName: {
+    fontSize: fontSizes.sm,
+    color: colors.text,
+    fontWeight: '500',
+    flex: 1,
+  },
+  interestWhy: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: 4,
+  },
+  weightBarTrack: {
+    height: 3,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: 2,
+    marginTop: 4,
+    overflow: 'hidden',
+  },
+  weightBarFill: {
+    height: '100%',
+    backgroundColor: '#a78bfa',
+  },
+  removeBtn: {
+    fontSize: 11,
+    color: colors.error,
+    fontWeight: '600',
+  },
+  toolItem: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  toolHeader: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  toolDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 6,
+  },
+  toolName: {
+    fontSize: fontSizes.sm,
+    color: colors.text,
+    fontFamily: 'Menlo',
+    fontWeight: '600',
+  },
+  toolLatestWarn: {
+    fontSize: 10,
+    color: colors.warning,
+  },
+  toolDesc: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  toolActions: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  btn: {
+    backgroundColor: colors.surfaceLight,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    borderRadius: borderRadius.sm,
+  },
+  btnSuccess: {
+    backgroundColor: colors.success,
+  },
+  btnText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  btnTextOnSuccess: {
+    color: '#fff',
+  },
+  toolDetails: {
+    marginTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: spacing.sm,
+  },
+  detailHeader: {
+    fontSize: 10,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    marginBottom: 4,
+  },
+  codeBlock: {
+    backgroundColor: '#000',
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontFamily: 'Menlo',
+    padding: spacing.sm,
+    borderRadius: borderRadius.sm,
+    marginTop: 4,
+  },
+  versionBlock: {
+    backgroundColor: colors.background,
+    padding: spacing.sm,
+    borderRadius: borderRadius.sm,
+    marginTop: 4,
+  },
+  versionLabel: {
+    fontSize: 12,
+    fontFamily: 'Menlo',
     color: colors.text,
     fontWeight: '600',
   },
-  historyDate: {
-    fontSize: fontSizes.xs,
+  activeBadge: {
+    fontSize: 9,
+    color: colors.success,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  versionNotes: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  invocationBlock: {
+    backgroundColor: colors.background,
+    padding: spacing.sm,
+    borderRadius: borderRadius.sm,
+    marginTop: 4,
+  },
+  sectionHeader: {
+    fontSize: 10,
     color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
   },
 });

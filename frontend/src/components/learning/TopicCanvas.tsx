@@ -23,7 +23,7 @@ interface TopicCanvasProps {
   topicId: string | null
 }
 
-interface ConceptNodeData {
+interface ConceptNodeData extends Record<string, unknown> {
   label: string
   mastery?: number
   description?: string
@@ -36,7 +36,7 @@ function ConceptNode({ data, selected }: NodeProps<Node<ConceptNodeData>>) {
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border-2 ${masteryColor} ${
+      className={`px-4 py-3 rounded-md border-2 ${masteryColor} ${
         selected ? 'bg-teal-900/50 ring-2 ring-teal-400' : 'bg-gray-800'
       } min-w-[120px] text-center shadow-lg`}
     >

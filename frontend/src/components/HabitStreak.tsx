@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, TrendingUp, Award, Calendar, Fire, Target } from 'lucide-react';
+import { Zap, TrendingUp, Award, Calendar, Flame, Target } from 'lucide-react';
 
 interface StreakData {
   current: number;
@@ -149,7 +149,7 @@ export default function HabitStreak({
       {streak.current > 0 && (
         <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
           <div className="flex items-center space-x-2">
-            <Fire className="w-4 h-4 text-blue-600" />
+            <Flame className="w-4 h-4 text-blue-600" />
             <span className="text-sm font-medium text-blue-800">
               {getMotivationMessage(streak.current)}
             </span>

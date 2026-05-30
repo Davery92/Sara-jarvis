@@ -306,7 +306,10 @@ async def _dispatch_llm_call(
             return await client.chat_completion(
                 messages=messages,
                 temperature=0.7,
-                max_tokens=4096,
+                # 12K tokens (≈48 KB) — enough for a multi-page research
+                # synthesis in one turn. Stays well under the 64K context
+                # ceiling we measured on the MLX endpoint at .115:8081.
+                max_tokens=12288,
                 model=model,
                 request_timeout=300.0,
                 allow_during_lesson_generation=True,
@@ -322,6 +325,86 @@ async def _dispatch_llm_call(
     raise last_error
 
 
+# Compaction tuning. Empirically the failure mode is "22 web_searches × ~3-10 KB
+# each, then the model can't fit the prompt." `KEEP_RECENT_TOOL_RESULTS` is the
+# sliding window of full-fidelity tool results the model sees; older ones are
+# replaced with a 1-line marker that preserves message-shape (tool_call_id,
+# tool name) but elides the bulky content. 8 is enough that the model can
+# cross-reference its most-recent searches without re-running them, and small
+# enough that a 30-call task still leaves ~75% of the 64K budget for the
+# synthesis turn.
+KEEP_RECENT_TOOL_RESULTS = 8
+
+
+def _compact_tool_history(messages: list[dict], keep_recent: int = KEEP_RECENT_TOOL_RESULTS) -> int:
+    """Replace older `tool`-role message contents with a short marker so the
+    conversation log doesn't outgrow the LLM's context window on long runs.
+
+    Idempotent: already-compacted entries (content starts with "[compacted:")
+    are skipped, so calling this every loop iteration is cheap.
+
+    Returns the number of tool messages compacted on this call.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_indices) <= keep_recent:
+        return 0
+
+    # Tool-call id → tool name lookup so the marker can name the elided call.
+    call_id_to_name: dict[str, str] = {}
+    for m in messages:
+        for tc in (m.get("tool_calls") or []):
+            cid = tc.get("id")
+            name = (tc.get("function") or {}).get("name")
+            if cid and name:
+                call_id_to_name[cid] = name
+
+    compacted_now = 0
+    for i in tool_indices[:-keep_recent]:
+        m = messages[i]
+        content = m.get("content") or ""
+        if not content or content.startswith("[compacted:"):
+            continue
+        tool_name = call_id_to_name.get(m.get("tool_call_id", ""), "tool")
+        m["content"] = (
+            f"[compacted: {tool_name} result ({len(content)} chars elided to save context)]"
+        )
+        compacted_now += 1
+    return compacted_now
+
+
+_PREAMBLE_TAIL_PHRASES = (
+    "let me create", "let me write", "let me build", "let me draft",
+    "let me put together", "let me compile", "let me synthesize",
+    "let me now", "let me proceed", "let me go ahead",
+    "now i'll", "now i will", "i'll now", "i will now",
+    "now i can create", "now i can write", "now i can build",
+    "i can now create", "i can now write",
+    "i have enough", "i now have enough",
+    "here it is", "here's the document", "here is the document",
+    "here's the final", "here is the final",
+)
+
+
+def _looks_like_preamble(text: str) -> bool:
+    """Detect when an LLM 'final' text response is actually a preamble — the
+    model announced what it was about to write, but never wrote it. Symptoms:
+
+      - Trailing colon ("Let me create it:")
+      - Future-tense announcement near the end ("now I'll write…", "let me
+        synthesize…", "here is the document:")
+
+    When this fires we don't accept the text as final; we nudge the model
+    once and let the loop continue.
+    """
+    if not text:
+        return False
+    trimmed = text.rstrip().rstrip("*_`")
+    if trimmed.endswith(":"):
+        return True
+    tail = trimmed[-240:].lower()
+    return any(phrase in tail for phrase in _PREAMBLE_TAIL_PHRASES)
+
+
 async def _dispatch_llm_loop(
     messages: list[dict],
     model: str | None,
@@ -335,13 +418,24 @@ async def _dispatch_llm_loop(
 
     Stops when:
     - The LLM calls report_complete
-    - The LLM returns a text response with no tool calls
+    - The LLM returns a text response with no tool calls AND that response
+      doesn't look like an interrupted preamble
     - max_rounds is exceeded
     """
     rounds = 0
     execution_log: list[dict] = []
+    # Cap how many times we'll nudge past a preamble — without this, a model
+    # stuck in announce-mode could burn the full max_rounds budget on filler.
+    preamble_nudges_used = 0
+    max_preamble_nudges = 2
 
     while rounds < max_rounds:
+        compacted = _compact_tool_history(messages)
+        if compacted:
+            logger.info(
+                "[dispatch] Compacted %d older tool result(s) before round %d (sliding window keeps %d most-recent)",
+                compacted, rounds, KEEP_RECENT_TOOL_RESULTS,
+            )
 
         result = await _dispatch_llm_call(messages, model=model, tools=tools)
 
@@ -349,12 +443,65 @@ async def _dispatch_llm_loop(
         if not choices:
             return f"LLM returned no choices: {result}", False, execution_log
 
-        msg = choices[0].get("message", {})
+        choice = choices[0]
+        msg = choice.get("message", {})
         tool_calls = msg.get("tool_calls")
+        finish_reason = choice.get("finish_reason")
 
         if not tool_calls:
-            # Final text response — no more tool calls
             content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
+
+            # Two ways the "no tool calls" branch can be a lie:
+            #   1. finish_reason="length" — the model was mid-output when
+            #      max_tokens cut it off. Treating that as the final answer
+            #      ships a truncated deliverable.
+            #   2. Content reads as a preamble ("…let me create it:") — the
+            #      model announced the deliverable but never produced it.
+            truncated = finish_reason == "length"
+            preamble = _looks_like_preamble(content)
+            if (truncated or preamble) and preamble_nudges_used < max_preamble_nudges:
+                preamble_nudges_used += 1
+                logger.warning(
+                    "[dispatch] Rejecting premature finish (round=%s, truncated=%s, "
+                    "preamble=%s, nudge=%s/%s); tail=%r",
+                    rounds, truncated, preamble,
+                    preamble_nudges_used, max_preamble_nudges,
+                    (content or "")[-160:],
+                )
+                entry = {
+                    "type": "llm_response",
+                    "ts": local_now().isoformat(),
+                    "round": rounds,
+                    "content": (content or "")[:10000],
+                    "premature_finish": True,
+                    "finish_reason": finish_reason,
+                }
+                execution_log.append(entry)
+                if task_id:
+                    await _publish_dispatch_event(task_id, entry)
+
+                # Carry the announcement forward so the model sees what it just
+                # said, then redirect it to actually deliver.
+                messages.append({"role": "assistant", "content": content})
+                if truncated:
+                    nudge = (
+                        "Your previous turn was truncated by the token limit before you "
+                        "finished. Continue from where you left off and deliver the full "
+                        "result. Use write_file to save long documents, or call "
+                        "report_complete with the complete content."
+                    )
+                else:
+                    nudge = (
+                        "You announced the deliverable but didn't actually produce it. "
+                        "Now produce it: either call write_file to save a long document "
+                        "to disk, or call report_complete with the full content as the "
+                        "summary. Don't just describe what you're about to do."
+                    )
+                messages.append({"role": "user", "content": nudge})
+                rounds += 1
+                continue
+
+            # Final text response — no more tool calls
             final_text = content or "Task completed (no output)"
             entry = {
                 "type": "llm_response",

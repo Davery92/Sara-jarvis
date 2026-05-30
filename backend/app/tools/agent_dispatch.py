@@ -36,8 +36,8 @@ class DispatchAgentTaskTool(BaseTool):
             "and system admin tasks in the sandbox agent. "
             "In 'auto' mode (default), the system routes automatically: internal data tasks "
             "use Sara's tools directly; code/system tasks use the sandbox agent. "
-            "ALWAYS use this tool (not handoff_to_agents) for email, calendar, notes, "
-            "and memory tasks."
+            "ALWAYS use this tool for email, calendar, notes, and memory tasks. "
+            "For chat-initiated 'research X' or 'look into X' tasks, use create_research_plan instead."
         )
 
     @property

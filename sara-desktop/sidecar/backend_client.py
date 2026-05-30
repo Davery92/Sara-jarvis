@@ -197,6 +197,30 @@ class BackendClient:
         except Exception as e:
             logger.error(f"Event send error: {e}")
 
+    async def send_focus_span(self, span: dict) -> None:
+        """Send a completed focus span to the backend."""
+        if not self._ws or not self._connected:
+            return
+        try:
+            message = {"type": "focus_span", **span,
+                       "timestamp": datetime.utcnow().isoformat()}
+            await self._ws.send(json.dumps(message))
+        except Exception as e:
+            logger.error(f"focus_span send error: {e}")
+            self._connected = False
+
+    async def send_activity_state(self, state: dict) -> None:
+        """Send a desktop activity state transition to the backend."""
+        if not self._ws or not self._connected:
+            return
+        try:
+            message = {"type": "activity_state", **state,
+                       "timestamp": datetime.utcnow().isoformat()}
+            await self._ws.send(json.dumps(message))
+        except Exception as e:
+            logger.error(f"activity_state send error: {e}")
+            self._connected = False
+
     async def upload_screenshot(
         self,
         image_data: bytes,

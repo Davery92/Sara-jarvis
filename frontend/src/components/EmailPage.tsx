@@ -345,11 +345,47 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
   }, [filter]);
 
   return (
-    <div className={`h-full flex overflow-hidden ${className || ''}`}>
+    <div className={`h-full flex flex-col gap-3 ${className || ''}`}>
+      <section className="assistant-panel-soft rounded-md px-4 py-3.5 md:px-5">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="min-w-0 max-w-2xl">
+            <div className="assistant-kicker mb-2">Inbox Triage</div>
+            <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-3">
+              <h2 className="font-display text-2xl font-semibold text-white">Email</h2>
+              <p className="max-w-xl text-sm leading-6 text-[var(--assistant-text-soft)]">
+                Review the inbox, inspect a message, and hand the thread to Sara without leaving this workspace.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <div className="assistant-panel-soft flex min-w-[128px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Unread</span>
+              <span className="font-display text-lg text-white">{stats?.unread_count ?? 0}</span>
+            </div>
+            <div className="assistant-panel-soft flex min-w-[148px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Action Required</span>
+              <span className="font-display text-lg text-white">{stats?.action_required_count ?? 0}</span>
+            </div>
+            <div className="assistant-panel-soft flex min-w-[142px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Visible</span>
+              <span className="font-display text-lg text-white">{emails.length}</span>
+            </div>
+            <div className="assistant-panel-soft flex min-w-[180px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+              <span className="assistant-kicker">Last Sync</span>
+              <span className="text-sm font-medium text-white">
+                {syncing ? 'Syncing…' : stats?.last_sync ? formatDate(stats.last_sync) : 'Unknown'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="assistant-panel-soft flex min-h-0 flex-1 overflow-hidden rounded-md p-1.5">
       {/* Left Panel - Email List */}
-      <div className="w-80 border-r border-gray-700 flex flex-col bg-gray-900">
+      <div className="flex w-80 flex-col border-r border-white/10 bg-slate-950/60">
         {/* Header */}
-        <div className="p-4 border-b border-gray-700">
+        <div className="border-b border-white/10 p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold text-white flex items-center gap-2">
               <span className="material-icons text-teal-400">email</span>
@@ -367,7 +403,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
           {/* Stats */}
           {stats && (
-            <div className="flex gap-4 text-sm text-gray-400 mb-3">
+            <div className="mb-3 flex gap-4 text-sm text-[var(--assistant-text-soft)]">
               <span>{stats.unread_count} unread</span>
               <span>{stats.action_required_count} action needed</span>
             </div>
@@ -389,7 +425,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
         </div>
 
         {/* Filters */}
-        <div className="p-2 border-b border-gray-700 flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 border-b border-white/10 p-3">
           <button
             onClick={() => setFilter({ ...filter, unreadOnly: !filter.unreadOnly })}
             className={`px-2 py-1 rounded text-xs transition-colors ${
@@ -424,16 +460,16 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
         {/* Email List */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="p-4 text-center text-gray-500">Loading...</div>
+            <div className="p-4 text-center text-[var(--assistant-text-soft)]">Loading…</div>
           ) : emails.length === 0 ? (
-            <div className="p-4 text-center text-gray-500">No emails found</div>
+            <div className="p-6 text-center text-[var(--assistant-text-soft)]">No emails found</div>
           ) : (
             emails.map((email) => (
               <div
                 key={email.id}
                 onClick={() => fetchEmailDetail(email.id)}
-                className={`p-3 border-b border-gray-800 cursor-pointer hover:bg-gray-800 transition-colors ${
-                  selectedEmail?.id === email.id ? 'bg-gray-800' : ''
+                className={`cursor-pointer border-b border-white/5 p-3 transition-colors hover:bg-white/[0.04] ${
+                  selectedEmail?.id === email.id ? 'bg-white/[0.06]' : ''
                 } ${!email.is_read ? 'border-l-2 border-l-teal-500' : ''}`}
               >
                 <div className="flex items-start justify-between mb-1">
@@ -468,14 +504,15 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
       </div>
 
       {/* Center Panel - Email Detail */}
-      <div className="flex-1 flex flex-col bg-gray-900 border-r border-gray-700">
+      <div className="flex flex-1 flex-col border-r border-white/10 bg-slate-950/40">
         {detailLoading ? (
-          <div className="flex-1 flex items-center justify-center text-gray-500">Loading...</div>
+          <div className="flex flex-1 items-center justify-center text-[var(--assistant-text-soft)]">Loading…</div>
         ) : selectedEmail ? (
           <>
             {/* Email Header */}
-            <div className="p-4 border-b border-gray-700">
-              <h1 className="text-xl font-semibold text-white mb-2">{selectedEmail.subject}</h1>
+            <div className="border-b border-white/10 p-5">
+              <div className="assistant-kicker mb-2">Selected Email</div>
+              <h1 className="mb-2 font-display text-2xl font-semibold text-white">{selectedEmail.subject}</h1>
               <div className="flex items-center gap-4 text-sm">
                 <div className="text-gray-300">
                   <span className="text-gray-500">From:</span>{' '}
@@ -501,7 +538,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
             {/* Refresh Attachments Button */}
             {selectedEmail.attachments.length === 0 && (
-              <div className="px-4 py-2 border-b border-gray-700 bg-yellow-500/10">
+              <div className="border-b border-white/10 bg-yellow-500/10 px-4 py-2">
                 <button
                   onClick={() => refreshAttachments(selectedEmail.id)}
                   className="flex items-center gap-2 text-sm text-yellow-400 hover:text-yellow-300"
@@ -515,8 +552,8 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
             {/* Sara's Analysis */}
             {selectedEmail.analyzed_at && (
-              <div className="p-4 border-b border-gray-700">
-                <div className="p-3 bg-gray-800 rounded-lg">
+              <div className="border-b border-white/10 p-4">
+                <div className="assistant-panel-soft rounded-md p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-teal-400 text-sm font-medium">Sara's Analysis</span>
                     {selectedEmail.category && (
@@ -539,7 +576,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
             {/* Attachments */}
             {selectedEmail.attachments.length > 0 && (
-              <div className="p-4 border-b border-gray-700 bg-gray-800/50">
+              <div className="border-b border-white/10 bg-white/[0.03] p-4">
                 <div className="text-sm text-gray-400 mb-2 flex items-center gap-2">
                   <span className="material-icons text-sm">attachment</span>
                   {selectedEmail.attachments.length} attachment{selectedEmail.attachments.length > 1 ? 's' : ''}
@@ -573,29 +610,30 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
             <div className="flex-1 overflow-y-auto p-4">
               {selectedEmail.body_html ? (
                 <div
-                  className="prose prose-invert max-w-none"
+                  className="prose prose-invert max-w-none prose-headings:text-white prose-p:text-slate-200 prose-li:text-slate-200"
                   dangerouslySetInnerHTML={{ __html: selectedEmail.body_html }}
                 />
               ) : (
-                <pre className="text-gray-300 whitespace-pre-wrap font-sans">
+                <pre className="whitespace-pre-wrap font-sans text-gray-300">
                   {selectedEmail.body_text || selectedEmail.body_preview}
                 </pre>
               )}
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-500">
+          <div className="flex flex-1 items-center justify-center text-[var(--assistant-text-soft)]">
             <div className="text-center">
-              <span className="material-icons text-6xl mb-4 block">email</span>
-              <p>Select an email to view</p>
+              <span className="material-icons mb-4 block text-6xl">email</span>
+              <p className="font-display text-xl text-white">Select an email to view</p>
+              <p className="mt-1 text-sm">The message detail and Sara context will appear here.</p>
             </div>
           </div>
         )}
       </div>
 
       {/* Right Panel - Sara Chat */}
-      <div className="w-80 flex flex-col bg-gray-900">
-        <div className="p-4 border-b border-gray-700">
+      <div className="flex w-80 flex-col bg-slate-950/60">
+        <div className="border-b border-white/10 p-4">
           <h3 className="text-lg font-semibold text-white flex items-center gap-2">
             <span className="text-teal-400">Sara</span>
             <span className="text-gray-400 text-sm font-normal">Email Assistant</span>
@@ -610,11 +648,11 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
         {/* Chat Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {!selectedEmail ? (
-            <div className="text-gray-500 text-sm text-center mt-8">
+            <div className="mt-8 text-center text-sm text-[var(--assistant-text-soft)]">
               Select an email to chat about it with Sara
             </div>
           ) : chatMessages.length === 0 ? (
-            <div className="text-gray-500 text-sm">
+            <div className="text-sm text-[var(--assistant-text-soft)]">
               <p className="mb-4">Ask me about this email:</p>
               <div className="space-y-2">
                 {['Summarize this email', 'Draft a reply', 'What action should I take?', 'Is this urgent?'].map(
@@ -624,7 +662,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
                       onClick={() => {
                         setChatInput(suggestion);
                       }}
-                      className="w-full text-left px-3 py-2 bg-gray-800 rounded-lg text-gray-300 hover:bg-gray-700 text-sm"
+                      className="assistant-panel-soft w-full rounded-md px-3 py-2 text-left text-sm text-gray-300 transition hover:bg-white/[0.05]"
                     >
                       {suggestion}
                     </button>
@@ -639,8 +677,8 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
                 className={`${
                   msg.role === 'user'
                     ? 'bg-teal-500/20 ml-8'
-                    : 'bg-gray-800 mr-8'
-                } rounded-lg p-3`}
+                    : 'assistant-panel-soft mr-8'
+                } rounded-md p-3`}
               >
                 <div className="text-xs text-gray-500 mb-1">
                   {msg.role === 'user' ? 'You' : 'Sara'}
@@ -650,7 +688,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
             ))
           )}
           {chatLoading && (
-            <div className="bg-gray-800 mr-8 rounded-lg p-3">
+            <div className="assistant-panel-soft mr-8 rounded-md p-3">
               <div className="text-xs text-gray-500 mb-1">Sara</div>
               <div className="text-sm text-gray-400">Thinking...</div>
             </div>
@@ -660,7 +698,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
         {/* Chat Input */}
         {selectedEmail && (
-          <div className="p-4 border-t border-gray-700">
+          <div className="border-t border-white/10 p-4">
             <div className="flex gap-2">
               <input
                 type="text"
@@ -680,6 +718,7 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
             </div>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

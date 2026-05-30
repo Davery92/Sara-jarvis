@@ -70,8 +70,17 @@ class DailyBriefService:
                 max_tokens=2000,
                 temperature=0.7,
                 model=resolved_model,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
-            return response["choices"][0]["message"]["content"]
+            msg = response["choices"][0]["message"]
+            content = (msg.get("content") or "").strip()
+            if not content:
+                content = (msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+            if not content:
+                raise RuntimeError(
+                    f"LLM returned empty content (finish_reason={response['choices'][0].get('finish_reason')})"
+                )
+            return content
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             raise
@@ -186,8 +195,9 @@ class DailyBriefService:
             try:
                 from app.models.cognitive import SaraReflection, Hypothesis
 
+                # sara_reflection and hypothesis are Sara-global tables (no user_id column).
                 reflections = db.query(SaraReflection).filter(
-                    SaraReflection.user_id == user_id
+                    SaraReflection.is_active == True  # noqa: E712
                 ).order_by(SaraReflection.created_at.desc()).limit(10).all()
 
                 if reflections:
@@ -196,13 +206,12 @@ class DailyBriefService:
                     ])
 
                 hypotheses = db.query(Hypothesis).filter(
-                    Hypothesis.user_id == user_id,
                     Hypothesis.status == "confirmed"
                 ).limit(10).all()
 
                 if hypotheses:
                     hypotheses_str = "\n".join([
-                        f"- {h.hypothesis} (confidence: {h.confidence})" for h in hypotheses
+                        f"- {h.statement} (confidence: {h.confidence})" for h in hypotheses
                     ])
             except Exception as e:
                 logger.warning(f"Could not load cognitive models: {e}")

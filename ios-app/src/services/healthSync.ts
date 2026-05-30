@@ -139,12 +139,12 @@ class HealthSyncService {
             const appleTime = appleHealthWeight.timestamp.getTime();
 
             if (saraTime > appleTime) {
-              // Sara is newer - push to Apple Health
-              const weightInKg = saraWeight.unit === 'lbs'
-                ? saraWeight.weight * 0.453592
+              // Sara is newer - push to Apple Health (in lbs; HealthKit accepts the unit explicitly)
+              const weightInLb = saraWeight.unit === 'kg'
+                ? saraWeight.weight * 2.20462
                 : saraWeight.weight;
 
-              const pushed = await healthKitService.saveWeight(weightInKg, new Date(saraWeight.timestamp));
+              const pushed = await healthKitService.saveWeight(weightInLb, new Date(saraWeight.timestamp));
               if (pushed) {
                 weightAction = 'pushed_to_apple_health';
                 console.log('[HealthSync] Pushed Sara weight to Apple Health');

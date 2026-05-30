@@ -230,10 +230,13 @@
       "Bash(sudo touch:*)",
       "Bash(sudo chown:*)",
       "Read(//var/log/**)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(awk 'NR<2937 || NR>3052' /home/david/jarvis/backend/app/services/acs/session_manager.py)",
+      "Bash(mv /tmp/sm_new.py /home/david/jarvis/backend/app/services/acs/session_manager.py)"
     ],
     "deny": [],
     "ask": [],
+    "defaultMode": "bypassPermissions",
     "additionalDirectories": [
       "/usr/bin",
       "/run"

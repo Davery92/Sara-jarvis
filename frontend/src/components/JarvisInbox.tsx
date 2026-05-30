@@ -76,7 +76,7 @@ const renderPayload = (payload: any) => {
 const ItemDetailModal: React.FC<ItemDetailModalProps> = ({ item, onClose }) => {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-2xl w-full p-6">
+      <div className="bg-gray-900 border border-gray-700 rounded-md max-w-2xl w-full p-6">
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center space-x-3">
             <span className="text-3xl">{getKindIcon(item.kind)}</span>
@@ -284,7 +284,7 @@ export const SaraInbox: React.FC<SaraInboxProps> = ({ className }) => {
 
   return (
     <div className={`jarvis-inbox ${className || ''}`}>
-      <div className="bg-card border border-card rounded-xl">
+      <div className="bg-card border border-card rounded-md">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-700">
           <div className="flex items-center space-x-3">

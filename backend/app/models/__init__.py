@@ -9,6 +9,7 @@ from .doc import Document, DocChunk
 from .folder import Folder
 from .note import Note
 from .note_connection import NoteConnection
+from .recipe import Recipe
 from .profile import UserProfile, GTKYSession, DailyReflection, ReflectionSettings, PrivacySettings, UserActivityLog
 from .workspace_state import WorkspaceState
 from .map import Map
@@ -22,6 +23,7 @@ from .insight import AutonomousInsight, InsightNudge, ActivitySession, Backgroun
 from .event_outbox import EventOutbox
 from .push_token import PushToken
 from .calendar_event import CalendarEvent
+from .ios_event_block import IOSEventBlock
 from .document_chunk import DocumentChunk
 from .email import Email, EmailAttachment, EmailSyncState
 from .automation import AutomationTask, AutomationExecutionLog, AutomationStateStore, RegisteredEndpoint
@@ -48,3 +50,4 @@ from .research_plan import ResearchPlan, ResearchMessage
 from .scheduled_job import ScheduledJob
 from .tunable_setting import TunableSetting
 from .external_workout import ExternalWorkout
+from .system_event import SystemEvent

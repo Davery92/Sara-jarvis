@@ -11,6 +11,7 @@ import { Platform, AppState, AppStateStatus } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import TimerOverlayContainer from './TimerOverlayContainer';
 import FloatingAssistant from './sara/FloatingAssistant';
+import SystemEventOverlay, { SystemEventOverlayPayload } from './SystemEventOverlay';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
@@ -21,6 +22,7 @@ import apiClient from '../services/api';
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
   const [pushToken, setPushToken] = useState<string | null>(null);
+  const [systemEvent, setSystemEvent] = useState<SystemEventOverlayPayload | null>(null);
   const hasInitialized = useRef(false);
 
   // Initialize services that require authentication
@@ -88,6 +90,14 @@ export const AuthenticatedOverlays: React.FC = () => {
           pushNotificationService.setOnTaskChatInject((taskId, conversationId, noteId) => {
             console.log('[AuthenticatedOverlays] Task chat inject, reloading conversation:', taskId);
             navigateToChat({ taskInject: { taskId, conversationId, noteId } });
+          });
+
+          // Set up narrator (System AI) tap handler — pops the overlay modal
+          // so the full body is always readable, regardless of how aggressively
+          // iOS truncated the push banner.
+          pushNotificationService.setOnSystemEventTapped((payload) => {
+            console.log('[AuthenticatedOverlays] System event tapped:', payload.event_id);
+            setSystemEvent(payload);
           });
 
           // Mark callbacks as ready - this will process any pending notification that launched the app
@@ -211,6 +221,23 @@ export const AuthenticatedOverlays: React.FC = () => {
     <>
       <TimerOverlayContainer />
       <FloatingAssistant />
+      <SystemEventOverlay
+        payload={systemEvent}
+        onClose={() => setSystemEvent(null)}
+        onDiscussInChat={(payload) => {
+          setSystemEvent(null);
+          // Pop into chat with the broadcast as conversation context.
+          navigateToChat({
+            notification: {
+              id: payload.event_id,
+              title: payload.title,
+              message: payload.body,
+              category: 'system_event',
+              item_type: 'narrator',
+            },
+          });
+        }}
+      />
     </>
   );
 };

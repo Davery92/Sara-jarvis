@@ -59,6 +59,11 @@ sara-desktop/sidecar/venv/
 
 # Large build files
 backend/static/downloads/*.zip
+backend/static/downloads/*.exe
+
+# Desktop build artifacts / caches
+sara-desktop/.cache/
+sara-desktop/sidecar/dist-frozen/
 
 # Data files
 data/

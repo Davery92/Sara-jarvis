@@ -92,6 +92,7 @@ class ConsolidationEngine:
                 ],
                 temperature=0.6,
                 max_tokens=2000,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
 
             # Extract content from OpenAI-compatible response
@@ -905,7 +906,7 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
                         "user_id": user_id,
                         "content": result.journal_entry[:2000],
                         "observations": json.dumps(result.patterns_noticed)[:1000] if result.patterns_noticed else None,
-                        "emotional_state": result.emotional_arc[:200] if result.emotional_arc else None,
+                        "emotional_state": result.emotional_arc[:100] if result.emotional_arc else None,
                     })
                     await db.commit()
                 await j_engine.dispose()
@@ -1036,24 +1037,8 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
             except Exception as e:
                 logger.debug(f"[Consolidation] Research dispatch failed: {e}")
 
-            # Also create ACS interest nodes from proposals so they flow into exploration
-            try:
-                from app.services.acs.interest_graph import InterestGraph
-                graph = InterestGraph()
-                for proposal in result.research_proposals[:2]:
-                    await graph.add_node(
-                        user_id=user_id,
-                        label=proposal[:100],
-                        description=f"Research proposal from consolidation: {proposal}",
-                        source="consolidation_proposal",
-                        fascination=0.6,
-                    )
-                logger.info(
-                    f"[Consolidation] Created {min(len(result.research_proposals), 2)} "
-                    f"interest nodes from research proposals"
-                )
-            except Exception as e:
-                logger.debug(f"[Consolidation] Interest node creation from proposals failed: {e}")
+            # (Old-ACS interest-node dispatch removed in Phase 6 decommission;
+            # research proposals now flow only through _dispatch_research_proposals.)
 
         # Write agent_run_log
         try:

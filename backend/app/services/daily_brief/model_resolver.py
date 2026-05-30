@@ -2,22 +2,18 @@
 Helpers for resolving the canonical background model label for daily brief jobs.
 """
 import os
-import re
 from typing import Optional
-
-
-_QWEN_122_PATTERN = re.compile(r"qwen.*3\.?5.*122", re.IGNORECASE)
 
 
 def resolve_qwen_122_model_label(*preferred_models: Optional[str]) -> str:
     """
-    Resolve the active Qwen 3.5 122B model label.
+    Resolve the background model label for daily brief synthesis.
 
     Preference order:
     1. Explicit preferred candidates passed by caller
     2. Background model settings (runtime + env-backed)
     3. Primary chat model settings
-    4. Known default label
+    4. MLX default
     """
     from app.core.config import settings
     from app.core.llm_config import llm_config
@@ -33,11 +29,7 @@ def resolve_qwen_122_model_label(*preferred_models: Optional[str]) -> str:
     ]
 
     for candidate in candidates:
-        if candidate and _QWEN_122_PATTERN.search(candidate):
+        if candidate and candidate.strip():
             return candidate.strip()
 
-    for candidate in candidates:
-        if candidate and "122" in candidate:
-            return candidate.strip()
-
-    return "Qwen3.5-122B-A10B"
+    return "qwen3.6-27b"

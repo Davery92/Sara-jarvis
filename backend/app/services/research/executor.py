@@ -479,6 +479,7 @@ Write in clean markdown format."""
                     content += "\n"
 
             note_id = str(uuid.uuid4())
+            note_title = f"Research: {plan['title']}"
             db.execute(
                 text("""
                     INSERT INTO note (id, user_id, folder_id, title, content, created_at, updated_at)
@@ -488,15 +489,53 @@ Write in clean markdown format."""
                     "id": note_id,
                     "user_id": self.user_id,
                     "folder_id": folder_id,
-                    "title": f"Research: {plan['title']}",
+                    "title": note_title,
                     "content": content,
                 },
             )
             db.commit()
             logger.info("Saved research note %s in Agent Reports folder", note_id)
 
+            # Notify David — only for chat-initiated plans. ACS-internal research
+            # is silent because it lands in the autonomous report flow already.
+            if plan.get("origin") == "david_chat":
+                await self._send_completion_push(plan, note_id, note_title, synthesis)
+
         except Exception as e:
             logger.error("Failed to save research note: %s", e)
+
+    async def _send_completion_push(
+        self, plan: Dict[str, Any], note_id: str, note_title: str, synthesis: str
+    ):
+        """Push a 'Research ready' notification with deep-link data to the note."""
+        try:
+            from app.services.notification_service import notification_service, NotificationPriority
+
+            # Body = first paragraph of synthesis, trimmed for the lock screen.
+            body = (synthesis or "").strip().split("\n\n", 1)[0]
+            body = body.replace("# ", "").replace("## ", "").strip()
+            if len(body) > 240:
+                body = body[:237].rstrip() + "..."
+            if not body:
+                body = f"Your research on {plan.get('title', 'the topic')} is ready."
+
+            await notification_service.send_notification(
+                user_id=self.user_id,
+                title=f"Research ready: {plan.get('title', 'Untitled')}",
+                message=body,
+                priority=NotificationPriority.NORMAL,
+                data={
+                    "type": "research_complete",
+                    "note_id": note_id,
+                    "note_title": note_title,
+                    "plan_id": self.plan_id,
+                },
+                category="research_complete",
+                source="research_executor",
+            )
+            logger.info("Sent research_complete push for plan %s → note %s", self.plan_id, note_id)
+        except Exception as e:
+            logger.warning("Failed to send research completion push: %s", e)
 
     async def _load_plan(self, db) -> Optional[Dict[str, Any]]:
         """Load the research plan from DB."""

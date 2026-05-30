@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   FlatList,
@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { useToast } from '../../context/ToastContext';
 import { SkeletonList } from '../../components/SkeletonLoader';
 import { MainTabScreenProps } from '../../types/navigation';
@@ -63,6 +64,16 @@ export default function NotesListScreen({ navigation }: Props) {
   useEffect(() => {
     loadData();
   }, [selectedFolder]);
+
+  // Refetch whenever the screen regains focus — covers the case where Sara
+  // (or any other background flow) writes a note while the user is in the
+  // editor or another tab. Without this, the list stays stale until the user
+  // pulls to refresh or changes folders.
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [selectedFolder])
+  );
 
   const loadData = async () => {
     try {

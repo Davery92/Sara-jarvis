@@ -14,6 +14,8 @@ from app.schemas.calendar import (
     CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
     IOSCalendarSyncRequest, IOSCalendarSyncResponse
 )
+from app.services.calendar_reminders import sync_event_reminders, clear_event_reminders
+from app.models.ios_event_block import IOSEventBlock
 from app.core.deps import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,10 @@ async def create_calendar_event(
     db.commit()
     db.refresh(event)
 
+    if event.reminder_minutes is not None:
+        sync_event_reminders(db, event)
+        db.commit()
+
     return CalendarEventResponse(
         id=event.id,
         title=event.title,
@@ -194,6 +200,9 @@ async def update_calendar_event(
     db.commit()
     db.refresh(event)
 
+    sync_event_reminders(db, event)
+    db.commit()
+
     return CalendarEventResponse(
         id=event.id,
         title=event.title,
@@ -231,6 +240,21 @@ async def delete_calendar_event(
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # For iOS-synced events, also record a blocklist row so the next iOS sync
+    # doesn't immediately resurrect the event. The event stays on iPhone.
+    if event.source == "ios_calendar" and event.ios_event_id:
+        existing_block = db.query(IOSEventBlock).filter(
+            IOSEventBlock.user_id == current_user.id,
+            IOSEventBlock.ios_event_id == event.ios_event_id,
+        ).first()
+        if not existing_block:
+            db.add(IOSEventBlock(
+                user_id=current_user.id,
+                ios_event_id=event.ios_event_id,
+                ios_calendar_id=event.ios_calendar_id,
+                title=event.title,
+            ))
+
     db.delete(event)
     db.commit()
 
@@ -254,8 +278,20 @@ async def sync_ios_calendar_events(
     processed_keys = set()
     payload_event_ids = set()
 
+    # Load the user's iOS event blocklist once — any events the user has removed
+    # from Sara should be skipped (but still tracked in payload_event_ids so the
+    # reconciliation step doesn't try to "delete" the already-absent rows).
+    blocked_ios_event_ids = {
+        row.ios_event_id
+        for row in db.query(IOSEventBlock.ios_event_id).filter(
+            IOSEventBlock.user_id == current_user.id
+        ).all()
+    }
+
     for event_data in sync_request.events:
         payload_event_ids.add(event_data.ios_event_id)
+        if event_data.ios_event_id in blocked_ios_event_ids:
+            continue
         try:
             # Parse UTC times and convert to local timezone for storage
             # (DB columns are naive DateTime, so we store local times)

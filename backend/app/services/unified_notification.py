@@ -41,6 +41,15 @@ DEFAULT_COOLDOWNS = {
     "wellness": 24.0,
     "system_health": 0.5,
     "calendar_prep": 2.0,
+    # Narrator ("System AI") broadcasts. Per-severity so roasts can be
+    # throttled separately from achievements.
+    "narrator_roast": 4.0,
+    "narrator_achievement": 1.0,
+    "narrator_observation": 8.0,
+    "narrator_patch_note": 23.0,  # daily/weekly fires; this is just dedup
+    "narrator_sponsored": 48.0,
+    "narrator_grudging": 2.0,
+    "narrator_deflected": 2.0,
 }
 
 # Mapping from category → tunable key. Categories not in this map fall through
@@ -53,6 +62,10 @@ _TUNABLE_COOLDOWN_KEYS = {
     "health": "notification.cooldown.health_hours",
     "fitness": "notification.cooldown.health_hours",  # share the health knob
     "wellness": "notification.cooldown.health_hours",
+    # Only the two high-frequency narrator severities expose tunables;
+    # the rest are rare enough that the hardcoded defaults suffice.
+    "narrator_roast": "notification.cooldown.narrator_roast_hours",
+    "narrator_observation": "notification.cooldown.narrator_observation_hours",
 }
 
 
@@ -166,7 +179,10 @@ async def send_notification(
     agent_run_id: Optional[int] = None,
     db: Optional[AsyncSession] = None,
     _bypass_attention: bool = False,
+    _bypass_ban: bool = False,
+    _bypass_desktop: bool = False,
     _attention_item_id: Optional[str] = None,
+    extra_push_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Send a notification through the unified pipeline with topic-based dedup.
@@ -225,7 +241,10 @@ async def send_notification(
             agent_run_id=agent_run_id,
             db=db,
             _bypass_attention=_bypass_attention,
+            _bypass_ban=_bypass_ban,
+            _bypass_desktop=_bypass_desktop,
             _attention_item_id=_attention_item_id,
+            extra_push_data=extra_push_data,
         )
         # AsyncSession does not auto-commit — if we opened this session
         # ourselves, the caller isn't going to commit for us, so the
@@ -258,7 +277,10 @@ async def _send_notification_impl(
     agent_run_id: Optional[int],
     db: Optional[AsyncSession],
     _bypass_attention: bool,
-    _attention_item_id: Optional[str],
+    _bypass_ban: bool,
+    _bypass_desktop: bool = False,
+    _attention_item_id: Optional[str] = None,
+    extra_push_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     # ── Engagement-based priority adjustment ──
     # If David consistently ignores a category, lower priority; if he engages, boost
@@ -295,7 +317,10 @@ async def _send_notification_impl(
         pass
 
     # ── Ban check: reject health/fitness/banned notifications before any delivery ──
-    ban_reason = await _check_notification_ban(user_id, title, message, category, db)
+    # _bypass_ban is reserved for explicit user-requested reports (e.g. the weekly
+    # health debrief) where banned phrases like "calorie" are legitimate content,
+    # not an unsolicited lecture from an autonomous worker.
+    ban_reason = None if _bypass_ban else await _check_notification_ban(user_id, title, message, category, db)
     if ban_reason:
         logger.info(f"Notification banned at pipeline entry: {ban_reason} | title={title[:60]}")
         if db:
@@ -346,26 +371,30 @@ async def _send_notification_impl(
             )
             return {"sent": False, "reason": "dedup", "topic": effective_topic}
 
-    # Try desktop delivery via WebSocket first (real-time, no phone buzz)
+    # Try desktop delivery via WebSocket first (real-time, no phone buzz).
+    # Callers that have their own custom desktop fanout (e.g. the narrator,
+    # which renders a styled SYSTEM_EVENT popup) pass _bypass_desktop=True
+    # to avoid a duplicate native SHOW_NOTIFICATION on top of their own UI.
     desktop_sent = False
-    try:
-        from app.services.command_router import command_router, CommandMessage, CommandType
-        from app.db.session import SessionLocal
-        ws_db = SessionLocal()
+    if not _bypass_desktop:
         try:
-            connected = command_router.get_connected_devices(user_id)
-            if connected:
-                cmd = CommandMessage(
-                    command_type=CommandType.SHOW_NOTIFICATION,
-                    payload={"title": title, "message": message, "priority": priority, "source": source}
-                )
-                desktop_sent = await command_router.send_command(ws_db, user_id, cmd)
-                if desktop_sent:
-                    logger.info(f"Notification delivered via desktop WebSocket: {title[:50]}")
-        finally:
-            ws_db.close()
-    except Exception as e:
-        logger.debug(f"Desktop WebSocket delivery skipped: {e}")
+            from app.services.command_router import command_router, CommandMessage, CommandType
+            from app.db.session import SessionLocal
+            ws_db = SessionLocal()
+            try:
+                connected = command_router.get_connected_devices(user_id)
+                if connected:
+                    cmd = CommandMessage(
+                        command_type=CommandType.SHOW_NOTIFICATION,
+                        payload={"title": title, "message": message, "priority": priority, "source": source}
+                    )
+                    desktop_sent = await command_router.send_command(ws_db, user_id, cmd)
+                    if desktop_sent:
+                        logger.info(f"Notification delivered via desktop WebSocket: {title[:50]}")
+            finally:
+                ws_db.close()
+        except Exception as e:
+            logger.debug(f"Desktop WebSocket delivery skipped: {e}")
 
     # Get push tokens
     tokens = await _get_push_tokens(db, user_id) if db else await _get_push_tokens_sync(user_id)
@@ -392,6 +421,7 @@ async def _send_notification_impl(
             tokens, title, message, priority, source,
             notification_id=notification_id,
             category=category,
+            extra_data=extra_push_data,
         )
         success = success or push_success
 
@@ -1092,6 +1122,7 @@ async def _send_push(
     source: str = "unified_heartbeat",
     notification_id: Optional[int] = None,
     category: str = "general",
+    extra_data: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Send mobile push notification to all of the user's device tokens."""
     unique_tokens = [t for t in dict.fromkeys(tokens) if t]
@@ -1100,7 +1131,7 @@ async def _send_push(
 
     normalized_priority = _normalize_priority(priority)
     push_priority = "high" if normalized_priority in ("high", "urgent", "critical") else "default"
-    push_data = {
+    push_data: Dict[str, Any] = {
         "type": "heartbeat" if source == "unified_heartbeat" else source,
         "priority": normalized_priority,
         "title": title,
@@ -1109,6 +1140,10 @@ async def _send_push(
     }
     if notification_id is not None:
         push_data["notification_id"] = notification_id
+    if extra_data:
+        # extra_data wins over the defaults above so callers can override, e.g.,
+        # set their own type or attach note_id / route hints for the iOS handler.
+        push_data.update(extra_data)
 
     # Map category to interactive notification category id
     push_category_map = {
@@ -1116,6 +1151,15 @@ async def _send_push(
         "acs_discovery": "ACS_DISCOVERY",
         "calendar_prep": "SARA_INSIGHT",
         "system_health": "GENERAL_NUDGE",
+        # All narrator severities share one iOS category; severity-specific
+        # UX is handled client-side via data.severity.
+        "narrator_roast": "SYSTEM_EVENT",
+        "narrator_achievement": "SYSTEM_EVENT",
+        "narrator_observation": "SYSTEM_EVENT",
+        "narrator_patch_note": "SYSTEM_EVENT",
+        "narrator_sponsored": "SYSTEM_EVENT",
+        "narrator_grudging": "SYSTEM_EVENT",
+        "narrator_deflected": "SYSTEM_EVENT",
     }
     push_category_id = push_category_map.get(category, "GENERAL_NUDGE")
 

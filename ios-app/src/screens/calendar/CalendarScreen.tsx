@@ -75,30 +75,40 @@ export default function CalendarScreen({ navigation }: Props) {
     });
   };
 
-  const handleEventPress = (event: CalendarEvent) => {
-    Alert.alert(
-      event.title,
-      `${calendarService.formatDateTime(event.start_time)} - ${calendarService.formatTime(event.end_time)}\n\n${event.description || 'No description'}`,
-      [{ text: 'OK' }]
-    );
-  };
+  const showEventActions = (event: CalendarEvent) => {
+    const isIOS = event.read_only || event.source === 'ios_calendar';
+    const timeRange = `${calendarService.formatDateTime(event.start_time)} - ${calendarService.formatTime(event.end_time)}`;
+    const description = event.description ? `\n\n${event.description}` : '';
 
-  const handleEventLongPress = (event: CalendarEvent) => {
-    // iOS calendar events are read-only
-    if (event.read_only || event.source === 'ios_calendar') {
+    if (isIOS) {
+      const source = event.ios_calendar_name ? `\n\n📱 Synced from ${event.ios_calendar_name} — edit in iOS Calendar` : '\n\n📱 Synced from iOS Calendar — edit in iOS Calendar';
       Alert.alert(
         event.title,
-        `This event is synced from iOS Calendar${event.ios_calendar_name ? ` (${event.ios_calendar_name})` : ''} and cannot be edited here.`,
-        [{ text: 'OK' }]
+        `${timeRange}${description}${source}`,
+        [
+          { text: 'Close', style: 'cancel' },
+          {
+            text: 'Hide from Sara',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await calendarService.deleteEvent(event.id);
+                loadData();
+              } catch (error) {
+                Alert.alert('Error', 'Failed to hide event');
+              }
+            },
+          },
+        ]
       );
       return;
     }
 
     Alert.alert(
       event.title,
-      'What would you like to do?',
+      `${timeRange}${description}`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'Close', style: 'cancel' },
         {
           text: 'Edit',
           onPress: () => {
@@ -122,6 +132,14 @@ export default function CalendarScreen({ navigation }: Props) {
         },
       ]
     );
+  };
+
+  const handleEventPress = (event: CalendarEvent) => {
+    showEventActions(event);
+  };
+
+  const handleEventLongPress = (event: CalendarEvent) => {
+    showEventActions(event);
   };
 
   // Reminder handlers

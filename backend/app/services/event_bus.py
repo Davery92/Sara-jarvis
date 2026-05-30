@@ -92,6 +92,12 @@ class EventType(str, Enum):
     PRESENCE_ROOM_CHANGED = "presence.room_changed"
     INTERRUPTIBILITY_CHANGED = "interruptibility.changed"
 
+    # Desktop activity events (from the Sara desktop agent's focus tracker)
+    DESKTOP_FOCUS_SPAN = "desktop.focus_span"
+    DESKTOP_ACTIVITY_STATE = "desktop.activity_state"
+    # Qwen-VLM extracted description of a screenshot uploaded from the desktop.
+    DESKTOP_SCREEN_CONTENT = "desktop.screen_content"
+
     # Chat events
     CHAT_MESSAGE_RECEIVED = "chat.message_received"
 
@@ -117,6 +123,10 @@ class EventType(str, Enum):
     # System events
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"
+
+    # Narrator ("System AI") events — every utterance the narrator emits,
+    # including intentionally-silent ones (payload.suppressed == True).
+    SYSTEM_NARRATION_EMITTED = "system.narration_emitted"
 
 
 class Event(BaseModel):

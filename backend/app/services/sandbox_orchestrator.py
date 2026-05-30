@@ -2,8 +2,8 @@
 Sandbox Orchestrator — GLM-based multi-step agent coordinator.
 
 Three-tier system:
-1. Sara (Qwen3.5-122B-A10B) → understands user intent, crafts task prompt, dispatches
-2. Orchestrator (Qwen3.5-122B-A10B) → plans approach, decomposes into steps,
+1. Sara (qwen3.6-27b) → understands user intent, crafts task prompt, dispatches
+2. Orchestrator (qwen3.6-27b) → plans approach, decomposes into steps,
    manages Claude Code agents on the sandbox VM
 3. Claude Code (on VM 10.185.1.176) → executes individual steps
 

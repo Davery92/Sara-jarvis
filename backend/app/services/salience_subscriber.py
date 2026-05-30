@@ -39,6 +39,9 @@ class SalienceSubscriber(EventSubscriber):
             EventType.HOME_STATE_CHANGED,
             # Activity
             EventType.ACTIVITY_STATE_CHANGED,
+            EventType.DESKTOP_FOCUS_SPAN,
+            EventType.DESKTOP_ACTIVITY_STATE,
+            EventType.DESKTOP_SCREEN_CONTENT,
             # Chat
             EventType.CHAT_MESSAGE_RECEIVED,
             # Food & health

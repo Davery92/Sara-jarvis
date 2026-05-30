@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
+  BellAlertIcon,
+  Cog6ToothIcon,
+  CpuChipIcon,
+  ShieldCheckIcon,
+} from '@heroicons/react/24/outline'
+import {
   getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals,
   getAIProvider, setAIProvider, getAIApiKey, setAIApiKey,
   getAIBaseUrl, setAIBaseUrl, getAIModel, setAIModel, getAINotificationModel, setAINotificationModel,
@@ -7,7 +13,7 @@ import {
   getEmbeddingDimension, setEmbeddingDimension
 } from '../utils/prefs'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient, AISettingsUpdate, TokenStats, Device, AutonomyFlags, AutonomyRolloutSummary, CodexOAuthStatus, NotificationPrefItem, NotificationPrefsResponse, ACSStatus, ACSSession, ACSSessionsResponse } from '../api/client'
+import { apiClient, AISettingsUpdate, TokenStats, Device, AutonomyFlags, AutonomyRolloutSummary, CodexOAuthStatus, NotificationPrefItem, NotificationPrefsResponse } from '../api/client'
 import { APP_CONFIG } from '../config'
 import SchedulesSection from '../components/SchedulesSection'
 import TunablesSection from '../components/TunablesSection'
@@ -113,7 +119,7 @@ function ConnectedDevices() {
 
   if (isLoading) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="mt-8 bg-card border border-card rounded-md p-6">
         <div className="animate-pulse">
           <div className="h-6 bg-gray-700 rounded w-48 mb-4"></div>
           <div className="space-y-3">
@@ -127,7 +133,7 @@ function ConnectedDevices() {
 
   if (error) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="mt-8 bg-card border border-card rounded-md p-6">
         <div className="flex items-center mb-4">
           <svg className="w-6 h-6 text-teal-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -142,7 +148,7 @@ function ConnectedDevices() {
   const devices = data?.devices || []
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-xl p-6">
+    <div className="mt-8 bg-card border border-card rounded-md p-6">
       <div className="flex items-center mb-4">
         <svg className="w-6 h-6 text-teal-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -450,7 +456,7 @@ function DesktopAppDownloads() {
 
   if (isLoading) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="mt-8 bg-card border border-card rounded-md p-6">
         <div className="animate-pulse">
           <div className="h-6 bg-gray-700 rounded w-48 mb-4"></div>
           <div className="space-y-3">
@@ -464,7 +470,7 @@ function DesktopAppDownloads() {
 
   if (error || !data?.downloads?.length) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-xl p-6">
+      <div className="mt-8 bg-card border border-card rounded-md p-6">
         <div className="flex items-center mb-4">
           <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -490,7 +496,7 @@ function DesktopAppDownloads() {
   })
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-xl p-6">
+    <div className="mt-8 bg-card border border-card rounded-md p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center">
           <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -716,7 +722,7 @@ function SaraBriefArchive() {
   }
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-xl p-6">
+    <div className="mt-8 bg-card border border-card rounded-md p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-lg font-medium text-white">Sara Brief Archive</h3>
@@ -849,310 +855,6 @@ const CLAUDE_MODELS = [
 
 type ProviderType = keyof typeof PROVIDER_PRESETS
 
-const ACS_MODELS = [
-  { value: 'Qwen3.5-122B-A10B', label: 'Qwen 3.5 122B (default)' },
-]
-
-function AutonomousCognition() {
-  const queryClient = useQueryClient()
-  const [expanded, setExpanded] = useState(false)
-
-  const { data: status, isLoading: statusLoading } = useQuery<ACSStatus>({
-    queryKey: ['acs', 'status'],
-    queryFn: () => apiClient.getACSStatus(),
-    refetchInterval: 10000,
-  })
-
-  const { data: sessionsData } = useQuery<ACSSessionsResponse>({
-    queryKey: ['acs', 'sessions'],
-    queryFn: () => apiClient.getACSSessions(10),
-    enabled: expanded,
-  })
-
-  const startMutation = useMutation({
-    mutationFn: (modelId?: string) => apiClient.startACS(modelId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['acs'] }),
-  })
-
-  const pauseMutation = useMutation({
-    mutationFn: () => apiClient.pauseACS(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['acs'] }),
-  })
-
-  const resumeMutation = useMutation({
-    mutationFn: () => apiClient.resumeACS(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['acs'] }),
-  })
-
-  const settingsMutation = useMutation({
-    mutationFn: (s: { model_id?: string; cooldown_minutes?: number; max_duration_minutes?: number }) =>
-      apiClient.updateACSSettings(s),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['acs'] }),
-  })
-
-  const state = status?.state || 'conversational'
-  const stateColor = state === 'autonomous' ? 'bg-green-500' : state === 'pausing' || state === 'cooldown' ? 'bg-yellow-500' : 'bg-gray-500'
-  const stateLabel = state.charAt(0).toUpperCase() + state.slice(1)
-
-  return (
-    <div className="mb-6 bg-card border border-card rounded-xl p-6">
-      <button
-        className="w-full flex items-center justify-between"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
-          <svg className="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-          </svg>
-          <h2 className="text-lg font-medium text-white">Autonomous Cognition</h2>
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium text-white ${stateColor}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${state === 'autonomous' ? 'animate-pulse' : ''} bg-white/80`} />
-            {stateLabel}
-          </span>
-        </div>
-        <svg className={`w-5 h-5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {expanded && (
-        <div className="mt-4 space-y-4">
-          {/* Controls */}
-          <div className="flex gap-2">
-            {state === 'conversational' || state === 'cooldown' ? (
-              <button
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                onClick={() => startMutation.mutate()}
-                disabled={startMutation.isPending}
-              >
-                {startMutation.isPending ? 'Starting...' : 'Start Session'}
-              </button>
-            ) : state === 'autonomous' ? (
-              <button
-                className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                onClick={() => pauseMutation.mutate()}
-                disabled={pauseMutation.isPending}
-              >
-                {pauseMutation.isPending ? 'Pausing...' : 'Pause'}
-              </button>
-            ) : null}
-          </div>
-
-          {/* Model Selector */}
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">ACS Model</label>
-            <select
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-              value={status?.model_id || 'Qwen3.5-122B-A10B'}
-              onChange={e => settingsMutation.mutate({ model_id: e.target.value })}
-            >
-              {ACS_MODELS.map(m => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Config */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Cooldown (min)</label>
-              <input
-                type="number"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                value={status?.cooldown_minutes || 5}
-                min={1}
-                max={60}
-                onChange={e => settingsMutation.mutate({ cooldown_minutes: parseInt(e.target.value) || 5 })}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Max Duration (min)</label>
-              <input
-                type="number"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
-                value={status?.max_duration_minutes || 60}
-                min={5}
-                max={120}
-                onChange={e => settingsMutation.mutate({ max_duration_minutes: parseInt(e.target.value) || 60 })}
-              />
-            </div>
-          </div>
-
-          {/* Session Log */}
-          <div>
-            <h3 className="text-sm font-medium text-gray-300 mb-2">Recent Sessions</h3>
-            {sessionsData?.sessions?.length ? (
-              <div className="space-y-1">
-                {sessionsData.sessions.map((s: ACSSession) => (
-                  <div key={s.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-3 py-2 text-sm">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${
-                        s.end_reason === 'completed' ? 'bg-green-400' :
-                        s.end_reason === 'timeout' ? 'bg-yellow-400' :
-                        s.end_reason === 'error' ? 'bg-red-400' :
-                        'bg-gray-400'
-                      }`} />
-                      <span className="text-gray-300">
-                        {s.started_at ? new Date(s.started_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 text-gray-500">
-                      <span>{s.duration_minutes ? `${s.duration_minutes}m` : '—'}</span>
-                      <span>{s.turns_completed}t</span>
-                      <span>{s.notes_created}n</span>
-                      <span className="text-xs">{s.end_reason || s.state}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500">No sessions yet</p>
-            )}
-          </div>
-
-          {/* Live View */}
-          <ACSLiveView state={state} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ACSLiveView({ state }: { state: string }) {
-  const [events, setEvents] = useState<Array<{ type: string; ts: string; output?: string; turn?: number; [k: string]: unknown }>>([])
-  const [connected, setConnected] = useState(false)
-  const [watching, setWatching] = useState(false)
-  const scrollRef = useRef<HTMLDivElement>(null)
-
-  const abortRef = useRef<AbortController | null>(null)
-
-  const startWatching = useCallback(() => {
-    if (abortRef.current) return
-    const controller = new AbortController()
-    abortRef.current = controller
-    setWatching(true)
-    setConnected(false)
-
-    const readStream = async () => {
-      try {
-        const resp = await fetch(`${APP_CONFIG.apiUrl}/api/acs/live`, {
-          credentials: 'include',
-          signal: controller.signal,
-          headers: { 'Accept': 'text/event-stream' },
-        })
-        if (!resp.ok || !resp.body) {
-          throw new Error(`HTTP ${resp.status}`)
-        }
-        setConnected(true)
-        const reader = resp.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const raw = line.slice(6)
-              try {
-                const data = JSON.parse(raw)
-                setEvents(prev => [...prev.slice(-200), data])
-              } catch {}
-            }
-          }
-        }
-      } catch (err: unknown) {
-        if (err instanceof Error && err.name === 'AbortError') return
-        setConnected(false)
-        abortRef.current = null
-        // Auto-reconnect after 3s
-        setTimeout(() => startWatching(), 3000)
-      }
-    }
-    readStream()
-  }, [])
-
-  const stopWatching = useCallback(() => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    setConnected(false)
-    setWatching(false)
-  }, [])
-
-  useEffect(() => {
-    return () => { abortRef.current?.abort() }
-  }, [])
-
-  // Auto-start watching when state is autonomous
-  useEffect(() => {
-    if ((state === 'autonomous' || state === 'pausing') && !watching) {
-      startWatching()
-    }
-  }, [state]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [events])
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-medium text-gray-300">Live View</h3>
-        <button
-          className={`px-3 py-1 text-xs font-medium rounded-lg ${
-            watching
-              ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
-              : 'bg-purple-600/20 text-purple-400 hover:bg-purple-600/30'
-          }`}
-          onClick={watching ? stopWatching : startWatching}
-        >
-          {watching ? (connected ? 'Watching...' : 'Reconnecting...') : 'Start Watching'}
-        </button>
-      </div>
-
-      {watching && (
-        <div
-          ref={scrollRef}
-          className="bg-gray-900 rounded-lg p-3 h-64 overflow-y-auto font-mono text-xs space-y-1 border border-gray-800"
-        >
-          {events.length === 0 && (
-            <p className="text-gray-600 italic">Waiting for activity...</p>
-          )}
-          {events.map((evt, i) => (
-            <div key={i} className="flex gap-2">
-              <span className="text-gray-600 shrink-0">
-                {evt.ts ? new Date(evt.ts).toLocaleTimeString() : ''}
-              </span>
-              <span className={`shrink-0 font-semibold ${
-                evt.type === 'session_started' ? 'text-green-400' :
-                evt.type === 'session_ended' ? 'text-yellow-400' :
-                evt.type === 'turn_completed' ? 'text-blue-400' :
-                'text-gray-400'
-              }`}>
-                {evt.type === 'turn_completed' ? `turn ${evt.turn}` : evt.type?.replace('_', ' ')}
-              </span>
-              <span className="text-gray-400 break-all">
-                {evt.type === 'turn_completed' && evt.output
-                  ? evt.output.slice(0, 300) + (evt.output.length > 300 ? '...' : '')
-                  : evt.type === 'session_started'
-                    ? `model=${evt.model_id}`
-                    : evt.type === 'session_ended'
-                      ? `reason=${evt.end_reason} turns=${evt.turns} notes=${evt.notes_created}`
-                      : JSON.stringify(evt).slice(0, 200)
-                }
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 
 export default function Settings() {
   const [aiProvider, setAiProviderState] = useState<ProviderType>(getAIProvider() as ProviderType || 'local')
@@ -1495,39 +1197,113 @@ export default function Settings() {
   }
 
   const pct = (value: number) => `${(value * 100).toFixed(1)}%`
+  const providerLabels: Record<ProviderType, string> = {
+    local: 'Local runtime',
+    gemini: 'Gemini',
+    openai: 'OpenAI',
+    codex: 'ChatGPT OAuth',
+    claude: 'Claude',
+    custom: 'Custom',
+  }
+  const enabledNotificationCount = notifPrefsData?.preferences.filter((pref) => pref.enabled).length ?? 0
+  const autonomyEnabledCount = autonomyFlags
+    ? [
+        autonomyFlags.autonomy_traces_enabled,
+        autonomyFlags.autonomy_structured_plan,
+        autonomyFlags.autonomy_policy_engine,
+        autonomyFlags.autonomy_attention_enabled,
+        autonomyFlags.autonomy_missions_enabled,
+        autonomyFlags.autonomy_policy_candidates_enabled,
+      ].filter(Boolean).length
+    : 0
+  const settingsHeroStats = [
+    {
+      label: 'AI Provider',
+      value: providerLabels[aiProvider] || 'Unassigned',
+      detail: codexOAuthStatus?.connected ? 'ChatGPT connection is live' : 'Primary model path for Sara',
+      Icon: CpuChipIcon,
+      accentClass: 'bg-cyan-400/10 text-cyan-200',
+    },
+    {
+      label: 'Alerts Enabled',
+      value: notifPrefsLoading ? '...' : String(enabledNotificationCount),
+      detail: 'Notification categories Sara may proactively use',
+      Icon: BellAlertIcon,
+      accentClass: 'bg-teal-400/10 text-teal-200',
+    },
+    {
+      label: 'Autonomy Gates',
+      value: autonomyFlagsLoading ? '...' : String(autonomyEnabledCount),
+      detail: autonomyFlags?.automation_admin_configured ? 'Admin gate configured' : 'Admin gate still needs setup',
+      Icon: ShieldCheckIcon,
+      accentClass: 'bg-emerald-400/10 text-emerald-200',
+    },
+    {
+      label: 'Workspace Mode',
+      value: getCalmMode() ? 'Calm' : 'Standard',
+      detail: getEnhancedVisuals() ? 'Enhanced visuals enabled' : 'Balanced visual load',
+      Icon: Cog6ToothIcon,
+      accentClass: 'bg-indigo-400/10 text-indigo-200',
+    },
+  ]
 
   if (isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading settings...</p>
+      <div className="flex-1 px-4 py-8 sm:px-6 lg:px-8">
+        <div className="assistant-panel mx-auto max-w-2xl rounded-md p-8 text-center">
+          <div className="mx-auto h-12 w-12 animate-spin rounded-full border-b-2 border-cyan-400"></div>
+          <p className="mt-4 text-sm text-[var(--assistant-text-soft)]">Loading settings...</p>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="flex-1 py-8">
-      <div className="max-w-4xl mx-auto px-4">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-2xl font-bold text-white mb-2">Settings</h1>
-          <p className="text-gray-400">Configure AI models, embeddings, and personalization</p>
-        </div>
+    <div className="flex-1 px-4 pb-12 pt-4 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-6xl space-y-8">
+        <section className="assistant-panel-soft rounded-md px-4 py-3.5 sm:px-5">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="min-w-0 max-w-2xl">
+              <div className="assistant-kicker mb-2">Assistant Runtime</div>
+              <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-3">
+                <h1 className="font-display text-2xl font-semibold text-white">Settings</h1>
+                <p className="max-w-xl text-sm leading-6 text-[var(--assistant-text-soft)]">
+                  Control the models, guardrails, devices, and background behaviors that shape how Sara runs.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {settingsHeroStats.map(({ label, value }) => (
+                <div key={label} className="assistant-panel flex min-w-[148px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
+                  <span className="assistant-kicker">{label}</span>
+                  <span className="text-sm font-medium text-white">{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <div className="assistant-kicker mb-3">Operations</div>
+          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
+            Keep schedules, tunables, and rollout guardrails aligned before you change deeper runtime behavior.
+          </p>
+        </section>
 
         {/* Scheduled Jobs (DB-backed Celery beat) */}
         <SchedulesSection />
 
-        {/* Behavior Tunables (cooldowns, ACS thresholds, brief tone) */}
+        {/* Behavior Tunables (cooldowns, deliberation thresholds, brief tone) */}
         <TunablesSection />
 
         {/* Autonomy Feature Flag Status */}
-        <div className="mb-6 bg-card border border-card rounded-xl p-6">
+        <div className="assistant-panel rounded-md p-6">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-medium text-white mb-1">Autonomy Flag Status</h2>
-              <p className="text-sm text-gray-400">
+              <div className="assistant-kicker mb-3">Autonomy Health</div>
+              <h2 className="font-display text-2xl font-semibold text-white">Autonomy Flag Status</h2>
+              <p className="mt-2 text-sm text-[var(--assistant-text-soft)]">
                 Read-only visibility into runtime autonomy rollout flags and admin gate setup.
               </p>
             </div>
@@ -1580,11 +1356,12 @@ export default function Settings() {
           )}
         </div>
 
-        <div className="mb-6 bg-card border border-card rounded-xl p-6">
+        <div className="assistant-panel rounded-md p-6">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-medium text-white mb-1">Autonomy Rollout Health (24h)</h2>
-              <p className="text-sm text-gray-400">
+              <div className="assistant-kicker mb-3">Autonomy Health</div>
+              <h2 className="font-display text-2xl font-semibold text-white">Autonomy Rollout Health (24h)</h2>
+              <p className="mt-2 text-sm text-[var(--assistant-text-soft)]">
                 Live rates vs configured thresholds for rollout and rollback decisions.
               </p>
             </div>
@@ -1659,7 +1436,7 @@ export default function Settings() {
 
         {/* Test Result Alert */}
         {testResult && (
-          <div className={`mb-6 p-4 rounded-lg ${
+          <div className={`assistant-panel rounded-md p-4 ${
             testResult.success 
               ? 'bg-green-900/20 border border-green-500/30 text-green-400' 
               : 'bg-red-900/20 border border-red-500/30 text-red-400'
@@ -1684,8 +1461,25 @@ export default function Settings() {
         )}
 
         {/* Settings Form */}
-        <div className="bg-card border border-card rounded-xl">
+        <section>
+          <div className="assistant-kicker mb-3">Core Runtime Configuration</div>
+          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
+            This is the main control surface for model routing, embeddings, background jobs, devices, and
+            notification behavior.
+          </p>
+        </section>
+
+        <div className="assistant-panel rounded-md">
           <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            <div className="border-b border-white/10 pb-6">
+              <div className="assistant-kicker mb-3">Configuration Surface</div>
+              <h2 className="font-display text-2xl font-semibold text-white">How Sara should think and run</h2>
+              <p className="mt-3 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
+                Update the core provider, memory, sandbox, and notification behavior here. Changes apply to the
+                live assistant runtime, not just this browser.
+              </p>
+            </div>
+
             {/* AI Provider Selection */}
             <div className="border-b border-gray-700 pb-6">
               <h3 className="text-lg font-medium text-white mb-4">AI Provider Selection</h3>
@@ -2349,11 +2143,15 @@ export default function Settings() {
           </form>
         </div>
 
+        <section>
+          <div className="assistant-kicker mb-3">Devices, Cognition, and History</div>
+          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
+            Deeper assistant workspaces live here: desktop runtime setup, connected devices, and brief history.
+          </p>
+        </section>
+
         {/* Desktop App Downloads */}
         <DesktopAppDownloads />
-
-        {/* Autonomous Cognition System */}
-        <AutonomousCognition />
 
         {/* Connected Devices */}
         <ConnectedDevices />
@@ -2362,15 +2160,18 @@ export default function Settings() {
         <SaraBriefArchive />
 
         {/* Developer Tools */}
-        <div className="mt-8 bg-card border border-card rounded-xl p-6">
+        <div className="assistant-panel rounded-md p-6">
           <div className="flex items-center mb-4">
             <svg className="w-6 h-6 text-purple-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
             </svg>
-            <h3 className="text-lg font-medium text-white">Developer Tools</h3>
+            <div>
+              <div className="assistant-kicker mb-2">Developer Surface</div>
+              <h3 className="font-display text-2xl font-semibold text-white">Developer Tools</h3>
+            </div>
           </div>
 
-          <p className="text-gray-400 text-sm mb-4">
+          <p className="text-sm text-[var(--assistant-text-soft)] mb-4">
             Experimental features for testing and development.
           </p>
 

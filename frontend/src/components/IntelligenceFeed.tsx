@@ -229,7 +229,7 @@ export default function IntelligenceFeed() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex-shrink-0 bg-card border border-card rounded-xl p-4 mb-4">
+      <div className="flex-shrink-0 bg-card border border-card rounded-md p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
           <div>
             <h2 className="text-lg font-semibold text-white">Intelligence Feed</h2>
@@ -402,7 +402,7 @@ export default function IntelligenceFeed() {
           </>
         ) : (
           /* Digest view */
-          <div className="bg-card border border-card rounded-xl p-6">
+          <div className="bg-card border border-card rounded-md p-6">
             {digestLoading ? (
               <div className="flex items-center justify-center py-12">
                 <div className="w-6 h-6 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />

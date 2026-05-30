@@ -162,7 +162,7 @@ export default function InsightInbox({ onToast, onNavigate }: InsightInboxProps)
         ) : (
           <div className="space-y-4 pb-4">
             {filteredInsights.map(insight => (
-            <div key={insight.id} className="bg-card border border-card rounded-xl p-6 hover:bg-gray-800/50 transition-colors">
+            <div key={insight.id} className="bg-card border border-card rounded-md p-6 hover:bg-gray-800/50 transition-colors">
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
                   <span className="text-2xl">{getInsightIcon(insight.insight_type)}</span>

@@ -22,6 +22,7 @@ import LearningScreen from '../screens/learning/LearningScreen';
 import NotificationsScreen from '../screens/notifications/NotificationsScreen';
 import ACSScreen from '../screens/acs/ACSScreen';
 import ChatScreen from '../screens/chat/ChatScreen';
+import SystemEventDetailScreen from '../screens/narrator/SystemEventDetailScreen';
 import { ChatScreenParams } from '../types/navigation';
 import { colors, fontSizes } from '../styles/theme';
 
@@ -48,6 +49,17 @@ export type AppStackParamList = {
   Learning: undefined;
   Notifications: { notificationId?: number } | undefined;
   ACS: undefined;
+  SystemEventDetail: {
+    eventId: string;
+    prefill?: {
+      title?: string;
+      body?: string;
+      subtitle?: string | null;
+      severity?: string;
+      trigger_name?: string;
+      trigger_context?: Record<string, any>;
+    };
+  };
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -175,6 +187,11 @@ export default function AppNavigator() {
         name="ACS"
         component={ACSScreen}
         options={{ title: 'Autonomous Cognition' }}
+      />
+      <Stack.Screen
+        name="SystemEventDetail"
+        component={SystemEventDetailScreen}
+        options={{ title: 'System Broadcast' }}
       />
     </Stack.Navigator>
   );

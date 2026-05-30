@@ -23,23 +23,6 @@ except ImportError:
     metrics_collector = None
     PSUTIL_AVAILABLE = False
 
-# Try to import voice bridge
-try:
-    from voice_bridge import VoiceBridge, VoiceState, is_available as voice_bridge_available
-    VOICE_BRIDGE_AVAILABLE = voice_bridge_available()
-except ImportError:
-    VoiceBridge = None
-    VoiceState = None
-    VOICE_BRIDGE_AVAILABLE = False
-
-# Try to import audio playback detector
-try:
-    from audio_playback import AudioPlaybackDetector, is_available as audio_playback_available
-    AUDIO_PLAYBACK_AVAILABLE = audio_playback_available()
-except ImportError:
-    AudioPlaybackDetector = None
-    AUDIO_PLAYBACK_AVAILABLE = False
-
 # Ensure log directory exists
 log_dir = config.settings_file.parent
 log_dir.mkdir(parents=True, exist_ok=True)
@@ -70,10 +53,11 @@ class SidecarService:
         self._backend_client = None
         self._electron_bridge = None
         self._metrics_collector = metrics_collector if PSUTIL_AVAILABLE else None
-        self._voice_bridge = None
-        self._voice_state = "disconnected"
-        self._audio_playback_detector = None
-        self._last_playback_state = False
+        self._focus_tracker = None
+
+        # Latest browser-extension context: {url, domain, title, received_at}.
+        # Used to enrich focus_span payloads when active_app is a browser.
+        self._browser_context: dict = {}
 
     async def start(self):
         """Start all sidecar services."""
@@ -92,6 +76,7 @@ class SidecarService:
             from screenshot import ScreenshotService
             from backend_client import BackendClient
             from electron_bridge import ElectronBridge
+            from focus_tracker import FocusTracker
 
             # Create instances
             self._electron_bridge = ElectronBridge(
@@ -103,6 +88,12 @@ class SidecarService:
             self._backend_client = BackendClient(
                 config=config,
                 on_command=self._handle_command
+            )
+
+            self._focus_tracker = FocusTracker(
+                on_focus_span=self._on_focus_span,
+                on_state_change=self._on_activity_state,
+                browser_context_provider=self._get_browser_context,
             )
 
             self._activity_monitor = ActivityMonitor(
@@ -143,33 +134,6 @@ class SidecarService:
             else:
                 logger.warning("psutil not available - system metrics disabled")
 
-            # Start voice bridge if available and enabled
-            if VOICE_BRIDGE_AVAILABLE and config.voice_bridge_enabled:
-                self._voice_bridge = VoiceBridge(
-                    host=config.voice_bridge_host,
-                    port=config.voice_bridge_port,
-                    on_state_change=self._on_voice_state_change,
-                    on_transcript=self._on_voice_transcript,
-                    config=config,
-                )
-                self._tasks.append(asyncio.create_task(self._voice_bridge.start()))
-                logger.info(f"Voice bridge enabled: {config.voice_bridge_host}:{config.voice_bridge_port}")
-            elif not VOICE_BRIDGE_AVAILABLE:
-                logger.warning("Voice bridge not available - missing audio or websocket dependencies")
-            else:
-                logger.info("Voice bridge disabled by configuration")
-
-            # Start audio playback detector if available
-            if AUDIO_PLAYBACK_AVAILABLE:
-                self._audio_playback_detector = AudioPlaybackDetector(
-                    on_state_change=self._on_audio_playback_change
-                )
-                self._tasks.append(asyncio.create_task(self._audio_playback_detector.start()))
-                self._tasks.append(asyncio.create_task(self._audio_playback_report_loop()))
-                logger.info("Audio playback detection enabled")
-            else:
-                logger.warning("Audio playback detection not available - missing pulsectl")
-
             logger.info("All services started successfully")
 
             # Wait for all tasks
@@ -192,7 +156,13 @@ class SidecarService:
         for task in self._tasks:
             task.cancel()
 
-        # Stop components
+        # Stop components — flush any in-flight span before activity_monitor
+        # quits so we don't lose the last span on graceful shutdown.
+        if self._focus_tracker:
+            try:
+                await self._focus_tracker.flush()
+            except Exception as e:
+                logger.error(f"focus_tracker flush failed: {e}")
         if self._activity_monitor:
             await self._activity_monitor.stop()
         if self._screenshot_service:
@@ -201,8 +171,6 @@ class SidecarService:
             await self._backend_client.disconnect()
         if self._electron_bridge:
             await self._electron_bridge.stop()
-        if self._voice_bridge:
-            await self._voice_bridge.stop()
 
         logger.info("Sidecar stopped")
 
@@ -281,6 +249,15 @@ class SidecarService:
 
     async def _on_activity_update(self, activity: dict):
         """Called when activity metrics are updated."""
+        # Feed the focus tracker so it can detect span boundaries and state
+        # transitions. The tracker invokes _on_focus_span / _on_activity_state
+        # when relevant.
+        if self._focus_tracker:
+            try:
+                await self._focus_tracker.on_tick(activity)
+            except Exception as e:
+                logger.error(f"focus_tracker tick failed: {e}")
+
         # Forward to Electron for UI updates
         if self._electron_bridge:
             await self._electron_bridge.send_message({
@@ -288,32 +265,220 @@ class SidecarService:
                 "activity": activity
             })
 
-    def _on_voice_state_change(self, state: str):
-        """Called when voice bridge state changes."""
-        self._voice_state = state
-        self._schedule_electron_message({
-            "type": "voice_state",
-            "state": state
-        })
+    async def _on_focus_span(self, span: dict) -> None:
+        """Forward a completed focus span to the backend over the device WS."""
+        if self._backend_client:
+            try:
+                await self._backend_client.send_focus_span(span)
+            except Exception as e:
+                logger.error(f"send_focus_span failed: {e}")
 
-    def _on_voice_transcript(self, user_text: str, sara_text: str):
-        """Called when voice transcript is received."""
-        self._schedule_electron_message({
-            "type": "voice_transcript",
-            "user": user_text,
-            "sara": sara_text
-        })
+    async def _on_activity_state(self, state: dict) -> None:
+        """Forward a desktop activity-state transition to the backend."""
+        if self._backend_client:
+            try:
+                await self._backend_client.send_activity_state(state)
+            except Exception as e:
+                logger.error(f"send_activity_state failed: {e}")
 
-    def _on_audio_playback_change(self, state):
-        """Called when audio playback state changes."""
-        self._last_playback_state = state.is_playing
-        logger.info(f"Audio playback {'started' if state.is_playing else 'stopped'}: {state.applications}")
+    def _get_browser_context(self) -> Optional[dict]:
+        """Return the most-recent browser tab context if it's still fresh.
 
-        self._schedule_electron_message({
-            "type": "audio_playback",
-            "is_playing": state.is_playing,
-            "applications": state.applications
-        })
+        We treat anything older than 60s as stale — if the extension has
+        stopped reporting (browser closed, extension disabled) we'd rather
+        drop the URL from focus spans than report whatever was last there.
+        """
+        ctx = self._browser_context
+        if not ctx:
+            return None
+        import time as _time
+        if _time.time() - ctx.get("received_at", 0) > 60:
+            return None
+        return {k: v for k, v in ctx.items() if k != "received_at"}
+
+    # ── Desktop actuators (invoked by chat-originated tool calls) ────────────
+
+    def _write_clipboard(self, text: str) -> None:
+        try:
+            import pyperclip
+        except ImportError:
+            logger.error("write_clipboard: pyperclip not installed")
+            return
+        try:
+            pyperclip.copy(text)
+            logger.info(f"Clipboard set ({len(text)} chars)")
+        except Exception as e:
+            logger.error(f"write_clipboard failed: {e}")
+
+    def _focus_window(self, title_match: str) -> None:
+        try:
+            import pygetwindow as gw
+        except ImportError:
+            logger.error("focus_window: pygetwindow not installed")
+            return
+        try:
+            needle = title_match.lower()
+            matches = [w for w in gw.getAllWindows() if needle in (w.title or "").lower()]
+            if not matches:
+                logger.info(f"focus_window: no window matched '{title_match}'")
+                return
+            target = matches[0]
+            try:
+                if hasattr(target, "isMinimized") and target.isMinimized:
+                    target.restore()
+            except Exception:
+                pass
+            try:
+                target.activate()
+            except Exception as e:
+                # pygetwindow wraps Win32 calls and raises Win32Exception even
+                # when GetLastError() == ERROR_SUCCESS (0). Swallow that one
+                # false positive but re-raise any real failure.
+                if "operation completed successfully" not in str(e).lower():
+                    raise
+            logger.info(f"Focused window: {target.title}")
+        except Exception as e:
+            logger.error(f"focus_window failed: {e}")
+
+    def _type_keystrokes(self, text: str) -> bool:
+        """Inject keystrokes into whatever currently has focus. Returns True on success."""
+        try:
+            from pynput.keyboard import Controller, Key
+        except ImportError:
+            logger.error("type_keystrokes: pynput not installed")
+            return False
+        try:
+            kb = Controller()
+            for ch in text:
+                if ch == "\n":
+                    kb.press(Key.enter)
+                    kb.release(Key.enter)
+                else:
+                    kb.type(ch)
+            return True
+        except Exception as e:
+            logger.error(f"type_keystrokes failed: {e}")
+            return False
+
+    def _type_into_window(self, title_match: str, text: str) -> None:
+        """Atomically focus a window matching `title_match` and type `text` into it.
+
+        On Windows uses ctypes to do the AttachThreadInput / SetForegroundWindow
+        dance that defeats anti-focus-stealing restrictions, then verifies the
+        target window actually has foreground before injecting keystrokes.
+
+        On other platforms falls back to a best-effort focus + sleep + type.
+        """
+        import sys
+        if sys.platform == "win32":
+            self._type_into_window_windows(title_match, text)
+        else:
+            self._type_into_window_fallback(title_match, text)
+
+    def _type_into_window_windows(self, title_match: str, text: str) -> None:
+        import ctypes
+        from ctypes import wintypes
+        import time
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        # Find a top-level visible window whose title contains the needle.
+        needle = title_match.lower()
+        target_hwnd = ctypes.c_void_p(None)
+        target_title = [""]
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _enum(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if needle in buf.value.lower():
+                target_hwnd.value = hwnd
+                target_title[0] = buf.value
+                return False  # stop enumerating
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_enum), 0)
+
+        if not target_hwnd.value:
+            logger.error(f"type_into_window: no window matched '{title_match}'")
+            return
+
+        # The classic Windows focus-stealing dance: attach our thread's input
+        # queue to the current foreground window's queue, then SetForegroundWindow
+        # succeeds. Without this, Windows often returns 0 (success) without
+        # actually transferring focus.
+        SW_RESTORE = 9
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+        our_tid = kernel32.GetCurrentThreadId()
+
+        attached = False
+        try:
+            if fg_tid and fg_tid != our_tid:
+                attached = bool(user32.AttachThreadInput(our_tid, fg_tid, True))
+
+            if user32.IsIconic(target_hwnd.value):
+                user32.ShowWindow(target_hwnd.value, SW_RESTORE)
+            user32.BringWindowToTop(target_hwnd.value)
+            user32.SetForegroundWindow(target_hwnd.value)
+        finally:
+            if attached:
+                user32.AttachThreadInput(our_tid, fg_tid, False)
+
+        # Brief settle so the window manager can finish the transition before
+        # we verify foreground and start injecting input.
+        time.sleep(0.15)
+
+        new_fg = user32.GetForegroundWindow()
+        if new_fg != target_hwnd.value:
+            logger.error(
+                f"type_into_window: focus transfer to '{target_title[0]}' "
+                f"failed (foreground hwnd={new_fg}, target hwnd={target_hwnd.value}); "
+                f"refusing to type to avoid leaking keys to the wrong window"
+            )
+            return
+
+        ok = self._type_keystrokes(text)
+        if ok:
+            logger.info(f"Typed {len(text)} chars into '{target_title[0]}'")
+
+    def _type_into_window_fallback(self, title_match: str, text: str) -> None:
+        import time
+        try:
+            import pygetwindow as gw
+        except ImportError:
+            logger.error("type_into_window: pygetwindow not installed")
+            return
+        try:
+            needle = title_match.lower()
+            matches = [w for w in gw.getAllWindows() if needle in (w.title or "").lower()]
+            if not matches:
+                logger.error(f"type_into_window: no window matched '{title_match}'")
+                return
+            target = matches[0]
+            try:
+                if hasattr(target, "isMinimized") and target.isMinimized:
+                    target.restore()
+            except Exception:
+                pass
+            try:
+                target.activate()
+            except Exception as e:
+                if "operation completed successfully" not in str(e).lower():
+                    raise
+            time.sleep(0.15)
+            ok = self._type_keystrokes(text)
+            if ok:
+                logger.info(f"Typed {len(text)} chars into '{target.title}'")
+        except Exception as e:
+            logger.error(f"type_into_window failed: {e}")
 
     def _schedule_electron_message(self, payload: dict):
         """Send an Electron bridge message from any thread context."""
@@ -332,34 +497,6 @@ class SidecarService:
             asyncio.create_task(bridge.send_message(payload))
         except RuntimeError as e:
             logger.debug("Dropping electron message without running loop: %s", e)
-
-    async def _audio_playback_report_loop(self):
-        """Periodically report audio playback state to backend."""
-        import httpx
-
-        await asyncio.sleep(5)  # Wait for startup
-
-        while self.running:
-            try:
-                if self._audio_playback_detector:
-                    state = self._audio_playback_detector.state
-
-                    # Send to backend
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        apps = ",".join(state.applications) if state.applications else ""
-                        await client.post(
-                            f"{config.backend_url}/api/sensory/audio-playback",
-                            params={
-                                "is_playing": state.is_playing,
-                                "volume_level": state.volume_level,
-                                "applications": apps
-                            }
-                        )
-
-            except Exception as e:
-                logger.debug(f"Audio playback report error: {e}")
-
-            await asyncio.sleep(5)  # Report every 5 seconds
 
     async def _handle_electron_message(self, data: dict):
         """Handle messages from Electron via the bridge."""
@@ -384,6 +521,24 @@ class SidecarService:
                 await self._screenshot_service.capture_and_upload(
                     analyze=data.get("analyze", False),
                     analyze_prompt=data.get("analyze_prompt")
+                )
+
+        elif msg_type == "browser_context":
+            # From the browser extension. Cache the latest active tab so
+            # focus_tracker can stitch it into focus_span payloads.
+            url = data.get("url")
+            if url:
+                import time as _time
+                self._browser_context = {
+                    "url": url,
+                    "domain": data.get("domain") or "",
+                    "title": data.get("title") or "",
+                    "received_at": _time.time(),
+                }
+                logger.debug(
+                    "browser_context: %s — %s",
+                    self._browser_context.get("domain"),
+                    (self._browser_context.get("title") or "")[:60],
                 )
 
         elif msg_type == "shutdown_sidecar":
@@ -434,14 +589,6 @@ class SidecarService:
                     "remaining_seconds": payload.get("remaining_seconds")
                 })
 
-        elif cmd_type == "speak":
-            # Forward to Electron for TTS
-            if self._electron_bridge:
-                await self._electron_bridge.send_message({
-                    "type": "speak",
-                    "text": payload.get("text")
-                })
-
         elif cmd_type == "show_notification":
             # Forward to Electron
             if self._electron_bridge:
@@ -451,12 +598,50 @@ class SidecarService:
                     "message": payload.get("message")
                 })
 
+        elif cmd_type == "system_event":
+            # Narrator broadcast — forward the whole payload so Electron can
+            # style by severity and show full body/subtitle.
+            if self._electron_bridge:
+                await self._electron_bridge.send_message({
+                    "type": "system_event",
+                    "event_id": payload.get("id"),
+                    "title": payload.get("title"),
+                    "body": payload.get("body"),
+                    "subtitle": payload.get("subtitle"),
+                    "severity": payload.get("severity"),
+                    "ttl_seconds": payload.get("ttl_seconds", 30),
+                    "trigger_name": payload.get("trigger_name"),
+                    "trigger_context": payload.get("trigger_context", {}),
+                })
+
         elif cmd_type == "open_workspace":
             # Open the workbench-canvas workspace in browser
             url = payload.get("url", "https://canvas.avery.cloud")
             import webbrowser
             webbrowser.open(url)
             logger.info(f"Opened workspace: {url}")
+
+        elif cmd_type == "write_clipboard":
+            text = payload.get("text")
+            if text is None:
+                logger.warning("write_clipboard: missing 'text' payload")
+            else:
+                self._write_clipboard(text)
+
+        elif cmd_type == "focus_window":
+            title_match = payload.get("title_match", "")
+            if not title_match:
+                logger.warning("focus_window: missing 'title_match' payload")
+            else:
+                self._focus_window(title_match)
+
+        elif cmd_type == "type_into_window":
+            title_match = payload.get("title_match", "")
+            text = payload.get("text")
+            if not title_match or not text:
+                logger.warning("type_into_window: missing 'title_match' or 'text'")
+            else:
+                self._type_into_window(title_match, text)
 
         elif cmd_type == "get_metrics":
             # Return current system metrics

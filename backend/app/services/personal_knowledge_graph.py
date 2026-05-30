@@ -38,6 +38,32 @@ BASE_PROPERTIES = [
     "times_confirmed", "version", "superseded_by", "pkg_id"
 ]
 
+# Statuses that mean the fact is "closed" — historical, not currently relevant.
+# Context-building queries should exclude these so stale items don't keep
+# showing up in chat prompts.
+PKG_CLOSED_STATUSES = ["completed", "abandoned", "archived", "stale"]
+
+# Cypher snippet — exclude closed facts and past-target_date goals.
+# Use as: ... AND (n.superseded_by IS NULL) AND ({PKG_FRESH_FILTER})
+# `target_date` is a stored ISO-8601 string, so a lex comparison against
+# today (as ISO) does the right thing for date-like strings.
+PKG_FRESH_FILTER = (
+    "(n.status IS NULL OR NOT toLower(n.status) IN $closed_statuses) "
+    "AND (NOT 'PKG_Goal' IN labels(n) OR n.target_date IS NULL "
+    "OR n.target_date >= $today_iso)"
+)
+
+
+def _pkg_fresh_params() -> dict:
+    """Params bound by the PKG_FRESH_FILTER snippet."""
+    from datetime import datetime, timezone, timedelta
+    # Allow goals within the last 24 hours (covers "today's call" being mentioned)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    return {
+        "closed_statuses": PKG_CLOSED_STATUSES,
+        "today_iso": cutoff.isoformat(),
+    }
+
 
 def _to_psycopg3_url(database_url: str) -> str:
     """Force a ``postgresql+psycopg://`` (psycopg3) URL.
@@ -232,12 +258,40 @@ class PersonalKnowledgeGraph:
                     MATCH (n:{label} {{dedup_key: $dedup_key}})
                     WHERE n.superseded_by IS NULL
                     RETURN n.pkg_id as pkg_id, n.confidence as confidence,
-                           n.times_confirmed as times_confirmed
+                           n.times_confirmed as times_confirmed,
+                           n.status as status
                 """, {"dedup_key": dedup_key})
 
                 existing = result.single()
 
                 if existing:
+                    # Don't resurrect closed facts. If the existing node was
+                    # explicitly marked completed/abandoned/archived/stale, a
+                    # later mention shouldn't bump confidence or last_confirmed
+                    # — that just keeps stale items at the top of context. We
+                    # still allow explicit property updates if the caller
+                    # passes new fields, but the timestamp stays frozen.
+                    closed_statuses = {"completed", "abandoned", "archived", "stale"}
+                    is_closed = (existing.get("status") or "").lower() in closed_statuses
+
+                    if is_closed:
+                        logger.debug(
+                            f"PKG: skipping confirmation bump for closed {label} "
+                            f"(status={existing.get('status')}, dedup={dedup_key[:30]})"
+                        )
+                        # Still allow explicit non-base property updates if any.
+                        if properties:
+                            set_clauses = ", ".join(
+                                f"n.{k} = ${k}" for k in properties.keys()
+                                if k not in BASE_PROPERTIES and k != "dedup_key" and k != "status"
+                            )
+                            if set_clauses:
+                                session.run(f"""
+                                    MATCH (n:{label} {{pkg_id: $pkg_id}})
+                                    SET {set_clauses}
+                                """, {"pkg_id": existing["pkg_id"], **properties})
+                        return existing["pkg_id"]
+
                     # Confirmation: bump confidence and update
                     new_confidence = min(existing["confidence"] + 0.1, 0.99)
                     new_times = (existing["times_confirmed"] or 0) + 1
@@ -405,11 +459,13 @@ class PersonalKnowledgeGraph:
 
                 where_clause = " OR ".join(f"({c})" for c in topic_conditions)
 
+                params.update(_pkg_fresh_params())
                 result = session.run(f"""
                     MATCH (n)
                     WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
                     AND n.superseded_by IS NULL
                     AND n.confidence > 0.3
+                    AND ({PKG_FRESH_FILTER})
                     AND ({where_clause})
                     RETURN labels(n) as labels, properties(n) as props
                     ORDER BY n.confidence DESC
@@ -948,15 +1004,17 @@ class PersonalKnowledgeGraph:
 
         try:
             with self.driver.session() as session:
+                params = {"limit": max_facts, **_pkg_fresh_params()}
                 result = session.run(f"""
                     MATCH (n)
                     WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
                     AND n.superseded_by IS NULL
                     AND n.confidence > 0.5
+                    AND ({PKG_FRESH_FILTER})
                     RETURN labels(n) as labels, properties(n) as props
                     ORDER BY n.confidence DESC, n.last_confirmed DESC
                     LIMIT $limit
-                """, {"limit": max_facts})
+                """, params)
 
                 lines = []
                 for record in result:
@@ -1242,15 +1300,17 @@ class PersonalKnowledgeGraph:
         try:
             with self.driver.session() as session:
                 label_clause = " OR ".join(f"n:{l}" for l in labels)
+                params = {"limit": limit, **_pkg_fresh_params()}
                 result = session.run(f"""
                     MATCH (n)
                     WHERE ({label_clause})
                     AND n.superseded_by IS NULL
                     AND n.confidence > 0.5
+                    AND ({PKG_FRESH_FILTER})
                     RETURN labels(n) as labels, properties(n) as props
                     ORDER BY n.confidence DESC
                     LIMIT $limit
-                """, {"limit": limit})
+                """, params)
 
                 return [
                     {
@@ -1680,13 +1740,15 @@ class PersonalKnowledgeGraph:
             pkg_ids = [m["pkg_id"] for m in matches]
             try:
                 with self.driver.session() as neo_session:
+                    params = {"pkg_ids": pkg_ids, **_pkg_fresh_params()}
                     result = neo_session.run(f"""
                         MATCH (n)
                         WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
                         AND n.pkg_id IN $pkg_ids
                         AND n.superseded_by IS NULL
+                        AND ({PKG_FRESH_FILTER})
                         RETURN n.pkg_id as pkg_id, labels(n) as labels, properties(n) as props
-                    """, {"pkg_ids": pkg_ids})
+                    """, params)
 
                     neo4j_data = {}
                     for record in result:

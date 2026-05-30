@@ -3,7 +3,6 @@ Predictive Engine — pattern-based predictions for upcoming activities.
 
 Analyzes behavioral patterns and calendar to generate forward-looking suggestions:
   "You usually go to the gym on Thursdays"
-  "Based on your pattern, you'll want to start winding down around 10pm"
 
 Runs as a Celery task every 30 minutes during waking hours.
 """
@@ -167,16 +166,6 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                     })
         except Exception as e:
             logger.debug(f"Travel prediction failed: {e}")
-
-        # 5. Bedtime prediction (if it's getting late and user is still active)
-        if current_hour >= 22:
-            predictions.append({
-                "type": "routine_prediction",
-                "title": "Wind-down time",
-                "message": "It's getting late. Based on your usual schedule, you might want to start winding down.",
-                "confidence": 0.6,
-                "priority": "low",
-            })
 
     return predictions[:6]  # Max 6 predictions per check
 

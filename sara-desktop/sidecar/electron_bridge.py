@@ -17,8 +17,7 @@ class ElectronBridge:
     Local WebSocket server for Electron communication.
 
     The Electron app connects to this server to receive:
-    - Wake word detection events
-    - Commands from other devices
+    - Commands from other devices (show note/timer/notification)
     - Activity updates
 
     And can send:
@@ -136,24 +135,12 @@ class ElectronBridge:
                 # Health check
                 await websocket.send(json.dumps({"type": "pong"}))
 
-            elif msg_type == "get_audio_devices":
-                # Request list of audio input devices
+            elif msg_type == "browser_context":
+                # From the browser extension. Forward to handler so the
+                # sidecar can cache the latest active URL for focus_span
+                # enrichment.
                 if self.on_message:
-                    await self._call_handler({
-                        "type": "get_audio_devices_request",
-                        "websocket": websocket
-                    })
-
-            elif msg_type == "set_audio_device":
-                # Set preferred audio device
-                device_index = data.get("device_index")
-                device_name = data.get("device_name")
-                if self.on_message:
-                    await self._call_handler({
-                        "type": "set_audio_device_request",
-                        "device_index": device_index,
-                        "device_name": device_name
-                    })
+                    await self._call_handler(data)
 
             else:
                 # Forward unknown messages to handler
@@ -193,13 +180,6 @@ class ElectronBridge:
         for client in disconnected:
             self._clients.discard(client)
 
-    async def broadcast_wake_word(self):
-        """Send wake word detection event to Electron."""
-        await self.send_message({
-            "type": "wake_word_detected",
-            "timestamp": asyncio.get_event_loop().time()
-        })
-
     async def show_note(self, note_id: str, title: str, content: str):
         """Tell Electron to show a note overlay."""
         await self.send_message({
@@ -225,30 +205,6 @@ class ElectronBridge:
             "title": title,
             "message": message
         })
-
-    async def start_listening(self):
-        """Tell Electron to start voice recording."""
-        await self.send_message({
-            "type": "start_listening"
-        })
-
-    async def speak(self, text: str):
-        """Tell Electron to speak text via TTS."""
-        await self.send_message({
-            "type": "speak",
-            "text": text
-        })
-
-    async def send_audio_devices(self, websocket, devices: list, current_device: str = None):
-        """Send audio devices list to a specific client."""
-        try:
-            await websocket.send(json.dumps({
-                "type": "audio_devices",
-                "devices": devices,
-                "current_device": current_device
-            }))
-        except Exception as e:
-            logger.error(f"Failed to send audio devices: {e}")
 
     @property
     def client_count(self) -> int:

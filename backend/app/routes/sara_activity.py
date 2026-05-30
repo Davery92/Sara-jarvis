@@ -124,6 +124,11 @@ async def get_activity(
             last_kept_ts = None
             for entry in entries:
                 content = entry.content or ""
+                # Skip parse/LLM failure stubs — these are error messages
+                # persisted as journal content when the deliberation or
+                # consolidation LLM call failed to produce valid JSON.
+                if content.startswith(("Parse failed:", "Deliberation failed:", "Consolidation failed:")):
+                    continue
                 entry_ts = entry.created_at
                 if last_kept_content and last_kept_ts and entry_ts:
                     within_window = (last_kept_ts - entry_ts) <= timedelta(hours=12)

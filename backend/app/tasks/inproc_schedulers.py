@@ -212,5 +212,28 @@ async def _dispatch_reminder(reminder):
         notification_data={
             "type": "reminder",
             "reminder_id": reminder.id,
+            "event_id": getattr(reminder, "event_id", None),
         },
     )
+
+
+# ── Calendar reminder top-up ───────────────────────────────────────
+@celery_app.task(name="app.tasks.inproc_schedulers.calendar_reminder_topup", queue="cognitive")
+def calendar_reminder_topup():
+    """Daily top-up of reminders for recurring calendar events.
+
+    Extends the rolling 30-day window so recurring events past the initial
+    expansion keep getting push notifications.
+    """
+    from app.db.base import SessionLocal
+    from app.services.calendar_reminders import topup_all_recurring
+
+    with SessionLocal() as db:
+        try:
+            created = topup_all_recurring(db)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error("calendar_reminder_topup failed: %s", e)
+            return {"created": 0, "error": str(e)}
+    return {"created": created}

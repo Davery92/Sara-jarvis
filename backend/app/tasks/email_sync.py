@@ -480,23 +480,28 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     email.analyzed_at = local_now()
                     email.has_meeting = analysis.get("has_meeting", False)
 
-                    # Create calendar event if this is a meeting email
+                    # Create calendar event if this is a meeting email.
+                    # Wrap in a SAVEPOINT so a failure here only rolls back the
+                    # calendar-event insert, not the entire batch's analysis
+                    # updates. A bare db.rollback() here used to wipe every
+                    # email's staged analyzed_at/category/notification_sent
+                    # fields in the current transaction — the push had already
+                    # gone out, but the row reverted to "unanalyzed", so the
+                    # next sync re-pushed it. That was the source of the
+                    # repeating notifications for old emails.
                     if analysis.get("has_meeting") and analysis.get("meeting_info") and not email.calendar_event_id:
                         try:
-                            event_id = await _create_calendar_event_from_email(
-                                db, user_id, email, analysis["meeting_info"]
-                            )
-                            if event_id:
-                                email.calendar_event_id = event_id
-                                email.calendar_event_created_at = local_now()
-                                source_type = "ICS attachment" if ics_meeting_info else "email content"
-                                logger.info(f"Created calendar event {event_id} from {source_type}: {email.subject}")
+                            async with db.begin_nested():
+                                event_id = await _create_calendar_event_from_email(
+                                    db, user_id, email, analysis["meeting_info"]
+                                )
+                                if event_id:
+                                    email.calendar_event_id = event_id
+                                    email.calendar_event_created_at = local_now()
+                                    source_type = "ICS attachment" if ics_meeting_info else "email content"
+                                    logger.info(f"Created calendar event {event_id} from {source_type}: {email.subject}")
                         except Exception as e:
                             logger.error(f"Failed to create calendar event from email: {e}")
-                            try:
-                                await db.rollback()
-                            except Exception:
-                                pass
 
                     # Check if we should send a notification
                     should_notify = False

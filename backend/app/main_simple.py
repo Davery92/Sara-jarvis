@@ -319,7 +319,7 @@ EMBEDDING_DIM = _app_state.embedding_dim
 
 # Background LLM Configuration (separate from chat - always uses local models)
 BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "mlx-community/Qwen3.6-27B-8bit")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "qwen3.6-27b")
 BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1")
 BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "Qwen3.5-35B-A3B")
 BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
@@ -1835,7 +1835,12 @@ class SimpleLLMClient:
         else:
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
-                reg_result = await tool_registry.execute_tool(name=function_name, user_id=str(user_id), parameters=arguments)
+                reg_result = await tool_registry.execute_tool(
+                    name=function_name,
+                    user_id=str(user_id),
+                    parameters=arguments,
+                    context={"origin": "chat"},
+                )
                 # Collect citations if available
                 try:
                     if reg_result.citations:
@@ -5299,6 +5304,14 @@ try:
 except Exception as e:
     logger.warning(f"Notes routes not available from module: {e}")
 
+# Recipes routes
+try:
+    from app.routes.recipes import router as recipes_router
+    app.include_router(recipes_router, tags=["Recipes"])
+    logger.info("✅ Recipes routes loaded from app.routes.recipes")
+except Exception as e:
+    logger.warning(f"Recipes routes not available from module: {e}")
+
 # Reminders routes (extracted from main_simple.py)
 try:
     from app.routes.reminders import router as reminders_router
@@ -5436,6 +5449,14 @@ try:
     logger.info("✅ Morning brief routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Morning brief routes failed to load: {e}")
+
+# Include Research Brief routes
+try:
+    from app.routes.research_brief import router as research_brief_router
+    app.include_router(research_brief_router, prefix="/api/research-brief", tags=["Research Brief"])
+    logger.info("✅ Research brief routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Research brief routes failed to load: {e}")
 
 # Include Settings → Schedules routes (DB-backed Celery beat schedule)
 try:
@@ -5684,6 +5705,10 @@ from app.routes.acs_interests import router as acs_interests_router
 app.include_router(acs_interests_router)
 from app.routes.acs_user_tools import router as acs_user_tools_router
 app.include_router(acs_user_tools_router)
+
+# Narrator ("System AI") — broadcast persona on top of ACS observation streams
+from app.routes.narrator import router as narrator_router
+app.include_router(narrator_router)
 
 # System metrics
 from app.routes.metrics import router as metrics_router

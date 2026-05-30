@@ -175,13 +175,21 @@ class MorningBriefService:
         except Exception as e:
             logger.warning(f"PKG unavailable for stable bootstrap: {e}")
 
-        # 2. Pull recent episodic memory highlights (high-importance episodes)
+        # 2. Pull recent episodic memory highlights (high-importance episodes).
+        # Recency cutoff is critical: without it, a single high-importance
+        # assistant message from weeks ago (e.g. "your 10:30 with Matt about the
+        # operating agreement") gets recycled into the morning brief every day
+        # and the LLM rephrases it as if it's still pending. Restrict to the
+        # last 3 days and to user-stated content (assistant turns are advice,
+        # not facts about David).
         try:
             rows = db.execute(text("""
                 SELECT content, importance
                 FROM episode
                 WHERE user_id = :user_id
                   AND importance >= 0.7
+                  AND role = 'user'
+                  AND created_at >= NOW() - INTERVAL '3 days'
                 ORDER BY created_at DESC
                 LIMIT 8
             """), {"user_id": user_id}).fetchall()
@@ -531,10 +539,25 @@ Synthesized summary:"""
                 metric_display = {
                     'resting_hr': ('Resting HR', 'bpm'),
                     'hrv': ('HRV', 'ms'),
+                    'hrv_morning': ('HRV (morning)', 'ms'),
                     'sleep_hours': ('Sleep', 'hrs'),
-                    'weight': ('Weight', 'kg'),
+                    'sleep_deep_min': ('Deep sleep', 'min'),
+                    'sleep_rem_min': ('REM sleep', 'min'),
+                    'sleep_core_min': ('Core sleep', 'min'),
+                    'sleep_awake_min': ('Awake', 'min'),
+                    'weight': ('Weight', 'lbs'),
                     'steps': ('Steps', ''),
                     'active_energy': ('Active Cal', 'kcal'),
+                    'spo2': ('Blood Oxygen', '%'),
+                    'respiratory_rate': ('Resp Rate', 'br/min'),
+                    'body_temp': ('Body Temp', '°F'),
+                    'vo2_max': ('VO2 max', 'ml/kg/min'),
+                    'walking_hr_avg': ('Walking HR', 'bpm'),
+                    'hr_recovery_1min': ('HR Recovery', 'bpm'),
+                    'stand_minutes': ('Stand', 'min'),
+                    'exercise_minutes': ('Exercise', 'min'),
+                    'flights_climbed': ('Flights', ''),
+                    'mindful_minutes': ('Mindful', 'min'),
                 }
 
                 for metric_type, data in metrics.items():
@@ -547,11 +570,15 @@ Synthesized summary:"""
                     status = data.get('status', 'normal')
 
                     # Format the value
-                    if metric_type in ['resting_hr', 'hrv', 'steps']:
+                    if metric_type in ['resting_hr', 'hrv', 'hrv_morning', 'steps',
+                                       'walking_hr_avg', 'hr_recovery_1min',
+                                       'stand_minutes', 'exercise_minutes',
+                                       'flights_climbed', 'mindful_minutes',
+                                       'sleep_deep_min', 'sleep_rem_min',
+                                       'sleep_core_min', 'sleep_awake_min']:
                         value_str = f"{int(value)}"
-                    elif metric_type == 'sleep_hours':
-                        value_str = f"{value:.1f}"
-                    elif metric_type == 'weight':
+                    elif metric_type in ('sleep_hours', 'weight', 'body_temp',
+                                         'spo2', 'respiratory_rate', 'vo2_max'):
                         value_str = f"{value:.1f}"
                     else:
                         value_str = f"{value:.0f}"
@@ -567,11 +594,15 @@ Synthesized summary:"""
 
                     # Add baseline comparison if available
                     if baseline:
-                        if metric_type in ['resting_hr', 'hrv', 'steps']:
+                        if metric_type in ['resting_hr', 'hrv', 'hrv_morning', 'steps',
+                                           'walking_hr_avg', 'hr_recovery_1min',
+                                           'stand_minutes', 'exercise_minutes',
+                                           'flights_climbed', 'mindful_minutes',
+                                           'sleep_deep_min', 'sleep_rem_min',
+                                           'sleep_core_min', 'sleep_awake_min']:
                             baseline_str = f"{int(baseline)}"
-                        elif metric_type == 'sleep_hours':
-                            baseline_str = f"{baseline:.1f}"
-                        elif metric_type == 'weight':
+                        elif metric_type in ('sleep_hours', 'weight', 'body_temp',
+                                             'spo2', 'respiratory_rate', 'vo2_max'):
                             baseline_str = f"{baseline:.1f}"
                         else:
                             baseline_str = f"{baseline:.0f}"

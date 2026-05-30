@@ -26,11 +26,15 @@ class ResearchLLMClient:
     def __init__(
         self,
         base_url: str = RESEARCH_LLM_URL,
-        model: str = RESEARCH_LLM_MODEL,
+        model: Optional[str] = None,
         timeout: float = RESEARCH_LLM_TIMEOUT,
     ):
         self.base_url = base_url.rstrip("/")
-        self.model = model
+        # If no model passed, discover at first call via /v1/models. The configured
+        # default is only a fallback for when discovery fails.
+        self._explicit_model = model
+        self._fallback_model = RESEARCH_LLM_MODEL
+        self._resolved_model: Optional[str] = model
         self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
 
@@ -42,6 +46,36 @@ class ResearchLLMClient:
                 headers={"Content-Type": "application/json"},
             )
         return self._client
+
+    async def _resolve_model(self) -> str:
+        """Return the actual model loaded at the endpoint, with caching."""
+        if self._resolved_model:
+            return self._resolved_model
+        try:
+            client = await self._get_client()
+            resp = await client.get("/v1/models", timeout=5.0)
+            resp.raise_for_status()
+            data = resp.json()
+            models = data.get("data") or data.get("models") or []
+            if models:
+                first = models[0]
+                if isinstance(first, dict):
+                    self._resolved_model = first.get("id") or first.get("name") or self._fallback_model
+                elif isinstance(first, str):
+                    self._resolved_model = first
+                else:
+                    self._resolved_model = self._fallback_model
+                logger.info("Research LLM resolved to model: %s", self._resolved_model)
+                return self._resolved_model
+        except Exception as e:
+            logger.warning("Research LLM model discovery failed (%s); using fallback %s", e, self._fallback_model)
+        self._resolved_model = self._fallback_model
+        return self._resolved_model
+
+    @property
+    def model(self) -> str:
+        """Backwards-compatible property; may return fallback before first resolve."""
+        return self._resolved_model or self._fallback_model
 
     async def health_check(self) -> bool:
         """Check if the research LLM is reachable."""
@@ -65,9 +99,10 @@ class ResearchLLMClient:
         Returns the full response dict (OpenAI format).
         """
         client = await self._get_client()
+        model = await self._resolve_model()
 
         payload: Dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,

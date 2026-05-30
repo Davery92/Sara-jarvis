@@ -116,6 +116,7 @@ class DeliberationEngine:
                 ],
                 temperature=0.4,
                 max_tokens=1500,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
 
             # Extract content from OpenAI-compatible response

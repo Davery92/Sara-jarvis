@@ -63,7 +63,7 @@ const rankLabel = (rank?: string | null) => {
 }
 
 const SectionCard = ({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) => (
-  <section className="bg-card border border-card rounded-xl p-4">
+  <section className="bg-card border border-card rounded-md p-4">
     <div className="flex items-center justify-between mb-3">
       <h2 className="text-base font-semibold text-white">{title}</h2>
       {right}
@@ -83,7 +83,7 @@ const TemerantGuideModal = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-xl border border-gray-700 bg-gray-950 shadow-2xl"
+        className="w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-md border border-gray-700 bg-gray-950 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-800 bg-gray-950/95 px-5 py-4 backdrop-blur">
@@ -313,7 +313,7 @@ function TemerantPage() {
   if (loading) {
     return (
       <div className="flex-1 min-h-0 p-6">
-        <div className="bg-card border border-card rounded-xl p-6 text-gray-300">Loading Temerant state...</div>
+        <div className="bg-card border border-card rounded-md p-6 text-gray-300">Loading Temerant state...</div>
       </div>
     )
   }
@@ -322,7 +322,7 @@ function TemerantPage() {
     <div className="flex-1 min-h-0 overflow-y-auto p-6">
       <TemerantGuideModal open={showGuide} onClose={() => setShowGuide(false)} />
       <div className="max-w-6xl mx-auto space-y-4">
-        <section className="bg-card border border-card rounded-xl p-5">
+        <section className="bg-card border border-card rounded-md p-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-widest text-teal-400">A Life in Temerant</p>
@@ -350,10 +350,10 @@ function TemerantPage() {
         </section>
 
         {error && (
-          <div className="bg-red-900/20 border border-red-700/50 text-red-300 px-4 py-3 rounded-xl text-sm">{error}</div>
+          <div className="bg-red-900/20 border border-red-700/50 text-red-300 px-4 py-3 rounded-md text-sm">{error}</div>
         )}
         {statusMessage && (
-          <div className="bg-emerald-900/20 border border-emerald-700/40 text-emerald-300 px-4 py-3 rounded-xl text-sm">
+          <div className="bg-emerald-900/20 border border-emerald-700/40 text-emerald-300 px-4 py-3 rounded-md text-sm">
             {statusMessage}
           </div>
         )}

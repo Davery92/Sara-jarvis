@@ -1,8 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { APP_CONFIG } from '../config'
 import { apiClient } from '../api/client'
 import type { Document, ChatModel, ChatModelsResponse } from '../api/client'
@@ -46,6 +44,25 @@ interface ParsedArtifact {
   title: string
   content: string
   language?: string
+}
+
+function getMessageText(content: ChatMessage['content']): string {
+  if (typeof content === 'string') {
+    return content
+  }
+
+  return content
+    .map(part => {
+      if (part.type === 'text') {
+        return part.text || ''
+      }
+      if (part.type.includes('image')) {
+        return '[Image attachment]'
+      }
+      return part.text || ''
+    })
+    .filter(Boolean)
+    .join('\n')
 }
 
 // Extract artifacts from message content
@@ -902,7 +919,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative flex h-full bg-card border border-card rounded-xl overflow-hidden ${isResizing ? 'select-none' : ''}`}
+      className={`relative flex h-full bg-card border border-card rounded-md overflow-hidden ${isResizing ? 'select-none' : ''}`}
     >
       {/* Main Chat Area - shrinks when canvas is open */}
       <div
@@ -910,9 +927,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         style={{ width: canvasPanelOpen ? `${100 - canvasWidth}%` : '100%' }}
       >
         {/* Header */}
-        <div className={`p-4 border-b border-gray-700 flex items-center justify-between ${isEphemeral ? 'bg-purple-900/20' : 'bg-gray-800'}`}>
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold">Chat with Sara</h2>
+        <div className={`px-3 py-2 border-b border-gray-700 flex items-center justify-between ${isEphemeral ? 'bg-purple-900/20' : 'bg-gray-800'}`}>
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-sm font-semibold">Chat with Sara</h2>
 
             {/* Model Selector Dropdown */}
             <div className="relative" ref={modelDropdownRef}>
@@ -994,12 +1011,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         </div>
 
         {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {!hasUserMessages && (
-            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4">
-              <div className="mb-3">
-                <h3 className="text-sm font-semibold text-gray-200 uppercase tracking-wider">Quick Actions</h3>
-                <p className="text-xs text-gray-500 mt-1">Context-aware shortcuts based on your current queue.</p>
+            <div className="bg-gray-800/60 border border-gray-700 rounded-md p-3">
+              <div className="mb-2">
+                <h3 className="text-xs font-semibold text-gray-200 uppercase tracking-wider">Quick Actions</h3>
+                <p className="text-[11px] text-gray-500 mt-0.5">Context-aware shortcuts based on your current queue.</p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <button
@@ -1033,26 +1050,29 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             </div>
           )}
 
-          {messages.map((msg, index) => (
+          {messages.map((msg, index) => {
+            const messageText = getMessageText(msg.content)
+
+            return (
             <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
                 {msg.role === 'assistant' && (
-                  <div className="flex items-center mb-2">
-                    <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-sm font-medium mr-2">
+                  <div className="flex items-center mb-1.5">
+                    <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-[11px] font-medium mr-2">
                       S
                     </div>
-                    <span className="text-sm text-gray-400">Sara</span>
+                    <span className="text-xs text-gray-400">Sara</span>
                   </div>
                 )}
-                
-                <div className={`rounded-lg px-4 py-3 ${
+
+                <div className={`rounded-lg px-3 py-2 ${
                   msg.role === 'user' 
                     ? 'bg-teal-600 text-white ml-auto' 
                     : 'bg-gray-700 text-gray-100'
                 }`}>
                   {msg.role === 'assistant' ? (() => {
                     // Parse artifacts from content
-                    const { cleanContent, artifacts: parsedArtifacts } = parseArtifacts(msg.content)
+                    const { cleanContent, artifacts: parsedArtifacts } = parseArtifacts(messageText)
 
                     return (
                       <>
@@ -1060,7 +1080,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                           remarkPlugins={[remarkGfm]}
                           skipHtml={false}
                           components={{
-                            code({node, inline, className, children, ...props}) {
+                            code(props: any) {
+                              const { inline, className, children, ...rest } = props
                               const match = /language-(\w+)/.exec(className || '')
                               const language = match ? match[1] : ''
                               const codeContent = String(children).replace(/\n$/, '')
@@ -1077,17 +1098,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                               // Handle regular code blocks
                               return !inline && match ? (
-                                <SyntaxHighlighter
-                                  style={oneDark}
-                                  language={language}
-                                  PreTag="div"
-                                  className="rounded-md mt-2"
-                                  {...props}
-                                >
-                                  {codeContent}
-                                </SyntaxHighlighter>
+                                <pre className="rounded-md mt-2 bg-gray-900 border border-gray-600 p-4 overflow-x-auto">
+                                  <code className={`${className} text-gray-100 text-sm`} {...rest}>
+                                    {codeContent}
+                                  </code>
+                                </pre>
                               ) : (
-                                <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...props}>
+                                <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...rest}>
                                   {children}
                                 </code>
                               )
@@ -1194,7 +1211,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       </>
                     )
                   })() : (
-                    <p>{msg.content}</p>
+                    <p>{messageText}</p>
                   )}
                   
                   {/* Display attached documents for user messages */}
@@ -1236,7 +1253,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     {/* TTS button for assistant messages */}
                     {msg.role === 'assistant' && (
                       <button
-                        onClick={() => handleSpeak(msg.content, index)}
+                        onClick={() => handleSpeak(messageText, index)}
                         className={`p-1 rounded-md transition-colors ${
                           speakingMessageIndex === index
                             ? 'bg-teal-600 text-white'
@@ -1257,7 +1274,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     )}
 
                     {/* Star rating for assistant messages with episode_id and length > 50 */}
-                    {msg.role === 'assistant' && msg.episode_id && msg.content.length > 50 && (
+                    {msg.role === 'assistant' && msg.episode_id && messageText.length > 50 && (
                       <StarRating
                         episodeId={msg.episode_id}
                         size="sm"
@@ -1267,18 +1284,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 </div>
               </div>
             </div>
-          ))}
+            )
+          })}
           
           {(isLoading || isUsingTools) && (
             <div className="flex justify-start">
               <div className="max-w-[80%]">
-                <div className="flex items-center mb-2">
-                  <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-sm font-medium mr-2">
+                <div className="flex items-center mb-1.5">
+                  <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-[11px] font-medium mr-2">
                     S
                   </div>
-                  <span className="text-sm text-gray-400">Sara</span>
+                  <span className="text-xs text-gray-400">Sara</span>
                 </div>
-                <div className="bg-gray-700 rounded-lg px-4 py-3">
+                <div className="bg-gray-700 rounded-lg px-3 py-2">
                   {isUsingTools && toolActivity ? (
                     <div className="text-gray-100 text-sm">
                       {toolActivity}
@@ -1302,8 +1320,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         <div className="border-t border-gray-700 bg-gray-800">
           {/* Uploaded Documents Preview */}
           {uploadedDocuments.length > 0 && (
-            <div className="p-4 border-b border-gray-700">
-              <div className="text-xs text-gray-400 mb-2">Attached Documents:</div>
+            <div className="px-3 py-2 border-b border-gray-700">
+              <div className="text-[11px] text-gray-400 mb-1.5">Attached Documents</div>
               <div className="flex flex-wrap gap-2">
                 {uploadedDocuments.map((doc) => (
                   <div key={doc.id} className="flex items-center bg-gray-600 rounded-lg px-3 py-1.5 text-sm">
@@ -1326,8 +1344,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
           {/* Attached Images Preview */}
           {attachedImages.length > 0 && (
-            <div className="p-4 border-b border-gray-700">
-              <div className="text-xs text-gray-400 mb-2">Attached Images:</div>
+            <div className="px-3 py-2 border-b border-gray-700">
+              <div className="text-[11px] text-gray-400 mb-1.5">Attached Images</div>
               <div className="flex flex-wrap gap-2">
                 {attachedImages.map((img, idx) => (
                   <div key={idx} className="relative group">
@@ -1349,14 +1367,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             </div>
           )}
 
-          <form onSubmit={handleSendMessage} className="p-3 md:p-4">
-            <div className="flex space-x-2 md:space-x-4">
+          <form onSubmit={handleSendMessage} className="p-3">
+            <div className="flex space-x-2">
               <input
                 type="text"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 placeholder={APP_CONFIG.ui.chatPlaceholder}
-                className="flex-1 bg-gray-700 border border-gray-600 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder-gray-400"
+                className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder-gray-400"
                 disabled={isLoading}
               />
               
@@ -1390,10 +1408,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   type="button"
                   onClick={() => setShowImageMenu(!showImageMenu)}
                   disabled={isLoading}
-                  className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 rounded-lg transition-colors flex items-center tap-target"
+                  className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
                   title="Add image"
                 >
-                  <span className="material-icons">add_photo_alternate</span>
+                  <span className="material-icons text-lg">add_photo_alternate</span>
                 </button>
                 {showImageMenu && (
                   <div className="absolute bottom-full left-0 mb-2 bg-gray-700 rounded-lg shadow-lg border border-gray-600 overflow-hidden z-50">
@@ -1428,13 +1446,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading}
-                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 md:px-4 rounded-lg transition-colors flex items-center tap-target"
+                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
                 title="Upload document"
               >
                 {isUploading ? (
                   <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
                 ) : (
-                  <span className="material-icons">attach_file</span>
+                  <span className="material-icons text-lg">attach_file</span>
                 )}
               </button>
 
@@ -1443,18 +1461,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 type="button"
                 onClick={() => setShowNoteSelector(true)}
                 disabled={isLoading}
-                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white font-medium px-3 rounded-lg transition-colors flex items-center tap-target"
+                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
                 title="Open note in canvas"
               >
-                <StickyNote size={20} />
+                <StickyNote size={18} />
               </button>
 
               <button
                 type="submit"
                 disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0)}
-                className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium px-4 md:px-6 rounded-lg transition-colors flex items-center tap-target"
+                className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 md:px-4 rounded-lg transition-colors flex items-center tap-target"
               >
-                <span className="material-icons">send</span>
+                <span className="material-icons text-lg">send</span>
               </button>
             </div>
           </form>

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, memo, useMemo } from 'react'
-import mermaid from 'mermaid'
+import { loadMermaid } from '../utils/mermaid'
 
 interface MermaidDiagramProps {
   chart: string
@@ -32,6 +32,8 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = memo(({ chart, id }) => {
       console.log('🎨 Rendering new Mermaid content:', chartContent.substring(0, 50) + '...')
       
       try {
+        const mermaid = await loadMermaid()
+
         // Initialize mermaid with minimal working config
         mermaid.initialize({
           startOnLoad: false,

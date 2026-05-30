@@ -163,7 +163,7 @@ export default function FloatingLearningPanel({
 
   return (
     <div
-      className="fixed bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden flex flex-col"
+      className="fixed bg-gray-900 border border-gray-700 rounded-md shadow-2xl overflow-hidden flex flex-col"
       style={{
         left: rect.x,
         top: rect.y,

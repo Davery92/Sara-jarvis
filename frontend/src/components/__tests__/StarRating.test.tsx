@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import StarRating from '../StarRating'
 
@@ -39,8 +39,12 @@ describe('StarRating', () => {
     fireEvent.click(star3)
 
     // Wait for async fetch
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(3)
+    })
+
+    await waitFor(() => {
+      expect(star3).not.toBeDisabled()
     })
   })
 
@@ -64,7 +68,7 @@ describe('StarRating', () => {
     fireEvent.click(star4)
 
     // Buttons should become disabled during loading
-    await vi.waitFor(() => {
+    await waitFor(() => {
       const stars = screen.getAllByRole('button', { name: /Rate \d stars/ })
       expect(stars[0]).toBeDisabled()
     })

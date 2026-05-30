@@ -177,7 +177,7 @@ export default function AutonomyTimeline() {
 
       {/* Status Card */}
       {status && (
-        <div className="bg-card border border-card rounded-xl p-6">
+        <div className="bg-card border border-card rounded-md p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-white">Sara's Inner World</h2>
             <span className="text-2xl">{EMOTION_EMOJI[status.emotional_state] || '🤖'}</span>

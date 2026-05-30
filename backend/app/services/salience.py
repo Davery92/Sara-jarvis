@@ -31,6 +31,37 @@ logger = logging.getLogger(__name__)
 
 USER_TZ = ZoneInfo("America/New_York")
 
+
+def _describe_focus_span(payload: dict) -> str:
+    """Compact focus-span description. Prefers domain+page over raw app+window
+    when the browser extension has enriched the span."""
+    dur = _fmt_duration(payload.get("duration_seconds", 0))
+    domain = payload.get("domain")
+    page = payload.get("page_title")
+    if domain:
+        if page:
+            return f"Desktop: {dur} on {domain} — {page[:60]}"
+        return f"Desktop: {dur} on {domain}"
+    app = payload.get("app") or "unknown app"
+    window = payload.get("window")
+    if window:
+        return f"Desktop: {dur} in {app} — {window[:60]}"
+    return f"Desktop: {dur} in {app}"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Compact human duration: 45s, 3m, 1h12m."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    h, rem = divmod(s, 3600)
+    return f"{h}h{rem // 60:02d}m"
+
 # Deliberation thresholds. SALIENCE_THRESHOLD and MAX_DELIBERATION_GAP_HOURS
 # are runtime-overridable via tunable_setting (`acs.salience_threshold`,
 # `acs.max_deliberation_gap_hours`) — these constants are fallback defaults.
@@ -317,6 +348,14 @@ class SalienceScorer:
             EventType.WORKOUT_LOGGED: lambda: f"Workout: {payload.get('type', 'exercise')}",
             EventType.WORKOUT_COMPLETED: lambda: f"Workout completed: {payload.get('type', 'exercise')}",
             EventType.ACTIVITY_STATE_CHANGED: lambda: f"Activity: {payload.get('state', 'unknown')}",
+            EventType.DESKTOP_FOCUS_SPAN: lambda: _describe_focus_span(payload),
+            EventType.DESKTOP_ACTIVITY_STATE: lambda: (
+                f"Desktop activity → {payload.get('state', 'unknown')}"
+                + (f" (was {payload.get('previous_state')})" if payload.get('previous_state') else "")
+            ),
+            EventType.DESKTOP_SCREEN_CONTENT: lambda: (
+                f"On screen: {(payload.get('summary') or '')[:200]}"
+            ),
             EventType.GOAL_MILESTONE_REACHED: lambda: f"Milestone! {payload.get('goal_name', '')}: {payload.get('milestone', '')}",
             EventType.GOAL_COMPLETED: lambda: f"Goal completed: {payload.get('goal_name', '')}",
             EventType.HEALTH_DATA_SYNCED: lambda: f"Health data synced",
@@ -356,6 +395,9 @@ class SalienceScorer:
             EventType.NOTE_CREATED: "knowledge",
             EventType.NOTE_UPDATED: "knowledge",
             EventType.ACTIVITY_STATE_CHANGED: "activity",
+            EventType.DESKTOP_FOCUS_SPAN: "activity",
+            EventType.DESKTOP_ACTIVITY_STATE: "activity",
+            EventType.DESKTOP_SCREEN_CONTENT: "activity",
             EventType.GOAL_MILESTONE_REACHED: "goals",
             EventType.GOAL_COMPLETED: "goals",
             EventType.GOAL_PROGRESS_LOGGED: "goals",

@@ -144,7 +144,16 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       timestamp: new Date(),
     }
 
-    const userQuery = text.trim()
+    // Thread conversation history so Sara remembers what she said two turns
+    // ago. Cap at the most-recent 20 turns to bound token use; the backend's
+    // own context system handles longer-term recall via working_memory.
+    const HISTORY_TURNS = 20
+    const prior = messages.slice(-HISTORY_TURNS).map(m => ({
+      role: m.role,
+      content: m.content,
+    }))
+    const history = [...prior, { role: userMessage.role, content: userMessage.content }]
+
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setIsLoading(true)
@@ -162,7 +171,7 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       const usedTools = new Set<string>()
 
       await apiClient.streamChat(
-        userQuery,
+        history,
         (chunk) => {
           setActiveTool(null)
           fullResponse += chunk
@@ -206,7 +215,7 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       })
       setIsLoading(false)
     }
-  }, [isLoading, isAuthenticated, onNeedAuth, checkForTimers, tryShowNote])
+  }, [isLoading, isAuthenticated, onNeedAuth, checkForTimers, tryShowNote, messages])
 
   const handleSend = useCallback(() => {
     handleSendWithText(input)

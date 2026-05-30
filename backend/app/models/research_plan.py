@@ -39,9 +39,10 @@ class ResearchPlan(Base):
     steps = Column(JSONB, nullable=False, default=[])
     status = Column(String, nullable=False, default="draft")
     created_by = Column(String, nullable=False, default="sara")
+    origin = Column(String, nullable=False, default="sara_internal")
     current_step_index = Column(Integer, default=0)
     findings_summary = Column(Text, nullable=True)
-    model_id = Column(String, nullable=True, default="Qwen3.5-27B")
+    model_id = Column(String, nullable=True)
     container_vmid = Column(Integer, nullable=True)
     total_tokens_used = Column(Integer, default=0)
     error_log = Column(Text, nullable=True)
@@ -62,6 +63,7 @@ class ResearchPlan(Base):
             "steps": self.steps,
             "status": self.status,
             "created_by": self.created_by,
+            "origin": self.origin,
             "current_step_index": self.current_step_index,
             "findings_summary": self.findings_summary,
             "model_id": self.model_id,

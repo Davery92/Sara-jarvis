@@ -295,61 +295,6 @@ export interface AutonomyRolloutSummary {
 }
 
 
-// ACS (Autonomous Cognition System) types
-export interface ACSStatus {
-  state: string  // idle|autonomous|pausing|conversational|cooldown
-  active_session_id: string | null
-  cooldown_until: string | null
-  model_id: string
-  cooldown_minutes: number
-  max_duration_minutes: number
-}
-
-export interface ACSSession {
-  id: string
-  model_id: string
-  state: string
-  started_at: string | null
-  ended_at: string | null
-  end_reason: string | null
-  turns_completed: number
-  notes_created: number
-  curiosities_explored: number
-  duration_minutes: number | null
-  duration_seconds?: number | null
-  cognitive_mode?: string | null
-  engagement_score?: number | null
-  outcome_type?: string | null
-  artifact_summary?: string | null
-  outbound_messages?: number
-  suppressed_messages?: number
-}
-
-export interface ACSSessionsResponse {
-  sessions: ACSSession[]
-  total: number
-}
-
-export interface ACSCuriosity {
-  id: string
-  topic: string
-  source: string
-  priority: number
-  status: string
-  exploration_notes: string | null
-  created_at: string | null
-}
-
-export interface ACSShowDavidItem {
-  id: string
-  title: string
-  content: string
-  category: string
-  priority: number
-  shown: boolean
-  created_at: string | null
-}
-
 class ApiClient {
   private client: AxiosInstance
 
@@ -921,66 +866,6 @@ class ApiClient {
     return response.data
   }
 
-  // ── ACS (Autonomous Cognition System) ──
-
-  async getACSStatus(): Promise<ACSStatus> {
-    const response = await this.client.get('/api/acs/status')
-    return response.data
-  }
-
-  async startACS(modelId?: string): Promise<{ session_id: string; state: string }> {
-    const response = await this.client.post('/api/acs/start', { model_id: modelId })
-    return response.data
-  }
-
-  async pauseACS(): Promise<{ state: string }> {
-    const response = await this.client.post('/api/acs/pause')
-    return response.data
-  }
-
-  async resumeACS(): Promise<{ session_id: string; state: string }> {
-    const response = await this.client.post('/api/acs/resume')
-    return response.data
-  }
-
-  async getACSSessions(limit: number = 20, offset: number = 0): Promise<ACSSessionsResponse> {
-    const response = await this.client.get('/api/acs/sessions', { params: { limit, offset } })
-    return response.data
-  }
-
-  async getACSSessionDetail(sessionId: string): Promise<ACSSession> {
-    const response = await this.client.get(`/api/acs/sessions/${sessionId}`)
-    return response.data
-  }
-
-  async getACSCuriosities(status?: string): Promise<{ items: ACSCuriosity[]; count: number }> {
-    const response = await this.client.get('/api/acs/curiosity', { params: { status } })
-    return response.data
-  }
-
-  async addACSCuriosity(topic: string, priority: number = 0.5): Promise<ACSCuriosity> {
-    const response = await this.client.post('/api/acs/curiosity', { topic, priority })
-    return response.data
-  }
-
-  async deleteACSCuriosity(id: string): Promise<void> {
-    await this.client.delete(`/api/acs/curiosity/${id}`)
-  }
-
-  async getACSShowDavid(unshownOnly: boolean = true): Promise<{ items: ACSShowDavidItem[]; count: number }> {
-    const response = await this.client.get('/api/acs/show-david', { params: { unshown_only: unshownOnly } })
-    return response.data
-  }
-
-  async markACSShowDavidShown(id: string): Promise<void> {
-    await this.client.post(`/api/acs/show-david/${id}/shown`)
-  }
-
-  async updateACSSettings(settings: { model_id?: string; cooldown_minutes?: number; max_duration_minutes?: number }): Promise<ACSStatus> {
-    const response = await this.client.put('/api/acs/settings', settings)
-    return response.data
-  }
-
   // ── Settings → Schedules (DB-backed Celery beat) ─────────────────
   async listSchedules(): Promise<ScheduledJob[]> {
     const response = await this.client.get('/api/settings/schedules')
@@ -1007,7 +892,7 @@ class ApiClient {
     return response.data
   }
 
-  // ── Settings → Tunables (cooldowns, ACS thresholds, brief tone) ──
+  // ── Settings → Tunables (cooldowns, deliberation thresholds, brief tone) ──
   async listTunables(): Promise<TunableSetting[]> {
     const response = await this.client.get('/api/settings/tunables')
     return response.data

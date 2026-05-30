@@ -8,12 +8,14 @@ import {
   ActivityIndicator,
   RefreshControl,
   Platform,
+  Alert,
 } from 'react-native';
 import { MainTabScreenProps } from '../../types/navigation';
 import { useToast } from '../../context/ToastContext';
 import { colors, fontSizes, spacing } from '../../styles/theme';
 import healthKitService, { HealthData } from '../../services/healthKit';
 import apiClient from '../../services/api';
+import { backfillHistoricalData, BackfillProgress } from '../../services/backgroundHealthSync';
 
 type Props = MainTabScreenProps<'Health'>;
 
@@ -27,6 +29,8 @@ export default function HealthDataScreen({ navigation }: Props) {
   const [weeklyStats, setWeeklyStats] = useState<any[]>([]);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState<number | null>(null);
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillStatus, setBackfillStatus] = useState<string | null>(null);
 
   useEffect(() => {
     initializeHealthKit();
@@ -120,6 +124,46 @@ export default function HealthDataScreen({ navigation }: Props) {
     }
   };
 
+  const runBackfill = (days: number) => {
+    Alert.alert(
+      `Backfill ${days} days?`,
+      `This pulls ${days} days of HealthKit history (steps, sleep, HRV, workouts, etc.) into Sara. ` +
+        `Existing rows are deduplicated server-side, so it's safe to run more than once. ` +
+        `On a slow connection this can take a couple minutes.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: `Pull ${days} days`,
+          style: 'default',
+          onPress: async () => {
+            setBackfilling(true);
+            setBackfillStatus('Reading HealthKit history…');
+            try {
+              const result = await backfillHistoricalData(days, (p: BackfillProgress) => {
+                setBackfillStatus(p.message);
+              });
+              setBackfillStatus(result.message);
+              if (result.success) {
+                showToast(
+                  'success',
+                  `Backfilled ${result.daysProcessed} days · ${result.metricsInserted} metrics · ${result.workoutsInserted} workouts`,
+                );
+              } else {
+                showToast('error', result.message || 'Backfill failed');
+              }
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : 'Unknown error';
+              setBackfillStatus(`Failed: ${msg}`);
+              showToast('error', msg);
+            } finally {
+              setBackfilling(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const formatDistance = (meters: number): string => {
     const km = meters / 1000;
     return `${km.toFixed(2)} km`;
@@ -190,6 +234,38 @@ export default function HealthDataScreen({ navigation }: Props) {
             )}
           </TouchableOpacity>
         </View>
+
+        {/* Historical Backfill */}
+        <View style={styles.backfillRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.backfillLabel}>Historical Backfill</Text>
+            <Text style={styles.backfillHint}>
+              {backfillStatus
+                ? backfillStatus
+                : 'Pull HealthKit history into Sara. Safe to re-run.'}
+            </Text>
+          </View>
+          <View style={styles.backfillButtonRow}>
+            <TouchableOpacity
+              style={[styles.backfillButton, backfilling && styles.syncButtonDisabled]}
+              onPress={() => runBackfill(90)}
+              disabled={backfilling}
+            >
+              {backfilling ? (
+                <ActivityIndicator size="small" color={colors.background} />
+              ) : (
+                <Text style={styles.backfillButtonText}>90 days</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.backfillButton, backfilling && styles.syncButtonDisabled]}
+              onPress={() => runBackfill(365)}
+              disabled={backfilling}
+            >
+              <Text style={styles.backfillButtonText}>1 year</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
 
       {/* Today's Summary */}
@@ -236,7 +312,7 @@ export default function HealthDataScreen({ navigation }: Props) {
             {todayData.weight && (
               <View style={styles.metricRow}>
                 <Text style={styles.metricLabel}>⚖️ Weight</Text>
-                <Text style={styles.metricValue}>{todayData.weight.toFixed(1)} kg</Text>
+                <Text style={styles.metricValue}>{todayData.weight.toFixed(1)} lbs</Text>
               </View>
             )}
             {todayData.restingHeartRate && (
@@ -401,6 +477,44 @@ const styles = StyleSheet.create({
   syncButtonText: {
     color: colors.background,
     fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  backfillRow: {
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  backfillLabel: {
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  backfillHint: {
+    fontSize: fontSizes.xs,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  backfillButtonRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  backfillButton: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: 8,
+    minWidth: 70,
+    alignItems: 'center',
+  },
+  backfillButtonText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
     fontWeight: '600',
   },
   statsGrid: {

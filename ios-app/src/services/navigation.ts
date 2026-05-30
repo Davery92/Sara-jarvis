@@ -142,6 +142,22 @@ export function navigateToNoteEditor(noteId: string | number, params?: { onSave?
 }
 
 /**
+ * Navigate to a narrator System AI broadcast detail. `prefill` lets the
+ * push tap show the body immediately while the API call refreshes the
+ * full trigger context.
+ */
+export function navigateToSystemEvent(eventId: string, prefill?: {
+  title?: string;
+  body?: string;
+  subtitle?: string | null;
+  severity?: string;
+  trigger_name?: string;
+  trigger_context?: Record<string, any>;
+}) {
+  navigateToStackScreen('SystemEventDetail', { eventId, prefill });
+}
+
+/**
  * Go back
  */
 export function goBack() {

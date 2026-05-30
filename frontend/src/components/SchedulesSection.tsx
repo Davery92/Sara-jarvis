@@ -75,7 +75,7 @@ function EditModal({
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
       <form
         onSubmit={submit}
-        className="bg-gray-900 border border-gray-700 rounded-xl p-6 max-w-lg w-full space-y-4 max-h-[90vh] overflow-y-auto"
+        className="bg-gray-900 border border-gray-700 rounded-md p-6 max-w-lg w-full space-y-4 max-h-[90vh] overflow-y-auto"
       >
         <div>
           <h3 className="text-lg font-semibold text-white">{job.display_name}</h3>
@@ -279,7 +279,7 @@ export default function SchedulesSection() {
   const editingJob = data?.find((j) => j.key === editingKey) ?? null
 
   return (
-    <div className="mb-6 bg-card border border-card rounded-xl p-6">
+    <div className="mb-6 bg-card border border-card rounded-md p-6">
       <div className="flex items-start justify-between gap-4 mb-4">
         <div>
           <h2 className="text-lg font-medium text-white mb-1">Scheduled Jobs</h2>

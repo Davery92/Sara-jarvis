@@ -33,6 +33,18 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const [search, setSearch] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const navigationDescriptions: Record<string, string> = {
+    dashboard: 'Return to today, priorities, and the assistant overview.',
+    chat: 'Jump into the main conversation with Sara.',
+    inbox: 'Review captures, reports, and assistant follow-ups.',
+    calendar: 'Open your schedule, reminders, and upcoming events.',
+    email: 'Triage messages and pending email work.',
+    notes: 'Open the notes workspace and knowledge capture.',
+    documents: 'Review uploads, files, and parsed documents.',
+    fitness: 'See training, recovery, and meal planning.',
+    briefings: 'Open the full morning brief.',
+    automations: 'Check active missions and background work.',
+  };
 
   const navigationCommands: Command[] = PALETTE_NAV_VIEWS
     .filter((entry) => entry.view !== 'login' && entry.view !== currentView)
@@ -40,6 +52,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       id: `nav-${entry.view}`,
       title: `Go to ${entry.title}`,
       icon: entry.icon,
+      description: navigationDescriptions[entry.view],
       keywords: entry.keywords,
       action: () => onNavigate(entry.view),
       category: 'navigation' as const,
@@ -47,9 +60,33 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   const commands: Command[] = [
     ...navigationCommands,
-    ...(onCreateNote ? [{ id: 'create-note', title: 'Create New Note', icon: '✍️', keywords: ['new', 'create', 'note', 'write'], action: onCreateNote, category: 'create' as const }] : []),
-    ...(onCreateEvent ? [{ id: 'create-event', title: 'Create New Event', icon: '📅', keywords: ['new', 'create', 'event', 'meeting', 'schedule'], action: onCreateEvent, category: 'create' as const }] : []),
-    ...(onCreateThread ? [{ id: 'create-thread', title: 'New Conversation', icon: '💬', keywords: ['new', 'conversation', 'thread', 'chat'], action: onCreateThread, category: 'create' as const }] : []),
+    ...(onCreateNote ? [{
+      id: 'create-note',
+      title: 'Create New Note',
+      description: 'Start a fresh note in the knowledge workspace.',
+      icon: 'edit_note',
+      keywords: ['new', 'create', 'note', 'write'],
+      action: onCreateNote,
+      category: 'create' as const,
+    }] : []),
+    ...(onCreateEvent ? [{
+      id: 'create-event',
+      title: 'Create New Event',
+      description: 'Add a meeting, reminder, or time block.',
+      icon: 'event',
+      keywords: ['new', 'create', 'event', 'meeting', 'schedule'],
+      action: onCreateEvent,
+      category: 'create' as const,
+    }] : []),
+    ...(onCreateThread ? [{
+      id: 'create-thread',
+      title: 'New Conversation',
+      description: 'Open a fresh assistant conversation thread.',
+      icon: 'chat',
+      keywords: ['new', 'conversation', 'thread', 'chat'],
+      action: onCreateThread,
+      category: 'create' as const,
+    }] : []),
   ];
 
   const filteredCommands = search
@@ -113,41 +150,58 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-60 z-[100] flex items-start justify-center pt-32" onClick={onClose}>
+    <div className="fixed inset-0 z-[100] flex items-start justify-center bg-slate-950/78 px-4 pt-20 backdrop-blur-md md:pt-28" onClick={onClose}>
       <div
-        className="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl w-full max-w-2xl mx-4"
+        className="assistant-panel w-full max-w-3xl overflow-hidden rounded-md shadow-[0_30px_90px_rgba(2,8,23,0.48)]"
         onClick={e => e.stopPropagation()}
       >
-        {/* Search Input */}
-        <div className="p-4 border-b border-gray-700">
-          <div className="flex items-center space-x-3">
-            <span className="text-gray-400 text-xl">⌘</span>
+        <div className="border-b border-white/8 px-5 py-5 md:px-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="assistant-kicker mb-2">Command Palette</div>
+              <p className="font-display text-2xl font-semibold text-white">Move through Sara quickly.</p>
+            </div>
+            <div className="rounded-full border border-white/8 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+              Esc to close
+            </div>
+          </div>
+
+          <div className="assistant-panel-soft flex items-center gap-3 rounded-md px-4 py-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-md border border-white/8 bg-slate-950/50 text-slate-300">
+              <span className="material-icons text-[20px]">search</span>
+            </div>
             <input
               ref={inputRef}
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type a command or search..."
-              className="flex-1 bg-transparent text-white text-lg outline-none placeholder-gray-500"
+              placeholder="Type a destination or action..."
+              className="flex-1 bg-transparent text-base text-white outline-none placeholder:text-slate-500 md:text-lg"
             />
+            <div className="hidden rounded-full border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-500 md:block">
+              Cmd/Ctrl + K
+            </div>
           </div>
         </div>
 
-        {/* Commands List */}
-        <div className="max-h-96 overflow-y-auto">
+        <div className="max-h-[28rem] overflow-y-auto px-3 py-3 md:px-4">
           {filteredCommands.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
-              No commands found
+            <div className="assistant-panel-soft m-2 rounded-md p-8 text-center">
+              <div className="font-display text-xl text-white">No matching command</div>
+              <p className="mt-2 text-sm text-slate-400">
+                Try searching by workspace name, like chat, inbox, calendar, or automations.
+              </p>
             </div>
           ) : (
-            <div className="p-2">
+            <div className="space-y-4">
               {Object.entries(categoryGroups).map(([category, cmds]) => (
-                <div key={category} className="mb-4">
-                  <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                <div key={category}>
+                  <div className="px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                     {categoryLabels[category as keyof typeof categoryLabels]}
                   </div>
-                  {cmds.map((cmd, idx) => {
+                  <div className="mt-2 space-y-2">
+                  {cmds.map((cmd) => {
                     const globalIndex = filteredCommands.indexOf(cmd);
                     const isSelected = globalIndex === selectedIndex;
 
@@ -155,39 +209,53 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                       <button
                         key={cmd.id}
                         onClick={() => handleCommandClick(cmd)}
-                        className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center space-x-3 transition-colors ${
+                        className={`w-full rounded-md border px-3 py-3 text-left transition ${
                           isSelected
-                            ? 'bg-teal-500 bg-opacity-20 text-teal-400'
-                            : 'text-gray-300 hover:bg-gray-800'
+                            ? 'border-teal-300/20 bg-teal-300/12 text-white shadow-[0_14px_30px_rgba(13,148,136,0.16)]'
+                            : 'border-white/8 bg-white/[0.02] text-slate-300 hover:bg-white/[0.04] hover:text-white'
                         }`}
                       >
-                        {cmd.icon && <span className="text-xl">{cmd.icon}</span>}
+                        <div className="flex items-center gap-3">
+                          {cmd.icon && (
+                            <span
+                              className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-md border ${
+                                isSelected
+                                  ? 'border-teal-300/20 bg-teal-300/14 text-teal-100'
+                                  : 'border-white/8 bg-slate-950/50 text-slate-400'
+                              }`}
+                            >
+                              <span className="material-icons text-[20px]">{cmd.icon}</span>
+                            </span>
+                          )}
                         <div className="flex-1 min-w-0">
                           <div className="font-medium">{cmd.title}</div>
                           {cmd.description && (
-                            <div className="text-sm text-gray-500 truncate">{cmd.description}</div>
+                            <div className="mt-1 text-sm text-slate-500 truncate">{cmd.description}</div>
                           )}
                         </div>
                         {isSelected && (
-                          <span className="text-xs text-gray-500">↵</span>
+                          <span className="rounded-full border border-white/8 bg-white/[0.03] px-2 py-1 text-[11px] text-slate-400">
+                            Enter
+                          </span>
                         )}
+                        </div>
                       </button>
                     );
                   })}
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        {/* Footer */}
-        <div className="px-4 py-2 border-t border-gray-700 text-xs text-gray-500 flex items-center justify-between">
+        <div className="border-t border-white/8 px-5 py-3 text-xs text-slate-500 flex items-center justify-between">
           <div className="flex items-center space-x-4">
             <span>↑↓ Navigate</span>
-            <span>↵ Select</span>
+            <span>Enter Select</span>
             <span>Esc Close</span>
           </div>
-          <div className="text-gray-600">
+          <div className="text-slate-600">
             {filteredCommands.length} commands
           </div>
         </div>

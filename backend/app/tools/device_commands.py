@@ -442,6 +442,234 @@ class DeviceOpenWorkspaceTool(BaseTool):
             db.close()
 
 
+async def _resolve_target_device_id(
+    db: Session, user_id: str, device_name: Optional[str]
+) -> Optional[str]:
+    """Match a user-provided device name to a registered machine."""
+    if not device_name:
+        return None
+    machines = await machine_registry_service.get_user_machines(
+        db, user_id, include_offline=False
+    )
+    device_name_lower = device_name.lower()
+    for m in machines:
+        friendly = (m.friendly_name or "").lower()
+        hostname = (m.hostname or "").lower()
+        platform = (m.platform or "").lower()
+        if (device_name_lower in friendly or
+            device_name_lower in hostname or
+            (device_name_lower in ['pc', 'windows'] and platform == 'windows') or
+            (device_name_lower in ['mac', 'macbook'] and platform == 'darwin')):
+            return m.device_id
+    return None
+
+
+class DeviceWriteClipboardTool(BaseTool):
+    """Write text to the clipboard on a connected desktop."""
+
+    requires_user_origin = True
+
+    @property
+    def name(self) -> str:
+        return "device_write_clipboard"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Write text to the clipboard on a connected desktop device, so the user "
+            "can paste it. Use when the user asks you to put something on their "
+            "clipboard, copy something for them, or prepare text for pasting."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to place on the clipboard."
+                },
+                "device_name": {
+                    "type": "string",
+                    "description": "Optional device the user mentioned (e.g., 'PC', 'laptop'). Omit for the most active device."
+                }
+            },
+            "required": ["text"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        text = kwargs.get("text")
+        if text is None:
+            return ToolResult(success=False, message="text is required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            target_device_id = await _resolve_target_device_id(
+                db, user_id, kwargs.get("device_name")
+            )
+            success = await command_router.write_clipboard(
+                db, user_id, text, target_device_id=target_device_id
+            )
+            if success:
+                preview = text if len(text) <= 40 else text[:37] + "…"
+                return ToolResult(
+                    success=True,
+                    message=f"Copied to clipboard: {preview}",
+                    data={"chars": len(text)},
+                )
+            return ToolResult(
+                success=False,
+                message="No connected device available.",
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to write clipboard: {e}")
+        finally:
+            db.close()
+
+
+class DeviceFocusWindowTool(BaseTool):
+    """Bring a window matching a title substring to the foreground."""
+
+    requires_user_origin = True
+
+    @property
+    def name(self) -> str:
+        return "device_focus_window"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Bring a window to the foreground on a connected desktop by matching "
+            "part of its title (case-insensitive). Use when the user asks to "
+            "switch to, focus, or pull up a window/app by name."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "title_match": {
+                    "type": "string",
+                    "description": "Substring of the target window title (e.g., 'Outlook', 'Cursor', 'Slack')."
+                },
+                "device_name": {
+                    "type": "string",
+                    "description": "Optional device the user mentioned. Omit for the most active device."
+                }
+            },
+            "required": ["title_match"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        title_match = kwargs.get("title_match")
+        if not title_match:
+            return ToolResult(success=False, message="title_match is required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            target_device_id = await _resolve_target_device_id(
+                db, user_id, kwargs.get("device_name")
+            )
+            success = await command_router.focus_window(
+                db, user_id, title_match, target_device_id=target_device_id
+            )
+            if success:
+                return ToolResult(
+                    success=True,
+                    message=f"Focusing window matching '{title_match}'",
+                    data={"title_match": title_match},
+                )
+            return ToolResult(
+                success=False,
+                message="No connected device available.",
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to focus window: {e}")
+        finally:
+            db.close()
+
+
+class DeviceTypeIntoWindowTool(BaseTool):
+    """Focus a window matching a title substring AND type text into it, atomically."""
+
+    requires_user_origin = True
+
+    @property
+    def name(self) -> str:
+        return "device_type_into_window"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Type `text` into a specific window identified by `title_match` "
+            "(case-insensitive substring of the window's title) on a connected "
+            "desktop. The sidecar focuses the window and types in a single atomic "
+            "step — there is no separate focus tool because that would create a "
+            "focus race with the chat UI. Use this whenever the user asks you "
+            "to type something into a named app or window (e.g., 'type X in "
+            "Notepad', 'paste this into Outlook'). If the user only said to "
+            "'type' without naming where, ask them which window."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "title_match": {
+                    "type": "string",
+                    "description": "Substring of the target window's title (e.g., 'Notepad', 'Outlook', 'Cursor')."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The text to type. Newlines become Enter keypresses."
+                },
+                "device_name": {
+                    "type": "string",
+                    "description": "Optional device the user mentioned. Omit for the most active device."
+                }
+            },
+            "required": ["title_match", "text"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        title_match = kwargs.get("title_match")
+        text = kwargs.get("text")
+        if not title_match:
+            return ToolResult(success=False, message="title_match is required")
+        if text is None or text == "":
+            return ToolResult(success=False, message="text is required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            target_device_id = await _resolve_target_device_id(
+                db, user_id, kwargs.get("device_name")
+            )
+            success = await command_router.type_into_window(
+                db, user_id, title_match, text, target_device_id=target_device_id
+            )
+            if success:
+                preview = text if len(text) <= 40 else text[:37] + "…"
+                return ToolResult(
+                    success=True,
+                    message=f"Typing into '{title_match}': {preview}",
+                    data={"chars": len(text), "title_match": title_match},
+                )
+            return ToolResult(
+                success=False,
+                message="No connected device available.",
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to type into window: {e}")
+        finally:
+            db.close()
+
+
 # Export all tools
 DEVICE_TOOLS = [
     DeviceListTool(),
@@ -450,4 +678,7 @@ DEVICE_TOOLS = [
     DeviceShowNoteTool(),
     DeviceTakeScreenshotTool(),
     DeviceOpenWorkspaceTool(),
+    DeviceWriteClipboardTool(),
+    DeviceFocusWindowTool(),
+    DeviceTypeIntoWindowTool(),
 ]

@@ -161,7 +161,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
     # Check LLM endpoints
     try:
         import httpx
-        llm_primary = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8080/v1")
+        llm_primary = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
         llm_fallback = os.getenv("FAST_MODEL_URL", "http://10.185.1.8:8686/v1")
         for name, url in [("llm_primary", llm_primary), ("llm_fallback", llm_fallback)]:
             try:

@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "examples": [
+    {
+      "trigger_context": {
+        "trigger_name": "stale_pr",
+        "severity": "roast",
+        "facts": {
+          "pr_count": 6,
+          "oldest_branch": "pr0-error-categorization",
+          "oldest_age_days": 13
+        },
+        "summary": "6 open PRs, oldest is 13 days old (pr0-error-categorization)"
+      },
+      "expected": {
+        "title_format": "ALL_CAPS",
+        "must_reference_any_of": ["pr0-error-categorization", "13", "6", "six"],
+        "forbid_substrings": ["great", "amazing", "awesome", "keep it up", "i notice", "lol", "lmao", "you got this", "well done"],
+        "body_max_sentences": 3,
+        "ends_with_question": false
+      },
+      "example_acceptable_output": {
+        "title": "LAZY BASTARD",
+        "body": "Six open pull requests. The oldest, pr0-error-categorization, is thirteen days old — older than several mammals. Several have begun to develop their own ecosystems.",
+        "subtitle": null
+      }
+    },
+    {
+      "trigger_context": {
+        "trigger_name": "stale_pr",
+        "severity": "roast",
+        "facts": {
+          "pr_count": 2,
+          "oldest_branch": "fix-modal-stacking",
+          "oldest_age_days": 9
+        },
+        "summary": "2 open PRs, oldest 9 days (fix-modal-stacking)"
+      },
+      "expected": {
+        "title_format": "ALL_CAPS",
+        "must_reference_any_of": ["fix-modal-stacking", "9", "nine", "2", "two"],
+        "forbid_substrings": ["great", "amazing", "awesome", "keep it up", "i notice", "lol"],
+        "body_max_sentences": 3
+      },
+      "example_acceptable_output": {
+        "title": "THE LONG WAIT",
+        "body": "fix-modal-stacking has been open for nine days. Modals remain, somewhere, stacked.",
+        "subtitle": null
+      }
+    },
+    {
+      "trigger_context": {
+        "trigger_name": "stale_pr",
+        "severity": "roast",
+        "facts": {
+          "pr_count": 1,
+          "oldest_branch": "experiment-quantum-router",
+          "oldest_age_days": 47
+        },
+        "summary": "1 open PR, 47 days old (experiment-quantum-router)"
+      },
+      "expected": {
+        "title_format": "ALL_CAPS",
+        "must_reference_any_of": ["experiment-quantum-router", "47", "forty-seven"],
+        "forbid_substrings": ["great", "amazing", "awesome", "keep it up"],
+        "body_max_sentences": 3
+      },
+      "example_acceptable_output": {
+        "title": "THE FOSSIL",
+        "body": "experiment-quantum-router. Forty-seven days. The branch is older than the idea it was supposed to test.",
+        "subtitle": null
+      }
+    },
+    {
+      "trigger_context": {
+        "trigger_name": "stale_pr",
+        "severity": "roast",
+        "facts": {
+          "pr_count": 4,
+          "oldest_branch": "refactor-notification-pipeline",
+          "oldest_age_days": 21
+        },
+        "summary": "4 open PRs, oldest 21 days (refactor-notification-pipeline)"
+      },
+      "expected": {
+        "title_format": "ALL_CAPS",
+        "must_reference_any_of": ["refactor-notification-pipeline", "21", "twenty-one", "4", "four"],
+        "forbid_substrings": ["great", "amazing", "keep it up"],
+        "body_max_sentences": 3
+      },
+      "example_acceptable_output": {
+        "title": "PARALLEL HISTORIES",
+        "body": "Four pull requests. The oldest, refactor-notification-pipeline, has been open for twenty-one days. Each one a small parallel universe in which the work is almost done.",
+        "subtitle": null
+      }
+    },
+    {
+      "trigger_context": {
+        "trigger_name": "stale_pr",
+        "severity": "roast",
+        "facts": {
+          "pr_count": 3,
+          "oldest_branch": "wip-dashboard-cleanup",
+          "oldest_age_days": 8
+        },
+        "summary": "3 open PRs, oldest 8 days (wip-dashboard-cleanup)"
+      },
+      "expected": {
+        "title_format": "ALL_CAPS",
+        "must_reference_any_of": ["wip-dashboard-cleanup", "wip", "8", "eight", "3", "three"],
+        "forbid_substrings": ["great", "amazing", "you got this", "keep it up"],
+        "body_max_sentences": 3
+      },
+      "example_acceptable_output": {
+        "title": "THE WORK IN PROGRESS, INDEFINITELY",
+        "body": "Three open pull requests. The oldest, wip-dashboard-cleanup, has been a work in progress for eight days. The 'wip' prefix has begun to feel less like a label and more like a state of being.",
+        "subtitle": null
+      }
+    }
+  ]
+}
