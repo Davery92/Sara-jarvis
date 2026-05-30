@@ -74,8 +74,22 @@ proactivity, focus. Each item lists target files and an acceptance check.
 
 ### P0 — Presence & Voice (the actual flagship feeling)
 
-#### P0.1 — Fix iOS voice transcription  ⛔ BLOCKING / user-reported broken
-Instrument first, then fix the real cause.
+#### P0.1 — Fix iOS voice transcription  ✅ DONE (2026-05-30)
+**Real root cause (found via live logs, not guesswork):** the ASR service image
+(`gpu-cluster/Dockerfile.asr`, `python:3.11-slim` + `nvidia` runtime on host
+`10.185.1.8`) was missing CUDA math libs. faster-whisper 1.1.0 / CTranslate2 4.x loads
+the model but every inference 500s with `libcublas.so.12 is not found`. `/health` stayed
+green, masking it. The app, VAD, multipart upload, and field contract were all correct.
+**Fix (`4b85e360`):** add `nvidia-cublas-cu12` + `nvidia-cudnn-cu12==9.*` wheels to the
+image and put them on `LD_LIBRARY_PATH`; rebuilt + redeployed on the GPU host. Verified
+end-to-end: Kokoro-synthesized phrase round-trips to "The quick brown fox…" on
+`device:cuda`, and a live iOS attempt logged `[Voice] Transcribed audio: "This is a test.
+Can you hear me?"` → 200 plus TTS reply → 200.
+Remaining (minor, optional): short-utterance hallucination-filter tuning ("yes"/"stop"),
+and client-side error surfacing so future failures aren't silent.
+
+<details><summary>Original instrument-first plan (kept for reference)</summary>
+
 1. **Verify the STT service is up:** from the backend container,
    `curl http://10.185.1.8:8585/health` (or a tiny m4a POST to the transcriptions route).
    If down/moved, that's the bug — fix the URL/service, not the app.
@@ -95,6 +109,7 @@ Instrument first, then fix the real cause.
   `ios-app/src/hooks/useSaraChat.ts`, `ios-app/src/components/FloatingAssistant.tsx`.
 - **Accept:** holding the orb, speaking a sentence, and seeing the transcript appear in
   chat on a physical device; a failure shows a clear message instead of nothing.
+</details>
 
 #### P0.2 — Voice in the web chat (cheapest big win)
 Wire the existing backend voice endpoints into `ChatInterface.tsx`.
