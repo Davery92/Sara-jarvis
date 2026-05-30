@@ -9,7 +9,8 @@ import StarRating from './StarRating'
 import { CanvasPanel } from './canvas/CanvasPanel'
 import { useArtifacts } from './canvas/hooks/useArtifacts'
 import { NoteSelectorModal } from './canvas/NoteSelectorModal'
-import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown } from 'lucide-react'
+import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown, History } from 'lucide-react'
+import ConversationHistoryDrawer from './ConversationHistoryDrawer'
 import { ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
 
 interface Conversation {
@@ -172,6 +173,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onQuickAction,
 }) => {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [toolActivity, setToolActivity] = useState('')
   const [isUsingTools, setIsUsingTools] = useState(false)
@@ -866,6 +868,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     console.log('[TTS] Web TTS disabled - use iOS app for voice')
   }
 
+  // Load a past conversation into the chat (from the history drawer).
+  // The save-active effect persists the selection once currentConversationId changes.
+  const loadConversation = useCallback(async (conversationId: string) => {
+    if (!conversationId || conversationId === currentConversationId) return
+    try {
+      setIsLoadingHistory(true)
+      const res = await fetch(
+        `${APP_CONFIG.apiUrl}/api/conversations/${conversationId}/messages?limit=100`,
+        { credentials: 'include' }
+      )
+      if (!res.ok) {
+        console.error('Failed to load conversation', conversationId)
+        return
+      }
+      const data = await res.json()
+      const loaded: ChatMessage[] = (data || []).map((ep: any) => ({
+        role: ep.role,
+        content: ep.content,
+        timestamp: new Date(ep.created_at),
+      }))
+      setMessages(loaded)
+      setCurrentConversationId(conversationId)
+    } catch (error) {
+      console.error('Error loading conversation:', error)
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }, [currentConversationId, setMessages])
+
   // Handle new chat - clear conversation and start fresh
   const handleNewChat = async () => {
     onClearChat()
@@ -921,6 +952,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       ref={containerRef}
       className={`relative flex h-full bg-card border border-card rounded-md overflow-hidden ${isResizing ? 'select-none' : ''}`}
     >
+      <ConversationHistoryDrawer
+        open={showHistory}
+        onClose={() => setShowHistory(false)}
+        currentConversationId={currentConversationId}
+        onSelect={loadConversation}
+        onNewChat={handleNewChat}
+      />
+
       {/* Main Chat Area - shrinks when canvas is open */}
       <div
         className={`flex flex-col min-w-0 ${!isResizing ? 'transition-all duration-300' : ''}`}
@@ -987,6 +1026,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Conversation history */}
+            <button
+              onClick={() => setShowHistory(true)}
+              className="p-1.5 rounded transition-colors text-gray-400 hover:text-teal-400 hover:bg-gray-700"
+              title="Conversation history"
+            >
+              <History size={18} />
+            </button>
+
             {/* Ghost/Ephemeral Toggle */}
             <button
               onClick={() => setIsEphemeral(!isEphemeral)}
