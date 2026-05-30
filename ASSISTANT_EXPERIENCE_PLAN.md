@@ -121,7 +121,21 @@ Wire the existing backend voice endpoints into `ChatInterface.tsx`.
   `frontend/src/services/voice.ts`, `frontend/src/api/client.ts`.
 - **Accept:** speak to the web chat, get a transcript, hear the reply read back.
 
-#### P0.3 — Live presence element (both platforms)
+#### P0.3 — Live presence element (both platforms)  ✅ DONE (2026-05-30, pending visual check)
+**Web (`f309ee25`):** `SaraPresence` chip in the shell header — polls daemon-status /
+focus / sara-status and subscribes to the `/api/acs/v2/stream` SSE feed; notable activity
+(`focus_set`, `notify_david`, `thought`, `tool_call`) briefly overrides the base state so
+the chip *reacts*, with an emphatic ping for focus_set / notify_david. Click → popover
+(focus + why, latest thought, last 3 events). Emotional state drives emoji + idle label.
+**iOS (`43393498`):** new `useSaraPresence` hook (RN has no EventSource, so it polls
+sara/status + daemon-status + acs/v2/activity); the floating orb now tints to the
+reaction color and gets a heartbeat pulse on emphatic reactions, replacing its old
+emoji-only 60s fetch. Both typecheck clean; all four endpoints confirmed live (401 w/o
+auth). Still TODO: visual confirmation on a real device + browser; the web SSE is a 2nd
+connection alongside ACSMindSection (fine for single-user). iOS orb still hidden on the
+Sara tab by design (full chat lives there).
+
+<details><summary>Original design notes</summary>
 A single persistent, animated presence driven by **real** daemon state.
 - Subscribe to `/api/acs/v2/stream` + poll `/api/sara/status`; map
   idle/listening/thinking/found-something/speaking → animation + color.
@@ -133,6 +147,7 @@ A single persistent, animated presence driven by **real** daemon state.
 - **iOS:** promote `FloatingAssistant` orb to all tabs incl. Sara; drive emoji/animation
   from `emotional_state` instead of the static map.
 - **Accept:** trigger a daemon focus change and watch the presence react on both surfaces.
+</details>
 
 ### P1 — Continuity (turn separate tools into one mind)
 
