@@ -179,15 +179,20 @@ searching past threads.
 
 ### P2 — Proactivity (surface the autonomy we run silently)
 
-#### P2.1 — "What Sara did / found" home feed (both apps)
-- A feed on the home surface: recent insights, completed background tasks, focus changes,
-  decisions awaiting input. The Cortana "Notebook" — the user sees Sara working for them.
-- **Files:** web `DashboardHomeView.tsx`, iOS `SaraScreen.tsx` / `AssistantInboxScreen.tsx`;
-  data from autonomous sweep + ACS activity endpoints.
+#### P2.1 — "What Sara did / found" home feed  ✅ DONE (2026-05-30, web)
+- **Web (`8d0fc040`):** self-contained `SaraActivityFeed` card on the dashboard polls
+  `/api/acs/v2/activity` (15s), filters out tick/external_event noise, and renders the
+  last 8 daemon events as a human-labeled timeline (focused / reflected / reached out /
+  finished …). Surfaces the autonomy that previously only lived on the ACS page. tsc clean.
+- **Optional:** port to iOS `SaraScreen` / `AssistantInboxScreen`.
 
-#### P2.2 — Action cards with real verbs
-- "You're free 2–4pm tomorrow — schedule your workout? [Yes] [Pick another time]."
-  Lean on the deliberation gate + 5-min standing-order undo. Propose → confirm.
+#### P2.2 — Action cards with real verbs  ✅ ALREADY EXISTS (attention inbox)
+- This is already built: the **attention inbox** is the propose→confirm system.
+  `POST /api/autonomy/attention/{item_id}/actions/{action_id}` + `AttentionInbox.tsx`
+  (`AttentionAction` items, `runAction`, confirm/defer/clarify) is exactly the
+  "schedule your workout? [Yes] [Pick another time]" pattern. Building a parallel
+  action-card system would duplicate it. Future polish only: surface attention actions
+  inline in chat / on the dashboard rather than just the inbox view.
 
 ### P3 — Focus & Trust + iOS system integration
 
