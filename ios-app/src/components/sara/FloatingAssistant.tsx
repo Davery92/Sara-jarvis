@@ -23,26 +23,21 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSaraOverlay } from '../../context/SaraOverlayContext';
 import { useSaraChat } from '../../hooks/useSaraChat';
+import { useSaraPresence } from '../../hooks/useSaraPresence';
 import { voiceService } from '../../services/voice';
-import { apiClient } from '../../services/api';
 import MessageBubble from '../chat/MessageBubble';
 import StreamingIndicator from '../chat/StreamingIndicator';
-import { colors, spacing, shadows } from '../../styles/theme';
+import { colors, shadows } from '../../styles/theme';
 import { navigateToChat } from '../../services/navigation';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const MINI_CHAT_HEIGHT = SCREEN_HEIGHT * 0.55;
 
-const EMOTION_EMOJI: Record<string, string> = {
-  curious: '🤔', calm: '😌', alert: '⚡', concerned: '😟',
-  happy: '😊', focused: '🎯', neutral: '😐', reflective: '🪞', attentive: '👀',
-};
-
 export default function FloatingAssistant() {
   const { mode, currentScreen, setMode } = useSaraOverlay();
   const chat = useSaraChat({ source: 'ios_overlay', currentScreen });
+  const presence = useSaraPresence();
 
-  const [emotionalState, setEmotionalState] = useState('neutral');
   const [inputText, setInputText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -52,25 +47,27 @@ export default function FloatingAssistant() {
   const miniChatAnim = useRef(new Animated.Value(0)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const reactionPop = useRef(new Animated.Value(1)).current;
 
   const flatListRef = useRef<FlatList>(null);
   const breatheAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
 
-  // Fetch Sara's emotional state periodically
+  // Emphatic daemon reactions (focus_set / notify_david) give the orb a heartbeat —
+  // the "she just noticed something" moment, mirroring the web presence chip.
   useEffect(() => {
-    const fetchStatus = async () => {
-      try {
-        const data = await apiClient.get('/api/sara/status') as any;
-        if (data?.emotional_state) {
-          setEmotionalState(data.emotional_state);
-        }
-      } catch {}
-    };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 60000);
-    return () => clearInterval(interval);
-  }, []);
+    if (presence.emphatic && mode === 'orb') {
+      const animation = Animated.loop(
+        Animated.sequence([
+          Animated.timing(reactionPop, { toValue: 1.18, duration: 450, useNativeDriver: true }),
+          Animated.timing(reactionPop, { toValue: 1, duration: 450, useNativeDriver: true }),
+        ])
+      );
+      animation.start();
+      return () => animation.stop();
+    }
+    reactionPop.setValue(1);
+  }, [presence.emphatic, mode]);
 
   // Load history when mini-chat opens
   useEffect(() => {
@@ -239,7 +236,7 @@ export default function FloatingAssistant() {
   // Don't render when hidden
   if (mode === 'hidden') return null;
 
-  const emoji = EMOTION_EMOJI[emotionalState] || '🤖';
+  const emoji = presence.emoji;
 
   // Get last 20 messages for mini-chat
   const recentMessages = chat.messages.slice(-20);
@@ -265,7 +262,7 @@ export default function FloatingAssistant() {
             styles.orbContainer,
             {
               transform: [
-                { scale: isRecording ? pulseAnim : breatheAnim },
+                { scale: isRecording ? pulseAnim : (presence.emphatic ? reactionPop : breatheAnim) },
               ],
             },
           ]}
@@ -277,6 +274,7 @@ export default function FloatingAssistant() {
             delayLongPress={300}
             style={[
               styles.orb,
+              !isRecording && !isProcessing && { backgroundColor: presence.color },
               isRecording && styles.orbRecording,
               isProcessing && styles.orbProcessing,
             ]}
