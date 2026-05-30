@@ -1,6 +1,7 @@
 import React from 'react'
 import AutomationTasksIndicator from '../AutomationTasksIndicator'
 import BackgroundTasksIndicator from '../BackgroundTasksIndicator'
+import SaraPresence from './SaraPresence'
 
 interface ShellHeaderProps {
   assistantName: string
@@ -17,6 +18,8 @@ const ShellHeader: React.FC<ShellHeaderProps> = ({
 }) => {
   return (
     <header className="hidden md:flex items-center justify-end gap-3 mb-3 flex-shrink-0">
+      <SaraPresence />
+      <div className="h-5 w-px bg-white/8" />
       <AutomationTasksIndicator onOpenAutomations={onOpenAutomations} />
       <BackgroundTasksIndicator onNavigateToWorkspace={onNavigateToWorkspace} />
       <div className="h-5 w-px bg-white/8" />
