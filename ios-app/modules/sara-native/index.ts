@@ -21,6 +21,8 @@ export interface WidgetData {
 interface SaraNativeModuleType {
   setWidgetData(data: Record<string, string>): void
   reloadWidgets(): void
+  /** Reads & clears the prompt left by the "Ask Sara" Siri App Intent. */
+  consumePendingSiriPrompt(): string | null
   areActivitiesEnabled(): boolean
   /** Returns the ActivityKit activity id, or null on failure / unsupported. */
   startTimerActivity(timerId: string, title: string, endEpochMs: number): string | null
@@ -42,6 +44,10 @@ export function setWidgetData(data: WidgetData): void {
     if (v != null) flat[k] = String(v)
   }
   SaraNative.setWidgetData(flat)
+}
+
+export function consumePendingSiriPrompt(): string | null {
+  return SaraNative?.consumePendingSiriPrompt() ?? null
 }
 
 export function areActivitiesEnabled(): boolean {

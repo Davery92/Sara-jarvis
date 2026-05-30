@@ -39,6 +39,15 @@ public class SaraNativeModule: Module {
       }
     }
 
+    // Reads & clears the prompt left by the "Ask Sara" App Intent (Siri).
+    Function("consumePendingSiriPrompt") { () -> String? in
+      guard let defaults = UserDefaults(suiteName: SaraNativeModule.appGroup) else { return nil }
+      guard let prompt = defaults.string(forKey: "siri_pending_prompt"), !prompt.isEmpty else { return nil }
+      defaults.removeObject(forKey: "siri_pending_prompt")
+      defaults.removeObject(forKey: "siri_pending_at")
+      return prompt
+    }
+
     Function("areActivitiesEnabled") { () -> Bool in
       #if canImport(ActivityKit)
       if #available(iOS 16.2, *) {
