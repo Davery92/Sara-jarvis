@@ -76,7 +76,7 @@ Net-new work shipped this initiative (things that genuinely did **not** exist):
 - **P1.3** "Chat about this" on notes.
 - **P2.1** "What Sara's been up to" dashboard feed.
 - **P3.3** entire iOS system layer: Siri/App Intents, Home/Lock widgets, Live Activities
-  (code-complete + prebuild-validated; pending first EAS build).
+  — **EAS build succeeded 2026-05-30** (compiles & signs). Pending on-device functional check.
 
 Recurring lesson: most surfaces the initial survey called "stubs" were already built and
 substantial — web chat persistence, cross-device resume, "chat about this" for inbox,
@@ -235,7 +235,7 @@ Like P2.2, the survey was wrong — these are built, not stubs:
 - Net: nothing genuine to add; building more would duplicate. Optional only: surface a
   distinct "quiet hours" control if cooldowns + category toggles ever feel insufficient.
 
-#### P3.3 — iOS system-level presence  ✅ CODE DONE (2026-05-30, `c036b4eb`) — pending first EAS build
+#### P3.3 — iOS system-level presence  ✅ BUILT (EAS build succeeded 2026-05-30) — pending on-device check
 Built via `@bacons/apple-targets` (widget extension) + a local Expo module
 (`modules/sara-native`) + a config plugin for main-target App Intents. See
 `ios-app/NATIVE_FEATURES.md` for setup (npm install, App Group registration, APPLE_TEAM_ID),
@@ -247,7 +247,7 @@ build, verify, and risks.
 - **Live Activities** ✅ — timer countdown (lock screen + Dynamic Island) via
   `Text(timerInterval:)`, wired into `TimerContext`.
 - TS clean (0 errors in new code); plugin/target/JSON validated; all native APIs confirmed
-  present. **Native compile + on-device behavior unverified until the first EAS build.**
+  present. **EAS build compiles & signs cleanly (2026-05-30); on-device behavior pending.**
 
 ---
 
