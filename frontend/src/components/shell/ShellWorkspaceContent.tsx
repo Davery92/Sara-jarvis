@@ -129,6 +129,7 @@ interface ShellWorkspaceContentProps {
   onSelectInboxTab: React.Dispatch<React.SetStateAction<'attention' | 'content'>>
   onOpenContentChat: (inboxItemId: string, title: string) => void
   onOpenAttentionChat: (prompt: string) => void
+  onChatAboutNote: (title: string, content: string) => void
   onNavigateToWorkspace?: (noteId: string) => void
 }
 
@@ -203,6 +204,7 @@ export default function ShellWorkspaceContent({
   onSelectInboxTab,
   onOpenContentChat,
   onOpenAttentionChat,
+  onChatAboutNote,
   onNavigateToWorkspace,
 }: ShellWorkspaceContentProps) {
   const [mountedViews, setMountedViews] = useState<AppView[]>(() => [view])
@@ -282,7 +284,7 @@ export default function ShellWorkspaceContent({
   if (targetView === 'notes') {
     return (
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {renderDeferredView('Loading notes…', <NotesPage />)}
+        {renderDeferredView('Loading notes…', <NotesPage onChatAboutNote={onChatAboutNote} />)}
       </div>
     )
   }

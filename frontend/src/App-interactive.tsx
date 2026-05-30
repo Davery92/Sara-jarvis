@@ -580,6 +580,17 @@ function App() {
               setMessage(prompt)
               navigateToView('chat')
             }}
+            onChatAboutNote={(title, content) => {
+              const trimmed = (content || '').trim()
+              const excerpt = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
+              const noteName = (title || '').trim() || 'this note'
+              setMessage(
+                excerpt
+                  ? `Let's talk about my note "${noteName}":\n\n${excerpt}`
+                  : `Let's talk about my note "${noteName}".`
+              )
+              navigateToView('chat')
+            }}
             onNavigateToWorkspace={handleWorkspaceNavigation}
           />
         </main>

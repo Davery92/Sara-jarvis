@@ -5,6 +5,7 @@ import {
   ArrowsPointingInIcon,
   ArrowsPointingOutIcon,
   ArrowPathIcon,
+  ChatBubbleLeftRightIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderIcon,
@@ -1350,7 +1351,12 @@ function GraphView({ nodes, edges, activeNoteId, onSelectNote }: GraphViewProps)
   )
 }
 
-export default function Notes() {
+interface NotesProps {
+  /** "Chat about this" — opens the chat view pre-loaded with the note's context. */
+  onChatAboutNote?: (title: string, content: string) => void
+}
+
+export default function Notes({ onChatAboutNote }: NotesProps = {}) {
   const [searchParams, setSearchParams] = useSearchParams()
   const [notes, setNotes] = useState<NoteRecord[]>([])
   const [folders, setFolders] = useState<FolderRecord[]>([])
@@ -2275,6 +2281,17 @@ export default function Notes() {
                                   )}
                                   {isFocusMode ? 'Exit focus' : 'Focus'}
                                 </button>
+                                {onChatAboutNote && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onChatAboutNote(draftTitle, draftContent)}
+                                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-teal-200 hover:text-teal-600"
+                                    title="Discuss this note with Sara"
+                                  >
+                                    <ChatBubbleLeftRightIcon className="h-4 w-4" />
+                                    Chat about this
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => setDraftStarred((current) => !current)}
