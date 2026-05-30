@@ -208,10 +208,19 @@ searching past threads.
 - Settings → autonomy controls: sweep cadence, quiet hours (server already has ET-aware
   cooldowns — expose them), per-category proactivity toggles.
 
-#### P3.3 — iOS system-level presence
-- **Siri / App Intents** ("Hey Siri, ask Sara…") — #1 iOS gap.
-- **Lock Screen / Home Screen widgets** — next event, daemon state, active timer.
-- **Live Activities** — workout/timer on the lock screen.
+#### P3.3 — iOS system-level presence  ✅ CODE DONE (2026-05-30, `c036b4eb`) — pending first EAS build
+Built via `@bacons/apple-targets` (widget extension) + a local Expo module
+(`modules/sara-native`) + a config plugin for main-target App Intents. See
+`ios-app/NATIVE_FEATURES.md` for setup (npm install, App Group registration, APPLE_TEAM_ID),
+build, verify, and risks.
+- **Siri / App Intents** ✅ — "Ask Sara" AppShortcut in the main target → `sara://ask?q=…`
+  → `siriDeepLink.ts` routes into chat as a quick-reply.
+- **Lock/Home Screen widgets** ✅ — `SaraWidget.swift` (systemSmall/medium + accessory
+  families); emotional state + latest thought + next event via App Group (`widgetBridge.ts`).
+- **Live Activities** ✅ — timer countdown (lock screen + Dynamic Island) via
+  `Text(timerInterval:)`, wired into `TimerContext`.
+- TS clean (0 errors in new code); plugin/target/JSON validated; all native APIs confirmed
+  present. **Native compile + on-device behavior unverified until the first EAS build.**
 
 ---
 
