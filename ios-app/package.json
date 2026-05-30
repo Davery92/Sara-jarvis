@@ -19,9 +19,8 @@
     "axios": "^1.13.2",
     "expo": "~54.0.23",
     "expo-av": "^16.0.7",
-    "expo-build-properties": "~1.0.9",
     "expo-background-fetch": "^14.0.9",
-    "expo-build-properties": "^1.0.10",
+    "expo-build-properties": "~1.0.10",
     "expo-calendar": "~15.0.8",
     "expo-camera": "^17.0.10",
     "expo-clipboard": "^8.0.8",
@@ -47,7 +46,8 @@
     "react-native-screens": "~4.16.0"
   },
   "devDependencies": {
-    "@bacons/apple-targets": "^0.4.4",
+    "@bacons/apple-targets": "^4.0.7",
+    "@expo/prebuild-config": "^54.0.6",
     "@types/react": "~19.1.0",
     "babel-plugin-transform-remove-console": "^6.9.4",
     "babel-preset-expo": "^54.0.10",
