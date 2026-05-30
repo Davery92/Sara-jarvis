@@ -151,12 +151,19 @@ A single persistent, animated presence driven by **real** daemon state.
 
 ### P1 — Continuity (turn separate tools into one mind)
 
-#### P1.1 — Persistent, searchable chat history
-- Persist conversations (backend already stores episodes; expose
-  list/get/search by `episode_id` / conversation id). Web chat resumes & searches past
-  threads; iOS mini-chat shows which conversation it's in.
-- **Files:** `frontend/src/components/ChatInterface.tsx`, `frontend/src/stores/chatStore.ts`,
-  iOS `ChatScreen.tsx` / `useSaraChat.ts`, backend conversation/episode routes.
+#### P1.1 — Persistent, searchable chat history  ✅ DONE (2026-05-30, web)
+Correction from the survey: the web chat was **not** one-shot — it already persists &
+resumes the *active* conversation (`/api/conversations/active` + `/{id}/messages`) and
+even checks `/api/session/active` for cross-device sessions. The real gap was browsing &
+searching past threads.
+- **Backend (`5968b685`):** new `GET /api/conversations/search?q=` — ILIKE over episode
+  content, rolled up per conversation with a match-centered snippet. (Conversation list /
+  messages / active already existed.) Live after backend restart (no `--reload` in dev).
+- **Web (`5968b685`):** `ConversationHistoryDrawer` (list + debounced search + resume +
+  new chat) opened from a History button in the chat toolbar; `loadConversation()` swaps
+  the active thread. tsc clean.
+- **Remaining/optional:** iOS already has `loadHistory` + active conversation; could add
+  the same history/search drawer there. Search is ILIKE, not semantic — fine at this scale.
 
 #### P1.2 — Cross-device presence sync
 - Use the existing 30 s heartbeat (`current_view`, `client_id`, platform) so a
