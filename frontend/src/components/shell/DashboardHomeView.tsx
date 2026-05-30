@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { AppView } from '../../navigation/views'
 import DashboardTasks from '../DashboardTasks'
 import SaraStatusCard from '../SaraStatusCard'
+import SaraActivityFeed from './SaraActivityFeed'
 import MissionControlBoard from '../MissionControlBoard'
 import SystemEventsTicker from '../SystemEventsTicker'
 
@@ -336,6 +337,8 @@ export default function DashboardHomeView({
 
       <div className="lg:col-span-1 space-y-4 md:space-y-6">
         <SaraStatusCard />
+
+        <SaraActivityFeed />
 
         <div className="assistant-panel-muted rounded-2xl p-3">
           <div className="assistant-kicker mb-2">Activity & Devices</div>
