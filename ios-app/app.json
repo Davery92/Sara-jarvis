@@ -14,6 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "cloud.avery.sara-ios",
+      "appleTeamId": "7MAK5MEJ6W",
       "icon": "./assets/icon.png",
       "infoPlist": {
         "UIBackgroundModes": [
