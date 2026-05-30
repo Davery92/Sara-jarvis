@@ -67,6 +67,26 @@ instrumentation, not a blind code change.**
 
 ---
 
+## Status (2026-05-30)
+
+Net-new work shipped this initiative (things that genuinely did **not** exist):
+- **P0.1** iOS voice fixed (root cause was the ASR image missing CUDA libs — server-side).
+- **P0.3** live daemon-driven presence: web shell chip + iOS orb reactions.
+- **P1.1** conversation history browser + cross-conversation search (web).
+- **P1.3** "Chat about this" on notes.
+- **P2.1** "What Sara's been up to" dashboard feed.
+- **P3.3** entire iOS system layer: Siri/App Intents, Home/Lock widgets, Live Activities
+  (code-complete + prebuild-validated; pending first EAS build).
+
+Recurring lesson: most surfaces the initial survey called "stubs" were already built and
+substantial — web chat persistence, cross-device resume, "chat about this" for inbox,
+propose→confirm action cards (attention inbox), the PKG browser, Privacy Dashboard, and a
+2.2k-line Settings with proactivity toggles + behavior tunables. The backend cognition is
+even further ahead of the front-ends than assumed; most of this work was **exposing** it.
+
+Remaining (deferred by David): **P3.1 cut-the-sprawl** ("tackle later"). Optional polish:
+iOS history-drawer, calendar/fitness "chat about this", live cross-device typing sync.
+
 ## Phases
 
 Priorities: **P0** = the Jarvis/Cortana feeling + fix what's broken. Then continuity,
@@ -202,11 +222,18 @@ searching past threads.
 - Collapse to ~5 primary destinations per platform; demote power-user/debug surfaces
   (ACS introspection, Sensory Monitor, Orchestrator Lab) under an "Advanced" area.
 
-#### P3.2 — Trust: real Privacy + Settings
-- Privacy Dashboard → "what Sara knows / why," backed by PKG (source, confidence,
-  confirmation counts already tracked).
-- Settings → autonomy controls: sweep cadence, quiet hours (server already has ET-aware
-  cooldowns — expose them), per-category proactivity toggles.
+#### P3.2 — Trust: real Privacy + Settings  ✅ ALREADY EXISTS (verified 2026-05-30)
+Like P2.2, the survey was wrong — these are built, not stubs:
+- **"What Sara knows / why"** → `PersonalKnowledge.tsx` (full PKG browser: confidence,
+  source, first-learned / last-confirmed, edit-confidence, delete, `/api/pkg/needs-review`,
+  `/api/pkg/validation-report`).
+- **Privacy Dashboard** (`privacy/PrivacyDashboard.tsx`, 452 LOC) → data-summary, export,
+  per-category delete (`/privacy/*`).
+- **Settings** (`pages/Settings.tsx`, 2,264 LOC) → a "Behavior Tunables (cooldowns,
+  deliberation thresholds, brief tone)" section, **per-category proactivity toggles**
+  (notification categories Sara may use), autonomy-flag visibility, notification prefs.
+- Net: nothing genuine to add; building more would duplicate. Optional only: surface a
+  distinct "quiet hours" control if cooldowns + category toggles ever feel insufficient.
 
 #### P3.3 — iOS system-level presence  ✅ CODE DONE (2026-05-30, `c036b4eb`) — pending first EAS build
 Built via `@bacons/apple-targets` (widget extension) + a local Expo module
