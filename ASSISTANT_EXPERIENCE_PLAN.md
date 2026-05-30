@@ -165,13 +165,17 @@ searching past threads.
 - **Remaining/optional:** iOS already has `loadHistory` + active conversation; could add
   the same history/search drawer there. Search is ILIKE, not semantic — fine at this scale.
 
-#### P1.2 — Cross-device presence sync
-- Use the existing 30 s heartbeat (`current_view`, `client_id`, platform) so a
-  conversation started on web is known on phone; sync "thinking/typing" state.
+#### P1.2 — Cross-device presence sync  ◑ PARTIAL (pre-existing)
+- Resume-across-devices already works: the web chat checks `/api/session/active` on mount
+  and picks up a conversation started on iOS. **Not built:** live "thinking/typing" state
+  syncing across devices (lower value; deferred).
 
-#### P1.3 — "Chat about this" everywhere
-- Context action on a note, inbox item, calendar event, fitness log → opens chat
-  pre-loaded with that context.
+#### P1.3 — "Chat about this" everywhere  ✅ CORE DONE (2026-05-30)
+- Already existed for inbox items (`onOpenContentChat` / `onOpenAttentionChat`).
+- **Added (`9ae50e71`):** notes — a "Chat about this" button in the note editor toolbar
+  opens the chat pre-loaded with the note's title + a trimmed excerpt
+  (`onChatAboutNote`, threaded App-interactive → ShellWorkspaceContent → NotesPage).
+- **Optional remaining surfaces:** calendar events, fitness logs (same one-handler pattern).
 
 ### P2 — Proactivity (surface the autonomy we run silently)
 
