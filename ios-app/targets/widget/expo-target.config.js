@@ -11,5 +11,5 @@ module.exports = {
     "com.apple.security.application-groups": ["group.cloud.avery.sara-ios"],
   },
   frameworks: ["SwiftUI", "WidgetKit", "ActivityKit"],
-  deploymentTarget: "16.2",
+  deploymentTarget: "18.0",
 };

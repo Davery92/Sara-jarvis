@@ -53,7 +53,9 @@ name across the two modules. Keep them identical.
   confirm the file landed in the **app** target (not the widget) in the generated Xcode project.
 - **`getFirstTarget()`** assumes the main app is target #0; verify if the build can't find the
   intents.
-- **Deployment target 16.2** is set via `expo-build-properties` (Live Activities need 16.1+).
+- **Deployment target 18.0** is set via `expo-build-properties` (per David; Live Activities
+  only need 16.1+, but the app floor is 18). The Swift's `@available(iOS 16.2/17, *)` guards
+  are harmless on an 18 target.
 - The widget/Live-Activity SwiftUI uses iOS 16.2/17 APIs guarded with `#available` /
   `if #available`; if the extension fails to compile, check those guards first.
 - `sara://ask` deep link: handled by `siriDeepLink.ts` listener; React Navigation's `linking`
