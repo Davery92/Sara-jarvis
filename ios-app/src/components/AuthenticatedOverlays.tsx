@@ -18,6 +18,8 @@ import { registerBackgroundHealthSync, triggerManualSync } from '../services/bac
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
 import { navigateToChat } from '../services/navigation';
 import apiClient from '../services/api';
+import { initSiriDeepLink } from '../services/siriDeepLink';
+import { refreshWidgetData } from '../services/widgetBridge';
 
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -190,12 +192,17 @@ export const AuthenticatedOverlays: React.FC = () => {
     syncIOSCalendar();
     logPresence('app_open');
     checkHealth();
+    refreshWidgetData();
+
+    // Siri "Ask Sara" deep links (sara://ask?q=…)
+    const disposeSiri = initSiriDeepLink();
 
     // Log presence on app resume + pause heartbeat when backgrounded
     const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
         logPresence('app_resume');
         sendHeartbeat();
+        refreshWidgetData();
         // Clear badge count when app comes to foreground
         pushNotificationService.setBadgeCount(0);
       }
@@ -209,6 +216,7 @@ export const AuthenticatedOverlays: React.FC = () => {
       pushNotificationService.cleanup();
       appStateSubscription.remove();
       clearInterval(heartbeatInterval);
+      disposeSiri();
     };
   }, [isAuthenticated]);
 

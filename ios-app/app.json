@@ -28,13 +28,18 @@
         "NSHealthShareUsageDescription": "Sara reads your health data to provide personalized wellness insights, track your fitness progress, and help you achieve your health goals.",
         "NSHealthUpdateUsageDescription": "Sara can write workout and nutrition data to Apple Health to keep your health records complete.",
         "NSCalendarsUsageDescription": "Sara reads your calendar to show upcoming events and help you stay organized.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSSupportsLiveActivities": true,
+        "NSSupportsLiveActivitiesFrequentUpdates": true
       },
       "entitlements": {
         "com.apple.developer.healthkit": true,
         "com.apple.developer.healthkit.access": [],
         "com.apple.developer.healthkit.background-delivery": true,
-        "aps-environment": "production"
+        "aps-environment": "production",
+        "com.apple.security.application-groups": [
+          "group.cloud.avery.sara-ios"
+        ]
       }
     },
     "android": {
@@ -55,6 +60,16 @@
     "plugins": [
       "expo-notifications",
       "expo-calendar",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "16.2"
+          }
+        }
+      ],
+      "@bacons/apple-targets",
+      "./plugins/withSaraAppIntents",
       [
         "expo-image-picker",
         {

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { Timer, timerService } from '../services/timer';
 import { Alert, AppState } from 'react-native';
+import { startTimerLiveActivity, endTimerLiveActivity } from '../services/liveActivity';
 
 interface TimerContextType {
   activeTimer: Timer | null;
@@ -55,6 +56,8 @@ export function TimerProvider({ children }: { children: ReactNode }) {
     try {
       const timer = await timerService.startTimer(title, durationSeconds);
       setActiveTimer(timer);
+      // Start a Live Activity (lock screen + Dynamic Island countdown).
+      startTimerLiveActivity(String(timer.id), title, Date.now() + durationSeconds * 1000);
       const minutes = Math.floor(durationSeconds / 60);
       const seconds = durationSeconds % 60;
       const durationStr = seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
@@ -68,14 +71,17 @@ export function TimerProvider({ children }: { children: ReactNode }) {
   const stopTimer = async () => {
     if (!activeTimer) return;
 
+    const stoppingId = String(activeTimer.id);
     try {
       await timerService.stopTimer(activeTimer.id);
+      endTimerLiveActivity(stoppingId);
       setActiveTimer(null);
       Alert.alert('Timer Stopped', 'Timer has been stopped');
     } catch (error: any) {
       // If timer is already stopped (404), just hide the overlay without showing an error
       if (error?.response?.status === 404) {
         console.log('Timer already stopped, hiding overlay');
+        endTimerLiveActivity(stoppingId);
         setActiveTimer(null);
       } else {
         console.error('Failed to stop timer:', error);
