@@ -59,6 +59,13 @@ interface Activity {
 
 type Verdict = 'productive' | 'looping' | 'drifting' | 'idle';
 
+interface Recalled {
+  summary: string;
+  created_at: string | null;
+  kind: string | null;
+  similarity: number | null;
+}
+
 // ─── Helpers ────────────────────────────────────────────
 
 function timeAgo(iso: string | null | undefined): string {
@@ -109,6 +116,28 @@ const VERDICT_LABEL: Record<Verdict, { text: string; color: string }> = {
   drifting: { text: 'Drifting a bit', color: '#fb923c' },
   idle: { text: 'Quiet for now', color: '#94a3b8' },
 };
+
+/** "earlier today" / "yesterday" / "Tuesday" / "May 12" — for recalled memories. */
+function recallWhen(iso: string | null | undefined): string {
+  if (!iso) return 'earlier';
+  const then = new Date(iso);
+  const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfThen = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime();
+  const dayDiff = Math.round((startOfToday - startOfThen) / dayMs);
+  if (dayDiff <= 0) return 'earlier today';
+  if (dayDiff === 1) return 'yesterday';
+  if (dayDiff < 7) return then.toLocaleDateString(undefined, { weekday: 'long' });
+  return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function recalledOf(a: Activity): Recalled | null {
+  const r = a.metadata?.recalled as Recalled[] | undefined;
+  if (!Array.isArray(r) || r.length === 0) return null;
+  const top = r[0];
+  return top && top.summary ? top : null;
+}
 
 function verdictOf(a: Activity): Verdict | null {
   const m = (a.metadata?.verdict as string) || a.tags?.find((t) =>
@@ -357,6 +386,7 @@ export default function SaraPresenceFace({
               const n = narrate(a);
               if (!n) return null;
               const v = a.kind === 'reflection' ? verdictOf(a) : null;
+              const recalled = recalledOf(a);
               return (
                 <View
                   key={a.id}
@@ -366,6 +396,14 @@ export default function SaraPresenceFace({
                     {n.prefix ? <Text style={styles.streamPrefix}>{n.prefix} </Text> : null}
                     {n.text}
                   </Text>
+                  {recalled ? (
+                    <View style={styles.recallRow}>
+                      <Text style={styles.recallText}>
+                        <Text style={styles.recallLead}>💭 Recalled from {recallWhen(recalled.created_at)} — </Text>
+                        {recalled.summary}
+                      </Text>
+                    </View>
+                  ) : null}
                   <View style={styles.streamMeta}>
                     <Text style={styles.streamTime}>{timeAgo(a.created_at)}</Text>
                     {v ? (
@@ -532,6 +570,14 @@ const styles = StyleSheet.create({
   streamItemBorder: { borderBottomWidth: 1, borderBottomColor: colors.assistant.border },
   streamText: { color: colors.text, fontSize: fontSizes.sm, lineHeight: 21 },
   streamPrefix: { color: colors.textMuted, fontStyle: 'italic' },
+  recallRow: {
+    marginTop: 8,
+    paddingLeft: spacing.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.accent + '66',
+  },
+  recallText: { color: colors.textSecondary, fontSize: fontSizes.xs, lineHeight: 18 },
+  recallLead: { color: colors.accent, fontWeight: '600' },
   streamMeta: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: 6 },
   streamTime: { color: colors.textMuted, fontSize: fontSizes.xs },
   streamVerdict: { fontSize: fontSizes.xs, fontWeight: '600' },
