@@ -16,12 +16,12 @@ import Svg, { Defs, RadialGradient, Stop, Ellipse } from 'react-native-svg'
 
 const AnimatedView = Animated.View
 
-// Ethereal palette — cyans, indigos, violets, magenta.
+// Cool, ethereal "ghost" palette — teals/cyans + one soft indigo accent.
+// Deliberately avoids Siri's warm pink/purple/orange multicolor swirl.
 const BLOBS = [
-  { id: 'b1', color: '#22d3ee', cx: 36, cy: 40, rx: 42, ry: 42 },
-  { id: 'b2', color: '#6366f1', cx: 64, cy: 44, rx: 46, ry: 46 },
-  { id: 'b3', color: '#a855f7', cx: 48, cy: 64, rx: 40, ry: 40 },
-  { id: 'b4', color: '#ec4899', cx: 40, cy: 56, rx: 34, ry: 34 },
+  { id: 'b1', color: '#5eead4', cx: 40, cy: 42, rx: 46, ry: 46 }, // teal
+  { id: 'b2', color: '#22d3ee', cx: 60, cy: 48, rx: 44, ry: 44 }, // cyan
+  { id: 'b3', color: '#818cf8', cx: 48, cy: 64, rx: 38, ry: 38 }, // soft indigo accent
 ]
 
 function Blob({ id, color, cx, cy, rx, ry }: (typeof BLOBS)[number]) {
@@ -46,9 +46,9 @@ export default function SaraOrb({ size = 56 }: { size?: number }) {
   const breath = useRef(new Animated.Value(0)).current
 
   useEffect(() => {
-    const durations = [16000, 11000, 20000, 13000]
-    const dirs = [1, -1, 1, -1]
-    const fadeDur = [3200, 4100, 3700, 4600]
+    // Slower, wispier than a Siri-style swirl.
+    const durations = [24000, 30000, 19000]
+    const fadeDur = [4200, 5200, 4700]
 
     const spins = rot.map((v, i) =>
       Animated.loop(
@@ -129,8 +129,8 @@ const styles = StyleSheet.create({
   },
   core: {
     position: 'absolute',
-    width: '38%',
-    height: '38%',
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    width: '32%',
+    height: '32%',
+    backgroundColor: 'rgba(220,255,250,0.12)',
   },
 })
