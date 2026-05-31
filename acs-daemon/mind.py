@@ -75,7 +75,10 @@ class Mind:
         summary = (parsed.get("summary") or thought.split(".")[0] or "thought").strip()[:200]
         await self.backend.append_activity(
             kind="thought", summary=summary, body=thought or None,
-            metadata={"turn": "think", "json_parsed": True},
+            metadata={
+                "turn": "think", "json_parsed": True,
+                "recalled": self._recalled_meta(recall),
+            },
         )
 
         # Inbox action runs first; it may change focus, which the explicit
@@ -119,6 +122,7 @@ class Mind:
             metadata={
                 "turn": "reflect", "json_parsed": True, "verdict": verdict,
                 "should_quiet_minutes": parsed.get("should_quiet_minutes"),
+                "recalled": self._recalled_meta(recall),
             },
         )
 
@@ -386,6 +390,25 @@ class Mind:
         # Sort by similarity desc, cap at 5.
         merged.sort(key=lambda r: r.get("similarity", 0.0), reverse=True)
         return merged[:5]
+
+    @staticmethod
+    def _recalled_meta(recall: list[dict]) -> list[dict]:
+        """Compact form of what she pulled from memory this turn, stored on the
+        thought/reflection so David's presence view can show "I remembered…".
+        Top 2 only, trimmed — metadata should stay light.
+        """
+        out: list[dict] = []
+        for r in (recall or [])[:2]:
+            summary = (r.get("summary") or "").strip()
+            if not summary:
+                continue
+            out.append({
+                "summary": summary[:160],
+                "created_at": r.get("created_at"),
+                "kind": r.get("kind"),
+                "similarity": r.get("similarity"),
+            })
+        return out
 
     # ── inbox side-effect ──
     async def _apply_inbox_action(
