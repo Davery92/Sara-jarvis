@@ -1,46 +1,16 @@
 import React from 'react';
-import { ScrollView, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { navigateToChat } from '../../services/navigation';
-import { colors } from '../../styles/theme';
-import ACSStatusCard from '../../components/sara/ACSStatusCard';
-import SaraOverviewPanel from '../../components/sara/SaraOverviewPanel';
+import TodayBrief from '../../components/sara/TodayBrief';
 
 interface SaraScreenProps {
   navigation?: any;
   route?: any;
 }
 
+/**
+ * Home tab. Redesigned into a clean daily brief (TodayBrief) — the old
+ * dashboard (ACSStatusCard + SaraOverviewPanel) was too cluttered for a
+ * personal assistant. Those components still exist for use elsewhere.
+ */
 export default function SaraScreen(props: SaraScreenProps) {
-  return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <ACSStatusCard />
-        <SaraOverviewPanel
-          onOpenChat={() => navigateToChat()}
-          onPrompt={(prompt) => {
-            navigateToChat({
-              quickReply: {
-                message: prompt,
-                title: 'Dashboard prompt',
-              },
-            });
-          }}
-          onOpenCalendar={() => props.navigation?.navigate('Calendar')}
-          onOpenTasks={() => props.navigation?.navigate('DailyTasks')}
-          onOpenInbox={() => props.navigation?.navigate('AssistantInboxTab')}
-        />
-      </ScrollView>
-    </SafeAreaView>
-  );
+  return <TodayBrief navigation={props.navigation} />;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  content: {
-    paddingBottom: 24,
-  },
-});
