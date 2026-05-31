@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import SaraPresenceFace from '../../components/sara/SaraPresenceFace';
 
 // ─── Types — match /api/acs/v2 ───────────────────────
 
@@ -190,6 +191,7 @@ const SOURCE_COLOR: Record<string, string> = {
 // ─── Main Component ──────────────────────────────────
 
 export default function ACSScreen() {
+  const [mode, setMode] = useState<'presence' | 'console'>('presence');
   const [activeTab, setActiveTab] = useState<TabType>('mind');
   const [refreshing, setRefreshing] = useState(false);
   const [, setTick] = useState(0);
@@ -200,8 +202,25 @@ export default function ACSScreen() {
     return () => clearInterval(id);
   }, []);
 
+  // Presence-first: Sara addressing David in her own voice. The raw daemon
+  // console (Mind / Interests / Tools) lives behind "Under the hood".
+  if (mode === 'presence') {
+    return (
+      <SafeAreaView style={styles.container} edges={['bottom']}>
+        <SaraPresenceFace onOpenConsole={() => setMode('console')} />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
+      <TouchableOpacity
+        style={styles.backToPresence}
+        onPress={() => setMode('presence')}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.backToPresenceText}>‹ Sara</Text>
+      </TouchableOpacity>
       <View style={styles.tabBar}>
         {(['mind', 'interests', 'tools'] as TabType[]).map((t) => (
           <TouchableOpacity
@@ -1041,6 +1060,16 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  backToPresence: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  backToPresenceText: {
+    color: colors.accent,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
   },
   tabBar: {
     flexDirection: 'row',
