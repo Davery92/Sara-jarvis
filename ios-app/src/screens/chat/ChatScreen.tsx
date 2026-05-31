@@ -107,6 +107,9 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
   const [showConversationControls, setShowConversationControls] = useState(false);
   const [conversationContext, setConversationContext] = useState<ConversationContextState | null>(null);
+  const [contextExpanded, setContextExpanded] = useState(false);
+  // Collapse the context summary whenever a new context loads.
+  useEffect(() => { setContextExpanded(false); }, [conversationContext?.title]);
   const [noteReaderVisible, setNoteReaderVisible] = useState(false);
   const [noteReaderTitle, setNoteReaderTitle] = useState('');
   const [noteReaderContent, setNoteReaderContent] = useState('');
@@ -1470,8 +1473,15 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
               </View>
               <View style={styles.contextCopy}>
                 <Text style={styles.contextEyebrow}>{conversationContext.sourceLabel}</Text>
-                <Text style={styles.contextTitle} numberOfLines={2}>{conversationContext.title}</Text>
-                <Text style={styles.contextSummary} numberOfLines={2}>{conversationContext.summary}</Text>
+                <Text style={styles.contextTitle} numberOfLines={contextExpanded ? undefined : 2}>{conversationContext.title}</Text>
+                <TouchableOpacity activeOpacity={0.7} onPress={() => setContextExpanded((v) => !v)}>
+                  <Text style={styles.contextSummary} numberOfLines={contextExpanded ? undefined : 2}>
+                    {conversationContext.summary}
+                  </Text>
+                  {(conversationContext.summary?.length || 0) > 90 ? (
+                    <Text style={styles.contextMore}>{contextExpanded ? 'Show less' : 'Show more'}</Text>
+                  ) : null}
+                </TouchableOpacity>
               </View>
               <TouchableOpacity
                 style={styles.contextDismiss}
@@ -1954,6 +1964,12 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: fontSizes.xs,
     lineHeight: 17,
+  },
+  contextMore: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    marginTop: 2,
   },
   contextPreviewCard: {
     marginTop: spacing.sm,
