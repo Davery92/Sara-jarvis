@@ -309,27 +309,39 @@ async def list_notifications(
             src_filter = "AND source = :source_filter"
             params["source_filter"] = source_filter
 
-        # Unified query: merge notification_log + acs_show_david_buffer
-        rows = db.execute(text(f"""
-            (
-                SELECT
-                    CAST(id AS VARCHAR) as id,
-                    title,
-                    message,
-                    category,
-                    COALESCE(priority, 'normal') as priority,
-                    source,
-                    topic,
-                    'notification' as item_type,
-                    sent_at as created_at,
-                    read_at,
-                    dismissed_at,
-                    engaged,
-                    response_text
-                FROM notification_log
-                WHERE user_id = :user_id AND sent = TRUE
-                {cat_filter} {src_filter}
-            )
+        # acs_show_david_buffer is a legacy ACS table dropped in migration 062 on
+        # current deployments. Only union it in if it still exists, so the endpoint
+        # works (from notification_log) either way instead of 500-ing.
+        acs_exists = bool(
+            db.execute(text("SELECT to_regclass('public.acs_show_david_buffer')")).scalar()
+        )
+
+        notif_select = f"""
+            SELECT
+                CAST(id AS VARCHAR) as id,
+                title,
+                message,
+                category,
+                COALESCE(priority, 'normal') as priority,
+                source,
+                topic,
+                'notification' as item_type,
+                sent_at as created_at,
+                read_at,
+                dismissed_at,
+                engaged,
+                response_text
+            FROM notification_log
+            WHERE user_id = :user_id AND sent = TRUE
+            {cat_filter} {src_filter}
+        """
+
+        acs_select = ""
+        acs_count = ""
+        if acs_exists:
+            acs_cat = "AND COALESCE(category, 'discovery') = :category" if category else ""
+            acs_src = "AND 'acs_session' = :source_filter" if source_filter else ""
+            acs_select = f"""
             UNION ALL
             (
                 SELECT
@@ -351,10 +363,16 @@ async def list_notifications(
                     shown as engaged,
                     NULL as response_text
                 FROM acs_show_david_buffer
-                WHERE user_id = :user_id
-                {"AND COALESCE(category, 'discovery') = :category" if category else ""}
-                {"AND 'acs_session' = :source_filter" if source_filter else ""}
-            )
+                WHERE user_id = :user_id {acs_cat} {acs_src}
+            )"""
+            acs_count = f"""+ (
+                SELECT COUNT(*) FROM acs_show_david_buffer
+                WHERE user_id = :user_id {acs_cat} {acs_src}
+            )"""
+
+        rows = db.execute(text(f"""
+            ( {notif_select} )
+            {acs_select}
             ORDER BY created_at DESC
             LIMIT :limit OFFSET :offset
         """), params).fetchall()
@@ -364,12 +382,7 @@ async def list_notifications(
             SELECT (
                 SELECT COUNT(*) FROM notification_log
                 WHERE user_id = :user_id AND sent = TRUE {cat_filter} {src_filter}
-            ) + (
-                SELECT COUNT(*) FROM acs_show_david_buffer
-                WHERE user_id = :user_id
-                {"AND COALESCE(category, 'discovery') = :category" if category else ""}
-                {"AND 'acs_session' = :source_filter" if source_filter else ""}
-            )
+            ) {acs_count}
         """), params).fetchone()
 
         notifications = []
