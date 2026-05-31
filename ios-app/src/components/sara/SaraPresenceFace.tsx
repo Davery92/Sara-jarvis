@@ -145,6 +145,20 @@ const NARRATABLE = new Set([
   'inbox_complete',
 ]);
 
+/** Pull title + message out of a notify_david activity body. */
+function parseNotice(a: Activity): { title: string; message: string } {
+  const body = a.body || '';
+  const titleM = body.match(/Title:\s*([\s\S]*?)\n\nBody:/);
+  const bodyM = body.match(/Body:\s*([\s\S]*?)(?:\n\nWhy:|$)/);
+  const fallbackTitle = (a.summary || '').replace(/^.*?David:\s*/, '').trim();
+  return {
+    title: (titleM?.[1] || fallbackTitle || 'Something came up').trim(),
+    message: (bodyM?.[1] || '').trim(),
+  };
+}
+
+const NOTICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 // ─── Component ──────────────────────────────────────────
 
 export default function SaraPresenceFace({
@@ -159,6 +173,7 @@ export default function SaraPresenceFace({
   const [activity, setActivity] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [dismissedNotices, setDismissedNotices] = useState<Set<string>>(new Set());
 
   const fetchAll = useCallback(async () => {
     try {
@@ -215,9 +230,20 @@ export default function SaraPresenceFace({
 
   const watching = (status?.watching_for || []).filter(Boolean).slice(0, 4);
 
-  // Narration stream — her recent thinking, in her voice.
+  // Her most recent unprompted reach-out — the "Hey, I noticed…" moment.
+  // Elevated out of the stream into its own card while it's fresh + unseen.
+  const notice = activity.find(
+    (a) =>
+      a.kind === 'notify_david' &&
+      !dismissedNotices.has(a.id) &&
+      Date.now() - new Date(a.created_at).getTime() < NOTICE_MAX_AGE_MS,
+  );
+  const parsedNotice = notice ? parseNotice(notice) : null;
+
+  // Narration stream — her recent thinking, in her voice. Skip the entry
+  // that's currently elevated as the reach-out card, to avoid duplication.
   const stream = activity
-    .filter((a) => NARRATABLE.has(a.kind))
+    .filter((a) => NARRATABLE.has(a.kind) && a.id !== notice?.id)
     .slice(0, 12);
 
   return (
@@ -241,6 +267,38 @@ export default function SaraPresenceFace({
           </View>
         </View>
       </View>
+
+      {/* ── She reached out: elevated unprompted notice ── */}
+      {notice && parsedNotice ? (
+        <View style={styles.noticeCard}>
+          <View style={styles.noticeHeader}>
+            <View style={styles.noticePulse} />
+            <Text style={styles.noticeEyebrow}>Sara reached out · {timeAgo(notice.created_at)}</Text>
+          </View>
+          <Text style={styles.noticeTitle}>{parsedNotice.title}</Text>
+          {parsedNotice.message ? (
+            <Text style={styles.noticeMessage}>{parsedNotice.message}</Text>
+          ) : null}
+          <View style={styles.noticeActions}>
+            <TouchableOpacity
+              style={styles.noticeFollowBtn}
+              activeOpacity={0.85}
+              onPress={() => navigation.navigate('Chat')}
+            >
+              <Text style={styles.noticeFollowText}>Follow up</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.noticeDismissBtn}
+              activeOpacity={0.7}
+              onPress={() =>
+                setDismissedNotices((prev) => new Set(prev).add(notice.id))
+              }
+            >
+              <Text style={styles.noticeDismissText}>Got it</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
 
       {/* ── Right now: her current thought ── */}
       <View style={[styles.heroCard, { borderColor: m.color + '55' }]}>
@@ -361,6 +419,46 @@ const styles = StyleSheet.create({
   moodRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   moodText: { color: colors.textSecondary, fontSize: fontSizes.sm },
+
+  noticeCard: {
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.accent + '88',
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  noticeHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.sm },
+  noticePulse: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
+  noticeEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+  noticeTitle: { color: colors.text, fontSize: fontSizes.md, fontWeight: '700', lineHeight: 22 },
+  noticeMessage: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 21,
+    marginTop: 6,
+  },
+  noticeActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
+  noticeFollowBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: 9,
+    paddingHorizontal: spacing.lg,
+  },
+  noticeFollowText: { color: '#fff', fontSize: fontSizes.sm, fontWeight: '700' },
+  noticeDismissBtn: {
+    borderRadius: borderRadius.md,
+    paddingVertical: 9,
+    paddingHorizontal: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+  },
+  noticeDismissText: { color: colors.textSecondary, fontSize: fontSizes.sm, fontWeight: '600' },
 
   heroCard: {
     backgroundColor: colors.assistant.panel,
