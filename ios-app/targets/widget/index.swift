@@ -9,6 +9,7 @@ struct SaraWidgetBundle: WidgetBundle {
     SaraStatusWidget()
     if #available(iOS 16.2, *) {
       SaraTimerLiveActivity()
+      SaraEventLiveActivity()
     }
   }
 }

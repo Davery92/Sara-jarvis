@@ -99,5 +99,54 @@ public class SaraNativeModule: Module {
       }
       #endif
     }
+
+    // ── Generic ongoing-event activities (workouts, background tasks) ──────────
+
+    Function("startEventActivity") { (id: String, kind: String, title: String, subtitle: String, startEpochMs: Double) -> String? in
+      #if canImport(ActivityKit)
+      if #available(iOS 16.2, *) {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return nil }
+        // Avoid duplicates for the same logical id.
+        if Activity<SaraEventAttributes>.activities.contains(where: { $0.attributes.id == id }) {
+          return nil
+        }
+        let attrs = SaraEventAttributes(id: id, kind: kind, title: title)
+        let state = SaraEventAttributes.ContentState(subtitle: subtitle, startEpochMs: startEpochMs)
+        do {
+          let content = ActivityContent(state: state, staleDate: nil)
+          let activity = try Activity.request(attributes: attrs, content: content, pushType: nil)
+          return activity.id
+        } catch {
+          return nil
+        }
+      }
+      #endif
+      return nil
+    }
+
+    Function("updateEventActivity") { (id: String, subtitle: String, startEpochMs: Double) in
+      #if canImport(ActivityKit)
+      if #available(iOS 16.2, *) {
+        Task {
+          for activity in Activity<SaraEventAttributes>.activities where activity.attributes.id == id {
+            let state = SaraEventAttributes.ContentState(subtitle: subtitle, startEpochMs: startEpochMs)
+            await activity.update(ActivityContent(state: state, staleDate: nil))
+          }
+        }
+      }
+      #endif
+    }
+
+    Function("endEventActivity") { (id: String) in
+      #if canImport(ActivityKit)
+      if #available(iOS 16.2, *) {
+        Task {
+          for activity in Activity<SaraEventAttributes>.activities where activity.attributes.id == id {
+            await activity.end(nil, dismissalPolicy: .immediate)
+          }
+        }
+      }
+      #endif
+    }
   }
 }

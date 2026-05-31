@@ -27,3 +27,27 @@ public struct SaraTimerAttributes: ActivityAttributes {
     self.title = title
   }
 }
+
+/// DUPLICATE of modules/sara-native/ios/SaraActivityAttributes.swift (SaraEventAttributes).
+@available(iOS 16.2, *)
+public struct SaraEventAttributes: ActivityAttributes {
+  public struct ContentState: Codable, Hashable {
+    public var subtitle: String
+    public var startEpochMs: Double
+
+    public init(subtitle: String, startEpochMs: Double) {
+      self.subtitle = subtitle
+      self.startEpochMs = startEpochMs
+    }
+  }
+
+  public var id: String
+  public var kind: String
+  public var title: String
+
+  public init(id: String, kind: String, title: String) {
+    self.id = id
+    self.kind = kind
+    self.title = title
+  }
+}

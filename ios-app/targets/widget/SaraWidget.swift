@@ -22,6 +22,28 @@ private func emoji(for emotion: String) -> String {
   }
 }
 
+/// Static gradient "orb" — the widget can't animate, so this is the still
+/// counterpart to the in-app smoke orb (cool teal/cyan/indigo).
+struct MoodOrb: View {
+  var size: CGFloat
+  var body: some View {
+    Circle()
+      .fill(
+        RadialGradient(
+          gradient: Gradient(colors: [
+            Color(red: 0.37, green: 0.92, blue: 0.83),
+            Color(red: 0.13, green: 0.83, blue: 0.93),
+            Color(red: 0.51, green: 0.55, blue: 0.97),
+          ]),
+          center: .center,
+          startRadius: 1,
+          endRadius: size / 1.3
+        )
+      )
+      .frame(width: size, height: size)
+  }
+}
+
 extension View {
   /// iOS 17 requires an explicit widget container background; older OSes don't.
   @ViewBuilder
@@ -84,14 +106,14 @@ struct SaraWidgetView: View {
   var body: some View {
     switch family {
     case .accessoryInline:
-      Text("\(emoji(for: entry.emotion)) \(nextEventShort)")
+      Text("Sara · \(nextEventShort)")
     case .accessoryCircular:
       VStack(spacing: 0) {
-        Text(emoji(for: entry.emotion)).font(.title2)
+        MoodOrb(size: 22)
       }
     case .accessoryRectangular:
       VStack(alignment: .leading, spacing: 2) {
-        Text("Sara \(emoji(for: entry.emotion))").font(.headline)
+        Text("Sara").font(.headline)
         if let title = entry.nextEventTitle, let time = entry.nextEventTime {
           Text("\(title) · \(time, style: .time)").font(.caption2)
         } else {
@@ -113,7 +135,7 @@ struct SaraWidgetView: View {
   private var smallView: some View {
     VStack(alignment: .leading, spacing: 6) {
       HStack {
-        Text(emoji(for: entry.emotion)).font(.title)
+        MoodOrb(size: 26)
         Spacer()
       }
       Text("Sara").font(.headline)
@@ -134,7 +156,7 @@ struct SaraWidgetView: View {
   private var mediumView: some View {
     HStack(alignment: .top, spacing: 12) {
       VStack(alignment: .leading, spacing: 4) {
-        Text(emoji(for: entry.emotion)).font(.largeTitle)
+        MoodOrb(size: 34)
         Text("Sara").font(.headline)
         Text(entry.emotion.capitalized).font(.caption).foregroundStyle(.secondary)
       }

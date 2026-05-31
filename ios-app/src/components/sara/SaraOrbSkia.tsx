@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { View, StyleSheet } from 'react-native'
 import { Canvas, Fill, Shader, Skia } from '@shopify/react-native-skia'
 
@@ -68,9 +68,8 @@ half4 main(float2 fragcoord) {
 }
 `
 
-const effect = Skia.RuntimeEffect.Make(SMOKE_SKSL)
-
 export default function SaraOrbSkia({ size = 56 }: { size?: number }) {
+  const effect = useMemo(() => Skia.RuntimeEffect.Make(SMOKE_SKSL), [])
   const [time, setTime] = useState(0)
 
   useEffect(() => {

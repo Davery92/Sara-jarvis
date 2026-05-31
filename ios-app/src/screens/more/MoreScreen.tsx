@@ -87,13 +87,6 @@ const menuSections: MenuSection[] = [
         description: 'Events, reminders, and iOS calendar sync.',
       },
       {
-        name: 'Projects',
-        icon: 'folder-open-outline',
-        label: 'Projects',
-        screen: 'Projects',
-        description: 'Project boards, QA queues, and files.',
-      },
-      {
         name: 'Recipes',
         icon: 'restaurant-outline',
         label: 'Recipes',
@@ -119,13 +112,6 @@ const menuSections: MenuSection[] = [
         label: 'Notes',
         screen: 'Notes',
         description: 'Quick notes, folders, and markdown content.',
-      },
-      {
-        name: 'Email',
-        icon: 'mail-outline',
-        label: 'Email',
-        screen: 'Email',
-        description: 'Email triage and detailed message review.',
       },
       {
         name: 'Documents',

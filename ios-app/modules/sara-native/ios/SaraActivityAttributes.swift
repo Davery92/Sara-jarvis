@@ -30,3 +30,29 @@ public struct SaraTimerAttributes: ActivityAttributes {
     self.title = title
   }
 }
+
+/// Generic ongoing-event Live Activity used for workouts and background tasks.
+/// Also DUPLICATED in targets/widget/SaraActivityAttributes.swift — keep in sync.
+@available(iOS 16.2, *)
+public struct SaraEventAttributes: ActivityAttributes {
+  public struct ContentState: Codable, Hashable {
+    public var subtitle: String
+    /// Epoch ms to count elapsed time up from; 0 = no timer shown.
+    public var startEpochMs: Double
+
+    public init(subtitle: String, startEpochMs: Double) {
+      self.subtitle = subtitle
+      self.startEpochMs = startEpochMs
+    }
+  }
+
+  public var id: String
+  public var kind: String // "workout" | "task"
+  public var title: String
+
+  public init(id: String, kind: String, title: String) {
+    self.id = id
+    self.kind = kind
+    self.title = title
+  }
+}

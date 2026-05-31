@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { BackgroundTask } from '../types/api';
 import { backgroundTaskService } from '../services/backgroundTasks';
 import AgentClarificationModal from '../components/AgentClarificationModal';
+import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
 
 interface BackgroundTasksContextType {
   tasks: BackgroundTask[];
@@ -47,6 +48,27 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
     });
     return () => unsubscribe();
   }, [dismissedTaskId]);
+
+  // "Sara is working on…" Live Activity for the currently-running task.
+  const taskActivityRef = useRef<string | null>(null);
+  useEffect(() => {
+    const running = tasks.find((t) => t.status === 'running');
+    if (running) {
+      const subtitle = (running.original_query || running.task_type || 'Working…').slice(0, 80);
+      const startMsRaw = running.started_at ? new Date(running.started_at).getTime() : Date.now();
+      const startMs = isNaN(startMsRaw) ? Date.now() : startMsRaw;
+      if (taskActivityRef.current !== running.id) {
+        if (taskActivityRef.current) endEvent(taskActivityRef.current);
+        startEvent(running.id, 'task', 'Sara is working', subtitle, startMs);
+        taskActivityRef.current = running.id;
+      } else {
+        updateEvent(running.id, subtitle, startMs);
+      }
+    } else if (taskActivityRef.current) {
+      endEvent(taskActivityRef.current);
+      taskActivityRef.current = null;
+    }
+  }, [tasks]);
 
   const refreshTasks = useCallback(async () => {
     await backgroundTaskService.fetchTasks();

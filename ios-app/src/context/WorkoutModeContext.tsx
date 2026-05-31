@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fitnessService, ActiveWorkoutSession, LogSetParams, RestTimerStatus } from '../services/fitness';
+import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
 
 interface WorkoutModeContextType {
   // State
@@ -40,6 +41,29 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   const restTimerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   // Local timer tracking (independent of session refresh)
   const localTimerRef = useRef<{ startTime: number; duration: number } | null>(null);
+
+  // Drive the workout Live Activity (count-up) off the active session.
+  const workoutActivityRef = useRef<string | null>(null);
+  useEffect(() => {
+    const active = session && session.status === 'active';
+    if (active) {
+      const title = session.workout_snapshot?.name || 'Workout';
+      const ex = session.workout_snapshot?.exercises?.[session.current_exercise_index];
+      const subtitle = ex?.name || 'In progress';
+      const startMsRaw = session.started_at ? new Date(session.started_at).getTime() : Date.now();
+      const startMs = isNaN(startMsRaw) ? Date.now() : startMsRaw;
+      if (workoutActivityRef.current !== session.id) {
+        if (workoutActivityRef.current) endEvent(workoutActivityRef.current);
+        startEvent(session.id, 'workout', title, subtitle, startMs);
+        workoutActivityRef.current = session.id;
+      } else {
+        updateEvent(session.id, subtitle, startMs);
+      }
+    } else if (workoutActivityRef.current) {
+      endEvent(workoutActivityRef.current);
+      workoutActivityRef.current = null;
+    }
+  }, [session]);
 
   // Check for active session on mount
   useEffect(() => {

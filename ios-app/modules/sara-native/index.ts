@@ -28,6 +28,10 @@ interface SaraNativeModuleType {
   startTimerActivity(timerId: string, title: string, endEpochMs: number): string | null
   endTimerActivity(timerId: string): void
   endAllActivities(): void
+  // Generic ongoing-event activities (workouts, background tasks)
+  startEventActivity(id: string, kind: string, title: string, subtitle: string, startEpochMs: number): string | null
+  updateEventActivity(id: string, subtitle: string, startEpochMs: number): void
+  endEventActivity(id: string): void
 }
 
 const SaraNative = requireOptionalNativeModule<SaraNativeModuleType>('SaraNative')
@@ -64,6 +68,24 @@ export function endTimerActivity(timerId: string): void {
 
 export function endAllActivities(): void {
   SaraNative?.endAllActivities()
+}
+
+export function startEventActivity(
+  id: string,
+  kind: 'workout' | 'task',
+  title: string,
+  subtitle: string,
+  startEpochMs: number
+): string | null {
+  return SaraNative?.startEventActivity(id, kind, title, subtitle, startEpochMs) ?? null
+}
+
+export function updateEventActivity(id: string, subtitle: string, startEpochMs: number): void {
+  SaraNative?.updateEventActivity(id, subtitle, startEpochMs)
+}
+
+export function endEventActivity(id: string): void {
+  SaraNative?.endEventActivity(id)
 }
 
 export default SaraNative
