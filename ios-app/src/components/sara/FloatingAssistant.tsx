@@ -24,6 +24,7 @@ import * as Haptics from 'expo-haptics';
 import { useSaraOverlay } from '../../context/SaraOverlayContext';
 import { useSaraChat } from '../../hooks/useSaraChat';
 import { useSaraPresence } from '../../hooks/useSaraPresence';
+import SaraOrb from './SaraOrb';
 import { voiceService } from '../../services/voice';
 import MessageBubble from '../chat/MessageBubble';
 import StreamingIndicator from '../chat/StreamingIndicator';
@@ -236,8 +237,6 @@ export default function FloatingAssistant() {
   // Don't render when hidden
   if (mode === 'hidden') return null;
 
-  const emoji = presence.emoji;
-
   // Get last 20 messages for mini-chat
   const recentMessages = chat.messages.slice(-20);
 
@@ -272,19 +271,17 @@ export default function FloatingAssistant() {
             onLongPress={handleOrbLongPress}
             onPressOut={handleOrbPressOut}
             delayLongPress={300}
-            style={[
-              styles.orb,
-              !isRecording && !isProcessing && { backgroundColor: presence.color },
-              isRecording && styles.orbRecording,
-              isProcessing && styles.orbProcessing,
-            ]}
+            style={styles.orb}
           >
-            {isRecording ? (
-              <Ionicons name="mic" size={24} color="#fff" />
-            ) : isProcessing ? (
-              <Ionicons name="hourglass" size={22} color="#fff" />
-            ) : (
-              <Text style={styles.orbEmoji}>{emoji}</Text>
+            <SaraOrb size={56} />
+            {(isRecording || isProcessing) && (
+              <View style={styles.orbIconOverlay} pointerEvents="none">
+                <Ionicons
+                  name={isRecording ? 'mic' : 'hourglass'}
+                  size={isRecording ? 24 : 22}
+                  color="#fff"
+                />
+              </View>
             )}
           </Pressable>
         </Animated.View>
@@ -424,19 +421,16 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
     ...shadows.md,
   },
-  orbRecording: {
-    backgroundColor: colors.error,
-  },
-  orbProcessing: {
-    backgroundColor: colors.textMuted,
-  },
-  orbEmoji: {
-    fontSize: 24,
+  orbIconOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.25)',
   },
 
   // Mini-chat styles
