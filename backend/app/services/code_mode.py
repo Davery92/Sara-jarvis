@@ -51,6 +51,28 @@ logger = logging.getLogger(__name__)
 # Holds references to detached background coder tasks so they aren't GC'd mid-run.
 _BG_TASKS: set = set()
 
+# Dedicated DB engine for code mode. Code-mode sessions are held across long
+# `await`s (SSH / LLM) inside detached tasks; using the shared request pool risks
+# a corrupted/cancelled connection being returned to it, which then surfaces as
+# "another command is already in progress" 500s on unrelated webapp requests.
+# NullPool = a fresh connection per session, closed on session.close(), never
+# returned to the shared pool — so code mode can never poison request handlers.
+_code_engine = None
+_CodeSessionLocal = None
+
+
+def _code_db():
+    """Open a DB session on code mode's isolated NullPool engine."""
+    global _code_engine, _CodeSessionLocal
+    if _CodeSessionLocal is None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import NullPool
+        from app.db.base import engine as _shared_engine
+        _code_engine = create_engine(_shared_engine.url, poolclass=NullPool, future=True)
+        _CodeSessionLocal = sessionmaker(bind=_code_engine, autoflush=False, expire_on_commit=True)
+    return _CodeSessionLocal()
+
 # ---------------------------------------------------------------------------
 # Layout on the VM
 # ---------------------------------------------------------------------------
@@ -481,12 +503,11 @@ async def run_code_message(request_db: Session, user_id: str, conversation_id, t
 
     Always terminates by putting a `final_response`, `done`, then `None` sentinel.
     """
-    from app.db.session import SessionLocal
     user_id = str(user_id)
     # This runs as a background asyncio task that can outlive the originating
     # HTTP request — whose Depends(get_db) session is closed on client
-    # disconnect. So we own a dedicated DB session for the task's lifetime.
-    db = SessionLocal()
+    # disconnect. So we own a dedicated DB session (isolated NullPool engine).
+    db = _code_db()
     try:
         kind, arg = parse_code_command(text)
         session = get_active_session(db, user_id, conversation_id)
@@ -1288,8 +1309,7 @@ async def _run_background_task(task_id, user_id, conversation_id, instruction, r
     """Detached coder run: resolves/clones the session, runs the instruction (and
     any queued follow-ups), pushes the branch, and pushes a completion notice.
     Owns its own DB session (it outlives the originating HTTP request)."""
-    from app.db.session import SessionLocal
-    db = SessionLocal()
+    db = _code_db()
     bridge = VMBridge()
     exec_log: list[dict] = []
 
