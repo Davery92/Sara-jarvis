@@ -51,6 +51,11 @@ function getMessageText(content: ChatMessage['content']): string {
   if (typeof content === 'string') {
     return content
   }
+  // Defensive: content can be undefined/null (e.g. an event with no text payload).
+  // Never let this throw — it renders during React's render pass and would crash the page.
+  if (!Array.isArray(content)) {
+    return content == null ? '' : String(content)
+  }
 
   return content
     .map(part => {
@@ -718,7 +723,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     break
                     
                   case 'text_chunk':
-                    streamingContent = eventData.data.full_content
+                    // Normal LLM streaming sends `full_content` (accumulated); chess/code
+                    // mode send `content`. Fall back so neither yields undefined.
+                    streamingContent = eventData.data.full_content ?? eventData.data.content ?? streamingContent ?? ''
                     setIsUsingTools(false)
                     setToolActivity('')
                     if (firstStreamChunk) {

@@ -416,6 +416,10 @@ def _system_prompt(repo: str, branch: str, workdir: str) -> str:
 # SSE helpers
 # ---------------------------------------------------------------------------
 async def _emit(q: asyncio.Queue, type_: str, **data):
+    # The web ChatInterface reads `full_content` for text_chunk; default it to
+    # `content` so single-chunk emits render (and never yield undefined there).
+    if type_ == "text_chunk" and "full_content" not in data:
+        data["full_content"] = data.get("content", "")
     await q.put({"type": type_, "data": data})
 
 
@@ -850,7 +854,7 @@ async def _handle_preview(session: CodeSession, conversation_id, q: asyncio.Queu
 
     async def say(t: str):
         parts.append(t)
-        await _emit(q, "text_chunk", content=t)
+        await _emit(q, "text_chunk", content=t, full_content="".join(parts))
 
     await say(f"🚀 Building a preview of `{session.repo_slug}` (`{session.branch}`)…\n")
 
