@@ -29,7 +29,7 @@ class BackgroundTaskService {
 
   private scheduleNextPoll(): void {
     const hasActive = this.lastTasks.some(t => t.status === 'pending' || t.status === 'running');
-    const interval = hasActive ? this.baseIntervalMs : this.baseIntervalMs * 2; // 60s when idle
+    const interval = hasActive ? this.baseIntervalMs : 60000; // active: base (10s); idle: 60s
 
     this.pollingInterval = setTimeout(() => {
       this.fetchTasks().then(() => this.scheduleNextPoll());

@@ -314,6 +314,7 @@ export interface BackgroundTask {
   workspace_folder_id: string | null;
   clarification_question: string | null;
   error_message: string | null;
+  status_label?: string | null;  // friendly current-step label (e.g. "editing mul.py")
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

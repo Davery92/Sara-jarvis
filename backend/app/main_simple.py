@@ -8071,6 +8071,33 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         return
 
+            # CODE MODE INTERCEPTION
+            # If the conversation has an active code session, or the user typed a
+            # /code command, route the whole turn to the coding harness on the VM.
+            try:
+                from app.services import code_mode
+                _code_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _code_msg = _extract_text_content(_code_raw) if _code_raw else None
+                if _code_msg:
+                    _code_session = code_mode.get_active_session(db, current_user.id, request.conversation_id)
+                    if _code_session or _code_msg.strip().lower().startswith("/code"):
+                        logger.info(f"💻 Code mode handling: {_code_msg[:60]}...")
+                        _code_queue = asyncio.Queue()
+                        _code_task = asyncio.create_task(
+                            code_mode.run_code_message(
+                                db, current_user.id, request.conversation_id, _code_msg, _code_queue
+                            )
+                        )
+                        while True:
+                            _ev = await _code_queue.get()
+                            if _ev is None:
+                                break
+                            yield f"data: {json.dumps(_ev)}\n\n"
+                        await _code_task  # surface any late exception / ensure cleanup
+                        return
+            except Exception as _code_e:
+                logger.error(f"Code mode interception error: {_code_e}", exc_info=True)
+
             # Create an async queue for events
             event_queue = asyncio.Queue()
 

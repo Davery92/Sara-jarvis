@@ -369,6 +369,7 @@ class MissionEngine:
                 FROM autonomy_mission
                 WHERE state IN ('running', 'pending')
                   AND current_step_index < total_steps
+                  AND source <> 'code_mode'   -- code-mode missions are driven by their own coroutine, not the primitive engine
                 ORDER BY
                     CASE priority
                         WHEN 'critical' THEN 0

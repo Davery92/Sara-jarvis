@@ -51,3 +51,4 @@ from .scheduled_job import ScheduledJob
 from .tunable_setting import TunableSetting
 from .external_workout import ExternalWorkout
 from .system_event import SystemEvent
+from .code_session import CodeSession

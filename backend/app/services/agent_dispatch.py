@@ -311,12 +311,21 @@ async def _dispatch_llm_call(
                 # ceiling we measured on the MLX endpoint at .115:8081.
                 max_tokens=12288,
                 model=model,
-                request_timeout=300.0,
+                # 30 min: a research synthesis over a large accumulated context
+                # is genuinely slow on the MLX endpoint. A timeout this long only
+                # trips on a real stall, not on a job that's still working.
+                request_timeout=1800.0,
                 allow_during_lesson_generation=True,
-                allow_fallback=(attempt == 0),  # only try fallback on first attempt
+                allow_fallback=False,  # primary endpoint only — no failover
                 extra_body=extra_body,
             )
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
+        except httpx.TimeoutException as e:
+            # A 30-minute read timeout means the endpoint truly stalled. Retrying
+            # just re-sends the same large prompt for another 30 min, so treat it
+            # as a hard failure rather than burning another hour.
+            logger.error(f"[dispatch] LLM call timed out after 30 min — treating as failure, not retrying: {e}")
+            raise
+        except (httpx.HTTPStatusError, httpx.ConnectError) as e:
             last_error = e
             wait = 10 * (attempt + 1)
             logger.warning(f"[dispatch] LLM call failed (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait}s")
@@ -1202,7 +1211,7 @@ class AgentDispatchService:
             db.query(BackgroundTask)
             .filter(
                 BackgroundTask.user_id == user_id,
-                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent"]),
+                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent", "code_mode"]),
                 BackgroundTask.status.in_(["needs_clarification", "running"]),
                 BackgroundTask.updated_at < cutoff,
             )
@@ -1230,7 +1239,7 @@ class AgentDispatchService:
             db.query(BackgroundTask)
             .filter(
                 BackgroundTask.user_id == user_id,
-                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent"]),
+                BackgroundTask.task_type.in_(["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent", "code_mode"]),
             )
             .order_by(BackgroundTask.created_at.desc())
             .limit(limit)

@@ -198,6 +198,15 @@ class Settings(BaseSettings):
     acs_v2_mode_max_repeat: int = 2                 # Don't pick same mode 2x in a row
     acs_execution_ratio: float = 0.7              # Fraction of sessions dedicated to plan execution vs free
 
+    # Code Mode (chat /code) — coding agent on the sara VM
+    github_pat: str = ""                              # fine-grained PAT: Contents R/W + Metadata R
+    git_author_name: str = "Sara"                     # commit author name
+    git_author_email: str = "sara@avery.cloud"        # commit author email
+    code_mode_root: str = "~/code-projects"           # base dir on the VM for bare clones + worktrees
+    code_mode_default_repo: str = "Davery92/sara-sandbox"  # used when `/code <task>` is sent with no active session
+    code_mode_llm_url: str = ""                        # optional LLM endpoint override; empty = use bg llm
+    code_mode_max_rounds: int = 60                    # max tool-call rounds per turn
+
     class Config:
         env_file = ".env"
         extra = "ignore"

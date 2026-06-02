@@ -24,7 +24,8 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
 
   // Start polling when provider mounts (30s default, scales to 60s when idle)
   useEffect(() => {
-    backgroundTaskService.startPolling(30000);
+    // 10s while a task is active (snappy Live Activity step updates), 60s when idle.
+    backgroundTaskService.startPolling(10000);
 
     return () => {
       backgroundTaskService.stopPolling();
@@ -54,7 +55,9 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
   useEffect(() => {
     const running = tasks.find((t) => t.status === 'running');
     if (running) {
-      const subtitle = (running.original_query || running.task_type || 'Working…').slice(0, 80);
+      // Prefer the live current-step label (code mode emits "editing X",
+      // "running tests", "pushing branch"); fall back to the original request.
+      const subtitle = (running.status_label || running.original_query || running.task_type || 'Working…').slice(0, 80);
       const startMsRaw = running.started_at ? new Date(running.started_at).getTime() : Date.now();
       const startMs = isNaN(startMsRaw) ? Date.now() : startMsRaw;
       if (taskActivityRef.current !== running.id) {
