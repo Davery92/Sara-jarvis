@@ -9,7 +9,7 @@ import StarRating from './StarRating'
 import { CanvasPanel } from './canvas/CanvasPanel'
 import { useArtifacts } from './canvas/hooks/useArtifacts'
 import { NoteSelectorModal } from './canvas/NoteSelectorModal'
-import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown, History } from 'lucide-react'
+import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown, History, Plus } from 'lucide-react'
 import ConversationHistoryDrawer from './ConversationHistoryDrawer'
 import { ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
 
@@ -119,27 +119,25 @@ const ArtifactCard: React.FC<{
 
   return (
     <div
-      className="mt-3 bg-gray-800 border border-gray-600 rounded-lg overflow-hidden cursor-pointer hover:border-teal-500 transition-colors"
+      className="mt-3 cursor-pointer overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] transition-colors hover:border-teal-300/30"
       onClick={onExpand}
     >
-      <div className="flex items-center justify-between px-3 py-2 bg-gray-700 border-b border-gray-600">
-        <div className="flex items-center gap-2 text-gray-300">
+      <div className="flex items-center justify-between border-b border-white/8 px-3 py-2">
+        <div className="flex items-center gap-2 text-slate-400">
           {getIcon()}
-          <span className="text-sm font-medium">{artifact.title}</span>
+          <span className="text-sm font-medium text-slate-200">{artifact.title}</span>
           {artifact.language && (
-            <span className="text-xs px-1.5 py-0.5 bg-gray-600 rounded text-gray-400">
-              {artifact.language}
-            </span>
+            <span className="text-xs text-slate-500">{artifact.language}</span>
           )}
         </div>
         <button
-          className="p-1 hover:bg-gray-600 rounded text-gray-400 hover:text-white"
+          className="rounded-lg p-1 text-slate-500 transition-colors hover:text-teal-300"
           title="Open in Canvas"
         >
           <Maximize2 size={14} />
         </button>
       </div>
-      <pre className="p-3 text-xs text-gray-400 font-mono overflow-hidden max-h-20">
+      <pre className="max-h-20 overflow-hidden p-3 font-mono text-xs text-slate-500">
         {getPreview()}
       </pre>
     </div>
@@ -163,6 +161,7 @@ interface ChatInterfaceProps {
     standingOrdersCount: number
   }
   onQuickAction?: (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => void
+  autoSendToken?: number
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({
@@ -176,6 +175,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   abortControllerRef,
   quickActionContext,
   onQuickAction,
+  autoSendToken,
 }) => {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null)
   const [showHistory, setShowHistory] = useState(false)
@@ -200,6 +200,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [isEphemeral, setIsEphemeral] = useState(false)
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null)
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [voiceError, setVoiceError] = useState<string | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const modelDropdownRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -249,6 +255,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       setCanvasPanelOpen(true)
     }
   }, [createArtifact])
+
+  // True once the user sends a message this mount — the history restore below
+  // must not clobber an in-flight exchange (e.g. dashboard ask-dock auto-send
+  // lands while the history fetch is still pending).
+  const sentSinceMountRef = useRef(false)
 
   // Load conversation history on mount
   useEffect(() => {
@@ -313,6 +324,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         const messagesData = await messagesResponse.json()
 
         if (messagesData && messagesData.length > 0) {
+          if (sentSinceMountRef.current) {
+            // A message went out while this fetch was pending — the fetched
+            // history is stale (it predates the send) and replacing messages
+            // would erase the user's bubble. The stream sets conversation_id.
+            console.log('Skipping history restore: message sent while loading')
+            return
+          }
+
           // Convert Episode format to ChatMessage format
           const loadedMessages: ChatMessage[] = messagesData.map((ep: any) => ({
             role: ep.role,
@@ -568,7 +587,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const handleSendMessage = async (e: React.FormEvent, isQuickChat = false) => {
     e.preventDefault()
     if ((!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0) || loading) return
-    
+    sentSinceMountRef.current = true
+
     // If parent provided onSendMessage, use it
     if (onSendMessage) {
       return await onSendMessage(e, isQuickChat)
@@ -801,6 +821,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     setIsLoading(false)
                     break
 
+                  case 'ui_command':
+                    // Jarvis-style overlay request ("bring up my morning brief").
+                    // SaraOverlayHost (mounted in the app shell) listens for this.
+                    console.log('🪟 UI_COMMAND event received:', eventData.data)
+                    window.dispatchEvent(new CustomEvent('sara:ui-command', { detail: eventData.data }))
+                    break
+
                   case 'canvas_command':
                     console.log('📐 CANVAS_COMMAND event received:', eventData.data)
                     const canvasData = eventData.data as CanvasCommand
@@ -869,10 +896,129 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   }
 
-  // Handle text-to-speech for messages (disabled - use iOS app for voice)
+  // Auto-send for handoffs like the dashboard ask dock: the caller sets the
+  // message and bumps the token, and we fire the send once the prefilled
+  // message has landed — no second Enter required.
+  const lastAutoSendRef = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (!autoSendToken || autoSendToken === lastAutoSendRef.current) return
+    if (!message.trim() || loading) return
+    lastAutoSendRef.current = autoSendToken
+    handleSendMessage({ preventDefault: () => {} } as React.FormEvent)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSendToken, message, loading])
+
+  // Handle text-to-speech for messages via the shared voice-agent endpoint
+  // (same Kokoro backend the iOS app uses — see /api/voice-agent/speak).
   const handleSpeak = async (text: string, messageIndex: number) => {
-    // TTS disabled on web - use iOS app for voice features
-    console.log('[TTS] Web TTS disabled - use iOS app for voice')
+    // Toggle off if this message is already speaking
+    if (speakingMessageIndex === messageIndex) {
+      currentAudioRef.current?.pause()
+      currentAudioRef.current = null
+      setSpeakingMessageIndex(null)
+      return
+    }
+    // Switching messages mid-speech: stop the previous one first
+    currentAudioRef.current?.pause()
+    currentAudioRef.current = null
+
+    setVoiceError(null)
+    setSpeakingMessageIndex(messageIndex)
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/voice-agent/speak`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, response_format: 'mp3' }),
+      })
+      if (!res.ok) throw new Error(`TTS service unavailable (${res.status})`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      currentAudioRef.current = audio
+      audio.onended = () => {
+        setSpeakingMessageIndex((cur) => (cur === messageIndex ? null : cur))
+        URL.revokeObjectURL(url)
+      }
+      audio.onerror = () => {
+        setVoiceError("Couldn't play that back")
+        setSpeakingMessageIndex((cur) => (cur === messageIndex ? null : cur))
+        URL.revokeObjectURL(url)
+      }
+      await audio.play()
+    } catch (error) {
+      console.error('[TTS] Error:', error)
+      setVoiceError("Couldn't hear that — voice service unavailable")
+      setSpeakingMessageIndex((cur) => (cur === messageIndex ? null : cur))
+    }
+  }
+
+  // Mic recording -> transcribe -> populate the input (does not auto-send, so
+  // the user can review/edit exactly like a typed message).
+  const startRecording = async () => {
+    setVoiceError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : ''
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+      audioChunksRef.current = []
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+      }
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop())
+        void transcribeRecording()
+      }
+      mediaRecorderRef.current = recorder
+      recorder.start()
+      setIsRecording(true)
+    } catch (error) {
+      console.error('[Voice] Mic access failed:', error)
+      setVoiceError("Couldn't access the microphone")
+      setIsRecording(false)
+    }
+  }
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop()
+    setIsRecording(false)
+  }
+
+  const transcribeRecording = async () => {
+    if (audioChunksRef.current.length === 0) return
+    setIsTranscribing(true)
+    setVoiceError(null)
+    try {
+      const blob = new Blob(audioChunksRef.current, {
+        type: mediaRecorderRef.current?.mimeType || 'audio/webm',
+      })
+      const formData = new FormData()
+      formData.append('audio', blob, 'recording.webm')
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/voice-agent/transcribe`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      })
+      if (!res.ok) throw new Error(`Transcription service unavailable (${res.status})`)
+      const data = await res.json()
+      const transcription = (data.transcription || '').trim()
+      if (!transcription) {
+        setVoiceError("Couldn't hear that — try again")
+        return
+      }
+      setMessage((prev) => (prev.trim() ? `${prev.trim()} ${transcription}` : transcription))
+    } catch (error) {
+      console.error('[Voice] Transcription error:', error)
+      setVoiceError("Couldn't hear that — voice service unavailable")
+    } finally {
+      setIsTranscribing(false)
+    }
   }
 
   // Load a past conversation into the chat (from the history drawer).
@@ -957,7 +1103,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative flex h-full bg-card border border-card rounded-md overflow-hidden ${isResizing ? 'select-none' : ''}`}
+      className={`relative flex h-full overflow-hidden ${isResizing ? 'select-none' : ''}`}
     >
       <ConversationHistoryDrawer
         open={showHistory}
@@ -973,24 +1119,24 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         style={{ width: canvasPanelOpen ? `${100 - canvasWidth}%` : '100%' }}
       >
         {/* Header */}
-        <div className={`px-3 py-2 border-b border-gray-700 flex items-center justify-between ${isEphemeral ? 'bg-purple-900/20' : 'bg-gray-800'}`}>
-          <div className="flex items-center gap-2.5">
-            <h2 className="text-sm font-semibold">Chat with Sara</h2>
+        <div className="flex items-center justify-between gap-3 border-b border-white/8 px-4 py-2.5">
+          <div className="flex min-w-0 items-baseline gap-3">
+            <h2 className="font-display text-xl font-semibold text-white">Chat with Sara</h2>
 
             {/* Model Selector Dropdown */}
             <div className="relative" ref={modelDropdownRef}>
               <button
                 onClick={() => setShowModelDropdown(!showModelDropdown)}
-                className="flex items-center gap-1.5 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm text-white transition-colors"
+                className="flex items-center gap-1 text-xs text-slate-500 transition-colors hover:text-slate-300"
               >
-                <span className="max-w-[120px] truncate">
+                <span className="max-w-[140px] truncate">
                   {availableModels?.models?.find(m => m.id === selectedModel)?.name || selectedModel}
                 </span>
-                <ChevronDown size={14} className={`text-gray-400 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
+                <ChevronDown size={12} className={`transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
               </button>
 
               {showModelDropdown && availableModels?.models && (
-                <div className="absolute top-full left-0 mt-1 w-48 bg-gray-700 border border-gray-600 rounded-lg shadow-xl z-50 py-1 max-h-64 overflow-y-auto">
+                <div className="absolute top-full left-0 z-50 mt-1.5 max-h-64 w-52 overflow-y-auto rounded-xl border border-white/10 bg-[#0c1626] py-1 shadow-[0_8px_40px_rgba(2,8,23,0.6)]">
                   {/* Group models by provider */}
                   {Object.entries(
                     availableModels.models.reduce((acc, model) => {
@@ -1000,7 +1146,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     }, {} as Record<string, ChatModel[]>)
                   ).map(([provider, models]) => (
                     <div key={provider}>
-                      <div className="px-3 py-1 text-xs text-gray-400 uppercase tracking-wider">
+                      <div className="px-3 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                         {provider === 'anthropic'
                           ? 'Claude'
                           : provider === 'google'
@@ -1018,8 +1164,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                             setSelectedModel(model.id)
                             setShowModelDropdown(false)
                           }}
-                          className={`w-full px-3 py-1.5 text-left text-sm hover:bg-gray-600 transition-colors ${
-                            model.id === selectedModel ? 'text-teal-400 bg-gray-600' : 'text-white'
+                          className={`w-full px-3 py-1.5 text-left text-sm transition-colors hover:bg-white/[0.06] ${
+                            model.id === selectedModel ? 'text-teal-300' : 'text-slate-300'
                           }`}
                         >
                           {model.name}
@@ -1030,13 +1176,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 </div>
               )}
             </div>
+
+            {isEphemeral && (
+              <span className="text-xs text-purple-300/80">ephemeral — not saved</span>
+            )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             {/* Conversation history */}
             <button
               onClick={() => setShowHistory(true)}
-              className="p-1.5 rounded transition-colors text-gray-400 hover:text-teal-400 hover:bg-gray-700"
+              className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-teal-300"
               title="Conversation history"
             >
               <History size={18} />
@@ -1045,10 +1195,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             {/* Ghost/Ephemeral Toggle */}
             <button
               onClick={() => setIsEphemeral(!isEphemeral)}
-              className={`p-1.5 rounded transition-colors ${
+              className={`rounded-lg p-2 transition-colors ${
                 isEphemeral
-                  ? 'text-purple-400 bg-purple-500/20 hover:bg-purple-500/30'
-                  : 'text-gray-400 hover:text-purple-400 hover:bg-gray-700'
+                  ? 'bg-purple-400/10 text-purple-300 hover:bg-purple-400/20'
+                  : 'text-slate-500 hover:bg-white/[0.06] hover:text-purple-300'
               }`}
               title={isEphemeral ? "Ephemeral mode ON - chat won't be saved" : "Ephemeral mode OFF - chat will be saved"}
             >
@@ -1057,49 +1207,47 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
             <button
               onClick={handleNewChat}
-              className="text-gray-400 hover:text-white transition-colors px-3 py-1 rounded-md bg-gray-700 hover:bg-gray-600 text-sm"
+              className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-teal-300"
               title="Start a new conversation"
             >
-              + New Chat
+              <Plus size={18} />
             </button>
           </div>
         </div>
 
         {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        <div className="flex-1 overflow-y-auto px-4 py-6">
+          <div className="mx-auto w-full max-w-[75ch] space-y-6">
           {!hasUserMessages && (
-            <div className="bg-gray-800/60 border border-gray-700 rounded-md p-3">
-              <div className="mb-2">
-                <h3 className="text-xs font-semibold text-gray-200 uppercase tracking-wider">Quick Actions</h3>
-                <p className="text-[11px] text-gray-500 mt-0.5">Context-aware shortcuts based on your current queue.</p>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div>
+              <p className="text-sm text-slate-500">New conversation.</p>
+              <div className="mt-4 space-y-1">
                 <button
                   onClick={() => handleQuickAction('inbox_attention')}
-                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                  className="flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-white/[0.04]"
                 >
-                  <p className="text-sm text-white">Review Attention Inbox</p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {quickActionContext?.attentionUnreadCount || 0} unread attention item(s)
-                  </p>
+                  <span className="text-[15px] text-slate-200">Review attention inbox</span>
+                  <span className="flex-shrink-0 text-xs text-slate-500">
+                    {quickActionContext?.attentionUnreadCount || 0} unread
+                  </span>
                 </button>
                 <button
                   onClick={() => handleQuickAction('missions')}
-                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                  className="flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-white/[0.04]"
                 >
-                  <p className="text-sm text-white">Open Missions</p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {quickActionContext?.missionAwaitingCount || 0} awaiting decisions, {quickActionContext?.runningMissionCount || 0} running
-                  </p>
+                  <span className="text-[15px] text-slate-200">Open missions</span>
+                  <span className="flex-shrink-0 text-xs text-slate-500">
+                    {quickActionContext?.missionAwaitingCount || 0} awaiting · {quickActionContext?.runningMissionCount || 0} running
+                  </span>
                 </button>
                 <button
                   onClick={() => handleQuickAction('standing_orders')}
-                  className="text-left rounded-lg border border-gray-700 bg-gray-900/70 hover:border-teal-500/50 px-3 py-2"
+                  className="flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-white/[0.04]"
                 >
-                  <p className="text-sm text-white">Summarize Standing Orders</p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {quickActionContext?.standingOrdersCount || 0} active standing order(s)
-                  </p>
+                  <span className="text-[15px] text-slate-200">Summarize standing orders</span>
+                  <span className="flex-shrink-0 text-xs text-slate-500">
+                    {quickActionContext?.standingOrdersCount || 0} active
+                  </span>
                 </button>
               </div>
             </div>
@@ -1109,22 +1257,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             const messageText = getMessageText(msg.content)
 
             return (
-            <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'order-2' : 'order-1'}`}>
-                {msg.role === 'assistant' && (
-                  <div className="flex items-center mb-1.5">
-                    <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-[11px] font-medium mr-2">
-                      S
-                    </div>
-                    <span className="text-xs text-gray-400">Sara</span>
-                  </div>
-                )}
-
-                <div className={`rounded-lg px-3 py-2 ${
-                  msg.role === 'user' 
-                    ? 'bg-teal-600 text-white ml-auto' 
-                    : 'bg-gray-700 text-gray-100'
-                }`}>
+            <div key={index} className={`group flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={msg.role === 'user' ? 'max-w-[85%] md:max-w-[75%]' : 'min-w-0 w-full'}>
+                <div className={
+                  msg.role === 'user'
+                    ? 'rounded-2xl bg-teal-400/10 px-4 py-2.5 text-[15px] leading-relaxed text-slate-100'
+                    : 'text-[15px] leading-relaxed text-slate-300'
+                }>
                   {msg.role === 'assistant' ? (() => {
                     // Parse artifacts from content
                     const { cleanContent, artifacts: parsedArtifacts } = parseArtifacts(messageText)
@@ -1153,33 +1292,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                               // Handle regular code blocks
                               return !inline && match ? (
-                                <pre className="rounded-md mt-2 bg-gray-900 border border-gray-600 p-4 overflow-x-auto">
-                                  <code className={`${className} text-gray-100 text-sm`} {...rest}>
+                                <pre className="mt-2 mb-3 overflow-x-auto rounded-xl border border-white/10 bg-[#0a1322] p-4">
+                                  <code className={`${className} text-[13px] text-slate-200`} {...rest}>
                                     {codeContent}
                                   </code>
                                 </pre>
                               ) : (
-                                <code className="bg-gray-600 px-1 py-0.5 rounded text-sm" {...rest}>
+                                <code className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[13px] text-slate-200" {...rest}>
                                   {children}
                                 </code>
                               )
                             },
-                            p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                            ul: ({children}) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
-                            ol: ({children}) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
+                            p: ({children}) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+                            ul: ({children}) => <ul className="my-2 list-disc space-y-1 pl-5 marker:text-slate-600">{children}</ul>,
+                            ol: ({children}) => <ol className="my-2 list-decimal space-y-1 pl-5 marker:text-slate-600">{children}</ol>,
+                            li: ({children}) => <li className="my-1 leading-relaxed">{children}</li>,
+                            strong: ({children}) => <strong className="font-medium text-slate-100">{children}</strong>,
                             blockquote: ({children}) => (
-                              <blockquote className="border-l-4 border-gray-500 pl-4 italic my-2">
+                              <blockquote className="my-2 border-l-2 border-white/15 pl-4 text-slate-400">
                                 {children}
                               </blockquote>
                             ),
-                            h1: ({children}) => <h1 className="text-xl font-bold mb-2">{children}</h1>,
-                            h2: ({children}) => <h2 className="text-lg font-bold mb-2">{children}</h2>,
-                            h3: ({children}) => <h3 className="text-md font-bold mb-2">{children}</h3>,
-                            hr: () => <hr className="border-gray-600 my-4" />,
+                            h1: ({children}) => <h1 className="mb-1.5 mt-4 text-base font-semibold text-slate-100 first:mt-0">{children}</h1>,
+                            h2: ({children}) => <h2 className="mb-1.5 mt-4 text-[15px] font-semibold text-slate-100 first:mt-0">{children}</h2>,
+                            h3: ({children}) => <h3 className="mb-1 mt-3 text-[13px] font-semibold uppercase tracking-wide text-slate-400 first:mt-0">{children}</h3>,
+                            hr: () => <hr className="my-4 border-white/8" />,
                             a: ({href, children}) => {
                               if (href && href.startsWith('#')) {
                                 return (
-                                  <span className="inline-block px-1.5 py-0.5 text-xs bg-teal-600/20 border border-teal-500/30 rounded text-teal-400 hover:bg-teal-600/30 cursor-pointer transition-colors">
+                                  <span className="cursor-pointer text-xs text-teal-300 transition-colors hover:text-teal-200">
                                     {children}
                                   </span>
                                 )
@@ -1212,37 +1353,42 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                   <a
                                     href={href}
                                     onClick={handleApiDownload}
-                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-600/20 border border-blue-500/30 rounded text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors no-underline"
+                                    className="inline-flex max-w-full cursor-pointer items-center gap-1 text-teal-300 no-underline transition-colors hover:text-teal-200"
                                     title="Click to download"
                                   >
-                                    <span className="material-icons text-xs" style={{fontSize: '14px'}}>attach_file</span>
-                                    {children}
+                                    <span className="material-icons flex-shrink-0 text-xs" style={{fontSize: '14px'}}>attach_file</span>
+                                    <span className="truncate">{children}</span>
                                   </a>
                                 )
                               }
                               return (
-                                <a href={href} className="text-teal-400 hover:text-teal-300 underline" target="_blank" rel="noopener noreferrer">
+                                <a
+                                  href={href}
+                                  className="inline-block max-w-full truncate align-bottom text-teal-300 underline decoration-teal-300/30 transition-colors hover:text-teal-200"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
                                   {children}
                                 </a>
                               )
                             },
                             table: ({children}) => (
-                              <div className="overflow-x-auto my-4">
-                                <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
+                              <div className="my-4 overflow-x-auto">
+                                <table className="w-full border-collapse text-sm">
                                   {children}
                                 </table>
                               </div>
                             ),
-                            thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
+                            thead: ({children}) => <thead>{children}</thead>,
                             tbody: ({children}) => <tbody>{children}</tbody>,
-                            tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
+                            tr: ({children}) => <tr className="border-b border-white/8 transition-colors hover:bg-white/[0.03]">{children}</tr>,
                             th: ({children}) => (
-                              <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
+                              <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
                                 {children}
                               </th>
                             ),
                             td: ({children}) => (
-                              <td className="border border-gray-600 px-3 py-2 text-gray-300">
+                              <td className="px-3 py-2 text-slate-300">
                                 {children}
                               </td>
                             ),
@@ -1266,30 +1412,30 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       </>
                     )
                   })() : (
-                    <p>{messageText}</p>
+                    <p className="whitespace-pre-wrap break-words">{messageText}</p>
                   )}
-                  
+
                   {/* Display attached documents for user messages */}
                   {msg.role === 'user' && msg.attachedDocuments && msg.attachedDocuments.length > 0 && (
-                    <div className="mt-3 space-y-2">
+                    <div className="mt-2 space-y-1">
                       {msg.attachedDocuments.map((doc) => (
-                        <div key={doc.id} className="flex items-center bg-teal-900/20 border border-teal-700/30 rounded-lg px-3 py-2 text-sm">
-                          <span className="material-icons text-teal-400 mr-2 text-sm">description</span>
-                          <span className="text-teal-200">
+                        <div key={doc.id} className="flex items-center gap-1.5 text-xs text-teal-200/80">
+                          <span className="material-icons text-sm">description</span>
+                          <span className="truncate">
                             {doc.title || doc.original_filename}
                           </span>
                         </div>
                       ))}
                     </div>
                   )}
-                  
+
                   {msg.role === 'assistant' && Array.isArray((msg as any).citations) && (msg as any).citations.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      <div className="text-[11px] text-gray-300">Sources</div>
-                      <ul className="space-y-1">
+                    <div className="mt-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Sources</div>
+                      <ul className="mt-1 space-y-0.5">
                         {(msg as any).citations.slice(0,5).map((c: any, i: number) => (
-                          <li key={i} className="text-[11px] text-gray-400 truncate">
-                            <a href={typeof c === 'string' ? c : c.url} target="_blank" rel="noreferrer" className="hover:text-gray-200">
+                          <li key={i} className="truncate text-xs text-slate-500">
+                            <a href={typeof c === 'string' ? c : c.url} target="_blank" rel="noreferrer" className="transition-colors hover:text-teal-300">
                               {typeof c === 'string' ? c : (c.title || c.url)}
                             </a>
                           </li>
@@ -1299,20 +1445,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   )}
                 </div>
 
-                <div className={`flex items-center justify-between text-xs text-gray-500 mt-1 ${
+                <div className={`mt-1.5 flex items-center gap-2 text-xs text-slate-600 ${
                   msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'
                 }`}>
-                  <span>{msg.timestamp.toLocaleTimeString()}</span>
+                  <span>{msg.timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
                     {/* TTS button for assistant messages */}
                     {msg.role === 'assistant' && (
                       <button
                         onClick={() => handleSpeak(messageText, index)}
-                        className={`p-1 rounded-md transition-colors ${
+                        className={`rounded-md p-1 transition-colors ${
                           speakingMessageIndex === index
-                            ? 'bg-teal-600 text-white'
-                            : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                            ? 'text-teal-300'
+                            : 'text-slate-600 hover:text-slate-300'
                         }`}
                         title={speakingMessageIndex === index ? 'Stop speaking' : 'Read aloud'}
                       >
@@ -1344,49 +1490,37 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           
           {(isLoading || isUsingTools) && (
             <div className="flex justify-start">
-              <div className="max-w-[80%]">
-                <div className="flex items-center mb-1.5">
-                  <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-[11px] font-medium mr-2">
-                    S
-                  </div>
-                  <span className="text-xs text-gray-400">Sara</span>
+              {isUsingTools && toolActivity ? (
+                <span className="text-sm text-slate-500">{toolActivity}</span>
+              ) : (
+                <div className="flex items-center gap-1 py-1">
+                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500"></div>
+                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500" style={{animationDelay: '0.1s'}}></div>
+                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500" style={{animationDelay: '0.2s'}}></div>
                 </div>
-                <div className="bg-gray-700 rounded-lg px-3 py-2">
-                  {isUsingTools && toolActivity ? (
-                    <div className="text-gray-100 text-sm">
-                      {toolActivity}
-                    </div>
-                  ) : (
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                    </div>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           )}
-          
+
           <div ref={chatMessagesEndRef} />
+          </div>
         </div>
 
         {/* Input Area */}
-        <div className="border-t border-gray-700 bg-gray-800">
-          {/* Uploaded Documents Preview */}
-          {uploadedDocuments.length > 0 && (
-            <div className="px-3 py-2 border-b border-gray-700">
-              <div className="text-[11px] text-gray-400 mb-1.5">Attached Documents</div>
-              <div className="flex flex-wrap gap-2">
+        <div className="border-t border-white/8 px-4">
+          <div className="mx-auto w-full max-w-[75ch]">
+            {/* Uploaded Documents Preview */}
+            {uploadedDocuments.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-3">
                 {uploadedDocuments.map((doc) => (
-                  <div key={doc.id} className="flex items-center bg-gray-600 rounded-lg px-3 py-1.5 text-sm">
-                    <span className="material-icons text-teal-400 mr-2 text-sm">description</span>
-                    <span className="text-gray-200 truncate max-w-48">
+                  <div key={doc.id} className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-slate-300">
+                    <span className="material-icons text-sm text-teal-300/80">description</span>
+                    <span className="max-w-48 truncate">
                       {doc.title || doc.original_filename}
                     </span>
                     <button
                       onClick={() => removeUploadedDocument(doc.id)}
-                      className="ml-2 text-gray-400 hover:text-red-400 transition-colors"
+                      className="text-slate-500 transition-colors hover:text-rose-300"
                       type="button"
                     >
                       <span className="material-icons text-xs">close</span>
@@ -1394,24 +1528,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Attached Images Preview */}
-          {attachedImages.length > 0 && (
-            <div className="px-3 py-2 border-b border-gray-700">
-              <div className="text-[11px] text-gray-400 mb-1.5">Attached Images</div>
-              <div className="flex flex-wrap gap-2">
+            {/* Attached Images Preview */}
+            {attachedImages.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-3">
                 {attachedImages.map((img, idx) => (
                   <div key={idx} className="relative group">
                     <img
                       src={img.preview}
                       alt={`Attached ${idx + 1}`}
-                      className="h-16 w-16 object-cover rounded-lg border border-gray-600"
+                      className="h-16 w-16 rounded-lg border border-white/10 object-cover"
                     />
                     <button
                       onClick={() => removeAttachedImage(idx)}
-                      className="absolute -top-1 -right-1 bg-red-500 hover:bg-red-600 rounded-full w-5 h-5 flex items-center justify-center text-white text-xs transition-colors"
+                      className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-white/10 bg-[#0c1626] text-xs text-slate-300 transition-colors hover:text-rose-300"
                       type="button"
                     >
                       <span className="material-icons text-xs">close</span>
@@ -1419,128 +1550,152 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
 
-          <form onSubmit={handleSendMessage} className="p-3">
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder={APP_CONFIG.ui.chatPlaceholder}
-                className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white placeholder-gray-400"
-                disabled={isLoading}
-              />
-              
-              {/* Hidden file inputs */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                onChange={handleDocumentUpload}
-                accept=".pdf,.doc,.docx,.txt,.md"
-                className="hidden"
-              />
-              <input
-                ref={imageInputRef}
-                type="file"
-                onChange={handleImageSelect}
-                accept="image/*"
-                className="hidden"
-              />
-              <input
-                ref={cameraInputRef}
-                type="file"
-                onChange={handleCameraCapture}
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-              />
+            <form onSubmit={handleSendMessage} className="py-3">
+              <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-white/[0.04] px-2 transition-colors focus-within:border-teal-300/30">
+                <input
+                  type="text"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder={APP_CONFIG.ui.chatPlaceholder}
+                  className="min-w-0 flex-1 bg-transparent px-2 py-2.5 text-[15px] text-slate-100 placeholder-slate-500 outline-none"
+                  disabled={isLoading}
+                />
 
-              {/* Image menu button */}
-              <div className="relative" ref={imageMenuRef}>
+                {/* Hidden file inputs */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  onChange={handleDocumentUpload}
+                  accept=".pdf,.doc,.docx,.txt,.md"
+                  className="hidden"
+                />
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  onChange={handleImageSelect}
+                  accept="image/*"
+                  className="hidden"
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  onChange={handleCameraCapture}
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                />
+
+                {/* Image menu button */}
+                <div className="relative" ref={imageMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowImageMenu(!showImageMenu)}
+                    disabled={isLoading}
+                    className="flex items-center rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-slate-200 disabled:opacity-40 tap-target"
+                    title="Add image"
+                  >
+                    <span className="material-icons text-lg">add_photo_alternate</span>
+                  </button>
+                  {showImageMenu && (
+                    <div className="absolute bottom-full left-0 z-50 mb-2 overflow-hidden rounded-xl border border-white/10 bg-[#0c1626] py-1 shadow-[0_8px_40px_rgba(2,8,23,0.6)]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          imageInputRef.current?.click()
+                          setShowImageMenu(false)
+                        }}
+                        className="flex w-full items-center gap-2 whitespace-nowrap px-4 py-2 text-left text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
+                      >
+                        <span className="material-icons text-sm">photo_library</span>
+                        Choose from gallery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          cameraInputRef.current?.click()
+                          setShowImageMenu(false)
+                        }}
+                        className="flex w-full items-center gap-2 whitespace-nowrap px-4 py-2 text-left text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
+                      >
+                        <span className="material-icons text-sm">photo_camera</span>
+                        Take a photo
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Document upload button */}
                 <button
                   type="button"
-                  onClick={() => setShowImageMenu(!showImageMenu)}
-                  disabled={isLoading}
-                  className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
-                  title="Add image"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="flex items-center rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-slate-200 disabled:opacity-40 tap-target"
+                  title="Upload document"
                 >
-                  <span className="material-icons text-lg">add_photo_alternate</span>
+                  {isUploading ? (
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent"></div>
+                  ) : (
+                    <span className="material-icons text-lg">attach_file</span>
+                  )}
                 </button>
-                {showImageMenu && (
-                  <div className="absolute bottom-full left-0 mb-2 bg-gray-700 rounded-lg shadow-lg border border-gray-600 overflow-hidden z-50">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        imageInputRef.current?.click()
-                        setShowImageMenu(false)
-                      }}
-                      className="w-full px-4 py-2 text-left text-white hover:bg-gray-600 flex items-center gap-2 whitespace-nowrap"
-                    >
-                      <span className="material-icons text-sm">photo_library</span>
-                      Choose from gallery
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        cameraInputRef.current?.click()
-                        setShowImageMenu(false)
-                      }}
-                      className="w-full px-4 py-2 text-left text-white hover:bg-gray-600 flex items-center gap-2 whitespace-nowrap"
-                    >
-                      <span className="material-icons text-sm">photo_camera</span>
-                      Take a photo
-                    </button>
-                  </div>
-                )}
+
+                {/* Open Note in Canvas button */}
+                <button
+                  type="button"
+                  onClick={() => setShowNoteSelector(true)}
+                  disabled={isLoading}
+                  className="flex items-center rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-slate-200 disabled:opacity-40 tap-target"
+                  title="Open note in canvas"
+                >
+                  <StickyNote size={18} />
+                </button>
+
+                {/* Mic button — record, transcribe via /api/voice-agent/transcribe,
+                    populate the input for review before sending. */}
+                <button
+                  type="button"
+                  onClick={isRecording ? stopRecording : startRecording}
+                  disabled={isLoading || isTranscribing}
+                  className={`flex items-center rounded-lg p-2 transition-colors disabled:opacity-40 tap-target ${
+                    isRecording
+                      ? 'animate-pulse text-rose-400 hover:text-rose-300'
+                      : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
+                  }`}
+                  title={isRecording ? 'Stop recording' : 'Speak your message'}
+                >
+                  {isTranscribing ? (
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent"></div>
+                  ) : (
+                    <span className="material-icons text-lg">{isRecording ? 'stop_circle' : 'mic'}</span>
+                  )}
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0)}
+                  className="my-1 ml-1 flex items-center rounded-xl bg-teal-400/90 p-2 text-slate-950 transition-colors hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-white/[0.06] disabled:text-slate-600 tap-target"
+                  aria-label="Send"
+                >
+                  <span className="material-icons text-lg">arrow_upward</span>
+                </button>
               </div>
-
-              {/* Document upload button */}
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
-                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
-                title="Upload document"
-              >
-                {isUploading ? (
-                  <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <span className="material-icons text-lg">attach_file</span>
-                )}
-              </button>
-
-              {/* Open Note in Canvas button */}
-              <button
-                type="button"
-                onClick={() => setShowNoteSelector(true)}
-                disabled={isLoading}
-                className="bg-gray-600 hover:bg-gray-700 disabled:bg-gray-800 text-white px-2.5 rounded-lg transition-colors flex items-center tap-target"
-                title="Open note in canvas"
-              >
-                <StickyNote size={18} />
-              </button>
-
-              <button
-                type="submit"
-                disabled={isLoading || (!message.trim() && uploadedDocuments.length === 0 && attachedImages.length === 0)}
-                className="bg-teal-600 hover:bg-teal-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-3 md:px-4 rounded-lg transition-colors flex items-center tap-target"
-              >
-                <span className="material-icons text-lg">send</span>
-              </button>
-            </div>
-          </form>
+              {voiceError && (
+                <div className="mt-1.5 px-2 text-xs text-rose-300">{voiceError}</div>
+              )}
+            </form>
+          </div>
         </div>
       </div>
 
       {/* Resizable Divider */}
       {canvasPanelOpen && (
         <div
-          className="w-1 bg-gray-700 hover:bg-teal-500 cursor-col-resize flex-shrink-0 transition-colors group relative"
+          className="group relative w-1 flex-shrink-0 cursor-col-resize bg-white/10 transition-colors hover:bg-teal-400/60"
           onMouseDown={handleResizeStart}
         >
-          <div className="absolute inset-y-0 -left-1 -right-1 group-hover:bg-teal-500/20" />
+          <div className="absolute inset-y-0 -left-1 -right-1 group-hover:bg-teal-400/20" />
         </div>
       )}
 

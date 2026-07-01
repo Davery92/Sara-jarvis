@@ -11,7 +11,7 @@
     --assistant-surface-soft: rgba(17, 29, 47, 0.66);
     --assistant-border: rgba(130, 151, 182, 0.16);
     --assistant-border-strong: rgba(94, 234, 212, 0.24);
-    --assistant-text-soft: #8ea5c0;
+    --assistant-text-soft: #9db3cd;
     --assistant-accent: #5eead4;
     --assistant-accent-strong: #14b8a6;
     --assistant-highlight: #7dd3fc;
@@ -74,7 +74,7 @@
   .assistant-kicker {
     color: var(--assistant-text-soft);
     font-size: 0.72rem;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.14em;
     line-height: 1;
     text-transform: uppercase;
     font-weight: 600;

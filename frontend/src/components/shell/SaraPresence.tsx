@@ -256,12 +256,15 @@ export default function SaraPresence() {
           <span className={`relative inline-flex h-2 w-2 rounded-full ${active.dot}`} />
         </span>
         <span className="font-medium text-slate-200">{name}</span>
-        <span className="text-slate-400">{chipLabel}</span>
+        <span className="max-w-[18ch] truncate text-slate-400">{chipLabel}</span>
         <span aria-hidden>{emo.emoji}</span>
       </button>
 
       {open && (
-        <div className="absolute right-0 z-50 mt-2 w-80 rounded-xl border border-white/10 bg-[#0e1116] p-3 text-left shadow-2xl shadow-black/40">
+        <div className="absolute right-0 z-50 mt-2 w-80 max-w-none rounded-xl border border-white/10 bg-[#0e1116] p-3 text-left shadow-2xl shadow-black/40">
+          {/* max-w-none: the global `max-width:100%` reset otherwise caps this
+              popover to 100% of its narrow (~124px) relative parent, collapsing
+              w-80 and wrapping all content into a tall, cramped column. */}
           {/* Header */}
           <div className="flex items-center gap-2 border-b border-white/8 pb-2">
             <span className={`h-2.5 w-2.5 rounded-full ${active.dot} ${active.pulse ? 'animate-pulse' : ''}`} />
