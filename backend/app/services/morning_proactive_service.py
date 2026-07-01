@@ -236,7 +236,8 @@ class MorningProactiveService:
                     "model": settings.bg_llm_primary_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": 200
+                    "max_tokens": 200,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"}
             )
@@ -295,8 +296,16 @@ class MorningProactiveService:
                 db=db
             )
 
-            if result.get("sent"):
-                logger.info(f"Sent proactive notification: {message['title']}")
+            # A normal/low-priority suggestion routed to the attention inbox
+            # (result["sent"] is False but attention_item_id is set) is still a
+            # real delivery David will see — count it so record_suggestion actually
+            # feeds the accept/reject learner. Only a true non-delivery (banned,
+            # deduped, no push tokens, tuner-suppressed) should return False.
+            if result.get("sent") or result.get("attention_item_id"):
+                logger.info(
+                    f"Delivered proactive suggestion: {message['title']} "
+                    f"(push={result.get('sent')}, attention_item_id={result.get('attention_item_id')})"
+                )
                 return True
             logger.info(f"Proactive notification not sent: reason={result.get('reason')} topic={topic}")
             return False

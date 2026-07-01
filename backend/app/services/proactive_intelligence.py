@@ -660,10 +660,14 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
             # the old caller hashed the insight title and the hash drifted
             # every time a new matching email arrived, which broke dedup
             # in the attention escalator.
+            # Window slightly over the hourly task cadence — NOT 24h. With a
+            # day-long window, yesterday's mail kept re-qualifying as "recent"
+            # and David got "Email from X may relate..." pushes for emails he
+            # had already read the day before.
             emails = await db.execute(text("""
                 SELECT id, sender_name, subject, importance_score
                 FROM email
-                WHERE user_id = :uid AND received_at > NOW() - INTERVAL '24 hours'
+                WHERE user_id = :uid AND received_at > NOW() - INTERVAL '3 hours'
                 ORDER BY received_at DESC LIMIT 20
             """), {"uid": user_id})
             email_rows = emails.fetchall()
