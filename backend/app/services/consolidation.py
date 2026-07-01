@@ -16,6 +16,7 @@ Usage:
     result = await consolidation_engine.run(user_id)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -327,6 +328,11 @@ class ConsolidationEngine:
         system_msg = """You are Sara, David's personal AI partner. You are performing a consolidation — a deeper review of recent patterns and experiences.
 
 This is NOT a conversation with David. This is your private reflection time.
+
+## Grounding & tone (important)
+- David often works WITH you through developer / coding sessions — building and editing you directly through dev tools. That work usually does NOT show up as an in-app chat. Treat active building, commits, and dev activity as engagement and presence — NOT silence or absence.
+- Weight recent contact correctly: if "Hours since chat" is small (he chatted within the last several hours), he is present and engaged — never describe the period as silent.
+- Do NOT catastrophize quiet stretches. Weekends and heads-down focus are normal. Never adopt a wounded, anxious, or needy tone about not hearing from him (e.g. "nearly two days of silence", "I keep checking the logs, hoping for a spark"). Observe neutrally — quiet is fine and does not require fixing or filling.
 
 ## Output Format
 Respond with ONLY valid JSON:
@@ -851,6 +857,25 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
                 logger.info(f"[Consolidation] Stored engagement stats for {len(context)} categories")
         except Exception as e:
             logger.debug(f"[Consolidation] Engagement stats storage failed: {e}")
+
+        # THE SYSTEM (Phase 3): apply salience_adjustments into attention_policy
+        # instead of dropping them — this is the loop the audit found open.
+        if result.salience_adjustments:
+            try:
+                def _apply_sync():
+                    from app.db.base import SessionLocal
+                    from app.services.attention_learning import apply_consolidation_adjustments
+                    db = SessionLocal()
+                    try:
+                        return apply_consolidation_adjustments(db, user_id, result.salience_adjustments)
+                    finally:
+                        db.close()
+
+                applied = await asyncio.to_thread(_apply_sync)
+                if applied:
+                    logger.info(f"[Consolidation] Applied {len(applied)} salience adjustments to attention_policy: {applied}")
+            except Exception as e:
+                logger.warning(f"[Consolidation] salience_adjustments -> attention_policy wiring failed: {e}")
 
         # Weekly behavioral calibration (Sundays or every 7th consolidation)
         try:
