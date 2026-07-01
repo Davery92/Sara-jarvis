@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { fitnessService } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 import { getLocalDateString } from '../../utils/dateUtils';
 
 interface Props {
@@ -272,17 +272,17 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: fontSizes.lg,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   cancelButton: {
     fontSize: fontSizes.md,
-    color: colors.error,
+    color: colors.textSecondary,
   },
   saveButton: {
     fontSize: fontSizes.md,
     color: colors.primary,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
   },
   content: {
     flex: 1,
@@ -291,11 +291,16 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
   },
   section: {
-    marginBottom: spacing.xl,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginBottom: spacing.md,
   },
   sectionTitle: {
-    fontSize: fontSizes.lg,
-    fontWeight: '600',
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.semibold,
     color: colors.text,
     marginBottom: spacing.md,
   },
@@ -303,14 +308,14 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   label: {
-    fontSize: fontSizes.md,
-    fontWeight: '500',
-    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.medium,
+    color: colors.textSecondary,
     marginBottom: spacing.sm,
   },
   input: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
@@ -328,24 +333,24 @@ const styles = StyleSheet.create({
   sorenessButton: {
     width: 45,
     height: 45,
-    borderRadius: borderRadius.md,
-    backgroundColor: colors.surface,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.surfaceLight,
     borderWidth: 1,
     borderColor: colors.border,
     justifyContent: 'center',
     alignItems: 'center',
   },
   sorenessButtonActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
+    backgroundColor: colors.assistant.actionSoft,
+    borderColor: colors.assistant.borderStrong,
   },
   sorenessText: {
     fontSize: fontSizes.md,
-    color: colors.text,
-    fontWeight: '600',
+    color: colors.textSecondary,
+    fontWeight: fontWeights.semibold,
   },
   sorenessTextActive: {
-    color: '#fff',
+    color: colors.accent,
   },
   weightRow: {
     flexDirection: 'row',
@@ -356,7 +361,7 @@ const styles = StyleSheet.create({
   },
   unitSelector: {
     flexDirection: 'row',
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
@@ -364,20 +369,20 @@ const styles = StyleSheet.create({
   unitButton: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceLight,
     justifyContent: 'center',
     alignItems: 'center',
     minWidth: 50,
   },
   unitButtonActive: {
-    backgroundColor: colors.primary,
+    backgroundColor: colors.assistant.actionSoft,
   },
   unitText: {
     fontSize: fontSizes.md,
-    color: colors.text,
-    fontWeight: '600',
+    color: colors.textSecondary,
+    fontWeight: fontWeights.semibold,
   },
   unitTextActive: {
-    color: '#fff',
+    color: colors.accent,
   },
 });

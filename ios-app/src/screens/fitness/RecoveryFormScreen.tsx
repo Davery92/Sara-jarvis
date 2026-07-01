@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { fitnessService, RecoveryLog } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 import { getLocalDateString } from '../../utils/dateUtils';
 
 interface RecoveryFormScreenProps {
@@ -251,12 +251,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.surface,
+    borderBottomColor: colors.border,
   },
   title: {
     color: colors.text,
     fontSize: fontSizes.lg,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
   },
   cancelButton: {
     color: colors.textSecondary,
@@ -265,7 +265,7 @@ const styles = StyleSheet.create({
   saveButton: {
     color: colors.primary,
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
   },
   saveButtonDisabled: {
     color: colors.textMuted,
@@ -278,14 +278,16 @@ const styles = StyleSheet.create({
     marginBottom: spacing.lg,
   },
   label: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '600',
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.medium,
     marginBottom: spacing.sm,
   },
   input: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     color: colors.text,
     fontSize: fontSizes.md,
@@ -324,8 +326,10 @@ const styles = StyleSheet.create({
   },
   unitToggle: {
     flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     overflow: 'hidden',
   },
   unitButton: {
@@ -333,16 +337,17 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     minWidth: 60,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   unitButtonActive: {
-    backgroundColor: colors.primary,
+    backgroundColor: colors.assistant.actionSoft,
   },
   unitButtonText: {
     color: colors.textSecondary,
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   unitButtonTextActive: {
-    color: colors.text,
+    color: colors.accent,
   },
 });

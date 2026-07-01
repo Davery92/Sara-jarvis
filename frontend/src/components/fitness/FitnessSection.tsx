@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Dumbbell, Apple, FileText, Activity, Settings, X, Calendar, Heart, RefreshCw, Target, TrendingUp, Trophy, Scale, ChevronDown, ChevronUp, BookOpen, Play, Clock, Zap, Moon } from 'lucide-react'
+import { Settings, X, RefreshCw, Target, TrendingUp, Trophy, Scale, ChevronDown, ChevronUp, Clock, Zap, Moon } from 'lucide-react'
 import FoodLog from './FoodLog'
 import WorkoutLog from './WorkoutLogEnhanced'
 import FitnessNotes from './FitnessNotes'
@@ -7,13 +7,25 @@ import TemplateBuilder from './TemplateBuilder'
 import RecoveryLog from './RecoveryLog'
 import RecoveryTrendChart from './RecoveryTrendChart'
 import PlanView from './PlanView'
+import NutritionGuide from './NutritionGuide'
+import PlanImporter from './PlanImporter'
+import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan'
+type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
   const [dashboardKey, setDashboardKey] = useState(0)
+  const [nutritionKey, setNutritionKey] = useState(0)
+  const [showImporter, setShowImporter] = useState(false)
+
+  const handlePlanApplied = () => {
+    // refresh the data-driven views so the new plan/guide shows immediately
+    setDashboardKey(prev => prev + 1)
+    setNutritionKey(prev => prev + 1)
+    setCurrentView('plan')
+  }
 
   // Refresh dashboard when switching to it
   const handleViewChange = (view: FitnessView) => {
@@ -24,68 +36,63 @@ export default function FitnessSection() {
   }
 
   const tabs = [
-    { id: 'dashboard' as FitnessView, label: 'Dashboard', icon: Activity },
-    { id: 'plan' as FitnessView, label: 'Plan', icon: BookOpen },
-    { id: 'programs' as FitnessView, label: 'Programs', icon: Target },
-    { id: 'templates' as FitnessView, label: 'Templates', icon: Calendar },
-    { id: 'recovery' as FitnessView, label: 'Recovery', icon: Heart },
-    { id: 'food' as FitnessView, label: 'Food Log', icon: Apple },
-    { id: 'workout' as FitnessView, label: 'Workouts', icon: Dumbbell },
-    { id: 'notes' as FitnessView, label: 'Notes', icon: FileText },
+    { id: 'dashboard' as FitnessView, label: 'Dashboard' },
+    { id: 'plan' as FitnessView, label: 'Plan' },
+    { id: 'programs' as FitnessView, label: 'Programs' },
+    { id: 'templates' as FitnessView, label: 'Templates' },
+    { id: 'recovery' as FitnessView, label: 'Recovery' },
+    { id: 'nutrition' as FitnessView, label: 'Nutrition' },
+    { id: 'food' as FitnessView, label: 'Food Log' },
+    { id: 'workout' as FitnessView, label: 'Workouts' },
+    { id: 'notes' as FitnessView, label: 'Notes' },
   ]
 
   return (
-    <div className="h-full flex flex-col bg-gray-900 text-white">
+    <div className="h-full flex flex-col text-white">
       {/* Header */}
-      <div className="border-b border-gray-700 bg-gray-800">
-        <div className="px-6 py-4">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Dumbbell className="w-6 h-6" />
-            Fitness Tracker
-          </h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Track your nutrition, workouts, and fitness progress
-          </p>
-        </div>
+      <div className="flex items-center gap-6 border-b border-white/5 px-6">
+        <h1 className="font-display text-xl font-semibold text-white py-3 flex-shrink-0">Fitness</h1>
 
         {/* Tabs */}
         <div
-          className="flex gap-1 px-6 overflow-x-auto scrollbar-hidden scroll-snap-x md:overflow-visible"
+          className="flex gap-5 -mb-px overflow-x-auto scrollbar-hidden scroll-snap-x md:overflow-visible"
           style={{
             overscrollBehaviorX: 'contain',
             WebkitOverflowScrolling: 'touch',
             touchAction: 'pan-x'
           }}
         >
-          {tabs.map((tab) => {
-            const Icon = tab.icon
-            return (
-              <button
-                key={tab.id}
-                onClick={() => handleViewChange(tab.id)}
-                className={`
-                  px-4 py-2 rounded-t-lg flex items-center gap-2 transition-colors
-                  whitespace-nowrap flex-shrink-0 scroll-snap-center tap-target
-                  ${
-                    currentView === tab.id
-                      ? 'bg-gray-900 text-white'
-                      : 'text-gray-400 hover:text-white hover:bg-gray-700'
-                  }
-                `}
-              >
-                <Icon className="w-4 h-4" />
-                <span className="hidden sm:inline">{tab.label}</span>
-                <span className="sm:hidden text-xs">{tab.label.split(' ')[0]}</span>
-              </button>
-            )
-          })}
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => handleViewChange(tab.id)}
+              className={`border-b-2 px-1 py-3 text-sm transition-colors whitespace-nowrap flex-shrink-0 scroll-snap-center tap-target ${
+                currentView === tab.id
+                  ? 'text-white border-teal-300'
+                  : 'text-slate-500 hover:text-slate-300 border-transparent'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
+
+        {/* Import plan */}
+        <button
+          onClick={() => setShowImporter(true)}
+          className="ml-auto flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 my-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm text-slate-300 transition-colors"
+          title="Upload a plan document and apply it"
+        >
+          <Upload className="w-4 h-4" />
+          <span className="hidden sm:inline">Import Plan</span>
+        </button>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-auto">
         {currentView === 'dashboard' && <FitnessDashboard key={dashboardKey} />}
         {currentView === 'plan' && <PlanView />}
+        {currentView === 'nutrition' && <NutritionGuide key={nutritionKey} />}
         {currentView === 'programs' && <ProgramManager />}
         {currentView === 'templates' && <TemplateBuilder />}
         {currentView === 'recovery' && (
@@ -98,6 +105,10 @@ export default function FitnessSection() {
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}
       </div>
+
+      {showImporter && (
+        <PlanImporter onClose={() => setShowImporter(false)} onApplied={handlePlanApplied} />
+      )}
     </div>
   )
 }
@@ -1287,14 +1298,14 @@ function FitnessDashboard() {
 
       {/* Active Phase Banner */}
       {activePhase && (
-        <div className="bg-gradient-to-r from-blue-900/50 to-purple-900/50 rounded-lg p-4 border border-blue-500/30">
+        <div className="assistant-panel rounded-xl p-4 bg-gradient-to-r from-teal-500/10 to-cyan-500/5">
           <div className="flex items-center justify-between">
             <div>
-              <span className="text-sm text-blue-300">Active Phase</span>
-              <h3 className="font-semibold text-lg">{activePhase.name}</h3>
+              <span className="assistant-kicker text-teal-300">Active Phase</span>
+              <h3 className="font-display font-semibold text-lg mt-1">{activePhase.name}</h3>
             </div>
             {activePhase.duration_weeks && (
-              <span className="text-sm text-gray-400">{activePhase.duration_weeks} weeks</span>
+              <span className="text-sm text-slate-400">{activePhase.duration_weeks} weeks</span>
             )}
           </div>
         </div>
@@ -1302,12 +1313,12 @@ function FitnessDashboard() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Nutrition Card */}
-        <div className="bg-gray-800 rounded-lg p-5 border border-gray-700">
+        <div className="assistant-panel rounded-xl p-5">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h3 className="font-semibold">Nutrition Today</h3>
+              <h3 className="font-display font-semibold">Nutrition Today</h3>
               {activePhase && (
-                <span className="text-xs text-blue-400">from {activePhase.name}</span>
+                <span className="text-xs text-teal-300">from {activePhase.name}</span>
               )}
             </div>
             <div className="flex items-center gap-2">
@@ -1329,13 +1340,13 @@ function FitnessDashboard() {
               <button
                 onClick={handleManualRefresh}
                 disabled={isRefreshing}
-                className="p-1 hover:bg-gray-700 rounded transition-colors disabled:opacity-50"
+                className="p-1 hover:bg-white/10 rounded transition-colors disabled:opacity-50"
               >
-                <RefreshCw className={`w-4 h-4 text-gray-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-4 h-4 text-slate-400 ${isRefreshing ? 'animate-spin' : ''}`} />
               </button>
               {!activePhase && (
-                <button onClick={() => setShowEditModal(true)} className="p-1 hover:bg-gray-700 rounded">
-                  <Settings className="w-4 h-4 text-gray-400" />
+                <button onClick={() => setShowEditModal(true)} className="p-1 hover:bg-white/10 rounded">
+                  <Settings className="w-4 h-4 text-slate-400" />
                 </button>
               )}
             </div>
@@ -1344,12 +1355,12 @@ function FitnessDashboard() {
           {/* Calorie Progress Bar */}
           <div className="mb-3">
             <div className="flex justify-between text-sm mb-1">
-              <span className="text-gray-400">Calories</span>
+              <span className="text-slate-400">Calories</span>
               <span>{Math.round(todayNutrition.calories)} / {goals.calories}</span>
             </div>
-            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-2 bg-white/10 rounded-full overflow-hidden">
               <div
-                className={`h-full transition-all ${caloriePercent > 100 ? 'bg-red-500' : 'bg-green-500'}`}
+                className={`h-full transition-all ${caloriePercent > 100 ? 'bg-rose-500' : 'bg-teal-400'}`}
                 style={{ width: `${Math.min(caloriePercent, 100)}%` }}
               />
             </div>
@@ -1358,12 +1369,12 @@ function FitnessDashboard() {
           {/* Protein Progress Bar */}
           <div className="mb-3">
             <div className="flex justify-between text-sm mb-1">
-              <span className="text-gray-400">Protein</span>
+              <span className="text-slate-400">Protein</span>
               <span>{todayNutrition.protein.toFixed(0)}g / {goals.protein}g</span>
             </div>
-            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-2 bg-white/10 rounded-full overflow-hidden">
               <div
-                className={`h-full transition-all ${proteinPercent >= 100 ? 'bg-green-500' : 'bg-blue-500'}`}
+                className={`h-full transition-all ${proteinPercent >= 100 ? 'bg-teal-400' : 'bg-cyan-400/70'}`}
                 style={{ width: `${Math.min(proteinPercent, 100)}%` }}
               />
             </div>
@@ -1371,26 +1382,26 @@ function FitnessDashboard() {
 
           <div className="grid grid-cols-2 gap-2 text-sm">
             <div className="flex justify-between">
-              <span className="text-gray-500">Carbs</span>
+              <span className="text-slate-500">Carbs</span>
               <span>{todayNutrition.carbs.toFixed(0)}g</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-gray-500">Fat</span>
+              <span className="text-slate-500">Fat</span>
               <span>{todayNutrition.fats.toFixed(0)}g</span>
             </div>
           </div>
         </div>
 
         {/* Weight Card */}
-        <div className="bg-gray-800 rounded-lg p-5 border border-gray-700">
+        <div className="assistant-panel rounded-xl p-5">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold flex items-center gap-2">
-              <Scale className="w-4 h-4 text-purple-400" />
+            <h3 className="font-display font-semibold flex items-center gap-2">
+              <Scale className="w-4 h-4 text-teal-300" />
               Weight
             </h3>
             <button
               onClick={() => setShowWeightModal(true)}
-              className="text-sm text-blue-400 hover:text-blue-300"
+              className="text-sm text-teal-300 hover:text-teal-200"
             >
               Log
             </button>
@@ -1399,12 +1410,12 @@ function FitnessDashboard() {
           {latestWeight ? (
             <div>
               <div className="text-3xl font-bold">{latestWeight.raw_weight} lbs</div>
-              <div className="text-sm text-gray-400 mt-1">
+              <div className="text-sm text-slate-400 mt-1">
                 Trend: {latestWeight.trend_weight} lbs
               </div>
               {latestWeight.weekly_delta !== null && (
                 <div className={`text-sm mt-1 flex items-center gap-1 ${
-                  latestWeight.weekly_delta < 0 ? 'text-green-400' : latestWeight.weekly_delta > 0 ? 'text-red-400' : 'text-gray-400'
+                  latestWeight.weekly_delta < 0 ? 'text-green-400' : latestWeight.weekly_delta > 0 ? 'text-red-400' : 'text-slate-400'
                 }`}>
                   {latestWeight.weekly_delta < 0 ? <TrendingUp className="w-4 h-4 rotate-180" /> : latestWeight.weekly_delta > 0 ? <TrendingUp className="w-4 h-4" /> : null}
                   {latestWeight.weekly_delta > 0 ? '+' : ''}{latestWeight.weekly_delta} lbs/week
@@ -1412,15 +1423,15 @@ function FitnessDashboard() {
               )}
             </div>
           ) : (
-            <div className="text-gray-400 text-sm">No weight logged yet</div>
+            <div className="text-slate-400 text-sm">No weight logged yet</div>
           )}
         </div>
 
         {/* PRs Card */}
-        <div className="bg-gray-800 rounded-lg p-5 border border-gray-700">
+        <div className="assistant-panel rounded-xl p-5">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold flex items-center gap-2">
-              <Trophy className="w-4 h-4 text-yellow-400" />
+            <h3 className="font-display font-semibold flex items-center gap-2">
+              <Trophy className="w-4 h-4 text-amber-300" />
               Personal Records
             </h3>
           </div>
@@ -1429,32 +1440,32 @@ function FitnessDashboard() {
             <div className="space-y-2">
               {prs.slice(0, 3).map(pr => (
                 <div key={pr.id} className="flex justify-between items-center text-sm">
-                  <span className="text-gray-300 truncate">{pr.exercise_name}</span>
+                  <span className="text-slate-300 truncate">{pr.exercise_name}</span>
                   <span className="font-medium">{pr.weight}x{pr.reps}</span>
                 </div>
               ))}
               {prs.length > 3 && (
-                <div className="text-xs text-gray-500">+{prs.length - 3} more</div>
+                <div className="text-xs text-slate-500">+{prs.length - 3} more</div>
               )}
             </div>
           ) : (
-            <div className="text-gray-400 text-sm">No PRs yet. Start lifting!</div>
+            <div className="text-slate-400 text-sm">No PRs yet. Start lifting!</div>
           )}
         </div>
 
         {/* Quick Actions Card */}
-        <div className="bg-gray-800 rounded-lg p-5 border border-gray-700">
-          <h3 className="font-semibold mb-3">Quick Actions</h3>
+        <div className="assistant-panel rounded-xl p-5">
+          <h3 className="font-display font-semibold mb-3">Quick Actions</h3>
           <div className="space-y-2">
-            <button className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition-colors">
+            <button className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors">
               Log Meal
             </button>
-            <button className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors">
+            <button className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors">
               Log Workout
             </button>
             <button
               onClick={() => setShowWeightModal(true)}
-              className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm font-medium transition-colors"
+              className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors"
             >
               Log Weight
             </button>
@@ -1464,9 +1475,9 @@ function FitnessDashboard() {
 
       {/* Weight Trend Chart (simple) */}
       {weightTrend.length > 1 && (
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-          <h3 className="font-semibold mb-4 flex items-center gap-2">
-            <TrendingUp className="w-5 h-5 text-purple-400" />
+        <div className="assistant-panel rounded-xl p-6">
+          <h3 className="font-display font-semibold mb-4 flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-teal-300" />
             Weight Trend (30 days)
           </h3>
           <div className="h-32 flex items-end gap-1">
@@ -1478,14 +1489,14 @@ function FitnessDashboard() {
               return (
                 <div
                   key={idx}
-                  className="flex-1 bg-purple-500/50 rounded-t hover:bg-purple-500/70 transition-colors"
+                  className="flex-1 bg-teal-400/40 rounded-t hover:bg-teal-400/70 transition-colors"
                   style={{ height: `${Math.max(height, 5)}%` }}
                   title={`${entry.date}: ${entry.raw_weight} lbs`}
                 />
               )
             })}
           </div>
-          <div className="flex justify-between text-xs text-gray-500 mt-2">
+          <div className="flex justify-between text-xs text-slate-500 mt-2">
             <span>{weightTrend[0]?.date}</span>
             <span>{weightTrend[weightTrend.length - 1]?.date}</span>
           </div>
@@ -1494,59 +1505,59 @@ function FitnessDashboard() {
 
       {/* Edit Goals Modal */}
       {showEditModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="assistant-panel rounded-xl p-6 w-full max-w-md">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-semibold">Edit Nutrition Goals</h3>
-              <button onClick={() => setShowEditModal(false)} className="p-1 hover:bg-gray-700 rounded">
+              <h3 className="font-display text-xl font-semibold">Edit Nutrition Goals</h3>
+              <button onClick={() => setShowEditModal(false)} className="p-1 hover:bg-white/10 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Daily Calories</label>
+                <label className="block text-sm text-slate-400 mb-1">Daily Calories</label>
                 <input
                   type="number"
                   value={editGoals.calories}
                   onChange={(e) => setEditGoals({ ...editGoals, calories: parseInt(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-green-500"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg focus:outline-none focus:border-teal-400/60 focus:ring-1 focus:ring-teal-400/30 text-white"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Protein (g)</label>
+                <label className="block text-sm text-slate-400 mb-1">Protein (g)</label>
                 <input
                   type="number"
                   value={editGoals.protein}
                   onChange={(e) => setEditGoals({ ...editGoals, protein: parseInt(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-green-500"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg focus:outline-none focus:border-teal-400/60 focus:ring-1 focus:ring-teal-400/30 text-white"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Carbs (g)</label>
+                <label className="block text-sm text-slate-400 mb-1">Carbs (g)</label>
                 <input
                   type="number"
                   value={editGoals.carbs}
                   onChange={(e) => setEditGoals({ ...editGoals, carbs: parseInt(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-green-500"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg focus:outline-none focus:border-teal-400/60 focus:ring-1 focus:ring-teal-400/30 text-white"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Fats (g)</label>
+                <label className="block text-sm text-slate-400 mb-1">Fats (g)</label>
                 <input
                   type="number"
                   value={editGoals.fats}
                   onChange={(e) => setEditGoals({ ...editGoals, fats: parseInt(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-green-500"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg focus:outline-none focus:border-teal-400/60 focus:ring-1 focus:ring-teal-400/30 text-white"
                 />
               </div>
             </div>
 
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowEditModal(false)} className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg">
+              <button onClick={() => setShowEditModal(false)} className="flex-1 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-slate-200 transition-colors">
                 Cancel
               </button>
-              <button onClick={saveGoals} className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg">
+              <button onClick={saveGoals} className="flex-1 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg transition-colors">
                 Save
               </button>
             </div>
@@ -1556,36 +1567,36 @@ function FitnessDashboard() {
 
       {/* Log Weight Modal */}
       {showWeightModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-sm border border-gray-700">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="assistant-panel rounded-xl p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-semibold">Log Weight</h3>
-              <button onClick={() => setShowWeightModal(false)} className="p-1 hover:bg-gray-700 rounded">
+              <h3 className="font-display text-xl font-semibold">Log Weight</h3>
+              <button onClick={() => setShowWeightModal(false)} className="p-1 hover:bg-white/10 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div>
-              <label className="block text-sm text-gray-400 mb-1">Weight (lbs)</label>
+              <label className="block text-sm text-slate-400 mb-1">Weight (lbs)</label>
               <input
                 type="number"
                 step="0.1"
                 value={newWeight}
                 onChange={(e) => setNewWeight(e.target.value)}
                 placeholder="Enter weight"
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-purple-500 text-lg"
+                className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg focus:outline-none focus:border-teal-400/60 focus:ring-1 focus:ring-teal-400/30 text-white text-lg"
                 autoFocus
               />
             </div>
 
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowWeightModal(false)} className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg">
+              <button onClick={() => setShowWeightModal(false)} className="flex-1 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-slate-200 transition-colors">
                 Cancel
               </button>
               <button
                 onClick={logWeight}
                 disabled={!newWeight}
-                className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg disabled:opacity-50"
+                className="flex-1 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg disabled:opacity-50 transition-colors"
               >
                 Log
               </button>

@@ -94,7 +94,7 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
   const renderChart = () => {
     if (recoveryData.length === 0) {
       return (
-        <div className="flex items-center justify-center h-64 text-gray-400">
+        <div className="flex items-center justify-center h-64 text-slate-400">
           No recovery data available. Start logging your daily metrics!
         </div>
       )
@@ -103,7 +103,7 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
     const values = recoveryData.map(d => d[selectedMetric] as number).filter(v => v !== null && v !== undefined)
     if (values.length === 0) {
       return (
-        <div className="flex items-center justify-center h-64 text-gray-400">
+        <div className="flex items-center justify-center h-64 text-slate-400">
           No {selectedMetric.replace('_', ' ')} data logged yet
         </div>
       )
@@ -116,19 +116,19 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
     return (
       <div className="relative h-64">
         {/* Y-axis labels */}
-        <div className="absolute left-0 top-0 bottom-8 w-12 flex flex-col justify-between text-xs text-gray-500">
+        <div className="absolute left-0 top-0 bottom-8 w-12 flex flex-col justify-between text-xs text-slate-500">
           <span>{maxValue.toFixed(1)}</span>
           <span>{((maxValue + minValue) / 2).toFixed(1)}</span>
           <span>{minValue.toFixed(1)}</span>
         </div>
 
         {/* Chart area */}
-        <div className="absolute left-12 right-0 top-0 bottom-8 border-l border-b border-gray-700">
+        <div className="absolute left-12 right-0 top-0 bottom-8 border-l border-b border-white/10">
           {/* Grid lines */}
           <div className="absolute inset-0 flex flex-col justify-between">
-            <div className="border-t border-gray-800"></div>
-            <div className="border-t border-gray-800"></div>
-            <div className="border-t border-gray-800"></div>
+            <div className="border-t border-white/5"></div>
+            <div className="border-t border-white/5"></div>
+            <div className="border-t border-white/5"></div>
           </div>
 
           {/* Data points and line */}
@@ -149,28 +149,29 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
               vectorEffect="non-scaling-stroke"
             />
 
-            {/* Points */}
-            {recoveryData.map((d, i) => {
-              const value = d[selectedMetric] as number
-              if (value === null || value === undefined) return null
-              const x = (i / (recoveryData.length - 1 || 1)) * 100
-              const y = 100 - ((value - minValue) / range) * 100
-              return (
-                <circle
-                  key={i}
-                  cx={x}
-                  cy={y}
-                  r="1"
-                  className={`${getMetricColor(selectedMetric)} fill-current`}
-                  vectorEffect="non-scaling-stroke"
-                />
-              )
-            })}
           </svg>
+
+          {/* Data point markers — rendered as HTML so they stay perfectly round
+              regardless of the chart's width (SVG circles get stretched by
+              preserveAspectRatio="none") */}
+          {recoveryData.map((d, i) => {
+            const value = d[selectedMetric] as number
+            if (value === null || value === undefined) return null
+            const x = (i / (recoveryData.length - 1 || 1)) * 100
+            const y = 100 - ((value - minValue) / range) * 100
+            return (
+              <div
+                key={i}
+                className={`absolute w-1.5 h-1.5 rounded-full ring-2 ring-[#0f1a2c] ${getMetricBgColor(selectedMetric)}`}
+                style={{ left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' }}
+                title={`${new Date(d.log_date).toLocaleDateString()}: ${value}`}
+              />
+            )
+          })}
         </div>
 
         {/* X-axis labels (dates) */}
-        <div className="absolute left-12 right-0 bottom-0 h-8 flex justify-between text-xs text-gray-500">
+        <div className="absolute left-12 right-0 bottom-0 h-8 flex justify-between text-xs text-slate-500">
           {recoveryData.length > 0 && (
             <>
               <span>{new Date(recoveryData[0].log_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
@@ -194,8 +195,8 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
 
   if (loading) {
     return (
-      <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-        <div className="flex items-center justify-center h-64 text-gray-400">
+      <div className="assistant-panel rounded-xl p-6">
+        <div className="flex items-center justify-center h-64 text-slate-400">
           Loading recovery trends...
         </div>
       </div>
@@ -203,9 +204,9 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
   }
 
   return (
-    <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
+    <div className="assistant-panel rounded-xl p-6">
       {!compact && (
-        <h2 className="text-2xl font-bold text-white mb-4">Recovery Trends ({days} days)</h2>
+        <h2 className="font-display text-2xl font-bold text-white mb-4">Recovery Trends ({days} days)</h2>
       )}
 
       {/* Metric selector */}
@@ -222,7 +223,7 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
               className={`p-4 rounded-lg border transition-all ${
                 isSelected
                   ? `${getMetricBgColor(metric.key)} border-transparent text-white`
-                  : 'bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-600'
+                  : 'bg-white/5 border-white/10 text-slate-400 hover:border-white/20'
               }`}
             >
               <div className="flex items-center justify-between mb-2">
@@ -257,26 +258,26 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
 
       {/* Stats summary */}
       {recoveryData.length > 0 && (
-        <div className="mt-6 pt-6 border-t border-gray-700">
+        <div className="mt-6 pt-6 border-t border-white/10">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center text-sm">
             <div>
-              <div className="text-gray-400 mb-1">Logs</div>
+              <div className="text-slate-400 mb-1">Logs</div>
               <div className="text-white font-semibold">{recoveryData.length}</div>
             </div>
             <div>
-              <div className="text-gray-400 mb-1">Avg HRV</div>
+              <div className="text-slate-400 mb-1">Avg HRV</div>
               <div className="text-white font-semibold">
                 {calculateStats('hrv').avg > 0 ? `${calculateStats('hrv').avg.toFixed(0)} ms` : '--'}
               </div>
             </div>
             <div>
-              <div className="text-gray-400 mb-1">Avg Sleep</div>
+              <div className="text-slate-400 mb-1">Avg Sleep</div>
               <div className="text-white font-semibold">
                 {calculateStats('sleep_hours').avg > 0 ? `${calculateStats('sleep_hours').avg.toFixed(1)} hrs` : '--'}
               </div>
             </div>
             <div>
-              <div className="text-gray-400 mb-1">Avg Soreness</div>
+              <div className="text-slate-400 mb-1">Avg Soreness</div>
               <div className="text-white font-semibold">
                 {calculateStats('soreness_level').avg > 0 ? `${calculateStats('soreness_level').avg.toFixed(1)}/10` : '--'}
               </div>

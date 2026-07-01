@@ -13,15 +13,17 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Picker } from '@react-native-picker/picker';
 import {
   fitnessService,
   FoodItem,
+  FoodServing,
   CreateFoodLogParams,
   Recipe,
 } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 import BarcodeScanner from './BarcodeScanner';
 
 // Unit conversion constants
@@ -131,6 +133,11 @@ export default function FoodLogModal({
 
   // Unit picker state
   const [showUnitPicker, setShowUnitPicker] = useState(false);
+  // Real serving options for the selected food (FatSecret/custom). When present,
+  // the unit picker offers these instead of generic units, and each carries its
+  // own macros — so "1/2 cup" vs "1 oz" just swaps numbers, no conversion math.
+  const [availableServings, setAvailableServings] = useState<FoodServing[]>([]);
+  const [selectedServingIdx, setSelectedServingIdx] = useState(0);
 
   // Base nutrition for conversion calculations
   const [baseNutrition, setBaseNutrition] = useState<{
@@ -265,20 +272,45 @@ export default function FoodLogModal({
     }
   };
 
-  const handleSelectFood = (food: FoodItem) => {
+  // Apply one of the food's real serving options. qty then means "number of
+  // these servings", so the conversion machinery's qty-multiplier path yields
+  // exactly serving.macros * qty — no cross-unit math, no silent failure.
+  const applyServing = (serving: FoodServing, idx: number) => {
+    setSelectedServingIdx(idx);
+    setUnit(serving.serving_description || 'serving');
+    setBaseNutrition({
+      calories: serving.calories || 0,
+      protein: serving.protein || 0,
+      carbs: serving.carbs || 0,
+      fats: serving.fat || 0,
+      perAmount: 1,
+      perUnit: serving.serving_description || 'serving',
+    });
+  };
+
+  const handleSelectFood = async (food: FoodItem) => {
     setSelectedFood(food);
     setSearchQuery(food.name);
     setSearchResults([]);
     setBarcodeError(null);
+    setQuantity('1');
+    setAvailableServings([]);
+    setSelectedServingIdx(0);
 
-    // Try to parse the serving description to extract numeric amount and unit
-    // E.g., "292g" -> { amount: 292, unit: 'g' }
-    // E.g., "1 cup (185g)" -> { amount: 185, unit: 'g' }
+    // Prefer the food's real serving options (each carries its own macros).
+    if (food.id) {
+      const detail = await fitnessService.getFoodDetails(food.id);
+      const servings = (detail?.servings || []).filter(s => s && s.serving_description);
+      if (servings.length > 0) {
+        setAvailableServings(servings);
+        applyServing(servings[0], 0);
+        return;
+      }
+    }
+
+    // Fallback (custom/recipe/no serving list): parse the single serving string.
     const parsed = parseServingDescription(food.serving_unit);
-
     if (parsed) {
-      // We successfully parsed the serving - use the extracted unit
-      console.log(`📊 Parsed serving "${food.serving_unit}" -> ${parsed.amount} ${parsed.unit}`);
       setUnit(parsed.unit);
       setBaseNutrition({
         calories: food.calories || 0,
@@ -288,11 +320,7 @@ export default function FoodLogModal({
         perAmount: parsed.amount,
         perUnit: parsed.unit,
       });
-      // Set initial quantity to 1 (user will type their amount in the chosen unit)
-      setQuantity('1');
     } else {
-      // Couldn't parse - treat as generic serving
-      console.log(`📊 Couldn't parse serving "${food.serving_unit}", using as-is`);
       setUnit(food.serving_unit || 'serving');
       setBaseNutrition({
         calories: food.calories || 0,
@@ -338,6 +366,8 @@ export default function FoodLogModal({
     setLoggedDate(new Date());
     setShowUnitPicker(false);
     setBaseNutrition(null);
+    setAvailableServings([]);
+    setSelectedServingIdx(0);
     resetManualFields();
     onClose();
   };
@@ -449,6 +479,18 @@ export default function FoodLogModal({
             quantity: qty,
             unit: String(customFood.serving_unit || 'serving'),
           }],
+          detailed_items: [{
+            food_id: customFood.id,
+            name: String(customFood.name || ''),
+            quantity: qty,
+            serving_unit: String(customFood.serving_unit || 'serving'),
+            calories: customFood.calories,
+            protein: customFood.protein,
+            carbs: customFood.carbs,
+            fats: customFood.fats,
+            source: 'custom',
+            is_custom: true,
+          }],
           calories: customFood.calories,
           protein: customFood.protein,
           carbs: customFood.carbs,
@@ -465,6 +507,19 @@ export default function FoodLogModal({
             name: foodName,
             quantity: qty,
             unit: String(unit || 'serving'),
+          }],
+          detailed_items: [{
+            food_id: selectedFood.id,
+            name: foodName,
+            quantity: qty,
+            serving_unit: String(unit || 'serving'),
+            serving_description: String(selectedFood.serving_unit || ''),
+            calories: displayNutrition.calories || undefined,
+            protein: displayNutrition.protein || undefined,
+            carbs: displayNutrition.carbs || undefined,
+            fats: displayNutrition.fats || undefined,
+            source: selectedFood.source,
+            is_custom: selectedFood.is_custom,
           }],
           calories: displayNutrition.calories || undefined,
           protein: displayNutrition.protein || undefined,
@@ -521,7 +576,7 @@ export default function FoodLogModal({
           <View style={styles.header}>
             <Text style={styles.title}>Log Food</Text>
             <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
-              <Text style={styles.closeButton}>✕</Text>
+              <Ionicons name="close" size={fontSizes.xxl} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -563,16 +618,18 @@ export default function FoodLogModal({
                 onPress={() => setShowDatePicker(true)}
                 style={[styles.dateTimeButton, { flex: 1, marginRight: spacing.sm }]}
               >
+                <Ionicons name="calendar-outline" size={16} color={colors.accent} />
                 <Text style={styles.dateTimeText}>
-                  📅 {loggedDate.toLocaleDateString()}
+                  {loggedDate.toLocaleDateString()}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => setShowTimePicker(true)}
                 style={[styles.dateTimeButton, { flex: 1 }]}
               >
+                <Ionicons name="time-outline" size={16} color={colors.accent} />
                 <Text style={styles.dateTimeText}>
-                  🕐 {loggedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {loggedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -642,7 +699,7 @@ export default function FoodLogModal({
                   style={styles.barcodeButton}
                   onPress={() => setShowBarcodeScanner(true)}
                 >
-                  <Text style={styles.barcodeButtonText}>📷</Text>
+                  <Ionicons name="barcode-outline" size={24} color={colors.background} />
                 </TouchableOpacity>
               </View>
 
@@ -665,13 +722,18 @@ export default function FoodLogModal({
                       ]}
                       onPress={() => setActiveQuickTab('recent')}
                     >
+                      <Ionicons
+                        name="time-outline"
+                        size={14}
+                        color={activeQuickTab === 'recent' ? colors.accent : colors.textSecondary}
+                      />
                       <Text
                         style={[
                           styles.quickTabText,
                           activeQuickTab === 'recent' && styles.quickTabTextActive,
                         ]}
                       >
-                        🕐 Recent ({recentFoods.length})
+                        Recent ({recentFoods.length})
                       </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
@@ -681,13 +743,18 @@ export default function FoodLogModal({
                       ]}
                       onPress={() => setActiveQuickTab('yesterday')}
                     >
+                      <Ionicons
+                        name="calendar-outline"
+                        size={14}
+                        color={activeQuickTab === 'yesterday' ? colors.accent : colors.textSecondary}
+                      />
                       <Text
                         style={[
                           styles.quickTabText,
                           activeQuickTab === 'yesterday' && styles.quickTabTextActive,
                         ]}
                       >
-                        📅 Yesterday ({yesterdayFoods.length})
+                        Yesterday ({yesterdayFoods.length})
                       </Text>
                     </TouchableOpacity>
                   </View>
@@ -726,7 +793,7 @@ export default function FoodLogModal({
                                   Logged {food.count}x in last 30 days
                                 </Text>
                               </View>
-                              <Text style={styles.quickFoodAdd}>+</Text>
+                              <Ionicons name="add-circle" size={26} color={colors.primary} style={styles.quickFoodAdd} />
                             </TouchableOpacity>
                           ))}
                         </ScrollView>
@@ -763,7 +830,7 @@ export default function FoodLogModal({
                                   {food.protein && ` • ${Math.round(food.protein)}g protein`}
                                 </Text>
                               </View>
-                              <Text style={styles.quickFoodAdd}>+</Text>
+                              <Ionicons name="add-circle" size={26} color={colors.primary} style={styles.quickFoodAdd} />
                             </TouchableOpacity>
                           ))}
                         </ScrollView>
@@ -860,7 +927,7 @@ export default function FoodLogModal({
                         onPress={() => setShowUnitPicker(true)}
                       >
                         <Text style={styles.unitSelectorText}>{unit}</Text>
-                        <Text style={styles.unitSelectorIcon}>▼</Text>
+                        <Ionicons name="chevron-down" size={16} color={colors.textSecondary} />
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -872,8 +939,9 @@ export default function FoodLogModal({
                 style={styles.manualEntryButton}
                 onPress={() => setShowManualEntry(true)}
               >
+                <Ionicons name="create-outline" size={16} color={colors.accent} />
                 <Text style={styles.manualEntryText}>
-                  ✏️ Can't find it? Enter manually
+                  Can't find it? Enter manually
                 </Text>
               </TouchableOpacity>
             </>
@@ -981,7 +1049,8 @@ export default function FoodLogModal({
                   resetManualFields();
                 }}
               >
-                <Text style={styles.backToSearchText}>← Back to Search</Text>
+                <Ionicons name="arrow-back" size={14} color={colors.accent} />
+                <Text style={styles.backToSearchText}>Back to Search</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -994,9 +1063,12 @@ export default function FoodLogModal({
               disabled={loading}
             >
               {loading ? (
-                <ActivityIndicator color={colors.text} />
+                <ActivityIndicator color={colors.background} />
               ) : (
-                <Text style={styles.submitButtonText}>Log Food</Text>
+                <>
+                  <Ionicons name="checkmark-circle" size={20} color={colors.background} />
+                  <Text style={styles.submitButtonText}>Log Food</Text>
+                </>
               )}
             </TouchableOpacity>
           </View>
@@ -1027,20 +1099,38 @@ export default function FoodLogModal({
               <TouchableOpacity onPress={() => setShowUnitPicker(false)}>
                 <Text style={styles.pickerCancel}>Cancel</Text>
               </TouchableOpacity>
-              <Text style={styles.pickerTitle}>Select Unit</Text>
+              <Text style={styles.pickerTitle}>
+                {availableServings.length > 0 ? 'Select Serving' : 'Select Unit'}
+              </Text>
               <TouchableOpacity onPress={() => setShowUnitPicker(false)}>
                 <Text style={styles.pickerDone}>Done</Text>
               </TouchableOpacity>
             </View>
             <Picker
-              selectedValue={unit}
-              onValueChange={(value) => setUnit(value as string)}
+              selectedValue={availableServings.length > 0 ? String(selectedServingIdx) : unit}
+              onValueChange={(value) => {
+                if (availableServings.length > 0) {
+                  const idx = parseInt(String(value), 10) || 0;
+                  const s = availableServings[idx];
+                  if (s) applyServing(s, idx);
+                } else {
+                  setUnit(value as string);
+                }
+              }}
               style={styles.picker}
               itemStyle={styles.pickerItem}
             >
-              {COMMON_UNITS.map((u, index) => (
-                <Picker.Item key={`unit-${index}`} label={u.label} value={u.value} />
-              ))}
+              {availableServings.length > 0
+                ? availableServings.map((s, index) => (
+                    <Picker.Item
+                      key={`serving-${index}`}
+                      label={`${s.serving_description}${s.calories != null ? ` — ${Math.round(s.calories)} cal` : ''}`}
+                      value={String(index)}
+                    />
+                  ))
+                : COMMON_UNITS.map((u, index) => (
+                    <Picker.Item key={`unit-${index}`} label={u.label} value={u.value} />
+                  ))}
             </Picker>
           </View>
         </TouchableOpacity>
@@ -1064,11 +1154,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.surface,
+    borderBottomColor: colors.border,
   },
   title: {
     fontSize: fontSizes.xl,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   closeButtonContainer: {
@@ -1077,10 +1167,6 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  closeButton: {
-    fontSize: fontSizes.xxl,
-    color: colors.textSecondary,
   },
   content: {
     flex: 1,
@@ -1096,15 +1182,16 @@ const styles = StyleSheet.create({
   mealTypeButton: {
     flex: 1,
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    padding: spacing.sm,
+    borderRadius: borderRadius.full,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xs,
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   mealTypeButtonActive: {
-    borderColor: colors.primary,
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderColor: colors.assistant.borderStrong,
+    backgroundColor: colors.assistant.actionSoft,
   },
   mealTypeEmoji: {
     fontSize: fontSizes.xl,
@@ -1113,17 +1200,17 @@ const styles = StyleSheet.create({
   mealTypeLabel: {
     fontSize: fontSizes.xs,
     color: colors.textSecondary,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   mealTypeLabelActive: {
-    color: colors.primary,
+    color: colors.accent,
   },
   dateTimeSection: {
     gap: spacing.xs,
   },
   sectionLabel: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
     marginBottom: spacing.xs,
   },
@@ -1132,11 +1219,15 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   dateTimeButton: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   dateTimeText: {
     fontSize: fontSizes.md,
@@ -1153,35 +1244,32 @@ const styles = StyleSheet.create({
   },
   barcodeButton: {
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     width: 52,
     height: 52,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  barcodeButtonText: {
-    fontSize: 24,
-  },
   errorContainer: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.assistant.errorSoft,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderColor: colors.error,
   },
   errorText: {
-    color: '#ef4444',
+    color: colors.error,
     fontSize: fontSizes.sm,
     textAlign: 'center',
   },
   searchInput: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   searchLoader: {
     position: 'absolute',
@@ -1190,10 +1278,11 @@ const styles = StyleSheet.create({
   },
   resultsContainer: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
     maxHeight: 300,
     borderWidth: 1,
-    borderColor: colors.primary,
+    borderColor: colors.border,
+    overflow: 'hidden',
   },
   resultsList: {
     maxHeight: 300,
@@ -1201,14 +1290,14 @@ const styles = StyleSheet.create({
   resultItem: {
     padding: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.background,
+    borderBottomColor: colors.divider,
   },
   resultInfo: {
     gap: spacing.xs,
   },
   resultName: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   resultBrand: {
@@ -1221,7 +1310,9 @@ const styles = StyleSheet.create({
   },
   selectedFoodContainer: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     gap: spacing.md,
   },
@@ -1230,7 +1321,7 @@ const styles = StyleSheet.create({
   },
   selectedFoodName: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   selectedFoodBrand: {
@@ -1243,15 +1334,15 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: colors.background,
+    borderColor: colors.divider,
   },
   nutritionItem: {
     alignItems: 'center',
   },
   nutritionValue: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
-    color: colors.primary,
+    fontWeight: fontWeights.bold,
+    color: colors.accent,
   },
   nutritionLabel: {
     fontSize: fontSizes.xs,
@@ -1263,7 +1354,7 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   quantityRow: {
@@ -1272,37 +1363,39 @@ const styles = StyleSheet.create({
   },
   quantityInput: {
     flex: 1,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
     textAlign: 'center',
   },
   unitInput: {
     flex: 2,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   unitSelector: {
     flex: 2,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   unitSelectorText: {
     fontSize: fontSizes.md,
     color: colors.text,
-  },
-  unitSelectorIcon: {
-    fontSize: fontSizes.sm,
-    color: colors.textSecondary,
   },
   // Unit Picker Modal Styles
   pickerOverlay: {
@@ -1312,8 +1405,10 @@ const styles = StyleSheet.create({
   },
   pickerContainer: {
     backgroundColor: colors.surface,
-    borderTopLeftRadius: borderRadius.lg,
-    borderTopRightRadius: borderRadius.lg,
+    borderTopLeftRadius: borderRadius.xl,
+    borderTopRightRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     paddingBottom: spacing.xl,
   },
   pickerHeader: {
@@ -1323,11 +1418,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.background,
+    borderBottomColor: colors.divider,
   },
   pickerTitle: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   pickerCancel: {
@@ -1336,8 +1431,8 @@ const styles = StyleSheet.create({
   },
   pickerDone: {
     fontSize: fontSizes.md,
-    color: colors.primary,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
   picker: {
     height: 200,
@@ -1348,36 +1443,39 @@ const styles = StyleSheet.create({
     color: colors.text,
   },
   manualEntryButton: {
+    flexDirection: 'row',
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
     borderWidth: 1,
-    borderColor: colors.primary,
+    borderColor: colors.assistant.borderStrong,
     borderStyle: 'dashed',
   },
   manualEntryText: {
     fontSize: fontSizes.sm,
-    color: colors.primary,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
   manualForm: {
     gap: spacing.md,
   },
   sectionTitle: {
     fontSize: fontSizes.md,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
     marginTop: spacing.sm,
   },
   input: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   row: {
     flexDirection: 'row',
@@ -1388,64 +1486,73 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   backToSearchButton: {
+    flexDirection: 'row',
     padding: spacing.sm,
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
   backToSearchText: {
     fontSize: fontSizes.sm,
-    color: colors.primary,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
   buttonContainer: {
     marginTop: spacing.md,
   },
   submitButton: {
+    flexDirection: 'row',
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
-    minHeight: 48,
     justifyContent: 'center',
+    gap: spacing.xs,
+    minHeight: 48,
   },
   submitButtonDisabled: {
     opacity: 0.5,
   },
   submitButtonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.bold,
+    color: colors.background,
   },
   // Quick Add Styles
   quickAddContainer: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     overflow: 'hidden',
   },
   quickTabHeader: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: colors.background,
+    borderBottomColor: colors.divider,
   },
   quickTab: {
     flex: 1,
+    flexDirection: 'row',
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.xs,
   },
   quickTabActive: {
-    backgroundColor: colors.background,
+    backgroundColor: colors.assistant.actionSoft,
     borderBottomWidth: 2,
-    borderBottomColor: colors.primary,
+    borderBottomColor: colors.accent,
   },
   quickTabText: {
     fontSize: fontSizes.sm,
     color: colors.textSecondary,
-    fontWeight: '500',
+    fontWeight: fontWeights.medium,
   },
   quickTabTextActive: {
-    color: colors.text,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
   quickTabContent: {
     maxHeight: 200,
@@ -1459,7 +1566,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.background,
+    borderBottomColor: colors.divider,
   },
   quickFoodInfo: {
     flex: 1,
@@ -1472,7 +1579,7 @@ const styles = StyleSheet.create({
   },
   quickFoodName: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
     flex: 1,
   },
@@ -1485,22 +1592,21 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
   },
   quickFoodAdd: {
-    fontSize: fontSizes.xl,
-    color: colors.primary,
-    fontWeight: '700',
     paddingHorizontal: spacing.sm,
   },
   mealTypeBadge: {
-    backgroundColor: colors.background,
+    backgroundColor: colors.surfaceLight,
     paddingHorizontal: spacing.xs,
     paddingVertical: 2,
-    borderRadius: borderRadius.sm,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   mealTypeBadgeText: {
     fontSize: 10,
     color: colors.textSecondary,
     textTransform: 'uppercase',
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   emptyText: {
     fontSize: fontSizes.sm,

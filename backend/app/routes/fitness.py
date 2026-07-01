@@ -2,7 +2,7 @@
 Fitness Routes
 API endpoints for fitness tracking: notes, food logging, workouts
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
@@ -147,6 +147,11 @@ class RecoveryLogResponse(BaseModel):
     notes: Optional[str] = None
     created_at: str
     updated_at: str
+    # Server-computed readiness (single source of truth — app just displays it).
+    readiness_score: Optional[int] = None
+    readiness_label: Optional[str] = None
+    readiness_status: Optional[str] = None
+    readiness_color: Optional[str] = None
 
 
 class IngredientItem(BaseModel):
@@ -743,15 +748,17 @@ async def get_recent_foods(
     from collections import Counter
 
     try:
-        # Get food logs from the last 30 days with detailed_items
+        # Get food logs from the last 30 days. Prefer rich detailed_items, but
+        # fall back to food_items (name/qty/unit) so logs made before detailed_items
+        # was populated still surface — for single-item logs the row-level macros
+        # ARE that item's macros (multi-item logs can't be split, so macros stay null).
         thirty_days_ago = datetime.now() - timedelta(days=30)
 
         query = text("""
-            SELECT detailed_items, logged_at
+            SELECT food_items, detailed_items, calories, protein, carbs, fats, logged_at
             FROM food_log
             WHERE user_id = :user_id
-            AND logged_at >= :since
-            AND detailed_items IS NOT NULL
+              AND logged_at >= :since
             ORDER BY logged_at DESC
         """)
 
@@ -760,27 +767,38 @@ async def get_recent_foods(
             "since": thirty_days_ago
         })
 
+        def _parse_json_col(col):
+            if isinstance(col, str):
+                try:
+                    return json.loads(col)
+                except Exception:
+                    return None
+            return col
+
         # Extract unique foods and count frequency
         food_frequency = Counter()
         food_details = {}  # Store full details for each food
         food_last_logged = {}  # Track when each food was last logged
 
         for row in result.fetchall():
-            detailed_items = row.detailed_items
             logged_at = row.logged_at
+            detailed = _parse_json_col(row.detailed_items)
+            food_items = _parse_json_col(row.food_items)
 
-            # Parse JSON if needed
-            if isinstance(detailed_items, str):
-                try:
-                    detailed_items = json.loads(detailed_items)
-                except:
-                    continue
-
-            if not detailed_items:
+            if detailed:
+                items = detailed
+                from_detailed = True
+            elif food_items:
+                items = food_items
+                from_detailed = False
+            else:
                 continue
 
-            for item in detailed_items:
-                food_name = item.get("name", "").strip()
+            # Row macros only map cleanly onto a single-item log.
+            single_item = len(items) == 1
+
+            for item in items:
+                food_name = (item.get("name") or "").strip()
                 if not food_name:
                     continue
 
@@ -791,20 +809,37 @@ async def get_recent_foods(
 
                 # Store details (keep most recent version)
                 if food_key not in food_details:
-                    food_details[food_key] = {
-                        "food_id": item.get("food_id"),
-                        "id": item.get("id") or item.get("food_id"),
-                        "name": food_name,
-                        "calories": item.get("calculated_calories") or item.get("calories"),
-                        "protein": item.get("calculated_protein") or item.get("protein"),
-                        "carbs": item.get("calculated_carbs") or item.get("carbs"),
-                        "fats": item.get("calculated_fats") or item.get("fats"),
-                        "serving_description": item.get("serving_description"),
-                        "serving_size": item.get("quantity") or item.get("serving_size") or 1,
-                        "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
-                        "source": item.get("source", "history"),
-                        "is_custom": item.get("is_custom", False)
-                    }
+                    if from_detailed:
+                        food_details[food_key] = {
+                            "food_id": item.get("food_id"),
+                            "id": item.get("id") or item.get("food_id"),
+                            "name": food_name,
+                            "calories": item.get("calculated_calories") or item.get("calories"),
+                            "protein": item.get("calculated_protein") or item.get("protein"),
+                            "carbs": item.get("calculated_carbs") or item.get("carbs"),
+                            "fats": item.get("calculated_fats") or item.get("fats"),
+                            "serving_description": item.get("serving_description"),
+                            "serving_size": item.get("quantity") or item.get("serving_size") or 1,
+                            "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
+                            "source": item.get("source", "history"),
+                            "is_custom": item.get("is_custom", False)
+                        }
+                    else:
+                        # food_items fallback: name/quantity/unit only.
+                        food_details[food_key] = {
+                            "food_id": item.get("food_id"),
+                            "id": item.get("food_id"),
+                            "name": food_name,
+                            "calories": row.calories if single_item else None,
+                            "protein": row.protein if single_item else None,
+                            "carbs": row.carbs if single_item else None,
+                            "fats": row.fats if single_item else None,
+                            "serving_description": item.get("unit"),
+                            "serving_size": item.get("quantity") or 1,
+                            "serving_unit": item.get("unit") or "serving",
+                            "source": "history",
+                            "is_custom": False
+                        }
                     food_last_logged[food_key] = logged_at
 
         # Sort by frequency (descending), then by recency
@@ -992,6 +1027,60 @@ async def get_yesterday_foods(
 # WORKOUT LOG ENDPOINTS
 # ============================================================================
 
+def _attach_watch_heart_rate(db: Session, user_id: str, workouts_dict: dict, workout_windows: dict) -> None:
+    """Meld Apple-Watch HR/calories onto each logged workout, matched by ET
+    calendar day.
+
+    Done at read time, so it always reflects the latest synced watch data — no
+    persistence or reconcile job, and no race with the post-workout sync delay.
+    Day-based (not strict time overlap) so it's robust to clock skew between
+    Sara's logged set times and the watch. Prefers a strength-type watch workout,
+    then the closest start time.
+    """
+    if not workout_windows:
+        return
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    overall_start = min(w[0] for w in workout_windows.values()) - timedelta(days=1)
+    overall_end = max(w[1] for w in workout_windows.values()) + timedelta(days=1)
+    rows = db.execute(text("""
+        SELECT activity_type, avg_heart_rate, max_heart_rate, min_heart_rate,
+               total_energy_kcal, total_distance_m, duration_seconds, started_at
+        FROM external_workout
+        WHERE user_id = :uid AND started_at >= :start AND started_at <= :end
+    """), {"uid": user_id, "start": overall_start, "end": overall_end}).fetchall()
+    if not rows:
+        return
+
+    from app.services.workout_session_service import WorkoutSessionService
+    names = WorkoutSessionService._ACTIVITY_NAMES
+    strength_types = {"50", "35", "63"}
+
+    for wid, (wstart, wend) in workout_windows.items():
+        sess_day = wstart.astimezone(et).date()
+        best = None
+        best_key = (-1, 1.0)  # (is_strength, -gap_seconds)
+        for r in rows:
+            if r.started_at.astimezone(et).date() != sess_day:
+                continue
+            gap = abs((r.started_at - wstart).total_seconds())
+            key = (1 if str(r.activity_type) in strength_types else 0, -gap)
+            if best is None or key > best_key:
+                best_key = key
+                best = r
+        if best is not None and wid in workouts_dict:
+            workouts_dict[wid]["heart_rate"] = {
+                "activity": names.get(str(best.activity_type), "Workout"),
+                "avg_heart_rate": best.avg_heart_rate,
+                "max_heart_rate": best.max_heart_rate,
+                "min_heart_rate": best.min_heart_rate,
+                "calories": round(float(best.total_energy_kcal)) if best.total_energy_kcal is not None else None,
+                "distance_m": round(float(best.total_distance_m)) if best.total_distance_m is not None else None,
+                "duration_min": round(best.duration_seconds / 60) if best.duration_seconds else None,
+            }
+
+
 @router.get("/workouts")
 async def list_workouts(
     status: str = "all",
@@ -1040,6 +1129,7 @@ async def list_workouts(
 
         # Group sets by workout_id
         workouts_dict = {}
+        workout_windows = {}  # workout_id -> [earliest_set_time, latest_set_time]
         for row in result.fetchall():
             workout_id = row.workout_id
 
@@ -1058,6 +1148,19 @@ async def list_workouts(
                     "exercises": []
                 }
 
+            # Track this workout's time span from its set timestamps, for the
+            # Apple-Watch HR meld below.
+            st = row.session_time or row.set_created_at
+            if st:
+                w = workout_windows.get(workout_id)
+                if w is None:
+                    workout_windows[workout_id] = [st, st]
+                else:
+                    if st < w[0]:
+                        w[0] = st
+                    if st > w[1]:
+                        w[1] = st
+
             # Add set to workout if set data exists
             if row.set_id:
                 workouts_dict[workout_id]["exercises"].append({
@@ -1073,6 +1176,12 @@ async def list_workouts(
                     "session_time": row.session_time.isoformat() if row.session_time else None,
                     "created_at": row.set_created_at.isoformat() if row.set_created_at else None
                 })
+
+        # Meld Apple-Watch HR/calories onto each workout by time overlap.
+        try:
+            _attach_watch_heart_rate(db, user_id, workouts_dict, workout_windows)
+        except Exception as e:
+            logger.warning(f"Watch HR meld (history) failed: {e}")
 
         workouts = list(workouts_dict.values())
         return {"workouts": workouts, "total": len(workouts)}
@@ -1478,15 +1587,9 @@ async def get_weight_suggestion(
                     logger.error(f"Error parsing starting_weights: {e}")
                     pass
 
-        # Get today's recovery data
-        today = date.today()
-        recovery_query = text("""
-            SELECT hrv, heart_rate, sleep_hours, soreness_level
-            FROM daily_recovery_log
-            WHERE user_id = :user_id AND log_date = :today
-        """)
-        recovery = db.execute(recovery_query, {"user_id": user_id, "today": today}).fetchone()
-        recovery_data = dict(recovery._mapping) if recovery else None
+        # Morning recovery snapshot (frozen at the AM sync — not intraday).
+        from app.services.progressive_overload import get_morning_recovery
+        recovery_data = get_morning_recovery(db, user_id, date.today())
 
         # Generate AI suggestion
         suggestion = suggest_weight(
@@ -2874,7 +2977,9 @@ async def get_today_nutrition_target(
 
     Falls back to single (weekly average) targets if no cycling is configured.
     """
-    target_date = on_date or date.today()
+    # Use Eastern (user) date — date.today() would use the server's UTC clock
+    # and roll over hours early/late, mislabeling the day near midnight.
+    target_date = on_date or local_now().date()
 
     # Find the active phase whose date range covers target_date
     phase_row = db.execute(text(f"""
@@ -2897,13 +3002,37 @@ async def get_today_nutrition_target(
 
     phase = dict(phase_row._mapping)
 
-    # Is today a training day? Look for any workout_session on this date.
+    # Is today a training day? Two independent signals, either one counts:
+    #   1. A materialized workout_session exists for the date (created by
+    #      activate_phase / toggle-training-day / actually logging a workout).
+    #   2. A template is *scheduled* for this weekday (plan-imported phases set
+    #      status='active' without ever materializing sessions, so the schedule
+    #      is the only signal). Mirrors /templates/today and the iOS fallback.
     sess = db.execute(text("""
         SELECT id FROM workout_session
         WHERE user_id = :uid AND session_date = :d
         LIMIT 1
     """), {"uid": user_id, "d": target_date}).fetchone()
     is_training = sess is not None
+
+    if not is_training:
+        import json as _json
+        weekday = target_date.strftime("%A").lower()
+        # Templates from the active phase, or standalone (no phase) templates.
+        sched_templates = db.execute(text("""
+            SELECT scheduled_days
+            FROM fitness_template
+            WHERE user_id = :uid
+              AND (phase_id = :pid OR phase_id IS NULL)
+        """), {"uid": user_id, "pid": phase["id"]}).fetchall()
+        for trow in sched_templates:
+            try:
+                days = _json.loads(trow.scheduled_days or "[]")
+            except (ValueError, TypeError):
+                days = []
+            if weekday in [str(d).lower() for d in days]:
+                is_training = True
+                break
 
     # Pick the right macros
     if is_training:
@@ -3093,8 +3222,8 @@ async def activate_phase(phase_id: str, user_id: str = Depends(get_current_user_
                     if current_date.weekday() in scheduled_day_nums:
                         # Create calendar event
                         event_id = str(uuid.uuid4())
-                        event_start = datetime.combine(current_date, datetime.min.time().replace(hour=9, minute=0))
-                        event_end = datetime.combine(current_date, datetime.min.time().replace(hour=10, minute=30))
+                        event_start = datetime.combine(current_date, datetime.min.time().replace(hour=13, minute=0))
+                        event_end = datetime.combine(current_date, datetime.min.time().replace(hour=14, minute=30))
 
                         db.execute(text("""
                             INSERT INTO calendar_event (id, user_id, title, start_time, end_time, description, location, source)
@@ -4012,6 +4141,50 @@ async def update_fitness_settings(settings: FitnessSettingsUpdate, user_id: str 
 # RECOVERY LOG ENDPOINTS
 # =============================================================================
 
+def _recovery_baseline(db: Session, user_id: str, days: int = 7) -> dict:
+    """Trailing-window averages used to score HRV/resting-HR relative to normal."""
+    row = db.execute(text("""
+        SELECT AVG(hrv) AS avg_hrv, AVG(heart_rate) AS avg_hr
+        FROM daily_recovery_log
+        WHERE user_id = :uid
+          AND log_date >= (CURRENT_DATE - (:days || ' days')::interval)
+    """), {"uid": user_id, "days": days}).fetchone()
+    return {
+        "avg_hrv": float(row.avg_hrv) if row and row.avg_hrv is not None else None,
+        "avg_hr": float(row.avg_hr) if row and row.avg_hr is not None else None,
+    }
+
+
+def _recovery_response(row, baseline: dict) -> RecoveryLogResponse:
+    """Build a RecoveryLogResponse from a daily_recovery_log row, attaching the
+    server-computed readiness score (single source of truth)."""
+    from app.services.recovery_score import compute_readiness
+    r = compute_readiness({
+        "sleep_hours": float(row['sleep_hours']) if row['sleep_hours'] else None,
+        "hrv": row['hrv'],
+        "heart_rate": row['heart_rate'],
+        "soreness_level": row['soreness_level'],
+    }, baseline)
+    return RecoveryLogResponse(
+        id=row['id'],
+        user_id=row['user_id'],
+        log_date=row['log_date'].isoformat(),
+        hrv=row['hrv'],
+        heart_rate=row['heart_rate'],
+        sleep_hours=float(row['sleep_hours']) if row['sleep_hours'] else None,
+        soreness_level=row['soreness_level'],
+        body_weight=float(row['body_weight']) if row['body_weight'] else None,
+        weight_unit=row['weight_unit'],
+        notes=row['notes'],
+        created_at=row['created_at'].isoformat(),
+        updated_at=row['updated_at'].isoformat(),
+        readiness_score=r["score"],
+        readiness_label=r["label"],
+        readiness_status=r["status"],
+        readiness_color=r["color"],
+    )
+
+
 @router.post("/recovery", response_model=RecoveryLogResponse)
 async def create_or_update_recovery_log(
     recovery_data: RecoveryLogCreate,
@@ -4128,22 +4301,8 @@ async def create_or_update_recovery_log(
 
         db.commit()
 
-        # Convert result to response model
-        row = result._mapping
-        return RecoveryLogResponse(
-            id=row['id'],
-            user_id=row['user_id'],
-            log_date=row['log_date'].isoformat(),
-            hrv=row['hrv'],
-            heart_rate=row['heart_rate'],
-            sleep_hours=float(row['sleep_hours']) if row['sleep_hours'] else None,
-            soreness_level=row['soreness_level'],
-            body_weight=float(row['body_weight']) if row['body_weight'] else None,
-            weight_unit=row['weight_unit'],
-            notes=row['notes'],
-            created_at=row['created_at'].isoformat(),
-            updated_at=row['updated_at'].isoformat()
-        )
+        # Convert result to response model (with server-computed readiness)
+        return _recovery_response(result._mapping, _recovery_baseline(db, user_id))
 
     except HTTPException:
         raise
@@ -4177,21 +4336,7 @@ async def get_recovery_log(
         if not result:
             return None
 
-        row = result._mapping
-        return RecoveryLogResponse(
-            id=row['id'],
-            user_id=row['user_id'],
-            log_date=row['log_date'].isoformat(),
-            hrv=row['hrv'],
-            heart_rate=row['heart_rate'],
-            sleep_hours=float(row['sleep_hours']) if row['sleep_hours'] else None,
-            soreness_level=row['soreness_level'],
-            body_weight=float(row['body_weight']) if row['body_weight'] else None,
-            weight_unit=row['weight_unit'],
-            notes=row['notes'],
-            created_at=row['created_at'].isoformat(),
-            updated_at=row['updated_at'].isoformat()
-        )
+        return _recovery_response(result._mapping, _recovery_baseline(db, user_id))
 
     except HTTPException:
         raise
@@ -4223,25 +4368,10 @@ async def get_recent_recovery_logs(
         """)
         results = db.execute(query, {"user_id": user_id, "limit": days}).fetchall()
 
-        recovery_logs = []
-        for row in results:
-            row_dict = row._mapping
-            recovery_logs.append(RecoveryLogResponse(
-                id=row_dict['id'],
-                user_id=row_dict['user_id'],
-                log_date=row_dict['log_date'].isoformat(),
-                hrv=row_dict['hrv'],
-                heart_rate=row_dict['heart_rate'],
-                sleep_hours=float(row_dict['sleep_hours']) if row_dict['sleep_hours'] else None,
-                soreness_level=row_dict['soreness_level'],
-                body_weight=float(row_dict['body_weight']) if row_dict['body_weight'] else None,
-                weight_unit=row_dict['weight_unit'],
-                notes=row_dict['notes'],
-                created_at=row_dict['created_at'].isoformat(),
-                updated_at=row_dict['updated_at'].isoformat()
-            ))
-
-        return recovery_logs
+        # One baseline over the window, so each day's score is stable across the
+        # series (matches how the app drew its trend line).
+        baseline = _recovery_baseline(db, user_id, days)
+        return [_recovery_response(row._mapping, baseline) for row in results]
 
     except Exception as e:
         logger.error(f"Failed to get recent recovery logs: {e}")
@@ -4738,7 +4868,7 @@ async def get_workout_session(
     """
     try:
         import json
-        from app.services.progressive_overload import suggest_weight, get_deload_state
+        from app.services.progressive_overload import suggest_weight, get_deload_state, get_morning_recovery
 
         # Get session with template
         session_query = text("""
@@ -4783,15 +4913,8 @@ async def get_workout_session(
         logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
         session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
 
-        # Get today's recovery data
-        today = date.today()
-        recovery_query = text("""
-            SELECT hrv, heart_rate, sleep_hours, soreness_level
-            FROM daily_recovery_log
-            WHERE user_id = :user_id AND log_date = :today
-        """)
-        recovery = db.execute(recovery_query, {"user_id": user_id, "today": today}).fetchone()
-        session_dict['recovery_data'] = dict(recovery._mapping) if recovery else None
+        # Morning recovery snapshot (frozen at the AM sync — not intraday).
+        session_dict['recovery_data'] = get_morning_recovery(db, user_id, date.today())
 
         # Determine deload state for the session date (or today if missing)
         deload = get_deload_state(
@@ -5237,6 +5360,71 @@ async def skip_current_exercise(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SelectExerciseRequest(BaseModel):
+    """Request body for jumping to a specific exercise during active workout"""
+    exercise_index: int
+
+
+@router.post("/workout-session/select-exercise")
+async def select_workout_exercise(
+    request: SelectExerciseRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Jump the active workout to a specific exercise by index.
+
+    Lets the user do exercises in any order (e.g. a machine is taken, move on and
+    come back). Set progress for the chosen exercise resumes from what's logged.
+    """
+    try:
+        result = await workout_session_service.select_exercise(
+            user_id=user_id,
+            exercise_index=request.exercise_index,
+            db=db,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to select exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SetVariantRequest(BaseModel):
+    """Request body for recording the machine/variation used for an exercise"""
+    exercise_index: int
+    variant: Optional[str] = None
+
+
+@router.post("/workout-session/set-variant")
+async def set_workout_variant(
+    request: SetVariantRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Record the actual machine/variation used for an exercise during a workout.
+
+    e.g. a "Squat" slot performed on the hack-squat machine — logs and weight
+    suggestions are then scoped to "Hack Squat" so they don't corrupt the barbell
+    squat's history. Pass an empty/blank variant to revert to the base lift.
+    """
+    try:
+        result = await workout_session_service.set_exercise_variant(
+            user_id=user_id,
+            exercise_index=request.exercise_index,
+            variant=request.variant,
+            db=db,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set exercise variant: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/workout-session/rest-timer")
 async def manage_rest_timer(
     request: RestTimerRequest,
@@ -5357,3 +5545,115 @@ async def get_workout_context(
     except Exception as e:
         logger.error(f"Failed to get workout context: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Plan Import — upload a plan document, parse it with the in-house LLM,
+# preview, then apply (creates + activates a new program). See
+# app/services/plan_importer.py.
+# ════════════════════════════════════════════════════════════════════════
+
+def _extract_uploaded_text(filename: str, content_type: str, raw: bytes) -> str:
+    """Best-effort text extraction for md/txt/pdf/docx uploads."""
+    name = (filename or "").lower()
+    ctype = (content_type or "").lower()
+    if name.endswith((".md", ".markdown", ".txt", ".text")) or ctype.startswith("text/"):
+        for enc in ("utf-8", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="ignore")
+    if name.endswith(".pdf") or ctype == "application/pdf":
+        try:
+            from pypdf import PdfReader  # maintained successor to PyPDF2
+        except ImportError:
+            from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(raw))
+        return "\n".join((p.extract_text() or "") for p in reader.pages[:200])
+    if name.endswith((".docx", ".doc")) or "word" in ctype:
+        try:
+            import docx  # python-docx
+            document = docx.Document(io.BytesIO(raw))
+            return "\n".join(p.text for p in document.paragraphs)
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not read this Word file. Export to PDF or Markdown, or paste the text instead.",
+            )
+    # Unknown type — try utf-8 as a last resort
+    return raw.decode("utf-8", errors="ignore")
+
+
+class ApplyPlanRequest(BaseModel):
+    plan: Dict[str, Any]
+    source_text: Optional[str] = ""
+    start_date: Optional[str] = None  # YYYY-MM-DD; defaults to next Monday
+
+
+@router.post("/import-plan/parse")
+async def import_plan_parse(
+    file: Optional[UploadFile] = File(None),
+    text_input: Optional[str] = Form(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Parse an uploaded document (or pasted text) into a structured plan. Read-only."""
+    from app.services.plan_importer import parse_plan_document, validate_parsed
+
+    source_text = ""
+    if file is not None:
+        raw = await file.read()
+        source_text = _extract_uploaded_text(file.filename, file.content_type, raw)
+    elif text_input:
+        source_text = text_input
+
+    if not source_text or not source_text.strip():
+        raise HTTPException(status_code=400, detail="No document content found. Upload a file or paste the plan text.")
+
+    try:
+        parsed = await parse_plan_document(source_text)
+    except Exception as e:
+        logger.error(f"Plan parse failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not parse the plan: {e}")
+
+    return {"parsed": parsed, "source_text": source_text, "warnings": validate_parsed(parsed)}
+
+
+@router.post("/import-plan/apply")
+async def import_plan_apply(
+    req: ApplyPlanRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Apply a (previewed) parsed plan: create + activate a new program."""
+    from app.services.plan_importer import apply_imported_plan
+
+    try:
+        summary = apply_imported_plan(
+            db, user_id, req.plan, source_text=req.source_text or "", start_date=req.start_date
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Plan apply failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not apply the plan: {e}")
+
+    return {"success": True, **summary}
+
+
+@router.get("/nutrition-guide")
+async def get_nutrition_guide(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Structured nutrition guide stored on the active program (drives the Nutrition tab)."""
+    row = db.execute(text(
+        "SELECT nutrition_guide FROM fitness_program "
+        "WHERE user_id=:uid AND is_active=true ORDER BY updated_at DESC LIMIT 1"
+    ), {"uid": user_id}).fetchone()
+    if not row or not row[0]:
+        return {"guide": None}
+    try:
+        return {"guide": json.loads(row[0])}
+    except (json.JSONDecodeError, TypeError):
+        return {"guide": None}

@@ -13,13 +13,14 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
 import {
   fitnessService,
   WorkoutTemplate,
   WeightSuggestion,
   CreateWorkoutSetParams,
 } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 
 interface WorkoutExercise {
   name: string;
@@ -307,7 +308,7 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
           <View style={styles.header}>
             <Text style={styles.title}>Log Workout</Text>
             <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
-              <Text style={styles.closeButton}>✕</Text>
+              <Ionicons name="close" size={24} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -321,7 +322,10 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                   style={styles.todayButton}
                   onPress={handleSelectTodayWorkout}
                 >
-                  <Text style={styles.todayButtonTitle}>📅 Today's Workout</Text>
+                  <View style={styles.todayButtonTitleRow}>
+                    <Ionicons name="calendar" size={18} color={colors.background} />
+                    <Text style={styles.todayButtonTitle}>Today's Workout</Text>
+                  </View>
                   <Text style={styles.todayButtonSubtitle}>{todayTemplate.name}</Text>
                 </TouchableOpacity>
               )}
@@ -341,24 +345,34 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                       style={styles.templateButton}
                       onPress={() => handleSelectTemplate(template)}
                     >
-                      <View>
-                        <Text style={styles.templateName}>{template.name}</Text>
-                        <Text style={styles.templateSubtitle}>
-                          {template.exercises.length} exercises
-                        </Text>
+                      <View style={styles.templateRowLeft}>
+                        <View style={styles.templateIconBadge}>
+                          <Ionicons name="list" size={18} color={colors.accent} />
+                        </View>
+                        <View>
+                          <Text style={styles.templateName}>{template.name}</Text>
+                          <Text style={styles.templateSubtitle}>
+                            {template.exercises.length} exercises
+                          </Text>
+                        </View>
                       </View>
-                      <Text style={styles.arrow}>›</Text>
+                      <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
                     </TouchableOpacity>
                   ))}
                 </View>
               )}
 
               <TouchableOpacity style={styles.customButton} onPress={handleSelectCustom}>
-                <View>
-                  <Text style={styles.customButtonTitle}>✏️ Custom Exercise</Text>
-                  <Text style={styles.customButtonSubtitle}>Create as you go</Text>
+                <View style={styles.templateRowLeft}>
+                  <View style={styles.templateIconBadge}>
+                    <Ionicons name="create-outline" size={18} color={colors.accent} />
+                  </View>
+                  <View>
+                    <Text style={styles.customButtonTitle}>Custom Exercise</Text>
+                    <Text style={styles.customButtonSubtitle}>Create as you go</Text>
+                  </View>
                 </View>
-                <Text style={styles.arrow}>›</Text>
+                <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
           )}
@@ -382,16 +396,18 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                     onPress={() => setShowDatePicker(true)}
                     style={[styles.dateTimeButton, { flex: 1, marginRight: spacing.sm }]}
                   >
+                    <Ionicons name="calendar-outline" size={16} color={colors.accent} />
                     <Text style={styles.dateTimeText}>
-                      📅 {workoutDate.toLocaleDateString()}
+                      {workoutDate.toLocaleDateString()}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => setShowTimePicker(true)}
                     style={[styles.dateTimeButton, { flex: 1 }]}
                   >
+                    <Ionicons name="time-outline" size={16} color={colors.accent} />
                     <Text style={styles.dateTimeText}>
-                      🕐 {workoutDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {workoutDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -437,8 +453,9 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
 
               <View style={styles.setsHeader}>
                 <Text style={styles.label}>Sets</Text>
-                <TouchableOpacity onPress={addSet}>
-                  <Text style={styles.addSetButton}>+ Add Set</Text>
+                <TouchableOpacity onPress={addSet} style={styles.addSetButton}>
+                  <Ionicons name="add" size={16} color={colors.accent} />
+                  <Text style={styles.addSetButtonText}>Add Set</Text>
                 </TouchableOpacity>
               </View>
 
@@ -471,7 +488,7 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                   />
                   {sets.length > 1 && (
                     <TouchableOpacity onPress={() => removeSet(index)}>
-                      <Text style={styles.removeButton}>✕</Text>
+                      <Ionicons name="close-circle" size={20} color={colors.error} />
                     </TouchableOpacity>
                   )}
                 </View>
@@ -495,9 +512,12 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                   disabled={loading}
                 >
                   {loading ? (
-                    <ActivityIndicator color={colors.text} />
+                    <ActivityIndicator color={colors.background} />
                   ) : (
-                    <Text style={styles.buttonText}>Log Workout</Text>
+                    <>
+                      <Ionicons name="checkmark" size={18} color={colors.background} />
+                      <Text style={styles.buttonText}>Log Workout</Text>
+                    </>
                   )}
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -595,7 +615,10 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
               {currentExercise.suggestedWeight && currentExercise.suggestedWeight > 0 && (
                 <View style={styles.suggestionCard}>
                   <View style={styles.suggestionHeader}>
-                    <Text style={styles.suggestionTitle}>📈 AI Suggestion</Text>
+                    <View style={styles.suggestionTitleRow}>
+                      <Ionicons name="trending-up" size={16} color={colors.accent} />
+                      <Text style={styles.suggestionTitle}>AI Suggestion</Text>
+                    </View>
                     <Text style={styles.suggestionWeight}>
                       {currentExercise.suggestedWeight}lbs
                     </Text>
@@ -665,6 +688,7 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                       onPress={completeExercise}
                     >
                       <Text style={styles.buttonText}>Next Exercise</Text>
+                      <Ionicons name="arrow-forward" size={18} color={colors.background} />
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.button, styles.secondaryButton]}
@@ -681,9 +705,12 @@ export default function WorkoutLogModal({ visible, onClose, onComplete }: Props)
                       disabled={loading}
                     >
                       {loading ? (
-                        <ActivityIndicator color={colors.text} />
+                        <ActivityIndicator color={colors.background} />
                       ) : (
-                        <Text style={styles.buttonText}>Finish Workout</Text>
+                        <>
+                          <Ionicons name="checkmark-done" size={18} color={colors.background} />
+                          <Text style={styles.buttonText}>Finish Workout</Text>
+                        </>
                       )}
                     </TouchableOpacity>
                     <TouchableOpacity
@@ -716,11 +743,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.surface,
+    borderBottomColor: colors.border,
   },
   title: {
     fontSize: fontSizes.xl,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   closeButtonContainer: {
@@ -729,10 +756,6 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  closeButton: {
-    fontSize: fontSizes.xxl,
-    color: colors.textSecondary,
   },
   content: {
     flex: 1,
@@ -745,19 +768,24 @@ const styles = StyleSheet.create({
   },
   todayButton: {
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.lg,
+    borderRadius: borderRadius.xl,
     padding: spacing.lg,
+  },
+  todayButtonTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
   },
   todayButtonTitle: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
-    color: colors.text,
-    marginBottom: spacing.xs,
+    fontWeight: fontWeights.bold,
+    color: colors.background,
   },
   todayButtonSubtitle: {
     fontSize: fontSizes.md,
-    color: colors.text,
-    opacity: 0.9,
+    color: colors.background,
+    opacity: 0.85,
   },
   divider: {
     flexDirection: 'row',
@@ -767,7 +795,7 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.divider,
   },
   dividerText: {
     color: colors.textMuted,
@@ -779,21 +807,39 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.textSecondary,
     marginBottom: spacing.xs,
   },
   templateButton: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  templateRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flex: 1,
+  },
+  templateIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   templateName: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   templateSubtitle: {
@@ -803,43 +849,41 @@ const styles = StyleSheet.create({
   },
   customButton: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    padding: spacing.lg,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
   customButtonTitle: {
-    fontSize: fontSizes.lg,
-    fontWeight: '700',
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.semibold,
     color: colors.text,
-    marginBottom: spacing.xs,
   },
   customButtonSubtitle: {
-    fontSize: fontSizes.sm,
+    fontSize: fontSizes.xs,
     color: colors.textMuted,
-  },
-  arrow: {
-    fontSize: fontSizes.xxl,
-    color: colors.textSecondary,
+    marginTop: spacing.xs,
   },
   formContainer: {
     gap: spacing.md,
   },
   label: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.semibold,
+    color: colors.textSecondary,
     marginBottom: spacing.xs,
   },
   input: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   setsHeader: {
     flexDirection: 'row',
@@ -847,16 +891,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   addSetButton: {
-    color: colors.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  addSetButtonText: {
+    color: colors.accent,
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   setRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
   },
   setLabel: {
@@ -866,8 +917,10 @@ const styles = StyleSheet.create({
   },
   setInput: {
     flex: 1,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.sm,
     fontSize: fontSizes.md,
     color: colors.text,
@@ -883,26 +936,23 @@ const styles = StyleSheet.create({
   },
   rpeInput: {
     width: 50,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.sm,
     fontSize: fontSizes.md,
     color: colors.text,
     textAlign: 'center',
   },
-  removeButton: {
-    fontSize: fontSizes.lg,
-    color: '#FF6B6B',
-    paddingHorizontal: spacing.xs,
-  },
   notesInput: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
     minHeight: 80,
     textAlignVertical: 'top',
   },
@@ -913,10 +963,12 @@ const styles = StyleSheet.create({
   },
   button: {
     flex: 1,
-    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.xs,
     minHeight: 48,
   },
   primaryButton: {
@@ -924,28 +976,32 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   finishButton: {
-    backgroundColor: '#4CAF50',
+    backgroundColor: colors.primary,
   },
   buttonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.bold,
+    color: colors.background,
   },
   secondaryButtonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.textSecondary,
   },
   exerciseHeader: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
   },
   exerciseName: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
     marginBottom: spacing.xs,
   },
@@ -954,8 +1010,10 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
   },
   targetInfo: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.sm,
   },
   targetText: {
@@ -963,10 +1021,10 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
   suggestionCard: {
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    backgroundColor: colors.assistant.actionSoft,
     borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
-    borderRadius: borderRadius.md,
+    borderColor: colors.assistant.borderStrong,
+    borderRadius: borderRadius.xl,
     padding: spacing.md,
   },
   suggestionHeader: {
@@ -975,14 +1033,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.xs,
   },
+  suggestionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
   suggestionTitle: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
-    color: '#60A5FA',
+    fontWeight: fontWeights.semibold,
+    color: colors.accent,
   },
   suggestionWeight: {
     fontSize: fontSizes.xl,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   suggestionReason: {
@@ -1000,13 +1063,13 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.sm,
   },
   progressCompleted: {
-    backgroundColor: '#4CAF50',
+    backgroundColor: colors.success,
   },
   progressCurrent: {
     backgroundColor: colors.primary,
   },
   progressPending: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceLight,
   },
   dateTimeSection: {
     gap: spacing.xs,
@@ -1016,11 +1079,15 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   dateTimeButton: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   dateTimeText: {
     fontSize: fontSizes.md,

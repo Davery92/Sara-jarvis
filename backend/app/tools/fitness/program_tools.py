@@ -1078,8 +1078,8 @@ class PhaseActivateTool(BaseTool):
                     while current_date <= end:
                         if current_date.weekday() in scheduled_day_nums:
                             event_id = str(uuid.uuid4())
-                            event_start = datetime.combine(current_date, datetime.min.time().replace(hour=9, minute=0))
-                            event_end = datetime.combine(current_date, datetime.min.time().replace(hour=10, minute=30))
+                            event_start = datetime.combine(current_date, datetime.min.time().replace(hour=13, minute=0))
+                            event_end = datetime.combine(current_date, datetime.min.time().replace(hour=14, minute=30))
 
                             db.execute(text("""
                                 INSERT INTO calendar_event (id, user_id, title, start_time, end_time, description, location, source)

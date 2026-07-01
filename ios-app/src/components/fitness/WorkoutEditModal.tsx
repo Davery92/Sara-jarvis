@@ -13,8 +13,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
 import { fitnessService, WorkoutSession, WorkoutSet } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 
 interface Props {
   visible: boolean;
@@ -115,7 +116,7 @@ export default function WorkoutEditModal({ visible, workoutSession, onClose, onC
           <View style={styles.header}>
             <Text style={styles.title}>Edit Workout</Text>
             <TouchableOpacity onPress={onClose} style={styles.closeButtonContainer}>
-              <Text style={styles.closeButton}>✕</Text>
+              <Ionicons name="close" size={24} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -130,16 +131,18 @@ export default function WorkoutEditModal({ visible, workoutSession, onClose, onC
                   onPress={() => setShowDatePicker(true)}
                   style={[styles.dateTimeButton, { flex: 1, marginRight: spacing.sm }]}
                 >
+                  <Ionicons name="calendar-outline" size={16} color={colors.accent} />
                   <Text style={styles.dateTimeText}>
-                    📅 {workoutDate.toLocaleDateString()}
+                    {workoutDate.toLocaleDateString()}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() => setShowTimePicker(true)}
                   style={[styles.dateTimeButton, { flex: 1 }]}
                 >
+                  <Ionicons name="time-outline" size={16} color={colors.accent} />
                   <Text style={styles.dateTimeText}>
-                    🕐 {workoutDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {workoutDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -221,9 +224,12 @@ export default function WorkoutEditModal({ visible, workoutSession, onClose, onC
                 disabled={loading}
               >
                 {loading ? (
-                  <ActivityIndicator color={colors.text} />
+                  <ActivityIndicator color={colors.background} />
                 ) : (
-                  <Text style={styles.buttonText}>Save Changes</Text>
+                  <>
+                    <Ionicons name="checkmark" size={18} color={colors.background} />
+                    <Text style={styles.buttonText}>Save Changes</Text>
+                  </>
                 )}
               </TouchableOpacity>
               <TouchableOpacity
@@ -253,11 +259,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.surface,
+    borderBottomColor: colors.border,
   },
   title: {
     fontSize: fontSizes.xl,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   closeButtonContainer: {
@@ -266,10 +272,6 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  closeButton: {
-    fontSize: fontSizes.xxl,
-    color: colors.textSecondary,
   },
   content: {
     flex: 1,
@@ -288,11 +290,15 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   dateTimeButton: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   dateTimeText: {
     fontSize: fontSizes.md,
@@ -301,28 +307,32 @@ const styles = StyleSheet.create({
   },
   exerciseSection: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     gap: spacing.sm,
   },
   exerciseName: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
     color: colors.text,
     marginBottom: spacing.xs,
   },
   label: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.semibold,
+    color: colors.textSecondary,
     marginBottom: spacing.xs,
   },
   setRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
   },
   setLabel: {
@@ -332,8 +342,10 @@ const styles = StyleSheet.create({
   },
   setInput: {
     flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.sm,
     fontSize: fontSizes.md,
     color: colors.text,
@@ -349,8 +361,10 @@ const styles = StyleSheet.create({
   },
   rpeInput: {
     width: 50,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.sm,
     fontSize: fontSizes.md,
     color: colors.text,
@@ -363,10 +377,12 @@ const styles = StyleSheet.create({
   },
   button: {
     flex: 1,
-    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.xs,
     minHeight: 48,
   },
   primaryButton: {
@@ -374,15 +390,17 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   buttonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.bold,
+    color: colors.background,
   },
   secondaryButtonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.textSecondary,
   },
 });

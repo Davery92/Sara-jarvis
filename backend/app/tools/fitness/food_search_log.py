@@ -87,7 +87,7 @@ class FoodSearchAndLogTool(BaseTool):
                 # Search FatSecret database
                 fatsecret_result = await self._search_food(food_name)
 
-                if not fatsecret_result:
+                if not fatsecret_result or not fatsecret_result.get("id"):
                     logger.warning(f"No FatSecret result found for: {food_name}")
                     simple_items.append({
                         "name": food_name,
@@ -96,14 +96,14 @@ class FoodSearchAndLogTool(BaseTool):
                     })
                     continue
 
-                # FatSecret returns nutrition per serving, not per 100g
-                # So we scale by quantity (number of servings)
-                scaling_factor = quantity
-
-                item_calories = (fatsecret_result.get("calories") or 0) * scaling_factor
-                item_protein = (fatsecret_result.get("protein") or 0) * scaling_factor
-                item_carbs = (fatsecret_result.get("carbs") or 0) * scaling_factor
-                item_fats = (fatsecret_result.get("fats") or 0) * scaling_factor
+                # Resolve accurate macros for the requested quantity+unit using the
+                # food's real serving list — e.g. "4 oz chicken" converts to grams
+                # and scales off the gram serving, instead of blindly logging the
+                # summary serving × 4 (which over-counted ~4x).
+                nutrition = await self._resolve_nutrition(
+                    fatsecret_result["id"], quantity, unit, food_name, fatsecret_result
+                )
+                item_calories, item_protein, item_carbs, item_fats, serving_label = nutrition
 
                 # Add to totals
                 total_calories += item_calories
@@ -116,8 +116,8 @@ class FoodSearchAndLogTool(BaseTool):
                     "food_id": fatsecret_result.get("id"),
                     "name": fatsecret_result.get("name"),
                     "quantity": quantity,
-                    "unit": unit or fatsecret_result.get("serving_unit", "serving"),
-                    "serving_description": fatsecret_result.get("serving_description"),
+                    "unit": unit or "serving",
+                    "serving_description": serving_label,
                     "calories": round(item_calories, 1),
                     "protein": round(item_protein, 1),
                     "carbs": round(item_carbs, 1),
@@ -129,7 +129,7 @@ class FoodSearchAndLogTool(BaseTool):
                 simple_items.append({
                     "name": fatsecret_result.get("name"),
                     "quantity": quantity,
-                    "unit": unit or fatsecret_result.get("serving_unit", "serving")
+                    "unit": unit or "serving"
                 })
 
             if not detailed_items:
@@ -241,6 +241,93 @@ class FoodSearchAndLogTool(BaseTool):
         except Exception as e:
             logger.error(f"Error searching for food '{food_name}': {e}")
             return None
+
+    _WEIGHT_UNITS = {"oz", "ounce", "ounces", "g", "gram", "grams", "lb", "lbs", "pound", "pounds", "kg"}
+
+    async def _resolve_nutrition(
+        self, food_id, quantity: float, unit: Optional[str], food_name: str, fallback: Dict[str, Any]
+    ) -> Tuple[float, float, float, float, str]:
+        """Accurate macros for quantity+unit using the food's full serving list.
+
+        Returns (calories, protein, carbs, fats, serving_label). Falls back to the
+        legacy "summary serving × quantity" if the full food can't be fetched.
+        """
+        try:
+            from app.services.fatsecret_service import get_fatsecret_service
+            svc = get_fatsecret_service()
+            fid = str(food_id)
+            if fid.startswith("fs-"):
+                fid = fid[3:]
+            food = await svc.get_food(fid)
+            if food and food.servings:
+                computed = self._compute_item_nutrition(food, quantity, unit, food_name)
+                if computed:
+                    return computed
+        except Exception as e:
+            logger.warning(f"resolve_nutrition fell back for '{food_name}': {e}")
+
+        # Legacy fallback: scale the summary serving by the raw quantity.
+        c = (fallback.get("calories") or 0) * quantity
+        p = (fallback.get("protein") or 0) * quantity
+        cb = (fallback.get("carbs") or 0) * quantity
+        f = (fallback.get("fats") or 0) * quantity
+        label = f"{quantity:g} × {fallback.get('serving_description') or 'serving'}"
+        return (c, p, cb, f, label)
+
+    def _compute_item_nutrition(
+        self, food, quantity: float, unit: Optional[str], food_name: str
+    ) -> Optional[Tuple[float, float, float, float, str]]:
+        """Pick the right serving and scale it for (quantity, unit)."""
+        servings = food.servings or []
+        if not servings:
+            return None
+        default = servings[0]
+
+        def macros(s) -> Tuple[float, float, float, float]:
+            return (s.calories or 0, s.protein or 0, s.carbohydrate or 0, s.fat or 0)
+
+        def gram_serving():
+            # A serving whose metric amount is in grams/ml — lets us scale by weight.
+            for s in servings:
+                mu = (s.metric_serving_unit or "").lower()
+                if mu in ("g", "gram", "grams", "ml") and s.metric_serving_amount:
+                    return s
+            return None
+
+        u = (unit or "").lower().strip()
+
+        # 1. Weight unit → convert to grams, scale off a gram-based serving.
+        if u in self._WEIGHT_UNITS:
+            gs = gram_serving()
+            if gs and gs.metric_serving_amount:
+                target_g = self._convert_to_grams(quantity, unit, food_name)
+                ratio = target_g / gs.metric_serving_amount
+                c, p, cb, f = macros(gs)
+                return (c * ratio, p * ratio, cb * ratio, f * ratio,
+                        f"{quantity:g} {unit} (~{round(target_g)}g)")
+
+        # 2. Unit names a real serving (e.g. "cup", "slice") → use that serving × qty.
+        if u:
+            match = next((s for s in servings if u in (s.serving_description or "").lower()), None)
+            if match:
+                c, p, cb, f = macros(match)
+                return (c * quantity, p * quantity, cb * quantity, f * quantity,
+                        f"{quantity:g} × {match.serving_description}")
+
+        # 3. Other volume/size unit → grams approximation off a gram serving.
+        if u:
+            gs = gram_serving()
+            if gs and gs.metric_serving_amount:
+                target_g = self._convert_to_grams(quantity, unit, food_name)
+                ratio = target_g / gs.metric_serving_amount
+                c, p, cb, f = macros(gs)
+                return (c * ratio, p * ratio, cb * ratio, f * ratio,
+                        f"{quantity:g} {unit} (~{round(target_g)}g)")
+
+        # 4. No/unknown unit → treat quantity as a count of the default serving.
+        c, p, cb, f = macros(default)
+        return (c * quantity, p * quantity, cb * quantity, f * quantity,
+                f"{quantity:g} × {default.serving_description}")
 
     def _convert_to_grams(self, quantity: float, unit: Optional[str], food_name: str) -> float:
         """Convert quantity to grams for nutrition calculation"""
