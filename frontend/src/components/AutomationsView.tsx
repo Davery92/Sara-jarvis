@@ -323,7 +323,7 @@ export default function AutomationsView() {
         <div className="p-4 border-b border-gray-700">
           <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-2">
             <span className="material-icons text-base">bolt</span>
-            Automations
+            Agent Tasks
           </h2>
           <p className="text-xs text-gray-500 mt-1">
             {tasks.filter(t => t.status === 'running').length} running

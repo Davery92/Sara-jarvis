@@ -124,10 +124,6 @@ class EventType(str, Enum):
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"
 
-    # Narrator ("System AI") events — every utterance the narrator emits,
-    # including intentionally-silent ones (payload.suppressed == True).
-    SYSTEM_NARRATION_EMITTED = "system.narration_emitted"
-
 
 class Event(BaseModel):
     """Event model"""

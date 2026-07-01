@@ -15,6 +15,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { voiceService } from '../services/voice';
 import { chatService } from '../services/chat';
+import { colors } from '../styles/theme';
 
 interface PushToTalkButtonProps {
   onTranscription?: (text: string) => void;
@@ -107,7 +108,7 @@ export const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({ onTranscript
           <Ionicons
             name={isRecording ? 'mic' : isProcessing ? 'hourglass' : 'mic-outline'}
             size={28}
-            color="#FFFFFF"
+            color={colors.text}
           />
         </TouchableOpacity>
       </Animated.View>
@@ -123,7 +124,7 @@ const styles = StyleSheet.create({
     zIndex: 1000,
   },
   buttonWrapper: {
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 8,
@@ -133,15 +134,15 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 30,
-    backgroundColor: '#6366F1',
+    backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
   },
   buttonRecording: {
-    backgroundColor: '#EF4444',
+    backgroundColor: colors.error,
   },
   buttonProcessing: {
-    backgroundColor: '#9CA3AF',
+    backgroundColor: colors.textMuted,
   },
 });
 

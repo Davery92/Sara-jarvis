@@ -66,17 +66,8 @@ interface ChatMessage {
   content: string;
 }
 
-// Category colors
-const CATEGORY_COLORS: Record<string, string> = {
-  support: 'bg-red-500/20 text-red-400 border-red-500/30',
-  urgent: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-  sales: 'bg-green-500/20 text-green-400 border-green-500/30',
-  internal: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  newsletter: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
-  personal: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  financial: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
-  notification: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
-};
+// Cap alarming counts — never render a raw triple-digit number
+const capCount = (n: number): string => (n > 99 ? '99+' : String(n));
 
 // Format file size
 const formatFileSize = (bytes: number): string => {
@@ -345,111 +336,76 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
   }, [filter]);
 
   return (
-    <div className={`h-full flex flex-col gap-3 ${className || ''}`}>
-      <section className="assistant-panel-soft rounded-md px-4 py-3.5 md:px-5">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="min-w-0 max-w-2xl">
-            <div className="assistant-kicker mb-2">Inbox Triage</div>
-            <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-3">
-              <h2 className="font-display text-2xl font-semibold text-white">Email</h2>
-              <p className="max-w-xl text-sm leading-6 text-[var(--assistant-text-soft)]">
-                Review the inbox, inspect a message, and hand the thread to Sara without leaving this workspace.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <div className="assistant-panel-soft flex min-w-[128px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
-              <span className="assistant-kicker">Unread</span>
-              <span className="font-display text-lg text-white">{stats?.unread_count ?? 0}</span>
-            </div>
-            <div className="assistant-panel-soft flex min-w-[148px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
-              <span className="assistant-kicker">Action Required</span>
-              <span className="font-display text-lg text-white">{stats?.action_required_count ?? 0}</span>
-            </div>
-            <div className="assistant-panel-soft flex min-w-[142px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
-              <span className="assistant-kicker">Visible</span>
-              <span className="font-display text-lg text-white">{emails.length}</span>
-            </div>
-            <div className="assistant-panel-soft flex min-w-[180px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
-              <span className="assistant-kicker">Last Sync</span>
-              <span className="text-sm font-medium text-white">
-                {syncing ? 'Syncing…' : stats?.last_sync ? formatDate(stats.last_sync) : 'Unknown'}
-              </span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div className="assistant-panel-soft flex min-h-0 flex-1 overflow-hidden rounded-md p-1.5">
-      {/* Left Panel - Email List */}
-      <div className="flex w-80 flex-col border-r border-white/10 bg-slate-950/60">
-        {/* Header */}
-        <div className="border-b border-white/10 p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <span className="material-icons text-teal-400">email</span>
-              Email
-            </h2>
-            <button
-              onClick={triggerSync}
-              disabled={syncing}
-              className="p-2 rounded hover:bg-gray-700 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
-              title="Sync emails"
-            >
-              <span className={`material-icons ${syncing ? 'animate-spin' : ''}`}>sync</span>
-            </button>
-          </div>
-
-          {/* Stats */}
+    <div className={`h-full flex flex-col ${className || ''}`}>
+      {/* Header — one slim row: title + live state, sync on the right */}
+      <div className="flex h-12 flex-shrink-0 items-center justify-between gap-3 border-b border-white/5 px-4">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h2 className="font-display text-xl font-semibold text-white">Email</h2>
           {stats && (
-            <div className="mb-3 flex gap-4 text-sm text-[var(--assistant-text-soft)]">
-              <span>{stats.unread_count} unread</span>
-              <span>{stats.action_required_count} action needed</span>
-            </div>
-          )}
-
-          {/* Search */}
-          <div className="relative">
-            <span className="material-icons absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-lg">
-              search
+            <span className="truncate text-sm text-slate-500">
+              {capCount(stats.unread_count)} unread
+              {syncing
+                ? ' · syncing…'
+                : stats.last_sync
+                  ? ` · synced ${formatDate(stats.last_sync)}`
+                  : ''}
             </span>
-            <input
-              type="text"
-              placeholder="Search emails..."
-              value={filter.search}
-              onChange={(e) => setFilter({ ...filter, search: e.target.value })}
-              className="w-full bg-gray-800 border border-gray-600 rounded-lg pl-10 pr-4 py-2 text-white text-sm focus:outline-none focus:border-teal-500"
-            />
-          </div>
+          )}
+        </div>
+        <button
+          onClick={triggerSync}
+          disabled={syncing}
+          className="flex flex-shrink-0 items-center gap-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300 disabled:opacity-50"
+          title="Sync emails"
+        >
+          <span className={`material-icons text-[16px] ${syncing ? 'animate-spin' : ''}`}>sync</span>
+          Sync
+        </button>
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+      {/* Left Panel - Email List (takes the space when nothing is selected) */}
+      <div
+        className={`flex min-h-0 flex-col border-r border-white/5 ${
+          selectedEmail ? 'w-80 flex-shrink-0' : 'w-full max-w-2xl'
+        }`}
+      >
+        {/* Search */}
+        <div className="px-3 pt-3">
+          <input
+            type="text"
+            placeholder="Search emails…"
+            value={filter.search}
+            onChange={(e) => setFilter({ ...filter, search: e.target.value })}
+            className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30"
+          />
         </div>
 
-        {/* Filters */}
-        <div className="flex flex-wrap gap-2 border-b border-white/10 p-3">
+        {/* Filters — quiet text tabs */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5">
           <button
             onClick={() => setFilter({ ...filter, unreadOnly: !filter.unreadOnly })}
-            className={`px-2 py-1 rounded text-xs transition-colors ${
-              filter.unreadOnly
-                ? 'bg-teal-500/20 text-teal-400 border border-teal-500/30'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            className={`text-xs transition-colors ${
+              filter.unreadOnly ? 'font-medium text-teal-300' : 'text-slate-500 hover:text-slate-300'
             }`}
           >
             Unread
           </button>
           <button
             onClick={() => setFilter({ ...filter, actionRequired: !filter.actionRequired })}
-            className={`px-2 py-1 rounded text-xs transition-colors ${
-              filter.actionRequired
-                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            className={`text-xs transition-colors ${
+              filter.actionRequired ? 'font-medium text-teal-300' : 'text-slate-500 hover:text-slate-300'
             }`}
           >
-            Action Required
+            Action required
+            {stats && stats.action_required_count > 0 && (
+              <span className="ml-1 text-slate-600">{capCount(stats.action_required_count)}</span>
+            )}
           </button>
           {filter.category && (
             <button
               onClick={() => setFilter({ ...filter, category: null })}
-              className="px-2 py-1 rounded text-xs bg-gray-700 text-gray-400 hover:bg-gray-600 flex items-center gap-1"
+              className="flex items-center gap-1 text-xs text-slate-400 transition-colors hover:text-slate-200"
             >
               {filter.category}
               <span className="material-icons text-xs">close</span>
@@ -460,43 +416,61 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
         {/* Email List */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="p-4 text-center text-[var(--assistant-text-soft)]">Loading…</div>
+            <p className="px-4 py-4 text-sm text-slate-500">Loading…</p>
           ) : emails.length === 0 ? (
-            <div className="p-6 text-center text-[var(--assistant-text-soft)]">No emails found</div>
+            <p className="px-4 py-6 text-sm text-slate-500">No emails match.</p>
           ) : (
             emails.map((email) => (
               <div
                 key={email.id}
                 onClick={() => fetchEmailDetail(email.id)}
-                className={`cursor-pointer border-b border-white/5 p-3 transition-colors hover:bg-white/[0.04] ${
+                className={`cursor-pointer px-4 py-3 transition-colors hover:bg-white/[0.04] ${
                   selectedEmail?.id === email.id ? 'bg-white/[0.06]' : ''
-                } ${!email.is_read ? 'border-l-2 border-l-teal-500' : ''}`}
+                } ${!email.is_read ? 'border-l-2 border-l-teal-400/80' : 'border-l-2 border-l-transparent'}`}
               >
-                <div className="flex items-start justify-between mb-1">
-                  <span className={`text-sm truncate flex-1 ${!email.is_read ? 'font-semibold text-white' : 'text-gray-300'}`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span
+                    className={`min-w-0 flex-1 truncate text-[15px] ${
+                      !email.is_read ? 'font-medium text-white' : 'text-slate-200'
+                    }`}
+                  >
                     {email.sender_name || email.sender_email}
                   </span>
-                  <span className="text-xs text-gray-500 ml-2">{formatDate(email.received_at)}</span>
+                  <span className="flex-shrink-0 text-xs tabular-nums text-slate-500">
+                    {formatDate(email.received_at)}
+                  </span>
                 </div>
-                <div className={`text-sm truncate mb-1 ${!email.is_read ? 'text-white' : 'text-gray-400'}`}>
+                <div
+                  className={`mt-0.5 truncate text-sm ${
+                    !email.is_read ? 'text-slate-300' : 'text-slate-400'
+                  }`}
+                >
                   {email.subject}
                 </div>
-                <div className="text-xs text-gray-500 truncate mb-2">
-                  {email.summary || email.body_preview}
-                </div>
-                <div className="flex items-center gap-2">
-                  {email.category && (
-                    <span className={`px-2 py-0.5 rounded text-xs border ${CATEGORY_COLORS[email.category] || CATEGORY_COLORS.notification}`}>
-                      {email.category}
-                    </span>
-                  )}
-                  {email.action_required && (
-                    <span className="text-red-400 text-xs">Action needed</span>
-                  )}
-                  {email.has_attachments && (
-                    <span className="material-icons text-gray-500 text-sm">attachment</span>
-                  )}
-                </div>
+                {(email.summary || email.body_preview) && (
+                  <div
+                    className={`mt-0.5 text-sm text-slate-500 ${
+                      selectedEmail ? 'truncate' : 'line-clamp-2'
+                    }`}
+                  >
+                    {email.summary || email.body_preview}
+                  </div>
+                )}
+                {(email.category || email.action_required || email.has_attachments) && (
+                  <div className="mt-1.5 flex items-center gap-2">
+                    {email.category && (
+                      <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-slate-500">
+                        {email.category}
+                      </span>
+                    )}
+                    {email.action_required && (
+                      <span className="text-[11px] text-amber-300/80">action needed</span>
+                    )}
+                    {email.has_attachments && (
+                      <span className="material-icons text-sm text-slate-600">attachment</span>
+                    )}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -504,71 +478,67 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
       </div>
 
       {/* Center Panel - Email Detail */}
-      <div className="flex flex-1 flex-col border-r border-white/10 bg-slate-950/40">
+      <div className="flex min-w-0 flex-1 flex-col">
         {detailLoading ? (
-          <div className="flex flex-1 items-center justify-center text-[var(--assistant-text-soft)]">Loading…</div>
+          <div className="flex flex-1 items-center justify-center text-sm text-slate-500">Loading…</div>
         ) : selectedEmail ? (
           <>
             {/* Email Header */}
-            <div className="border-b border-white/10 p-5">
-              <div className="assistant-kicker mb-2">Selected Email</div>
-              <h1 className="mb-2 font-display text-2xl font-semibold text-white">{selectedEmail.subject}</h1>
-              <div className="flex items-center gap-4 text-sm">
-                <div className="text-gray-300">
-                  <span className="text-gray-500">From:</span>{' '}
+            <div className="border-b border-white/5 px-6 py-4">
+              <h1 className="font-display text-xl font-semibold leading-snug text-white">
+                {selectedEmail.subject}
+              </h1>
+              <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm">
+                <span className="text-slate-300">
                   {selectedEmail.sender_name ? (
                     <>
-                      {selectedEmail.sender_name} &lt;{selectedEmail.sender_email}&gt;
+                      {selectedEmail.sender_name}{' '}
+                      <span className="text-slate-500">&lt;{selectedEmail.sender_email}&gt;</span>
                     </>
                   ) : (
                     selectedEmail.sender_email
                   )}
-                </div>
-                <div className="text-gray-500">
+                </span>
+                <span className="text-xs text-slate-500">
                   {new Date(selectedEmail.received_at).toLocaleString()}
-                </div>
+                </span>
               </div>
               {selectedEmail.to_recipients.length > 0 && (
-                <div className="text-sm text-gray-500 mt-1">
-                  <span>To:</span>{' '}
-                  {selectedEmail.to_recipients.map((r) => r.name || r.email).join(', ')}
+                <div className="mt-1 text-xs text-slate-500">
+                  To: {selectedEmail.to_recipients.map((r) => r.name || r.email).join(', ')}
                 </div>
+              )}
+              {selectedEmail.attachments.length === 0 && (
+                <button
+                  onClick={() => refreshAttachments(selectedEmail.id)}
+                  className="mt-2 text-xs text-slate-500 transition-colors hover:text-teal-300"
+                >
+                  Check for attachments
+                </button>
               )}
             </div>
 
-            {/* Refresh Attachments Button */}
-            {selectedEmail.attachments.length === 0 && (
-              <div className="border-b border-white/10 bg-yellow-500/10 px-4 py-2">
-                <button
-                  onClick={() => refreshAttachments(selectedEmail.id)}
-                  className="flex items-center gap-2 text-sm text-yellow-400 hover:text-yellow-300"
-                >
-                  <span className="material-icons text-sm">attachment</span>
-                  Check for attachments
-                  <span className="text-xs text-gray-500">(fetch from server)</span>
-                </button>
-              </div>
-            )}
-
             {/* Sara's Analysis */}
             {selectedEmail.analyzed_at && (
-              <div className="border-b border-white/10 p-4">
-                <div className="assistant-panel-soft rounded-md p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-teal-400 text-sm font-medium">Sara's Analysis</span>
+              <div className="border-b border-white/5 px-6 py-4">
+                <div className="border-l-2 border-teal-400/60 pl-3">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-300/90">
+                      Sara's read
+                    </span>
                     {selectedEmail.category && (
-                      <span className={`px-2 py-0.5 rounded text-xs border ${CATEGORY_COLORS[selectedEmail.category] || CATEGORY_COLORS.notification}`}>
+                      <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-slate-500">
                         {selectedEmail.category}
                       </span>
                     )}
                     {selectedEmail.importance_score !== null && (
-                      <span className="text-xs text-gray-500">
-                        Importance: {Math.round(selectedEmail.importance_score * 100)}%
+                      <span className="text-xs text-slate-500">
+                        importance {Math.round(selectedEmail.importance_score * 100)}%
                       </span>
                     )}
                   </div>
                   {selectedEmail.summary && (
-                    <p className="text-sm text-gray-300">{selectedEmail.summary}</p>
+                    <p className="mt-1.5 text-sm leading-relaxed text-slate-300">{selectedEmail.summary}</p>
                   )}
                 </div>
               </div>
@@ -576,29 +546,21 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
 
             {/* Attachments */}
             {selectedEmail.attachments.length > 0 && (
-              <div className="border-b border-white/10 bg-white/[0.03] p-4">
-                <div className="text-sm text-gray-400 mb-2 flex items-center gap-2">
-                  <span className="material-icons text-sm">attachment</span>
-                  {selectedEmail.attachments.length} attachment{selectedEmail.attachments.length > 1 ? 's' : ''}
-                </div>
+              <div className="border-b border-white/5 px-6 py-3">
                 <div className="flex flex-wrap gap-2">
                   {selectedEmail.attachments.map((att) => (
                     <button
                       key={att.id}
                       onClick={() => downloadAttachment(selectedEmail.id, att.id, att.filename)}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                        att.is_riskninja_relevant
-                          ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30 border border-green-500/30'
-                          : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                      }`}
+                      className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
                     >
-                      <span className="material-icons text-sm">
+                      <span className="material-icons text-sm text-slate-500">
                         {att.content_type?.startsWith('image/') ? 'image' : 'description'}
                       </span>
-                      <span className="truncate max-w-[200px]">{att.filename}</span>
-                      <span className="text-xs text-gray-500">{formatFileSize(att.size)}</span>
+                      <span className="max-w-[200px] truncate">{att.filename}</span>
+                      <span className="text-xs text-slate-500">{formatFileSize(att.size)}</span>
                       {att.is_riskninja_relevant && (
-                        <span className="text-xs text-green-400">RiskNinja</span>
+                        <span className="text-xs text-teal-300/80">RiskNinja</span>
                       )}
                     </button>
                   ))}
@@ -607,54 +569,40 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
             )}
 
             {/* Email Body */}
-            <div className="flex-1 overflow-y-auto p-4">
+            <div className="flex-1 overflow-y-auto px-6 py-4">
               {selectedEmail.body_html ? (
                 <div
                   className="prose prose-invert max-w-none prose-headings:text-white prose-p:text-slate-200 prose-li:text-slate-200"
                   dangerouslySetInnerHTML={{ __html: selectedEmail.body_html }}
                 />
               ) : (
-                <pre className="whitespace-pre-wrap font-sans text-gray-300">
+                <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed text-slate-300">
                   {selectedEmail.body_text || selectedEmail.body_preview}
                 </pre>
               )}
             </div>
           </>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-[var(--assistant-text-soft)]">
-            <div className="text-center">
-              <span className="material-icons mb-4 block text-6xl">email</span>
-              <p className="font-display text-xl text-white">Select an email to view</p>
-              <p className="mt-1 text-sm">The message detail and Sara context will appear here.</p>
-            </div>
+          <div className="flex flex-1 items-center justify-center p-8">
+            <p className="text-sm text-slate-500">Select an email to read it here.</p>
           </div>
         )}
       </div>
 
-      {/* Right Panel - Sara Chat */}
-      <div className="flex w-80 flex-col bg-slate-950/60">
-        <div className="border-b border-white/10 p-4">
-          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-            <span className="text-teal-400">Sara</span>
-            <span className="text-gray-400 text-sm font-normal">Email Assistant</span>
-          </h3>
-          {selectedEmail && (
-            <p className="text-xs text-gray-500 mt-1">
-              Context: {selectedEmail.subject.substring(0, 40)}...
-            </p>
-          )}
-        </div>
+      {/* Right Panel - Sara Chat (only once an email is selected) */}
+      {selectedEmail && (
+        <div className="flex w-80 flex-shrink-0 flex-col border-l border-white/5">
+          <div className="border-b border-white/5 px-4 py-3">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              Ask Sara
+            </h3>
+            <p className="mt-1 truncate text-xs text-slate-500">{selectedEmail.subject}</p>
+          </div>
 
-        {/* Chat Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {!selectedEmail ? (
-            <div className="mt-8 text-center text-sm text-[var(--assistant-text-soft)]">
-              Select an email to chat about it with Sara
-            </div>
-          ) : chatMessages.length === 0 ? (
-            <div className="text-sm text-[var(--assistant-text-soft)]">
-              <p className="mb-4">Ask me about this email:</p>
-              <div className="space-y-2">
+          {/* Chat Messages */}
+          <div className="flex-1 space-y-4 overflow-y-auto p-4">
+            {chatMessages.length === 0 ? (
+              <div className="space-y-1">
                 {['Summarize this email', 'Draft a reply', 'What action should I take?', 'Is this urgent?'].map(
                   (suggestion) => (
                     <button
@@ -662,63 +610,59 @@ export const EmailPage: React.FC<EmailPageProps> = ({ className }) => {
                       onClick={() => {
                         setChatInput(suggestion);
                       }}
-                      className="assistant-panel-soft w-full rounded-md px-3 py-2 text-left text-sm text-gray-300 transition hover:bg-white/[0.05]"
+                      className="block w-full rounded-lg px-2 py-1.5 text-left text-sm text-slate-400 transition-colors hover:bg-white/[0.04] hover:text-slate-200"
                     >
                       {suggestion}
                     </button>
                   )
                 )}
               </div>
-            </div>
-          ) : (
-            chatMessages.map((msg, idx) => (
-              <div
-                key={idx}
-                className={`${
-                  msg.role === 'user'
-                    ? 'bg-teal-500/20 ml-8'
-                    : 'assistant-panel-soft mr-8'
-                } rounded-md p-3`}
-              >
-                <div className="text-xs text-gray-500 mb-1">
-                  {msg.role === 'user' ? 'You' : 'Sara'}
+            ) : (
+              chatMessages.map((msg, idx) => (
+                <div key={idx}>
+                  <div
+                    className={`text-xs ${msg.role === 'user' ? 'text-slate-500' : 'text-teal-300/80'}`}
+                  >
+                    {msg.role === 'user' ? 'You' : 'Sara'}
+                  </div>
+                  <div className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
+                    {msg.content}
+                  </div>
                 </div>
-                <div className="text-sm text-gray-200 whitespace-pre-wrap">{msg.content}</div>
+              ))
+            )}
+            {chatLoading && (
+              <div>
+                <div className="text-xs text-teal-300/80">Sara</div>
+                <div className="mt-0.5 text-sm text-slate-500">Thinking…</div>
               </div>
-            ))
-          )}
-          {chatLoading && (
-            <div className="assistant-panel-soft mr-8 rounded-md p-3">
-              <div className="text-xs text-gray-500 mb-1">Sara</div>
-              <div className="text-sm text-gray-400">Thinking...</div>
-            </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
 
-        {/* Chat Input */}
-        {selectedEmail && (
-          <div className="border-t border-white/10 p-4">
-            <div className="flex gap-2">
+          {/* Chat Input */}
+          <div className="border-t border-white/5 p-3">
+            <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 transition-colors focus-within:border-teal-300/30">
               <input
                 type="text"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}
-                placeholder="Ask about this email..."
-                className="flex-1 bg-gray-800 border border-gray-600 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-teal-500"
+                placeholder="Ask about this email…"
+                className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
               />
               <button
                 onClick={sendChatMessage}
                 disabled={!chatInput.trim() || chatLoading}
-                className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-lg p-1.5 text-slate-500 transition-colors enabled:text-teal-300 enabled:hover:bg-teal-400/10 disabled:opacity-40"
+                aria-label="Send to Sara"
               >
-                <span className="material-icons text-sm">send</span>
+                <span className="material-icons text-[18px]">arrow_upward</span>
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
       </div>
     </div>
   );

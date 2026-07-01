@@ -83,7 +83,7 @@ const StarRating: React.FC<StarRatingProps> = ({ episodeId, size = 18 }) => {
             {isLoading && star === rating ? (
               <ActivityIndicator size="small" color={colors.primary} />
             ) : (
-              <Text style={[styles.star, { fontSize: size, color: isFilled ? '#FCD34D' : '#6B7280' }]}>
+              <Text style={[styles.star, { fontSize: size, color: isFilled ? colors.hues.amber : colors.textMuted }]}>
                 {isFilled ? '★' : '☆'}
               </Text>
             )}

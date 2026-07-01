@@ -13,8 +13,15 @@ interface WorkoutModeContextType {
 
   // Actions
   startWorkout: (templateId: string) => Promise<ActiveWorkoutSession | null>;
-  logSet: (params: LogSetParams) => Promise<{ success: boolean; coaching_feedback?: string }>;
+  logSet: (params: LogSetParams) => Promise<{
+    success: boolean;
+    coaching_feedback?: string;
+    rest_seconds?: number;
+    pr?: { is_pr: boolean; estimated_1rm?: number; previous_best?: number | null } | null;
+  }>;
   skipExercise: () => Promise<void>;
+  selectExercise: (exerciseIndex: number) => Promise<void>;
+  setVariant: (exerciseIndex: number, variant: string | null) => Promise<void>;
   startRestTimer: (duration?: number) => Promise<void>;
   stopRestTimer: () => Promise<void>;
   completeWorkout: () => Promise<{ summary?: any }>;
@@ -203,6 +210,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       return {
         success: result.success,
         coaching_feedback: result.coaching_feedback,
+        rest_seconds: result.next_set?.rest_seconds,
+        pr: result.pr ?? null,
       };
     } catch (err: any) {
       console.error('Failed to log set:', err);
@@ -222,12 +231,39 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  const selectExercise = async (exerciseIndex: number) => {
+    try {
+      setError(null);
+      // Optimistically move the cursor so the UI responds instantly; the next
+      // poll / refresh reconciles current_set_index from the backend.
+      setSession(prev => prev ? { ...prev, current_exercise_index: exerciseIndex } : prev);
+      await fitnessService.selectExercise(exerciseIndex);
+      await refreshSession();
+    } catch (err: any) {
+      console.error('Failed to select exercise:', err);
+      setError(err.message);
+      await refreshSession();
+    }
+  };
+
+  const setVariant = async (exerciseIndex: number, variant: string | null) => {
+    try {
+      setError(null);
+      await fitnessService.setExerciseVariant(exerciseIndex, variant);
+      await refreshSession();
+    } catch (err: any) {
+      console.error('Failed to set exercise variant:', err);
+      setError(err.message);
+    }
+  };
+
   const startRestTimer = async (duration?: number) => {
     try {
       const defaultDuration = duration || 120;
+      const startedAt = Date.now();
       // Set local ref for immediate countdown (avoids stale closure issues)
       localTimerRef.current = {
-        startTime: Date.now(),
+        startTime: startedAt,
         duration: defaultDuration,
       };
       // Immediately show the timer
@@ -236,6 +272,15 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
         remaining_seconds: defaultDuration,
         total_seconds: defaultDuration,
       });
+      // Keep the session's timer fields in sync too, so the resume-fallback in
+      // updateRestTimer can never resurrect a stale (pre-log) countdown after a
+      // refreshSession races in with the old backend timer. This is what made
+      // logging a set mid-countdown fail to reset the timer.
+      setSession(prev => prev ? {
+        ...prev,
+        rest_timer_started_at: new Date(startedAt).toISOString(),
+        rest_timer_duration_seconds: defaultDuration,
+      } : prev);
       // Persist to backend (non-blocking)
       fitnessService.manageRestTimer('start', defaultDuration).catch(err => {
         console.error('Failed to persist rest timer:', err);
@@ -310,6 +355,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     startWorkout,
     logSet,
     skipExercise,
+    selectExercise,
+    setVariant,
     startRestTimer,
     stopRestTimer,
     completeWorkout,

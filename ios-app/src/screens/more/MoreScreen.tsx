@@ -134,6 +134,13 @@ const menuSections: MenuSection[] = [
     description: 'Personal data sources, health context, and app controls.',
     items: [
       {
+        name: 'System',
+        icon: 'pulse-outline',
+        label: 'The System',
+        screen: 'System',
+        description: 'What Sara sees, thinks, and surfaces — world state, attention balance, thoughts.',
+      },
+      {
         name: 'Health',
         icon: 'heart-outline',
         label: 'Apple Health',

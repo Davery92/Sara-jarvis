@@ -611,7 +611,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   modalButtonTextSave: {
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
   },
 });

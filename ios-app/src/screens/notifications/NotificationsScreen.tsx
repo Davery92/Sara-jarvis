@@ -57,7 +57,7 @@ const CATEGORY_META: Record<string, { emoji: string; label: string }> = {
 
 const PRIORITY_COLORS: Record<string, string> = {
   critical: colors.error,
-  urgent: '#f97316',
+  urgent: colors.hues.orange,
   high: colors.warning,
   normal: colors.primary,
   low: colors.textMuted,

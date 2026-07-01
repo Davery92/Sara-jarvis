@@ -217,7 +217,7 @@ async def send_push_notification(
 
 
 class NotificationFeedbackRequest(BaseModel):
-    action: str  # "read", "engaged", "dismissed"
+    action: str  # "read", "engaged", "dismissed", "dislike"
     response_text: Optional[str] = None
 
 
@@ -230,11 +230,13 @@ async def notification_feedback(
 ):
     """
     Record user interaction with a notification.
-    Actions: read (user saw it), engaged (user clicked/replied), dismissed (user swiped away).
+    Actions: read (saw it), engaged (clicked/replied), dismissed (swiped away),
+    dislike (explicit "I didn't want this" — strongest negative; fast-trains the
+    attention learner via the 'stop' outcome).
     """
     action = request.action
-    if action not in ("read", "engaged", "dismissed"):
-        raise HTTPException(status_code=400, detail="action must be 'read', 'engaged', or 'dismissed'")
+    if action not in ("read", "engaged", "dismissed", "dislike"):
+        raise HTTPException(status_code=400, detail="action must be 'read', 'engaged', 'dismissed', or 'dislike'")
 
     try:
         user_id = current_user.id
@@ -268,8 +270,37 @@ async def notification_feedback(
                 SET dismissed_at = COALESCE(dismissed_at, NOW())
                 WHERE id = :id
             """), {"id": notification_id})
+        elif action == "dislike":
+            db.execute(text("""
+                UPDATE notification_log
+                SET dismissed_at = COALESCE(dismissed_at, NOW()),
+                    response_text = COALESCE(:response_text, response_text)
+                WHERE id = :id
+            """), {"id": notification_id, "response_text": request.response_text or "[disliked]"})
 
         db.commit()
+
+        # Phase 3 (THE SYSTEM): feed engagement into the attention learner in real
+        # time, per (domain × current context). Never block feedback recording.
+        try:
+            cat = db.execute(text("SELECT category FROM notification_log WHERE id=:id"),
+                             {"id": notification_id}).scalar()
+            from app.services.attention_learning import apply_engagement, _domain
+            from app.services.subconscious import resolve_context
+            ctx = "available"
+            try:
+                from app.services.working_memory import read_memory
+                snap = await read_memory(user_id)
+                act = snap.get("activity_state") if isinstance(snap, dict) else getattr(snap, "activity_state", None)
+                ctx = resolve_context(act)
+            except Exception:
+                pass
+            # 'dislike' is the explicit hard-negative → the learner's fast 'stop'.
+            outcome = "stop" if action == "dislike" else action
+            apply_engagement(db, user_id, _domain(cat), ctx, outcome)
+        except Exception as e:
+            logger.warning(f"[attention-learning] real-time update skipped: {e}")
+
         logger.info(f"Notification {notification_id} feedback: {action} by user {user_id}")
         return {"success": True, "notification_id": notification_id, "action": action}
 
@@ -431,23 +462,48 @@ async def mark_all_notifications_read(
               AND dismissed_at IS NULL
         """), {"user_id": user_id})
 
-        acs_result = db.execute(text("""
-            UPDATE acs_show_david_buffer
-            SET shown = TRUE,
-                shown_at = COALESCE(shown_at, NOW())
-            WHERE user_id = :user_id
-              AND COALESCE(shown, FALSE) = FALSE
-        """), {"user_id": user_id})
+        # acs_show_david_buffer is a legacy table dropped in migration 062 on
+        # current deployments — updating it unconditionally 500'd this endpoint
+        # and rolled back the notification_log update above.
+        acs_updated = 0
+        acs_exists = bool(
+            db.execute(text("SELECT to_regclass('public.acs_show_david_buffer')")).scalar()
+        )
+        if acs_exists:
+            acs_result = db.execute(text("""
+                UPDATE acs_show_david_buffer
+                SET shown = TRUE,
+                    shown_at = COALESCE(shown_at, NOW())
+                WHERE user_id = :user_id
+                  AND COALESCE(shown, FALSE) = FALSE
+            """), {"user_id": user_id})
+            acs_updated = acs_result.rowcount if hasattr(acs_result, "rowcount") else 0
 
         db.commit()
         return {
             "success": True,
             "updated": notifications_result.rowcount if hasattr(notifications_result, "rowcount") else 0,
-            "acs_updated": acs_result.rowcount if hasattr(acs_result, "rowcount") else 0,
+            "acs_updated": acs_updated,
         }
     except Exception as e:
         logger.error(f"Error marking all notifications read: {e}")
         db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/notifications/unread-count")
+async def get_unread_notification_count(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Icon badge count. Delegates to the shared assistant-inbox badge formula
+    (unread attention + clarifications + unread unlinked notifications) so the
+    icon, the tab badge, and the inbox screen all show the same number."""
+    try:
+        from app.routes.assistant_inbox import compute_badge
+        return {"unread": compute_badge(db, str(current_user.id))}
+    except Exception as e:
+        logger.error(f"Error getting unread notification count: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -459,12 +515,17 @@ async def mark_acs_notification_read(
 ):
     """Mark an ACS show_david_buffer item as shown/read."""
     try:
-        db.execute(text("""
-            UPDATE acs_show_david_buffer
-            SET shown = TRUE, shown_at = NOW()
-            WHERE id = :id AND user_id = :user_id
-        """), {"id": item_id, "user_id": current_user.id})
-        db.commit()
+        # Legacy table — dropped in migration 062 on current deployments.
+        acs_exists = bool(
+            db.execute(text("SELECT to_regclass('public.acs_show_david_buffer')")).scalar()
+        )
+        if acs_exists:
+            db.execute(text("""
+                UPDATE acs_show_david_buffer
+                SET shown = TRUE, shown_at = NOW()
+                WHERE id = :id AND user_id = :user_id
+            """), {"id": item_id, "user_id": current_user.id})
+            db.commit()
         return {"success": True}
     except Exception as e:
         db.rollback()

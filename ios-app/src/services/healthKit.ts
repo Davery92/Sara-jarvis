@@ -34,6 +34,8 @@ const HK_IDENTIFIERS = {
   // Existing
   stepCount: 'HKQuantityTypeIdentifierStepCount',
   distanceWalkingRunning: 'HKQuantityTypeIdentifierDistanceWalkingRunning',
+  distanceCycling: 'HKQuantityTypeIdentifierDistanceCycling',
+  distanceSwimming: 'HKQuantityTypeIdentifierDistanceSwimming',
   activeEnergyBurned: 'HKQuantityTypeIdentifierActiveEnergyBurned',
   heartRate: 'HKQuantityTypeIdentifierHeartRate',
   restingHeartRate: 'HKQuantityTypeIdentifierRestingHeartRate',
@@ -908,6 +910,27 @@ class HealthKitService {
     min_heart_rate: number | null;
     workout_metadata: Record<string, any>;
   }>> {
+    // In @kingstinct/react-native-healthkit v13 the WorkoutSample no longer
+    // exposes totalEnergyBurned/totalDistance as plain numbers — they live on
+    // the workout's statistics and must be read via getStatistic(). Reading the
+    // old fields silently yields undefined, which is why calories/distance were
+    // syncing as NULL. Pick the distance identifier by workout modality.
+    const distanceIdForActivity = (activityType: string): string => {
+      if (activityType === '13') return HK_IDENTIFIERS.distanceCycling;   // cycling
+      if (activityType === '46') return HK_IDENTIFIERS.distanceSwimming;  // swimming
+      return HK_IDENTIFIERS.distanceWalkingRunning;
+    };
+    const workoutStat = async (
+      w: any, identifier: string, unit: string,
+    ): Promise<number | null> => {
+      try {
+        const stat = await w.getStatistic?.(identifier, unit);
+        const v = stat?.sumQuantity?.quantity;
+        return typeof v === 'number' && v > 0 ? v : null;
+      } catch {
+        return null;
+      }
+    };
     if (!this.isAvailable || !this.healthkit) return [];
 
     try {
@@ -940,21 +963,33 @@ class HealthKitService {
           // HR fetch is best-effort; workout still gets logged
         }
 
+        const activityType = String(w.workoutActivityType ?? 'unknown');
+
+        // Pull total active energy and distance from the workout's statistics.
+        let energyKcal = await workoutStat(w, HK_IDENTIFIERS.activeEnergyBurned, 'kcal');
+        let distanceM = await workoutStat(w, distanceIdForActivity(activityType), 'm');
+        // Fall back to the legacy direct fields if a future lib version restores them.
+        if (energyKcal == null && typeof w.totalEnergyBurned === 'number') energyKcal = w.totalEnergyBurned;
+        if (distanceM == null && typeof w.totalDistance === 'number') distanceM = w.totalDistance;
+
         out.push({
           external_id: w.uuid || w.id || `${w.startDate}-${w.workoutActivityType}`,
-          activity_type: String(w.workoutActivityType || 'unknown'),
+          activity_type: activityType,
           started_at: wStart.toISOString(),
           ended_at: wEnd.toISOString(),
           duration_seconds: durationS,
-          total_energy_kcal: w.totalEnergyBurned ?? null,
-          total_distance_m: w.totalDistance ?? null,
+          total_energy_kcal: energyKcal != null ? Math.round(energyKcal) : null,
+          total_distance_m: distanceM != null ? Math.round(distanceM) : null,
           avg_heart_rate: avgHR,
           max_heart_rate: maxHR,
           min_heart_rate: minHR,
           workout_metadata: {
-            indoor: w.metadata?.HKIndoorWorkout ?? null,
+            // v13 surfaces these as flat metadata* fields (older libs nested them under metadata).
+            indoor: w.metadataIndoorWorkout ?? w.metadata?.HKIndoorWorkout ?? null,
             device: w.device?.name ?? null,
             source_name: w.sourceRevision?.source?.name ?? null,
+            elevation_ascended_m: w.metadataElevationAscended?.quantity ?? null,
+            avg_speed_m_s: w.metadataAverageSpeed?.quantity ?? null,
           },
         });
       }

@@ -331,7 +331,7 @@ export default function DailyTasksScreen() {
           disabled={!newTitle.trim() || adding}
         >
           {adding ? (
-            <ActivityIndicator size="small" color="#fff" />
+            <ActivityIndicator size="small" color={colors.text} />
           ) : (
             <Text style={styles.addButtonText}>+</Text>
           )}
@@ -590,7 +590,7 @@ const styles = StyleSheet.create({
   },
   addButtonText: {
     fontSize: 24,
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
     lineHeight: 26,
   },

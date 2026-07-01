@@ -11,6 +11,7 @@ import { useTaskEventStream } from './hooks/useTaskEventStream'
 import { CommandPalette } from './components/CommandPalette'
 import NotificationBanner from './components/NotificationBanner'
 import MiniChatOverlay from './components/MiniChatOverlay'
+import SaraOverlayHost from './components/overlay/SaraOverlayHost'
 // import HealthAlertChat from './components/HealthAlertChat'  // Disabled: health notifications are hard-banned per HEARTBEAT.md
 import ConfirmDialog from './components/ConfirmDialog'
 import AuthScreen from './components/shell/AuthScreen'
@@ -26,6 +27,7 @@ function App() {
   const [message, setMessage] = useState('')
   const [chatMessages, setChatMessages] = useState([])
   const [toasts, setToasts] = useState([])
+  const [chatAutoSendToken, setChatAutoSendToken] = useState<number | undefined>(undefined)
   const [inboxTab, setInboxTab] = useState<'attention' | 'content'>('content')
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean
@@ -318,16 +320,18 @@ function App() {
   }
 
   const showToast = useCallback((message, type = 'info', persistent = false, _highlight = false) => {
-    const id = Date.now()
-    const toast = { id, message, type, persistent }
-    setToasts(prev => [...prev, toast])
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    setToasts(prev => {
+      // Don't stack duplicates of the same message
+      if (prev.some(t => t.message === message)) return prev
+      return [...prev.slice(-9), { id, message, type, persistent }]
+    })
 
-    // Auto-remove toast after 5 seconds (unless persistent)
-    if (!persistent) {
-      setTimeout(() => {
-        setToasts(prev => prev.filter(t => t.id !== id))
-      }, 5000)
-    }
+    // Nothing camps on screen forever — history belongs in the notification
+    // indicators, not in a stack covering the page.
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, persistent ? 30000 : 5000)
   }, [])
   
   const removeToast = (id) => {
@@ -435,7 +439,9 @@ function App() {
     { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
     { view: 'email', label: 'Email', icon: 'email' },
     { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
+    { view: 'system', label: 'System', icon: 'hub' },
     { view: 'acs', label: 'ACS', icon: 'smart_toy' },
+    { view: 'automations', label: 'Agent Tasks', icon: 'bolt' },
     { view: 'notes', label: 'Notes', icon: 'edit_note' },
     { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
@@ -580,6 +586,12 @@ function App() {
               setMessage(prompt)
               navigateToView('chat')
             }}
+            onAskSara={(prompt) => {
+              setMessage(prompt)
+              setChatAutoSendToken(Date.now())
+              navigateToView('chat')
+            }}
+            chatAutoSendToken={chatAutoSendToken}
             onChatAboutNote={(title, content) => {
               const trimmed = (content || '').trim()
               const excerpt = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
@@ -611,6 +623,9 @@ function App() {
       {/* Mini Chat Overlay for Agent Clarifications */}
       <MiniChatOverlay />
 
+      {/* Jarvis-style overlays summoned from chat ("bring up my morning brief") */}
+      <SaraOverlayHost />
+
       {/* Health Alert Chat Overlay — DISABLED: health notifications are hard-banned per HEARTBEAT.md */}
 
       <ConfirmDialog
@@ -624,7 +639,7 @@ function App() {
         onCancel={closeConfirmDialog}
       />
 
-      <ToastStack toasts={toasts} onRemoveToast={removeToast} />
+      <ToastStack toasts={toasts} onRemoveToast={removeToast} onClearAll={() => setToasts([])} />
     </div>
   )
 }

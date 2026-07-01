@@ -31,12 +31,32 @@ def check_upcoming(self):
         logger.warning(f"Calendar prep check failed: {e}")
 
 
+@celery_app.task(name="app.tasks.calendar_prep.research_upcoming", bind=True, max_retries=0)
+def research_upcoming(self):
+    """Pre-research the counterparty of upcoming business meetings (deduped)."""
+    try:
+        from app.services.meeting_research import research_upcoming_meetings
+        triggered = research_upcoming_meetings(DEFAULT_USER_ID)
+        if triggered:
+            logger.info("Meeting research: triggered %d (%s)", len(triggered), triggered)
+    except Exception as e:
+        logger.warning(f"Meeting research scan failed: {e}")
+
+
 @celery_app.task(name="app.tasks.calendar_prep.cross_system_check", bind=True, max_retries=0)
 def cross_system_check(self):
     """Cross-reference email, calendar, notes for insights."""
     try:
+        from app.core.timezone import now as et_now
         from app.services.proactive_intelligence import cross_reference_check
         from app.services.unified_notification import send_notification
+
+        # These are FYI nudges, never urgent — don't fire them overnight.
+        # (This task pushed "Email from X may relate to upcoming event" at
+        # 11:43 PM. Overnight email still surfaces via the morning brief.)
+        hour = et_now().hour
+        if hour >= 22 or hour < 7:
+            return
 
         insights = _run_async(cross_reference_check(DEFAULT_USER_ID))
         for insight in insights:

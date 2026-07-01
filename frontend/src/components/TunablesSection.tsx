@@ -35,17 +35,17 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
   const step = tunable.value_type === 'float' ? '0.1' : '1'
 
   return (
-    <div className="bg-gray-800/50 border border-gray-700 rounded p-3 mb-2">
-      <div className="flex items-baseline justify-between gap-3 mb-1">
+    <div className="rounded-lg px-3 py-2.5 hover:bg-white/[0.04] transition-colors">
+      <div className="flex items-baseline justify-between gap-3">
         <div className="flex-1 min-w-0">
-          <div className="text-sm text-white font-medium">
+          <div className="text-[15px] text-slate-200">
             {tunable.display_name}
             {!isDefault && (
               <span className="ml-2 text-[10px] text-amber-400 uppercase tracking-wider">modified</span>
             )}
           </div>
           {tunable.description && (
-            <div className="text-xs text-gray-500 mt-0.5">{tunable.description}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{tunable.description}</div>
           )}
         </div>
       </div>
@@ -55,13 +55,13 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
             type="text"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white"
+            className="flex-1 bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-1.5 text-sm text-white"
           />
         ) : tunable.value_type === 'bool' ? (
           <select
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white"
+            className="flex-1 bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-1.5 text-sm text-white"
           >
             <option value="true">true</option>
             <option value="false">false</option>
@@ -74,16 +74,16 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
             max={tunable.max_value ?? undefined}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            className="w-32 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white font-mono"
+            className="w-32 bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-1.5 text-sm text-white font-mono"
           />
         )}
         {tunable.unit && (
-          <span className="text-xs text-gray-500">{tunable.unit}</span>
+          <span className="text-xs text-slate-500">{tunable.unit}</span>
         )}
         <button
           onClick={handleSave}
           disabled={!dirty || saving}
-          className="text-xs px-2 py-1 text-white bg-indigo-600 rounded disabled:opacity-30 hover:bg-indigo-500"
+          className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/[0.06] hover:text-white disabled:opacity-30"
         >
           Save
         </button>
@@ -91,7 +91,7 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
           <button
             onClick={onReset}
             disabled={saving}
-            className="text-xs px-2 py-1 text-gray-300 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700"
+            className="text-xs text-slate-500 hover:text-teal-300 transition-colors disabled:opacity-40 px-1.5 py-1.5"
             title={`Reset to default (${JSON.stringify(tunable.default_value)})`}
           >
             Reset
@@ -99,7 +99,7 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
         )}
       </div>
       {(tunable.min_value !== null || tunable.max_value !== null) && (
-        <div className="text-[10px] text-gray-600 mt-1 font-mono">
+        <div className="text-[10px] text-slate-600 mt-1 font-mono">
           {tunable.min_value !== null && `min ${tunable.min_value}`}
           {tunable.min_value !== null && tunable.max_value !== null && ' · '}
           {tunable.max_value !== null && `max ${tunable.max_value}`}
@@ -143,20 +143,19 @@ export default function TunablesSection() {
   }, [data])
 
   return (
-    <div className="mb-6 bg-card border border-card rounded-md p-6">
-      <div className="mb-4">
-        <h2 className="text-lg font-medium text-white mb-1">Behavior Tunables</h2>
-        <p className="text-sm text-gray-400">
-          Edit how Sara behaves: notification cooldowns, quiet hours, ACS deliberation thresholds, morning brief tone & length. Changes take effect within ~60 seconds.
-        </p>
+    <div>
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+          Behavior tunables
+        </h2>
       </div>
 
-      {isLoading && <p className="text-sm text-gray-500">Loading tunables…</p>}
-      {error && <p className="text-sm text-red-300">Failed to load tunables.</p>}
+      {isLoading && <p className="text-sm text-slate-500">Loading tunables…</p>}
+      {error && <p className="text-sm text-slate-500">Failed to load tunables.</p>}
 
       {grouped.map(([category, tunables]) => (
-        <div key={category} className="mb-5">
-          <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">
+        <div key={category} className="mb-6">
+          <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 mb-1.5">
             {CATEGORY_LABELS[category] ?? category}
           </h3>
           {tunables.map((t) => (

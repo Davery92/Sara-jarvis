@@ -43,7 +43,7 @@ const REACTIONS: Record<string, ReactionStyle> = {
 
 const NOTABLE = new Set(Object.keys(REACTIONS));
 const REACTION_MS = 9000;
-const IDLE_COLOR = '#0d7ff2'; // theme primary
+const IDLE_COLOR = '#14b8a6'; // theme primary
 
 export interface SaraPresence {
   emotionalState: string;

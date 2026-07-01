@@ -734,10 +734,13 @@ Synthesized summary:"""
                 "end_of_day": end_of_day
             })
 
+            from app.services.calendar_ownership import classify_event, ownership_prefix
+
             events = []
             for row in result.fetchall():
+                ownership = classify_event(row.title, row.ios_calendar_name)
                 events.append(CalendarEvent(
-                    title=row.title,
+                    title=f"{ownership_prefix(ownership)}{row.title}",
                     starts_at=row.start_time.strftime("%H:%M") if row.start_time and not row.all_day else ("All day" if row.all_day else ""),
                     ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
                     location=row.location,
@@ -758,8 +761,14 @@ Synthesized summary:"""
                     return "No calendar events found — Google Calendar sync is not active. Check your Google Calendar directly for today's schedule.", []
                 return "No events scheduled for today.", []
 
-            # Format calendar summary
+            # Format calendar summary. Titles carry an owner prefix ("Everett: …")
+            # for events that aren't David's, so downstream phrasing never
+            # claims someone else's appointment as his.
             lines = ["## Today's Schedule"]
+            lines.append(
+                "*(Events prefixed with a name belong to that family member, "
+                "not David.)*"
+            )
             for event in events:
                 time_str = event.starts_at
                 if event.ends_at:
@@ -1238,63 +1247,29 @@ Synthesized summary:"""
                     "readiness_score": 100
                 }
 
-            # Calculate readiness score (0-100)
-            readiness_score = 100
-            factors = []
-
-            # Sleep factor (30% weight) - target 7-8 hrs
-            if recovery.sleep_hours:
-                if recovery.sleep_hours < 6:
-                    readiness_score -= 30
-                    factors.append(f"only {recovery.sleep_hours:.1f} hours of sleep")
-                elif recovery.sleep_hours < 7:
-                    readiness_score -= 15
-                    factors.append(f"{recovery.sleep_hours:.1f} hours of sleep")
-                elif recovery.sleep_hours > 9:
-                    readiness_score -= 5  # Oversleep can indicate issues
-
-            # HRV factor (25% weight) - compare to baseline
-            if recovery.hrv and averages and averages.avg_hrv:
-                hrv_diff = recovery.hrv - averages.avg_hrv
-                if hrv_diff < -15:  # Significantly below baseline
-                    readiness_score -= 25
-                    factors.append(f"HRV {abs(hrv_diff):.0f}ms below baseline")
-                elif hrv_diff < -8:
-                    readiness_score -= 12
-                    factors.append(f"HRV slightly below baseline")
-
-            # Resting HR factor (20% weight) - elevated HR = poor recovery
-            if recovery.heart_rate and averages and averages.avg_hr:
-                hr_diff = recovery.heart_rate - averages.avg_hr
-                if hr_diff > 10:  # Elevated
-                    readiness_score -= 20
-                    factors.append(f"elevated resting HR ({recovery.heart_rate} bpm)")
-                elif hr_diff > 5:
-                    readiness_score -= 10
-
-            # Soreness factor (15% weight)
-            if recovery.soreness_level:
-                if recovery.soreness_level >= 8:
-                    readiness_score -= 15
-                    factors.append(f"high soreness ({recovery.soreness_level}/10)")
-                elif recovery.soreness_level >= 6:
-                    readiness_score -= 10
-                    factors.append(f"moderate soreness ({recovery.soreness_level}/10)")
-                elif recovery.soreness_level >= 4:
-                    readiness_score -= 5
-
-            # Cap score
-            readiness_score = max(0, min(100, readiness_score))
-
-            # Determine status message
-            if readiness_score >= 85:
-                status_msg = "Well recovered - good to push it today"
-            elif readiness_score >= 70:
-                status_msg = "Moderate recovery - train but listen to your body"
-            elif readiness_score >= 50:
-                status_msg = "Low recovery - consider lighter weights"
-            else:
-                status_msg = "Poor recovery - rest day recommended"
+            # Calculate readiness score via the single shared scorer (same
+            # weights the recovery API + iOS app now display — no drift).
+            from app.services.recovery_score import compute_readiness
+            _readiness = compute_readiness(
+                {
+                    "sleep_hours": recovery.sleep_hours,
+                    "hrv": recovery.hrv,
+                    "heart_rate": recovery.heart_rate,
+                    "soreness_level": recovery.soreness_level,
+                },
+                {
+                    "avg_hrv": averages.avg_hrv if averages else None,
+                    "avg_hr": averages.avg_hr if averages else None,
+                },
+            )
+            readiness_score = _readiness["score"]
+            # Keep the brief's original hyphenated phrasing for TTS continuity.
+            status_msg = {
+                "Excellent": "Well recovered - good to push it today",
+                "Good": "Moderate recovery - train but listen to your body",
+                "Low": "Low recovery - consider lighter weights",
+                "Poor": "Poor recovery - rest day recommended",
+            }[_readiness["label"]]
 
             # Build markdown text
             lines = ["## Recovery Status"]
@@ -1713,6 +1688,15 @@ Synthesized summary:"""
                         break
 
             if not today_template:
+                # No scheduled template — but a logged/started session still
+                # makes it a training day. Use the shared definition so this
+                # never contradicts the nutrition targets.
+                from app.services.training_day import is_training_day
+                if is_training_day(db, user_id, today)["is_training_day"]:
+                    return {
+                        "text": "## Today's Plan\n**Training Day** - Workout logged. No template scheduled for today.",
+                        "tts": "You've got a workout logged today, though nothing was scheduled from your plan."
+                    }
                 return {
                     "text": "## Today's Plan\n**Rest Day** - No workout scheduled. Focus on recovery.",
                     "tts": "Today is a rest day. No workout scheduled. Focus on recovery and stay hydrated."

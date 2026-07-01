@@ -3,7 +3,23 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import apiClient from './api';
-import { navigateToChat, navigateToInbox, navigateToNoteEditor } from './navigation';
+import { navigateToChat, navigateToInbox, navigateToNoteEditor, navigateToFitness, navigateToNotifications, navigate } from './navigation';
+import { endEvent } from './eventActivity';
+
+// Push types that mean a background task reached a terminal state — the
+// "Sara is working" Live Activity for it must be torn down on sight.
+const TASK_TERMINAL_PUSH_TYPES = new Set([
+  'background_task',
+  'research_complete',
+  'task_chat_inject',
+]);
+
+/** Ends the task Live Activity named by a terminal-task push, if any. */
+function endTaskActivityFromPush(data: any): void {
+  if (data?.task_id && TASK_TERMINAL_PUSH_TYPES.has(data?.type)) {
+    endEvent(String(data.task_id));
+  }
+}
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
@@ -22,6 +38,7 @@ const NOTIFICATION_ACTIONS = {
   REPLY: 'REPLY',
   VIEW_DETAILS: 'VIEW_DETAILS',
   DISMISS: 'DISMISS',
+  DISLIKE: 'DISLIKE',
 };
 
 // Notification category identifiers
@@ -34,136 +51,55 @@ const NOTIFICATION_CATEGORIES = {
   ACS_DISCOVERY: 'ACS_DISCOVERY',
   THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
   LEARNING_REVIEW: 'LEARNING_REVIEW',
-  SYSTEM_EVENT: 'SYSTEM_EVENT',
 };
 
 // Set up interactive notification categories
 async function setupNotificationCategories() {
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.MEAL_NUDGE, [
-    {
-      identifier: NOTIFICATION_ACTIONS.LOG_MEAL,
-      buttonTitle: 'Log Meal',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  // A "Dislike" action is appended to EVERY category so David can tell Sara, at
+  // notify-time (long-press), that he didn't want this. It runs in the
+  // background (no app open) and feeds the learner's fast 'stop' signal.
+  const DISLIKE = {
+    identifier: NOTIFICATION_ACTIONS.DISLIKE,
+    buttonTitle: '👎 Dislike',
+    options: { opensAppToForeground: false, isDestructive: true },
+  };
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.MORNING_CHECKIN, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  const REPLY = (placeholder: string) => ({
+    identifier: NOTIFICATION_ACTIONS.REPLY,
+    buttonTitle: 'Reply',
+    options: { opensAppToForeground: true },
+    textInput: { submitButtonTitle: 'Send', placeholder },
+  });
+  const VIEW = (buttonTitle = 'View') => ({
+    identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+    buttonTitle,
+    options: { opensAppToForeground: true },
+  });
+  const DISMISS = (buttonTitle = 'Not Now') => ({
+    identifier: NOTIFICATION_ACTIONS.DISMISS,
+    buttonTitle,
+    options: { opensAppToForeground: false },
+  });
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.HEALTH_ALERT, [
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'View Details',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Ask Sara...' },
-    },
-  ]);
+  const categoryActions: Record<string, any[]> = {
+    [NOTIFICATION_CATEGORIES.MEAL_NUDGE]: [
+      { identifier: NOTIFICATION_ACTIONS.LOG_MEAL, buttonTitle: 'Log Meal', options: { opensAppToForeground: true } },
+      REPLY('Tell Sara...'),
+    ],
+    [NOTIFICATION_CATEGORIES.MORNING_CHECKIN]: [REPLY('Tell Sara...')],
+    [NOTIFICATION_CATEGORIES.HEALTH_ALERT]: [VIEW('View Details'), REPLY('Ask Sara...')],
+    [NOTIFICATION_CATEGORIES.GENERAL_NUDGE]: [REPLY('Tell Sara...')],
+    [NOTIFICATION_CATEGORIES.SARA_INSIGHT]: [REPLY('Reply to Sara...'), VIEW(), DISMISS('Not Now')],
+    [NOTIFICATION_CATEGORIES.ACS_DISCOVERY]: [VIEW(), DISMISS('Not Now')],
+    [NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP]: [REPLY('Reply...'), DISMISS('Dismiss')],
+    [NOTIFICATION_CATEGORIES.LEARNING_REVIEW]: [VIEW('Start Review'), DISMISS('Later')],
+  };
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.GENERAL_NUDGE, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  for (const [category, actions] of Object.entries(categoryActions)) {
+    await Notifications.setNotificationCategoryAsync(category, [...actions, DISLIKE]);
+  }
 
-  // Sara proactive observations/insights
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.SARA_INSIGHT, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Reply to Sara...' },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'View',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.DISMISS,
-      buttonTitle: 'Not Now',
-      options: { opensAppToForeground: false },
-    },
-  ]);
-
-  // ACS autonomous discoveries
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.ACS_DISCOVERY, [
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'View',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.DISMISS,
-      buttonTitle: 'Not Now',
-      options: { opensAppToForeground: false },
-    },
-  ]);
-
-  // Thread follow-ups (Sara following up on a prior topic)
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Reply...' },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.DISMISS,
-      buttonTitle: 'Dismiss',
-      options: { opensAppToForeground: false },
-    },
-  ]);
-
-  // Learning spaced repetition review reminders
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.LEARNING_REVIEW, [
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'Start Review',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.DISMISS,
-      buttonTitle: 'Later',
-      options: { opensAppToForeground: false },
-    },
-  ]);
-
-  // Narrator ("System AI") broadcasts. Tap or View opens the app to the
-  // event detail; Dismiss is a no-op so iOS still records the engagement.
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.SYSTEM_EVENT, [
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'View',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.DISMISS,
-      buttonTitle: 'Dismiss',
-      options: { opensAppToForeground: false },
-    },
-  ]);
-
-  console.log('[PushNotifications] Notification categories set up');
+  console.log('[PushNotifications] Notification categories set up (with Dislike)');
 }
 
 // Initialize categories on module load
@@ -317,6 +253,9 @@ class PushNotificationService {
     this.notificationListener = Notifications.addNotificationReceivedListener(
       (notification) => {
         console.log('[PushNotifications] Notification received:', notification);
+        // Task finished while the app is foregrounded — don't wait for the
+        // next poll cycle (or a tap) to clear the Live Activity.
+        endTaskActivityFromPush(notification.request.content.data);
         if (this.onNotificationReceived) {
           this.onNotificationReceived(notification);
         }
@@ -348,7 +287,10 @@ class PushNotificationService {
         if (data?.notification_id) {
           const notifId = Number(data.notification_id);
           if (!isNaN(notifId)) {
-            if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
+            if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) {
+              // Explicit "I dislike this" — strongest negative signal.
+              apiClient.sendNotificationFeedback(notifId, 'dislike');
+            } else if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
               apiClient.sendNotificationFeedback(notifId, 'dismissed');
             } else {
               // Any other interaction (tap, reply, view) counts as engaged
@@ -370,8 +312,76 @@ class PushNotificationService {
   /**
    * Handle navigation when user taps a notification
    */
+  /**
+   * Generic deep-link router. The server sets `data.target` (+ optional
+   * `data.params`) on every push so a tap opens the relevant area. Returns true
+   * if it handled the target. Falls through to type-based routing otherwise.
+   */
+  private routeByTarget(target?: string, params?: any, data?: any): boolean {
+    if (!target) return false;
+    const p = params || {};
+    try {
+      switch (String(target).toLowerCase()) {
+        case 'chat': {
+          // Proactive check-ins / follow-ups are Sara *talking to you* — they
+          // should drop her message into the chat so you can just reply, NOT
+          // open the "Discuss this" templated-prompt flow (that's for reviewing
+          // an ACS discovery/notification). Route those through the heartbeat
+          // param, which ChatScreen renders as an assistant message + open
+          // composer. Everything else keeps the old notification behaviour.
+          const ptype = String(data?.type || '').toLowerCase();
+          const pcat = String(data?.category || '').toLowerCase();
+          const isCheckin =
+            ptype === 'proactive_checkin' ||
+            ptype === 'heartbeat' ||
+            ptype === 'unified_heartbeat' ||
+            pcat === 'checkin' ||
+            pcat === 'followup';
+          if (!p.chat && isCheckin) {
+            navigateToChat({
+              heartbeat: {
+                title: data?.title || 'Checking in',
+                message: data?.message || data?.body || '',
+                priority: data?.priority || 'normal',
+              },
+            });
+          } else {
+            navigateToChat(p.chat || { notification: data });
+          }
+          return true;
+        }
+        case 'inbox': navigateToInbox({ focus: p.focus || 'new' }); return true;
+        case 'notifications': navigateToNotifications(); return true;
+        case 'email': navigate('Email', p); return true;
+        case 'agent_tasks': navigate('AgentTasks', p); return true;
+        case 'calendar': navigate('Calendar', p); return true;
+        case 'fitness': navigateToFitness(); return true;
+        case 'learn': navigate('Learning', p); return true;
+        case 'acs': navigate('ACS', p); return true;
+        case 'knowledge': navigate('Knowledge', p); return true;
+        // "System" = Sara's awareness/proactive thoughts → open the System hub.
+        case 'system': navigate('System'); return true;
+        case 'notes':
+          if (data?.note_id) navigateToNoteEditor(data.note_id);
+          else navigate('Notes', p);
+          return true;
+        default: return false;
+      }
+    } catch (e) {
+      console.warn('[PushNotifications] routeByTarget failed', e);
+      return false;
+    }
+  }
+
   private handleNotificationNavigation(data: any, actionIdentifier?: string, userText?: string): void {
     if (!data) return;
+
+    // "Dislike" is a pure background feedback signal — never open or navigate.
+    if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) return;
+
+    // Tapping a "task done" notification must also clear its Live Activity —
+    // the app may have been backgrounded/killed when the push landed.
+    endTaskActivityFromPush(data);
 
     // Handle action button taps with text input
     if (userText && this.onQuickReply) {
@@ -389,6 +399,18 @@ class PushNotificationService {
       if (this.onLogMealAction) {
         this.onLogMealAction();
       }
+      return;
+    }
+
+    // Generic deep-link target wins over type-based routing (server sets it on
+    // every push). A body TAP uses the DEFAULT action identifier (which is a
+    // non-empty string), so treat tap + "View" as open-intents. Quick-reply,
+    // Log-Meal, and Dislike are handled and returned above this point.
+    const isOpenIntent =
+      !actionIdentifier ||
+      actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER ||
+      actionIdentifier === NOTIFICATION_ACTIONS.VIEW_DETAILS;
+    if (isOpenIntent && this.routeByTarget(data.target, data.params, data)) {
       return;
     }
 
@@ -456,14 +478,22 @@ class PushNotificationService {
           this.onTaskChatInject(data.task_id, data.conversation_id, data.note_id);
         }
         break;
-      case 'background_task':
-        // Background task completed - notify listeners
+      case 'background_task': {
+        // Background task completed. If it produced a report note, deep-link
+        // straight to it; otherwise fall back to the inbox. (Backend sends the
+        // id as both `note_id` and `result_note_id`.)
         console.log('[PushNotifications] Background task notification:', data);
+        const bgNoteId = data.note_id || data.result_note_id;
         if (this.onBackgroundTaskComplete) {
-          this.onBackgroundTaskComplete(data.task_id, data.result_note_id);
+          this.onBackgroundTaskComplete(data.task_id, bgNoteId);
         }
-        navigateToInbox({ focus: 'done' });
+        if (bgNoteId) {
+          navigateToNoteEditor(bgNoteId);
+        } else {
+          navigateToInbox({ focus: 'done' });
+        }
         break;
+      }
       case 'research_complete':
         // Chat-initiated research plan finished — open the report note directly.
         console.log('[PushNotifications] Research complete:', data);
@@ -484,67 +514,6 @@ class PushNotificationService {
           navigateToChat();
         }
         break;
-      case 'system_event': {
-        // Narrator broadcast — the System AI. Tapping pops a global overlay
-        // modal with the full body, regardless of how aggressively iOS
-        // truncates the banner. Dismiss action is a no-op.
-        console.log(
-          '[PushNotifications] System event tapped:',
-          { event_id: data.event_id, trigger: data.trigger_name, severity: data.severity,
-            has_body: !!(data.body || data.message), has_title: !!data.title }
-        );
-        if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
-          break;
-        }
-        if (!data.event_id) {
-          // No event id → fall back to opening chat so the tap isn't a dead-end.
-          navigateToChat();
-          break;
-        }
-        const payload = {
-          event_id: data.event_id as string,
-          title: (data.title as string) || 'System Broadcast',
-          body: (data.body as string) || (data.message as string) || '',
-          subtitle: (data.subtitle as string | null) ?? null,
-          severity: (data.severity as string) || 'observation',
-          trigger_name: data.trigger_name as string | undefined,
-        };
-        if (this.onSystemEventTapped) {
-          this.onSystemEventTapped(payload);
-        } else {
-          // App was launched cold by the tap — overlay isn't mounted yet.
-          // Stash the payload; setOnSystemEventTapped will flush it.
-          this.pendingSystemEventData = payload;
-        }
-        // Final safety net: if the body came through empty (broken push
-        // payload, stale build, exotic encoding), fetch the canonical row
-        // from the backend and re-fire the overlay with the real body.
-        if (!payload.body) {
-          (async () => {
-            try {
-              const fresh: any = await apiClient.get(
-                `/api/narrator/events/${payload.event_id}`
-              );
-              const refilled = {
-                ...payload,
-                title: fresh.title || payload.title,
-                body: fresh.body || payload.body,
-                subtitle: fresh.subtitle ?? payload.subtitle,
-                severity: fresh.severity || payload.severity,
-                trigger_name: fresh.trigger_name || payload.trigger_name,
-              };
-              if (this.onSystemEventTapped) {
-                this.onSystemEventTapped(refilled);
-              } else {
-                this.pendingSystemEventData = refilled;
-              }
-            } catch (e) {
-              console.warn('[PushNotifications] system_event refill failed:', e);
-            }
-          })();
-        }
-        break;
-      }
       case 'agent_clarification':
         // Agent needs clarification
         console.log('[PushNotifications] Agent clarification needed:', data);
@@ -629,24 +598,6 @@ class PushNotificationService {
   private onQuickReply: ((message: string, context?: { nudgeType?: string; title?: string }) => void) | null = null;
   // Callback for log meal action
   private onLogMealAction: (() => void) | null = null;
-  // Callback for narrator (System AI) broadcasts — opens the overlay modal.
-  private onSystemEventTapped: ((payload: {
-    event_id: string;
-    title: string;
-    body: string;
-    subtitle?: string | null;
-    severity: string;
-    trigger_name?: string;
-  }) => void) | null = null;
-  // Pending system_event data (if callback wasn't ready when tap happened).
-  private pendingSystemEventData: {
-    event_id: string;
-    title: string;
-    body: string;
-    subtitle?: string | null;
-    severity: string;
-    trigger_name?: string;
-  } | null = null;
 
   /**
    * Set callback for background task completion
@@ -728,29 +679,6 @@ class PushNotificationService {
     callback: (title: string, message: string, priority: string) => void
   ): void {
     this.onHeartbeatTapped = callback;
-  }
-
-  /**
-   * Set callback for narrator (System AI) broadcasts. When tapped, the
-   * callback fires with the event payload so a global overlay can render
-   * the full body. Flushes any pending tap captured before this setter ran.
-   */
-  setOnSystemEventTapped(
-    callback: (payload: {
-      event_id: string;
-      title: string;
-      body: string;
-      subtitle?: string | null;
-      severity: string;
-      trigger_name?: string;
-    }) => void
-  ): void {
-    this.onSystemEventTapped = callback;
-    if (this.pendingSystemEventData) {
-      const p = this.pendingSystemEventData;
-      this.pendingSystemEventData = null;
-      callback(p);
-    }
   }
 
   /**

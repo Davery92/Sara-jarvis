@@ -520,7 +520,7 @@ export default function BriefingsScreen() {
               style={[styles.heroActionButton, styles.heroActionPrimary, generating && styles.heroActionDisabled]}
             >
               {generating ? (
-                <ActivityIndicator size="small" color="#fff" />
+                <ActivityIndicator size="small" color={colors.text} />
               ) : (
                 <Text style={styles.heroActionPrimaryText}>Refresh Brief</Text>
               )}
@@ -826,7 +826,7 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   heroActionPrimaryText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '700',
   },
@@ -874,7 +874,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   playText: {
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
     fontSize: fontSizes.sm,
   },
@@ -1030,13 +1030,13 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xs,
   },
   briefTypeChipMorning: {
-    backgroundColor: '#F59E0B22',
-    borderColor: '#F59E0B66',
+    backgroundColor: 'rgba(251, 191, 36, 0.13)',
+    borderColor: 'rgba(251, 191, 36, 0.40)',
     borderWidth: 1,
   },
   briefTypeChipResearch: {
-    backgroundColor: '#8B5CF622',
-    borderColor: '#8B5CF666',
+    backgroundColor: 'rgba(139, 92, 246, 0.13)',
+    borderColor: 'rgba(139, 92, 246, 0.40)',
     borderWidth: 1,
   },
   briefTypeChipText: {

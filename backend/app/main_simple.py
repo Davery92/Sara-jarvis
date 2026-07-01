@@ -145,6 +145,7 @@ NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
 AI_PROVIDER = _app_state.ai_provider
 OPENAI_BASE_URL = _app_state.openai_base_url
 OPENAI_MODEL = _app_state.openai_model
+CHAT_DEFAULT_MODEL = _app_state.chat_default_model
 OPENAI_API_KEY = _app_state.openai_api_key
 ANTHROPIC_API_KEY = _app_state.anthropic_api_key
 GOOGLE_API_KEY = _app_state.google_api_key
@@ -169,6 +170,7 @@ from app.core.text_utils import extract_text_content as _extract_text_content
 from app.core.text_utils import is_local_base_url as _is_local_base_url
 from app.core.text_utils import safe_parse_iso_datetime as _safe_parse_iso_datetime
 from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls
+from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
 
 
 async def _mark_shown_discoveries(user_id: str, response_text: str):
@@ -588,9 +590,22 @@ class SimpleLLMClient:
         payload = {
             "model": effective_model,
             "messages": filtered_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # Reasoning-only Claude models (Sonnet 5, Opus 4.7/4.8, Fable 5) return a
+        # 400 if `temperature` is supplied. For those, drop the sampling param and
+        # turn on adaptive thinking (the model decides how much to reason per turn).
+        # Adaptive thinking shares the max_tokens budget with the visible reply, so
+        # give it generous headroom to avoid truncating the answer. Fable/Mythos
+        # have thinking always on and reject an explicit thinking config.
+        reasoning_only = claude_rejects_sampling_params(effective_model)
+        if reasoning_only:
+            if not claude_thinking_always_on(effective_model):
+                payload["thinking"] = {"type": "adaptive"}
+            payload["max_tokens"] = max(max_tokens, 32000)
+        else:
+            payload["temperature"] = temperature
 
         # Use system array format with cache_control for prompt caching
         if system_content:
@@ -629,7 +644,11 @@ class SimpleLLMClient:
             response = await self.client.post(
                 "https://api.anthropic.com/v1/messages",
                 json=payload,
-                headers=self._get_anthropic_headers()
+                headers=self._get_anthropic_headers(),
+                # Adaptive thinking + larger max_tokens can take longer to generate
+                # on this non-streaming path; widen the read timeout past the
+                # client default (120s) so heavier turns don't spuriously fail.
+                timeout=300.0 if reasoning_only else httpx.USE_CLIENT_DEFAULT,
             )
             if response.status_code >= 400:
                 error_body = response.text
@@ -1435,8 +1454,17 @@ class SimpleLLMClient:
             # Store ephemeral flag for use in store_conversation
             self._ephemeral = ephemeral
 
-            # Determine which model to use
+            # Determine which model to use. Reject overrides that aren't in the
+            # catalog — stale clients still request retired models (e.g. the old
+            # iOS default "gpt-oss:120b"), which would otherwise fall through to
+            # the global provider and 404 against Anthropic/Gemini.
             effective_model = model or OPENAI_MODEL
+            _known_model_ids = {(m.get("id") or "").lower() for m in AVAILABLE_MODELS}
+            if model and model.lower() not in _known_model_ids:
+                logger.warning(
+                    f"Requested model '{model}' not in catalog — using default '{OPENAI_MODEL}'"
+                )
+                effective_model = OPENAI_MODEL
             model_config = get_model_config(effective_model)
             logger.info(f"🤖 Model selection: requested={model}, effective={effective_model}, provider={model_config['provider']}, base_url={model_config['base_url']}")
 
@@ -3198,11 +3226,16 @@ class DocumentProcessor:
     def _extract_pdf_text(self, file_path: str) -> str:
         """Extract text from PDF file with robust error handling"""
         try:
-            import PyPDF2
+            # pypdf is the maintained successor to PyPDF2 (same PdfReader API).
+            # Fall back to PyPDF2 only if pypdf isn't present.
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
             text = ""
-            
+
             with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
+                reader = PdfReader(file)
                 
                 # Process all pages (or reasonable limit for very large documents)
                 max_pages = min(len(reader.pages), 500)  # Up to 500 pages
@@ -3231,7 +3264,7 @@ class DocumentProcessor:
                     return ""
                     
         except ImportError:
-            logger.error("PyPDF2 not available for PDF text extraction")
+            logger.error("No PDF library (pypdf/PyPDF2) available for PDF text extraction")
             return ""
         except Exception as e:
             logger.error(f"Error extracting PDF text: {e}")
@@ -3430,6 +3463,88 @@ class DocumentProcessor:
 
 document_processor = DocumentProcessor()
 
+
+# Map common file extensions → MIME type for attachments that arrive with a
+# generic/octet-stream media type (some pickers don't report it reliably).
+_ATTACHMENT_EXT_MIME = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+}
+
+
+def _materialize_document_attachments(messages) -> None:
+    """Replace base64 'document' content blocks with extracted-text blocks, in place.
+
+    Clients (iOS/web) can attach PDFs, Word docs, and text files to a chat turn as
+    ``{"type": "document", "data": <base64>, "media_type": ..., "filename": ...}``.
+    The local LLM can't read binary files, so we extract their text here and splice
+    it into the message as plain text before the turn reaches intent routing or the
+    model. Image blocks are left untouched so vision still works.
+    """
+    import base64 as _b64
+    import tempfile
+
+    for msg in messages or []:
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        if not any(isinstance(p, dict) and p.get("type") == "document" for p in content):
+            continue
+
+        new_content = []
+        for part in content:
+            if not (isinstance(part, dict) and part.get("type") == "document"):
+                new_content.append(part)
+                continue
+
+            filename = part.get("filename") or part.get("name") or "attachment"
+            media_type = part.get("media_type") or part.get("mime_type") or ""
+            ext = os.path.splitext(filename)[1].lower()
+            # Fall back to extension-based MIME when the client didn't give a usable one.
+            if media_type not in document_processor.supported_types:
+                media_type = _ATTACHMENT_EXT_MIME.get(ext, media_type or "application/octet-stream")
+
+            extracted = ""
+            try:
+                raw = _b64.b64decode(part.get("data") or "")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                    tf.write(raw)
+                    tmp_path = tf.name
+                try:
+                    extracted = document_processor.extract_text(tmp_path, media_type) or ""
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed to extract attached document '{filename}': {e}")
+
+            extracted = extracted.strip()
+            MAX_CHARS = 50000
+            if len(extracted) > MAX_CHARS:
+                extracted = extracted[:MAX_CHARS] + f"\n\n[... document truncated at {MAX_CHARS} characters ...]"
+
+            if extracted:
+                block_text = (
+                    f"\n\n[Attached file: {filename}]\n{extracted}\n"
+                    f"[End of attached file: {filename}]\n"
+                )
+            else:
+                block_text = (
+                    f"\n\n[Attached file: {filename} — no readable text could be "
+                    f"extracted from this {media_type} file.]\n"
+                )
+            new_content.append({"type": "text", "text": block_text})
+
+        msg.content = new_content
+
+
 # NTFY Notification Service
 class NTFYService:
     """Service for sending mobile notifications via NTFY with AI-generated messages"""
@@ -3523,7 +3638,9 @@ Message: [message]"""
                         "model": OPENAI_NOTIFICATION_MODEL,
                         "messages": [{"role": "system", "content": system_prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 150
+                        "max_tokens": 150,
+                        # Local qwen: disable thinking or `content` comes back empty.
+                        "chat_template_kwargs": {"enable_thinking": False},
                     },
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
                 )
@@ -5288,6 +5405,14 @@ try:
 except Exception as e:
     logger.warning(f"Auth routes not available from module: {e}")
 
+# Unified assistant inbox (needs-you / FYI merge + shared badge formula)
+try:
+    from app.routes.assistant_inbox import router as assistant_inbox_router
+    app.include_router(assistant_inbox_router)
+    logger.info("✅ Assistant inbox routes loaded from app.routes.assistant_inbox")
+except Exception as e:
+    logger.warning(f"Assistant inbox routes not available from module: {e}")
+
 # Folders routes (extracted from main_simple.py)
 try:
     from app.routes.folders import router as folders_router
@@ -5482,6 +5607,20 @@ try:
 except Exception as e:
     logger.error(f"❌ Project tracker routes failed to load: {e}")
 
+try:
+    from app.routes.hosts import router as hosts_router
+    app.include_router(hosts_router, prefix="/api", tags=["Managed Hosts"])
+    logger.info("✅ Managed hosts routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Managed hosts routes failed to load: {e}")
+
+try:
+    from app.routes.browse_shots import router as browse_shots_router
+    app.include_router(browse_shots_router, prefix="/api", tags=["Browse Screenshots"])
+    logger.info("✅ Browse screenshot routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Browse screenshot routes failed to load: {e}")
+
 # Include Artifacts routes
 try:
     from app.routes.artifacts import router as artifacts_router
@@ -5670,6 +5809,10 @@ app.include_router(email_router, prefix="/api")
 from app.routes.content_inbox import router as content_inbox_router
 app.include_router(content_inbox_router)
 
+# Progress Photos routes (fitness physique tracking + inline VLM critique)
+from app.routes.progress_photos import router as progress_photos_router
+app.include_router(progress_photos_router)
+
 # Agent Orchestration routes (VM agent dispatch + candidate skills)
 from app.routes.agent_orchestration import router as agent_orch_router
 app.include_router(agent_orch_router)
@@ -5706,10 +5849,6 @@ app.include_router(acs_interests_router)
 from app.routes.acs_user_tools import router as acs_user_tools_router
 app.include_router(acs_user_tools_router)
 
-# Narrator ("System AI") — broadcast persona on top of ACS observation streams
-from app.routes.narrator import router as narrator_router
-app.include_router(narrator_router)
-
 # System metrics
 from app.routes.metrics import router as metrics_router
 app.include_router(metrics_router)
@@ -5733,7 +5872,9 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
                     "model": OPENAI_MODEL,
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens
+                    "max_tokens": max_tokens,
+                    # Local qwen: disable thinking or `content` comes back empty.
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
             )
@@ -5765,6 +5906,13 @@ async def get_shadow_active():
 from app.routes.subconscious import router as subconscious_router
 app.include_router(subconscious_router, tags=["Subconscious"])
 logger.info("✅ Subconscious routes loaded successfully")
+
+
+# ===================== THE SYSTEM (awareness / god-view) =====================
+# routes/system_awareness.py — read-only god-view (Phase 0) + world model (Phase 1).
+from app.routes.system_awareness import router as system_awareness_router
+app.include_router(system_awareness_router, prefix="/api/system", tags=["System"])
+logger.info("✅ System awareness routes loaded successfully")
 
 
 
@@ -6268,7 +6416,7 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     logger.info(f"[Voice] Canvas mode - added workspace tools: {tool_categories}")
 
                 # Capability core: keep high-leverage awareness/action tools loaded.
-                capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
+                capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
                 tool_categories = tool_categories or []
                 for category in capability_core_categories:
                     if category not in tool_categories:
@@ -7111,7 +7259,7 @@ logger.info("✅ Apple Health sync routes loaded successfully")
 # Initialize Neo4j on startup
 def load_settings_from_db():
     """Load persistent settings from database on startup"""
-    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
+    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, CHAT_DEFAULT_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
     global BG_LLM_REQUEST_TIMEOUT, BG_LLM_CONNECT_TIMEOUT, BG_LLM_NUM_CTX
@@ -7147,6 +7295,9 @@ def load_settings_from_db():
             if "openai_model" in settings_dict:
                 OPENAI_MODEL = settings_dict["openai_model"]
                 config.settings.openai_model = OPENAI_MODEL
+
+            if "chat_default_model" in settings_dict:
+                CHAT_DEFAULT_MODEL = settings_dict["chat_default_model"]
 
             if "openai_notification_model" in settings_dict:
                 OPENAI_NOTIFICATION_MODEL = settings_dict["openai_notification_model"]
@@ -7685,7 +7836,7 @@ async def get_available_chat_models(current_user: User = Depends(get_current_use
     """Get list of available chat models for the model selector dropdown."""
     return {
         "models": AVAILABLE_MODELS,
-        "default": OPENAI_MODEL
+        "default": CHAT_DEFAULT_MODEL
     }
 
 
@@ -7965,6 +8116,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     logger.info(f"💬 Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
     logger.info(f"📋 Received conversation_id: {request.conversation_id}")
 
+    # Extract text from any attached documents (PDF/Word/text) so the model can
+    # actually read them. Mutates request.messages in place, turning 'document'
+    # content blocks into plain-text blocks. Runs before intent routing/LLM.
+    try:
+        _materialize_document_attachments(request.messages)
+    except Exception as _doc_err:
+        logger.warning(f"Document attachment extraction failed (non-critical): {_doc_err}")
+
     # Signal activity state machine: David is actively chatting
     try:
         from app.services.activity_state_machine import activity_state_machine, ActivitySignal
@@ -8027,14 +8186,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             active_conversation_id=request.conversation_id,
             active_conversation_device=_device,
         ))
-        # Update cross-device active session
-        from app.routes.session import update_active_session
-        _aio.ensure_future(update_active_session(
-            user_id=str(current_user.id),
-            conversation_id=request.conversation_id or "unknown",
-            device=_device,
-            turn_count=len(request.messages),
-        ))
+        # Update cross-device active session. A brand-new conversation has no id
+        # yet — skip it here; the post-stream update below stamps the real id.
+        if request.conversation_id:
+            from app.routes.session import update_active_session
+            _aio.ensure_future(update_active_session(
+                user_id=str(current_user.id),
+                conversation_id=request.conversation_id,
+                device=_device,
+                turn_count=len(request.messages),
+            ))
     except Exception:
         pass  # Non-critical
 
@@ -8079,8 +8240,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 _code_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
                 _code_msg = _extract_text_content(_code_raw) if _code_raw else None
                 if _code_msg:
-                    _code_session = code_mode.get_active_session(db, current_user.id, request.conversation_id)
-                    if _code_session or _code_msg.strip().lower().startswith("/code"):
+                    _is_code_cmd = _code_msg.strip().lower().startswith("/code")
+                    # Plain (non-/code) messages only route to code mode when an
+                    # active session is bound to THIS conversation. Without a
+                    # conversation_id we must NOT fall back to the user's most
+                    # recent session — a session created with a NULL/absent
+                    # conversation_id would otherwise become a global catch-all
+                    # that hijacks every normal chat turn. Explicit `/code`
+                    # commands still follow the user across conversations (their
+                    # fallback lives in code_mode.run_code_message).
+                    _code_session = (
+                        code_mode.get_active_session(db, current_user.id, request.conversation_id)
+                        if request.conversation_id else None
+                    )
+                    if _code_session or _is_code_cmd:
                         logger.info(f"💻 Code mode handling: {_code_msg[:60]}...")
                         _code_queue = asyncio.Queue()
                         _code_task = asyncio.create_task(
@@ -8097,6 +8270,90 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         return
             except Exception as _code_e:
                 logger.error(f"Code mode interception error: {_code_e}", exc_info=True)
+
+            # HOST INSPECTION INTERCEPTION
+            # "/host ..." commands, or natural "check out <server>" when the named
+            # target resolves to a registered machine. Lets David say
+            # "Sara, check out gpu-box" and get specs back.
+            try:
+                from app.services import host_command_handler
+                _host_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _host_msg = _extract_text_content(_host_raw) if _host_raw else None
+                if _host_msg:
+                    _host_cmd = host_command_handler.parse_host_command(_host_msg, db, current_user.id)
+                    if _host_cmd:
+                        logger.info(f"🖥️ Host command handling: {_host_cmd.get('action')} {_host_cmd.get('name','')}")
+                        async for _hev in host_command_handler.run_host_command(db, current_user.id, _host_cmd):
+                            yield f"data: {json.dumps(_hev)}\n\n"
+                        return
+            except Exception as _host_e:
+                logger.error(f"Host interception error: {_host_e}", exc_info=True)
+
+            # WEB INVESTIGATION INTERCEPTION
+            # "go check out getcara.ai and tell me about it" → drop it into the
+            # autonomous background agent, which opens the site in a real browser
+            # (Playwright), explores it, and reports back with a detailed writeup
+            # + screenshots. NOT an inline web_search answer.
+            try:
+                from app.services import web_investigation
+                _wi_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _wi_msg = _extract_text_content(_wi_raw) if _wi_raw else None
+                if _wi_msg:
+                    _wi_urls = web_investigation.detect(_wi_msg, db, current_user.id)
+                    if _wi_urls:
+                        logger.info(f"🌐 Web investigation dispatch: {_wi_urls}")
+                        _wi_res = await web_investigation.dispatch_investigation(db, current_user.id, _wi_urls)
+                        if _wi_res.get("status") == "error":
+                            _wi_ack = f"I couldn't start that investigation: {_wi_res.get('error')}"
+                        elif len(_wi_urls) == 1:
+                            _wi_ack = (
+                                f"🔍 On it — I'll open **{_wi_urls[0]}** in a real browser, dig through "
+                                f"the site, and send you a detailed report (with screenshots where "
+                                f"useful) when I'm done. You can keep chatting meanwhile; watch the "
+                                f"tasks panel for live progress."
+                            )
+                        else:
+                            _wi_list = "\n".join(f"- **{u}**" for u in _wi_urls)
+                            _wi_ack = (
+                                f"🔍 On it — I'm opening each of these in a real browser and will "
+                                f"send you a single combined report comparing them all (with "
+                                f"screenshots where useful):\n"
+                                f"{_wi_list}\n\n"
+                                f"You can keep chatting meanwhile; watch the tasks panel for live progress."
+                            )
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _wi_ack, 'full_content': _wi_ack}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _wi_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+            except Exception as _wi_e:
+                logger.error(f"Web investigation interception error: {_wi_e}", exc_info=True)
+
+            # UI COMMAND INTERCEPTION
+            # Jarvis-style: "bring up my morning brief" / "show me my nutrition" /
+            # "open my note about the server build" → ui_command SSE event that
+            # the webapp renders as an overlay, plus a one-line ack. No LLM call.
+            try:
+                from app.services import ui_intent
+                _ui_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _ui_msg = _extract_text_content(_ui_raw) if _ui_raw else None
+                if _ui_msg:
+                    # iOS clients can navigate to any app screen; the webapp only
+                    # handles overlay surfaces, so screen intents fall through to
+                    # the LLM there instead of acking with no visible effect.
+                    _ui_is_ios = str(request.source or "").startswith("ios")
+                    _ui = ui_intent.parse_ui_intent(_ui_msg, allow_screens=_ui_is_ios)
+                    if _ui:
+                        _ui_res = ui_intent.resolve_ui_intent(db, current_user.id, _ui)
+                        logger.info(f"🪟 UI command: {_ui.get('overlay') or _ui.get('screen')} (query={_ui.get('query')})")
+                        if _ui_res.get("command"):
+                            yield f"data: {json.dumps({'type': 'ui_command', 'data': _ui_res['command']})}\n\n"
+                        _ui_ack = _ui_res["ack"]
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _ui_ack, 'full_content': _ui_ack}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _ui_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+            except Exception as _ui_e:
+                logger.error(f"UI command interception error: {_ui_e}", exc_info=True)
 
             # Create an async queue for events
             event_queue = asyncio.Queue()
@@ -8130,7 +8387,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             _screen_to_categories = {
                 'Fitness': ['fitness'], 'Learning': ['learning', 'web'],
                 'Calendar': ['time'], 'Notes': ['notes'], 'Health': ['health', 'fitness'],
-                'Inbox': ['inbox'], 'Recipes': ['fitness'],
+                'Inbox': ['inbox'], 'Recipes': ['recipes', 'fitness'],
             }
             if request.current_screen and request.current_screen in _screen_to_categories:
                 screen_cats = _screen_to_categories[request.current_screen]
@@ -9022,7 +9279,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     if is_work_mode:
                         # Work mode: always include workspace + maps + vm_agents tools regardless of intent
                         effective_categories = list(tool_categories) if tool_categories else []
-                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
                         # Always add workspace tools for canvas control
                         if 'workspace' not in effective_categories:
                             effective_categories.append('workspace')
@@ -9037,7 +9294,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         # Standard chat uses intent-based tool loading from classify_with_context
                         # Also ensure awareness/action core categories are always available
                         effective_categories = list(tool_categories)
-                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox"]
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
                         for category in capability_core_categories:
                             if category not in effective_categories:
                                 effective_categories.append(category)
@@ -9072,6 +9329,21 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         }
                     })
                     logger.info("✅ final_response event queued")
+
+                    # Stamp the cross-device session with the real conversation id.
+                    # The pre-stream update skips new conversations (no id yet), so
+                    # without this a single-turn chat would not be resumable.
+                    if final_conv_id:
+                        try:
+                            from app.routes.session import update_active_session
+                            asyncio.ensure_future(update_active_session(
+                                user_id=str(current_user.id),
+                                conversation_id=str(final_conv_id),
+                                device=getattr(request, 'source', None) or 'unknown',
+                                turn_count=len(request.messages),
+                            ))
+                        except Exception:
+                            pass
 
                     # Emit suggested actions based on tools used and response
                     try:
@@ -10183,7 +10455,8 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
                 json={
                     "model": OPENAI_MODEL,
                     "messages": test_messages,
-                    "max_tokens": 50
+                    "max_tokens": 50,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=10.0

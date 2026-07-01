@@ -227,11 +227,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   link: {
-    color: '#2dd4bf',
+    color: colors.accent,
     textDecorationLine: 'underline',
   },
   internalLink: {
-    color: '#60a5fa',
+    color: colors.hues.sky,
     textDecorationLine: 'underline',
     fontWeight: '500',
   },

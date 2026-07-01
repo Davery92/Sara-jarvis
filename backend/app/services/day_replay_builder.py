@@ -20,6 +20,7 @@ import logging
 import json
 from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -42,6 +43,7 @@ class DataSource(str, Enum):
     LEARNING = "learning"
     TIMERS = "timers"
     REMINDERS = "reminders"
+    HOME = "home"
 
 
 @dataclass
@@ -157,6 +159,18 @@ class DayReplayBuilder:
             events.extend(reminder_events)
             sources_included.append(DataSource.REMINDERS.value)
 
+        home_events = await self._get_home_events(db, day_start, day_end)
+        if home_events:
+            events.extend(home_events)
+            sources_included.append(DataSource.HOME.value)
+
+        # Normalize timestamps to naive ET — sources are mixed (some columns are
+        # timestamptz, some naive); aware vs naive comparison breaks the sort.
+        et = ZoneInfo("America/New_York")
+        for event in events:
+            if event.timestamp.tzinfo is not None:
+                event.timestamp = event.timestamp.astimezone(et).replace(tzinfo=None)
+
         # Sort all events chronologically
         events.sort(key=lambda e: e.timestamp)
 
@@ -232,6 +246,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get episode events: {e}")
+            db.rollback()
 
         return events
 
@@ -247,10 +262,10 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT el.id, el.started_at, el.completed_at, el.result, el.error,
-                           at.name, at.description, at.trigger_type, at.action_type
+                    SELECT el.id, el.started_at, el.completed_at, el.result, el.error_message,
+                           at.name, at.description, at.original_intent
                     FROM automation_execution_log el
-                    JOIN automation_task at ON el.automation_id = at.id
+                    JOIN automation_task at ON el.task_id = at.id
                     WHERE at.user_id = :user_id
                       AND el.started_at BETWEEN :day_start AND :day_end
                     ORDER BY el.started_at
@@ -266,15 +281,14 @@ class DayReplayBuilder:
                     automation_runs[name] = {
                         "count": 0,
                         "description": row.description,
-                        "trigger_type": row.trigger_type,
-                        "action_type": row.action_type,
+                        "original_intent": row.original_intent,
                         "successful": 0,
                         "first_run": row.started_at,
                         "last_run": row.started_at
                     }
                 automation_runs[name]["count"] += 1
                 automation_runs[name]["last_run"] = row.started_at
-                if not row.error:
+                if not row.error_message:
                     automation_runs[name]["successful"] += 1
 
             for name, data in automation_runs.items():
@@ -286,8 +300,7 @@ class DayReplayBuilder:
                     details={
                         "automation_name": name,
                         "description": data["description"],
-                        "trigger_type": data["trigger_type"],
-                        "action_type": data["action_type"],
+                        "original_intent": data["original_intent"],
                         "run_count": data["count"],
                         "successful_runs": data["successful"],
                         "first_run": data["first_run"].isoformat(),
@@ -298,6 +311,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get automation events: {e}")
+            db.rollback()
 
         return events
 
@@ -313,26 +327,31 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT id, workout_type, duration_minutes, notes,
-                           started_at, completed_at, status
-                    FROM workout_session
-                    WHERE user_id = :user_id
-                      AND session_date = :session_date
+                    SELECT ws.id, ws.started_at, ws.completed_at, ws.status,
+                           w.title AS workout_title
+                    FROM workout_session ws
+                    LEFT JOIN workout w ON w.id = ws.template_id
+                    WHERE ws.user_id = :user_id
+                      AND ws.session_date = :session_date
                 """),
                 {"user_id": user_id, "session_date": day_start.date()}
             ).fetchall()
 
             for row in result:
                 if row.status == "completed":
+                    duration = None
+                    if row.started_at and row.completed_at:
+                        duration = int((row.completed_at - row.started_at).total_seconds() // 60)
+                    workout_type = row.workout_title or "workout"
                     events.append(DayReplayEvent(
                         timestamp=row.started_at or day_start,
                         source=DataSource.FITNESS_WORKOUTS,
                         event_type="workout_completed",
-                        summary=f"Completed {row.workout_type} workout ({row.duration_minutes} min)",
+                        summary=f"Completed {workout_type} workout"
+                                + (f" ({duration} min)" if duration else ""),
                         details={
-                            "workout_type": row.workout_type,
-                            "duration_minutes": row.duration_minutes,
-                            "notes": row.notes,
+                            "workout_type": workout_type,
+                            "duration_minutes": duration,
                             "status": row.status
                         },
                         importance=0.8
@@ -340,6 +359,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get workout events: {e}")
+            db.rollback()
 
         return events
 
@@ -355,7 +375,7 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT id, meal_type, description, calories, protein, carbs, fat,
+                    SELECT id, meal_type, food_items, notes, calories, protein, carbs, fats,
                            logged_at
                     FROM food_log
                     WHERE user_id = :user_id
@@ -374,18 +394,28 @@ class DayReplayBuilder:
                 total_protein += row.protein or 0
                 meals_logged.append(row.meal_type)
 
+                # food_items is JSON (list of items); fall back to free-text notes
+                description = row.notes or ""
+                if row.food_items:
+                    try:
+                        items = row.food_items if isinstance(row.food_items, list) else json.loads(row.food_items)
+                        names = [i.get("name", str(i)) if isinstance(i, dict) else str(i) for i in items]
+                        description = ", ".join(names) or description
+                    except (TypeError, ValueError):
+                        pass
+
                 events.append(DayReplayEvent(
                     timestamp=row.logged_at,
                     source=DataSource.FITNESS_FOOD,
                     event_type="meal_logged",
-                    summary=f"{row.meal_type}: {row.description[:50] if row.description else 'Logged'}",
+                    summary=f"{row.meal_type}: {description[:50] if description else 'Logged'}",
                     details={
                         "meal_type": row.meal_type,
-                        "description": row.description,
+                        "description": description,
                         "calories": row.calories,
                         "protein": row.protein,
                         "carbs": row.carbs,
-                        "fat": row.fat
+                        "fat": row.fats
                     },
                     importance=0.4
                 ))
@@ -408,6 +438,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get food events: {e}")
+            db.rollback()
 
         return events
 
@@ -422,9 +453,8 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT hrv, resting_hr, sleep_hours, sleep_quality,
-                           soreness_level, stress_level, energy_level,
-                           created_at
+                    SELECT hrv, heart_rate, sleep_hours, soreness_level,
+                           body_weight, created_at
                     FROM daily_recovery_log
                     WHERE user_id = :user_id
                       AND log_date = :log_date
@@ -437,21 +467,20 @@ class DayReplayBuilder:
                     timestamp=result.created_at or datetime.combine(replay_date, datetime.min.time()),
                     source=DataSource.FITNESS_RECOVERY,
                     event_type="recovery_metrics",
-                    summary=f"Recovery: {result.sleep_hours}h sleep, HRV {result.hrv}, energy {result.energy_level}/10",
+                    summary=f"Recovery: {result.sleep_hours}h sleep, HRV {result.hrv}, resting HR {result.heart_rate}",
                     details={
                         "hrv": result.hrv,
-                        "resting_hr": result.resting_hr,
+                        "resting_hr": result.heart_rate,
                         "sleep_hours": result.sleep_hours,
-                        "sleep_quality": result.sleep_quality,
                         "soreness_level": result.soreness_level,
-                        "stress_level": result.stress_level,
-                        "energy_level": result.energy_level
+                        "body_weight": result.body_weight
                     },
                     importance=0.7
                 ))
 
         except Exception as e:
             logger.warning(f"Failed to get recovery events: {e}")
+            db.rollback()
 
         return events
 
@@ -465,22 +494,24 @@ class DayReplayBuilder:
         """Get calendar events for the day."""
         events = []
         try:
+            # calendar_event holds the real calendar (iOS-synced + email-extracted);
+            # the legacy `event` table is Sara-created events only.
             result = db.execute(
                 text("""
                     SELECT id, title, description, location,
-                           starts_at, ends_at, event_type
-                    FROM event
+                           start_time, end_time, source, ios_calendar_name
+                    FROM calendar_event
                     WHERE user_id = :user_id
-                      AND starts_at BETWEEN :day_start AND :day_end
-                    ORDER BY starts_at
+                      AND start_time BETWEEN :day_start AND :day_end
+                    ORDER BY start_time
                 """),
                 {"user_id": user_id, "day_start": day_start, "day_end": day_end}
             ).fetchall()
 
             for row in result:
-                duration = (row.ends_at - row.starts_at).seconds // 60 if row.ends_at else 0
+                duration = (row.end_time - row.start_time).seconds // 60 if row.end_time else 0
                 events.append(DayReplayEvent(
-                    timestamp=row.starts_at,
+                    timestamp=row.start_time,
                     source=DataSource.CALENDAR,
                     event_type="calendar_event",
                     summary=f"{row.title} ({duration} min)",
@@ -489,13 +520,15 @@ class DayReplayBuilder:
                         "description": row.description,
                         "location": row.location,
                         "duration_minutes": duration,
-                        "event_type": row.event_type
+                        "event_source": row.source,
+                        "calendar_name": row.ios_calendar_name
                     },
                     importance=0.6
                 ))
 
         except Exception as e:
             logger.warning(f"Failed to get calendar events: {e}")
+            db.rollback()
 
         return events
 
@@ -537,6 +570,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get email events: {e}")
+            db.rollback()
 
         return events
 
@@ -550,12 +584,12 @@ class DayReplayBuilder:
         """Get research job completions for the day."""
         events = []
         try:
-            # Check for jarvis_task (background research tasks)
+            # background_task holds dispatched agent work (research, code, etc.)
             result = db.execute(
                 text("""
-                    SELECT id, task_type, description, status, result_summary,
+                    SELECT id, task_type, original_query, status,
                            created_at, completed_at
-                    FROM jarvis_task
+                    FROM background_task
                     WHERE user_id = :user_id
                       AND created_at BETWEEN :day_start AND :day_end
                     ORDER BY created_at
@@ -564,22 +598,23 @@ class DayReplayBuilder:
             ).fetchall()
 
             for row in result:
+                query = row.original_query or row.task_type or "task"
                 events.append(DayReplayEvent(
                     timestamp=row.created_at,
                     source=DataSource.RESEARCH,
                     event_type="research_task",
-                    summary=f"Research: {row.description[:50]}... ({row.status})",
+                    summary=f"Agent task: {query[:50]}... ({row.status})",
                     details={
                         "task_type": row.task_type,
-                        "description": row.description,
-                        "status": row.status,
-                        "result_summary": row.result_summary
+                        "description": query,
+                        "status": row.status
                     },
                     importance=0.6
                 ))
 
         except Exception as e:
             logger.warning(f"Failed to get research events: {e}")
+            db.rollback()
 
         return events
 
@@ -597,7 +632,7 @@ class DayReplayBuilder:
                 text("""
                     SELECT ls.id, ls.session_type, ls.duration_minutes,
                            ls.started_at, ls.ended_at,
-                           lt.name as topic_name
+                           lt.title as topic_name
                     FROM learning_session ls
                     LEFT JOIN learning_topic lt ON ls.topic_id = lt.id
                     WHERE ls.user_id = :user_id
@@ -623,6 +658,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get learning events: {e}")
+            db.rollback()
 
         return events
 
@@ -638,7 +674,7 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT id, title, duration_minutes, start_time, end_time, status
+                    SELECT id, title, duration_minutes, start_time, end_time, is_completed
                     FROM timer
                     WHERE user_id = :user_id
                       AND start_time BETWEEN :day_start AND :day_end
@@ -662,6 +698,7 @@ class DayReplayBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to get timer events: {e}")
+            db.rollback()
 
         return events
 
@@ -677,7 +714,7 @@ class DayReplayBuilder:
         try:
             result = db.execute(
                 text("""
-                    SELECT id, title, reminder_time, completed, completed_at
+                    SELECT id, title, reminder_time, is_completed
                     FROM reminder
                     WHERE user_id = :user_id
                       AND reminder_time BETWEEN :day_start AND :day_end
@@ -686,7 +723,7 @@ class DayReplayBuilder:
                 {"user_id": user_id, "day_start": day_start, "day_end": day_end}
             ).fetchall()
 
-            completed = [r for r in result if r.completed]
+            completed = [r for r in result if r.is_completed]
 
             if result:
                 events.append(DayReplayEvent(
@@ -697,13 +734,72 @@ class DayReplayBuilder:
                     details={
                         "total": len(result),
                         "completed": len(completed),
-                        "reminders": [{"title": r.title, "completed": r.completed} for r in result]
+                        "reminders": [{"title": r.title, "completed": r.is_completed} for r in result]
                     },
                     importance=0.4
                 ))
 
         except Exception as e:
             logger.warning(f"Failed to get reminder events: {e}")
+            db.rollback()
+
+        return events
+
+    async def _get_home_events(
+        self,
+        db: Session,
+        day_start: datetime,
+        day_end: datetime
+    ) -> List[DayReplayEvent]:
+        """Get Home Assistant activity for the day, summarized per entity.
+
+        One event per entity per day: how often it changed and at which hours.
+        This is the raw material for daily-routine pattern detection (when do
+        doors open, when do lights come on, when is there motion).
+        home_activity_log is house-wide, not per-user.
+        """
+        events = []
+        try:
+            result = db.execute(
+                text("""
+                    -- changed_at is timestamptz; convert to naive ET so the day
+                    -- window, sort order, and hour buckets match every other source
+                    SELECT entity_id,
+                           MAX(friendly_name) AS friendly_name,
+                           MAX(domain) AS domain,
+                           COUNT(*) AS change_count,
+                           MIN(changed_at AT TIME ZONE 'America/New_York') AS first_change,
+                           MAX(changed_at AT TIME ZONE 'America/New_York') AS last_change,
+                           ARRAY_AGG(DISTINCT EXTRACT(HOUR FROM changed_at AT TIME ZONE 'America/New_York')::int) AS active_hours
+                    FROM home_activity_log
+                    WHERE (changed_at AT TIME ZONE 'America/New_York') BETWEEN :day_start AND :day_end
+                    GROUP BY entity_id
+                    ORDER BY change_count DESC
+                """),
+                {"day_start": day_start, "day_end": day_end}
+            ).fetchall()
+
+            for row in result:
+                events.append(DayReplayEvent(
+                    timestamp=row.first_change,
+                    source=DataSource.HOME,
+                    event_type="home_entity_activity",
+                    summary=f"{row.friendly_name or row.entity_id}: {row.change_count} changes",
+                    details={
+                        "entity_id": row.entity_id,
+                        "friendly_name": row.friendly_name,
+                        "domain": row.domain,
+                        "change_count": row.change_count,
+                        "first_change": row.first_change.isoformat(),
+                        "last_change": row.last_change.isoformat(),
+                        "active_hours": sorted(row.active_hours or [])
+                    },
+                    importance=0.5 if row.domain in ("lock", "cover") else 0.4
+                ))
+
+        except Exception as e:
+            logger.warning(f"Failed to get home events: {e}")
+            db.rollback()
 
         return events
 

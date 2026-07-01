@@ -1,707 +1,463 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+/**
+ * AssistantInboxScreen — the Inbox tab.
+ *
+ * Two-pivot triage view backed by /api/assistant-inbox/unified:
+ *  - "Needs you": active attention items (incl. HITL questions) and task
+ *    clarifications. Every card is actionable in place — reply inline,
+ *    archive, run quick actions, open the related note, discuss in chat.
+ *  - "FYI": notifications, running/recent background work, unread captures.
+ *    Tap to expand (marks read), swipe-free clear-all.
+ *
+ * The server dedupes (a notification tied to an active attention item only
+ * shows once) and owns the badge formula, so the count here, the tab badge,
+ * and the app icon badge all mean the same thing.
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   AppState,
   DeviceEventEmitter,
+  Linking,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
-import type { RouteProp } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { useBackgroundTasks } from '../../context/BackgroundTasksContext';
-import type { BackgroundTask } from '../../types/api';
 import type { AppStackParamList } from '../../navigation/AppNavigator';
 import apiClient from '../../services/api';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
-import notesService from '../../services/notes';
 import { navigateToChat, navigateToNoteEditor } from '../../services/navigation';
-import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
+import { borderRadius, colors, fontSizes, spacing } from '../../styles/theme';
 
-type AssistantInboxFocus = 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
-type AssistantInboxNavigationProp = NativeStackNavigationProp<AppStackParamList, 'AssistantInbox'>;
-type AssistantInboxRouteProp = RouteProp<AppStackParamList, 'AssistantInbox'>;
-type ItemState = Exclude<AssistantInboxFocus, 'all'>;
-
-interface AttentionItem {
-  id: string;
-  title: string;
-  body: string | null;
-  priority: 'low' | 'normal' | 'high' | 'urgent' | 'critical';
-  status: 'new' | 'sent' | 'read' | 'archived' | 'dropped';
-  created_at: string;
-}
-
-interface InboxItem {
-  id: string;
-  title: string | null;
-  description: string | null;
-  status: string;
-  shared_at: string;
-  original_url: string | null;
-}
-
-interface NotificationItem {
-  id: string;
-  title: string;
-  message: string;
-  category: string;
-  priority: string;
-  source: string;
-  topic?: string | null;
-  item_type: string;
-  created_at: string;
-  read_at: string | null;
-  dismissed_at: string | null;
-  engaged: boolean;
-}
-
-interface Mission {
-  id: string;
-  title: string;
-  description: string | null;
-  state: string;
-  source: string;
-  created_at: string;
-  completed_at: string | null;
-}
-
-interface ACSDirective {
-  id: string;
-  directive_type: string;
-  content: string;
-  priority: string;
-  status: string;
-  source: string;
-  response?: string;
-  created_at: string;
-}
-
-interface ACSSnapshot {
-  state: string;
-  daily_plan?: string;
-  directives?: ACSDirective[];
-  latest_note?: {
-    created_at: string;
-  };
-  last_session?: {
-    mode: string;
-    ended_at: string;
-  };
-  live_session?: {
-    id: string;
-    mode: string;
-    turns: number;
-    elapsed_minutes: number;
-  };
-}
+type InboxNavigationProp = NativeStackNavigationProp<AppStackParamList, 'AssistantInbox'>;
 
 interface UnifiedItem {
   id: string;
-  state: ItemState;
-  kind: 'attention' | 'task' | 'mission' | 'notification' | 'content' | 'acs';
+  kind: 'attention' | 'task_clarification' | 'notification' | 'task' | 'capture';
+  ref_id: string;
   title: string;
-  summary: string;
-  timestamp: string;
-  sourceLabel: string;
-  cta: string;
-  color: string;
-  onPress: () => void;
+  body: string | null;
+  priority: string;
+  source: string;
+  status: string;
+  unread: boolean;
+  created_at: string | null;
+  is_hitl: boolean;
+  actions: Array<{ id: string; label: string }>;
+  payload: Record<string, any>;
 }
 
-const STATE_META: Record<ItemState, { label: string; description: string; color: string }> = {
-  waiting: {
-    label: 'Waiting on you',
-    description: 'Clarifications, queued attention items, and pending decisions.',
-    color: colors.warning,
-  },
-  in_progress: {
-    label: 'In progress',
-    description: 'Tasks Sara is running or background work that is still moving.',
-    color: colors.primary,
-  },
-  new: {
-    label: 'New',
-    description: 'Fresh signals, captures, and discoveries Sara surfaced recently.',
-    color: colors.secondary,
-  },
-  done: {
-    label: 'Done',
-    description: 'Completed or closed-out work worth reviewing once.',
-    color: colors.success,
-  },
-  archived: {
-    label: 'Archived',
-    description: 'Seen, sorted, or tucked away so the active inbox stays calm.',
-    color: colors.textMuted,
-  },
-};
-
-const KIND_LABELS: Record<UnifiedItem['kind'], string> = {
-  attention: 'Attention',
-  task: 'Task',
-  mission: 'Mission',
-  notification: 'Notification',
-  content: 'Capture',
-  acs: 'ACS',
-};
-
-const DETAIL_FEEDS: Array<{
-  key: string;
-  label: string;
-  description: string;
-  onPress: (navigation: AssistantInboxNavigationProp) => void;
-}> = [
-  {
-    key: 'attention',
-    label: 'Attention Queue',
-    description: 'Directives, reminders, and items that still need a response.',
-    onPress: (navigation) => navigation.navigate('Inbox', { tab: 'attention' }),
-  },
-  {
-    key: 'content',
-    label: 'Captured Content',
-    description: 'Links, text, and clips you have shared into Sara.',
-    onPress: (navigation) => navigation.navigate('Inbox', { tab: 'content' }),
-  },
-  {
-    key: 'notifications',
-    label: 'Notifications',
-    description: 'Recent nudges, discoveries, and alerts from Sara.',
-    onPress: (navigation) => navigation.navigate('Notifications'),
-  },
-  {
-    key: 'tasks',
-    label: 'Agent Tasks',
-    description: 'Detailed mission state, clarifications, and task outcomes.',
-    onPress: (navigation) => navigation.navigate('AgentTasks'),
-  },
-  {
-    key: 'acs',
-    label: 'ACS',
-    description: 'Autonomous cognition sessions, directives, and deliverables.',
-    onPress: (navigation) => navigation.navigate('ACS'),
-  },
-];
-
 function formatRelativeTime(isoString: string | null): string {
-  if (!isoString) return 'Recently';
+  if (!isoString) return '';
   const diffMs = Date.now() - new Date(isoString).getTime();
   const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
-
-  if (diffMinutes < 1) return 'Just now';
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  if (diffMinutes < 1) return 'now';
+  if (diffMinutes < 60) return `${diffMinutes}m`;
   const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffHours < 24) return `${diffHours}h`;
   const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 7) return `${diffDays}d ago`;
+  if (diffDays < 7) return `${diffDays}d`;
   return new Date(isoString).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function sortByTimestamp<T extends { created_at?: string | null; completed_at?: string | null; discovered_at?: string | null; shared_at?: string | null }>(
-  items: T[],
-): T[] {
-  return [...items].sort((a, b) => {
-    const aTime = new Date(a.completed_at || a.discovered_at || a.shared_at || a.created_at || 0).getTime();
-    const bTime = new Date(b.completed_at || b.discovered_at || b.shared_at || b.created_at || 0).getTime();
-    return bTime - aTime;
-  });
+function hoursFromNow(hours: number): string {
+  return new Date(Date.now() + hours * 3600_000).toISOString();
 }
 
-function mapBackgroundTaskState(task: BackgroundTask): ItemState {
-  if (task.status === 'needs_clarification') return 'waiting';
-  if (task.status === 'pending' || task.status === 'running') return 'in_progress';
-  return 'done';
+function tomorrow9am(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return d.toISOString();
 }
 
-function mapMissionState(state: string): ItemState {
-  if (state === 'needs_clarification' || state === 'awaiting_confirm') return 'waiting';
-  if (state === 'pending' || state === 'running') return 'in_progress';
-  return 'done';
-}
+const KIND_ICONS: Record<UnifiedItem['kind'], React.ComponentProps<typeof Ionicons>['name']> = {
+  attention: 'alert-circle-outline',
+  task_clarification: 'help-circle-outline',
+  notification: 'notifications-outline',
+  task: 'construct-outline',
+  capture: 'bookmark-outline',
+};
 
-function mapAttentionState(status: AttentionItem['status']): ItemState {
-  if (status === 'new' || status === 'sent') return 'waiting';
-  if (status === 'read') return 'done';
-  return 'archived';
-}
-
-function mapDirectiveState(status: string): ItemState {
-  const normalized = status.toLowerCase();
-  if (normalized === 'completed' || normalized === 'done') {
-    return 'done';
-  }
-  if (normalized === 'dismissed' || normalized === 'archived') {
-    return 'archived';
-  }
-  if (normalized === 'new' || normalized === 'queued') {
-    return 'new';
-  }
-  return 'waiting';
-}
-
-function mapContentState(status: string): ItemState {
-  const normalized = status.toLowerCase();
-  if (normalized === 'unread') return 'new';
-  if (normalized === 'read') return 'done';
-  return 'archived';
-}
+const PRIORITY_COLORS: Record<string, string> = {
+  critical: colors.error,
+  urgent: colors.error,
+  high: colors.warning,
+  normal: colors.primary,
+  low: colors.textMuted,
+};
 
 export default function AssistantInboxScreen() {
-  const navigation = useNavigation<AssistantInboxNavigationProp>();
-  const route = useRoute<AssistantInboxRouteProp>();
-  const { tasks, refreshTasks } = useBackgroundTasks();
+  const navigation = useNavigation<InboxNavigationProp>();
 
-  const [focus, setFocus] = useState<AssistantInboxFocus>(route.params?.focus || 'all');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [missions, setMissions] = useState<Mission[]>([]);
-  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
-  const [acsSnapshot, setAcsSnapshot] = useState<ACSSnapshot | null>(null);
-  const [attentionUnreadCount, setAttentionUnreadCount] = useState(0);
-  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
-  const [contentUnread, setContentUnread] = useState(0);
-  const lastInboxOpenedAtRef = useRef(0);
-  const hasWaitingItemsRef = useRef(false);
+  const [needsYou, setNeedsYou] = useState<UnifiedItem[]>([]);
+  const [fyi, setFyi] = useState<UnifiedItem[]>([]);
+  const [counts, setCounts] = useState({ needs_you: 0, fyi_unread: 0, badge: 0 });
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
+  const lastOpenedAtRef = useRef(0);
 
-  useEffect(() => {
-    if (route.params?.focus) {
-      setFocus(route.params.focus);
-    }
-  }, [route.params?.focus]);
-
-  useEffect(() => {
-    hasWaitingItemsRef.current = attentionItems.some(
-      (item) => mapAttentionState(item.status) === 'waiting',
-    );
-  }, [attentionItems]);
-
-  const loadAssistantActivity = useCallback(async (showLoading = true) => {
-    if (showLoading) setLoading(true);
+  const load = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
     try {
-      await refreshTasks();
-      const [
-        attentionResult,
-        attentionCountResult,
-        notificationsResult,
-        missionsResult,
-        inboxResult,
-        inboxStatsResult,
-        acsSnapshotResult,
-      ] = await Promise.allSettled([
-        apiClient.getAttentionItems(undefined, 12),
-        apiClient.getAttentionCount(),
-        apiClient.get('/api/notifications?limit=100'),
-        apiClient.getMissions(),
-        apiClient.getInboxItems(undefined, 12),
-        apiClient.getInboxStats(),
-        apiClient.get('/api/acs/snapshot'),
-      ]);
-
-      if (attentionResult.status === 'fulfilled') {
-        setAttentionItems(sortByTimestamp(attentionResult.value || []));
-      }
-      if (attentionCountResult.status === 'fulfilled') {
-        setAttentionUnreadCount((attentionCountResult.value as any)?.unread || 0);
-      }
-      if (notificationsResult.status === 'fulfilled') {
-        const nextNotifications = sortByTimestamp((notificationsResult.value as any)?.notifications || []);
-        setNotifications(nextNotifications);
-        setNotificationUnreadCount(
-          nextNotifications.filter((item) => !item.read_at && !item.engaged && !item.dismissed_at).length,
-        );
-      }
-      if (missionsResult.status === 'fulfilled') {
-        setMissions(sortByTimestamp(missionsResult.value || []));
-      }
-      if (inboxResult.status === 'fulfilled') {
-        setInboxItems(sortByTimestamp(inboxResult.value || []));
-      }
-      if (inboxStatsResult.status === 'fulfilled') {
-        setContentUnread(inboxStatsResult.value?.unread || 0);
-      }
-      if (acsSnapshotResult.status === 'fulfilled') {
-        setAcsSnapshot((acsSnapshotResult.value as ACSSnapshot) || null);
-      }
+      const data = await apiClient.getUnifiedInbox();
+      setNeedsYou(data.needs_you || []);
+      setFyi(data.fyi || []);
+      setCounts(data.counts || { needs_you: 0, fyi_unread: 0, badge: 0 });
     } catch (error) {
-      console.error('Failed to load assistant inbox:', error);
-      Alert.alert('Error', 'Unable to load assistant activity right now.');
+      console.error('[AssistantInbox] Failed to load:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [refreshTasks]);
+  }, []);
+
+  const reloadAndSync = useCallback(() => {
+    load(false);
+    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+  }, [load]);
 
   useFocusEffect(
     useCallback(() => {
       const now = Date.now();
-      if (now - lastInboxOpenedAtRef.current > 15000) {
-        lastInboxOpenedAtRef.current = now;
+      if (now - lastOpenedAtRef.current > 15000) {
+        lastOpenedAtRef.current = now;
         assistantAnalytics.track('assistant.inbox_opened', {
-          focus,
-          has_waiting_items: hasWaitingItemsRef.current,
+          focus: 'unified',
+          has_waiting_items: needsYou.length > 0,
         });
       }
-
-      loadAssistantActivity();
-      const pollInterval = setInterval(() => {
-        loadAssistantActivity(false);
-      }, 15000);
+      load(needsYou.length === 0 && fyi.length === 0);
 
       const appStateSubscription = AppState.addEventListener('change', (nextState) => {
         const wasBackgrounded = appStateRef.current.match(/inactive|background/);
         appStateRef.current = nextState;
-
         if (wasBackgrounded && nextState === 'active') {
-          loadAssistantActivity(false);
+          load(false);
         }
       });
-
-      return () => {
-        clearInterval(pollInterval);
-        appStateSubscription.remove();
-      };
-    }, [focus, loadAssistantActivity]),
+      return () => appStateSubscription.remove();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [load]),
   );
 
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
-    loadAssistantActivity(false);
-  }, [loadAssistantActivity]);
+    load(false);
+  }, [load]);
 
-  const handleArchiveAllAttention = useCallback(async () => {
+  // ── Item actions ──────────────────────────────────────────────────────
+
+  const handleExpand = useCallback((item: UnifiedItem) => {
+    const expanding = expandedId !== item.id;
+    setExpandedId(expanding ? item.id : null);
+    // Expanding an unread FYI notification marks it read.
+    if (expanding && item.kind === 'notification' && item.unread) {
+      apiClient.markNotificationRead(item.ref_id).then(() => {
+        setFyi((prev) =>
+          prev.map((i) => (i.id === item.id ? { ...i, unread: false, status: 'read' } : i)),
+        );
+        DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+      }).catch(() => {});
+    }
+    // Expanding an unread attention item marks it read (still needs you,
+    // but stops counting toward the badge).
+    if (expanding && item.kind === 'attention' && item.unread) {
+      apiClient.markAttentionRead(item.ref_id).then(() => {
+        setNeedsYou((prev) =>
+          prev.map((i) => (i.id === item.id ? { ...i, unread: false, status: 'read' } : i)),
+        );
+        DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
+      }).catch(() => {});
+    }
+  }, [expandedId]);
+
+  const handleArchiveAttention = useCallback(async (item: UnifiedItem) => {
+    setBusyId(item.id);
     try {
-      await apiClient.archiveAllAttention();
-      loadAssistantActivity(false);
+      await apiClient.archiveAttentionItem(item.ref_id);
+      setNeedsYou((prev) => prev.filter((i) => i.id !== item.id));
       DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
     } catch {
-      Alert.alert('Error', 'Unable to clear attention items right now.');
+      Alert.alert('Error', 'Could not archive that item.');
+    } finally {
+      setBusyId(null);
     }
-  }, [loadAssistantActivity]);
+  }, []);
 
-  const handleMarkAllNotificationsSeen = useCallback(async () => {
-    const unreadNotifications = notifications.filter(
-      (item) => !item.read_at && !item.engaged && !item.dismissed_at,
-    );
+  const handleReply = useCallback(async (item: UnifiedItem) => {
+    const message = (replyDrafts[item.id] || '').trim();
+    if (!message) return;
+    setBusyId(item.id);
     try {
-      await apiClient.markAllNotificationsRead();
-    } catch {
-      try {
-        await Promise.all(
-          unreadNotifications.map((item) => apiClient.markNotificationRead(item.id, item.item_type)),
-        );
-      } catch {
-        Alert.alert('Error', 'Unable to clear notifications right now.');
-        return;
+      if (item.kind === 'task_clarification') {
+        await apiClient.post(`/api/background-tasks/${item.ref_id}/clarify`, { response: message });
+      } else {
+        await apiClient.replyToAttentionItem(item.ref_id, message);
       }
-    }
-    loadAssistantActivity(false);
-    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
-  }, [loadAssistantActivity, notifications]);
-
-  const handleMarkAllCapturesReviewed = useCallback(async () => {
-    const unreadCaptures = inboxItems.filter((item) => item.status.toLowerCase() === 'unread');
-    try {
-      await apiClient.markAllInboxRead();
+      setReplyDrafts((prev) => ({ ...prev, [item.id]: '' }));
+      setNeedsYou((prev) => prev.filter((i) => i.id !== item.id));
+      reloadAndSync();
     } catch {
-      try {
-        await Promise.all(unreadCaptures.map((item) => apiClient.getInboxItem(item.id)));
-      } catch {
-        Alert.alert('Error', 'Unable to clear captured items right now.');
-        return;
-      }
+      Alert.alert('Error', 'Could not send your reply.');
+    } finally {
+      setBusyId(null);
     }
-    loadAssistantActivity(false);
-    DeviceEventEmitter.emit('assistantInboxBadgeRefresh');
-  }, [inboxItems, loadAssistantActivity]);
+  }, [replyDrafts, reloadAndSync]);
 
-  const sourceCounts = useMemo(() => ({
-    attention: attentionUnreadCount,
-    notifications: notificationUnreadCount,
-    captures: contentUnread,
-    clarifications: tasks.filter((task) => task.status === 'needs_clarification').length,
-  }), [attentionUnreadCount, contentUnread, notificationUnreadCount, tasks]);
-
-  const remainingBadgeSummary = useMemo(() => {
-    const parts = [
-      sourceCounts.notifications > 0
-        ? `${sourceCounts.notifications} notification${sourceCounts.notifications === 1 ? '' : 's'}`
-        : null,
-      sourceCounts.attention > 0
-        ? `${sourceCounts.attention} attention item${sourceCounts.attention === 1 ? '' : 's'}`
-        : null,
-      sourceCounts.captures > 0
-        ? `${sourceCounts.captures} capture${sourceCounts.captures === 1 ? '' : 's'}`
-        : null,
-    ].filter(Boolean);
-
-    if (parts.length === 0) {
-      return 'The inbox badge is clear.';
-    }
-
-    if (parts.length === 1) {
-      return `That remaining badge count is ${parts[0]}.`;
-    }
-
-    return `The remaining badge count is coming from ${parts.join(', ')}.`;
-  }, [sourceCounts.attention, sourceCounts.captures, sourceCounts.notifications]);
-
-  const handleClearAllSignals = useCallback(async () => {
-    const jobs: Promise<unknown>[] = [];
-    if (sourceCounts.notifications > 0) {
-      jobs.push(handleMarkAllNotificationsSeen());
-    }
-    if (sourceCounts.attention > 0) {
-      jobs.push(apiClient.archiveAllAttention());
-    }
-    if (sourceCounts.captures > 0) {
-      jobs.push(handleMarkAllCapturesReviewed());
-    }
-
-    try {
-      const results = await Promise.allSettled(jobs);
-      if (results.length > 0 && results.every((result) => result.status === 'rejected')) {
-        throw new Error('all clear actions failed');
-      }
-      loadAssistantActivity(false);
-    } catch {
-      Alert.alert('Error', 'Unable to clear assistant inbox items right now.');
-    }
-  }, [
-    handleMarkAllCapturesReviewed,
-    handleMarkAllNotificationsSeen,
-    loadAssistantActivity,
-    sourceCounts.attention,
-    sourceCounts.captures,
-    sourceCounts.notifications,
-  ]);
-
-  const unifiedItems = useMemo<UnifiedItem[]>(() => {
-    const items: UnifiedItem[] = [];
-
-    attentionItems.forEach((item) => {
-      items.push({
-        id: `attention-${item.id}`,
-        state: mapAttentionState(item.status),
-        kind: 'attention',
-        title: item.title,
-        summary: item.body || 'Sara flagged this for follow-up.',
-        timestamp: item.created_at,
-        sourceLabel: 'Autonomy',
-        cta: 'Open queue',
-        color: STATE_META[mapAttentionState(item.status)].color,
-        onPress: () => navigation.navigate('Inbox', { tab: 'attention' }),
-      });
-    });
-
-    tasks.forEach((task) => {
-      const taskState = mapBackgroundTaskState(task);
-      items.push({
-        id: `task-${task.id}`,
-        state: taskState,
-        kind: 'task',
-        title: task.original_query,
-        summary:
-          task.status === 'needs_clarification'
-            ? (task.clarification_question || 'Sara needs a little more input before continuing.')
-            : (task.error_message || 'Background work is still underway.'),
-        timestamp: task.completed_at || task.started_at || task.created_at,
-        sourceLabel: 'Background task',
-        cta: 'Open tasks',
-        color: STATE_META[taskState].color,
-        onPress: () => navigation.navigate('AgentTasks'),
-      });
-    });
-
-    missions.forEach((mission) => {
-      const missionState = mapMissionState(mission.state);
-      items.push({
-        id: `mission-${mission.id}`,
-        state: missionState,
-        kind: 'mission',
-        title: mission.title.replace(/^Agent:\s*/, ''),
-        summary: mission.description || 'Agent work associated with Sara autonomy.',
-        timestamp: mission.completed_at || mission.created_at,
-        sourceLabel: mission.source || 'Mission',
-        cta: 'Open tasks',
-        color: STATE_META[missionState].color,
-        onPress: () => navigation.navigate('AgentTasks'),
-      });
-    });
-
-    notifications.forEach((item) => {
-      const notificationState: ItemState = !item.read_at && !item.engaged && !item.dismissed_at ? 'new' : 'archived';
-      const isDailyReport = item.title.startsWith("Sara's Daily Report");
-
-        items.push({
-          id: `notification-${item.id}`,
-          state: notificationState,
-          kind: 'notification',
-          title: item.title,
-          summary: item.message || 'Sara sent a new update.',
-          timestamp: item.created_at,
-          sourceLabel: item.source || item.category || 'Notification',
-          cta: isDailyReport
-            ? 'Open full report'
-            : notificationState === 'new'
-              ? 'Chat with Sara'
-              : 'Review notification',
-          color: STATE_META[notificationState].color,
-          onPress: async () => {
-            if (isDailyReport) {
-              const note = await notesService.findDailyReportNote({
-                title: item.title,
-                topic: item.topic,
-              });
-
-              if (note?.id) {
-                navigateToNoteEditor(note.id);
-                return;
-              }
-
-              Alert.alert('Full report unavailable', 'Sara saved the daily report, but the note could not be resolved yet.');
-              return;
-            }
-
-            if (notificationState === 'new') {
-              navigateToChat({
-                notification: {
-                  id: item.id,
-                  title: item.title,
-                  message: item.message || '',
-                  category: item.category,
-                  item_type: item.item_type,
-                },
-              });
-              return;
-            }
-            navigation.navigate('Notifications');
+  // Act on the server's post-action directive. Check-ins return
+  // {type:'chat', prompt:'Help me handle this: …'} for "Reply to Sara" — open
+  // chat seeded with that prompt. (Previously only result.note_id was checked,
+  // so "Reply to Sara" silently did nothing.)
+  const handleAttentionDirective = useCallback((directive?: {
+    type?: string;
+    prompt?: string;
+    url?: string;
+    note_id?: string;
+    note_title?: string;
+    note_preview?: string;
+    title?: string;
+  }) => {
+    if (!directive?.type) return;
+    if (directive.type === 'chat') {
+      if (directive.note_id) {
+        navigateToChat({
+          noteContext: {
+            id: directive.note_id,
+            title: directive.note_title || directive.title || 'Shared note',
+            prompt: directive.prompt,
+            preview: directive.note_preview,
           },
         });
-    });
-
-    inboxItems.forEach((item) => {
-        const contentState = mapContentState(item.status);
-        items.push({
-          id: `content-${item.id}`,
-          state: contentState,
-          kind: 'content',
-          title: item.title || 'Captured item',
-          summary: item.description || item.original_url || 'New content waiting in your captured inbox.',
-          timestamp: item.shared_at,
-          sourceLabel: 'Captured content',
-          cta: contentState === 'new' ? 'Open content' : 'Review content',
-          color: STATE_META[contentState].color,
-          onPress: () => navigation.navigate('Inbox', { tab: 'content' }),
-        });
-    });
-
-    if (acsSnapshot?.live_session) {
-      items.push({
-        id: `acs-live-${acsSnapshot.live_session.id}`,
-        state: 'in_progress',
-        kind: 'acs',
-        title: `ACS is active in ${acsSnapshot.live_session.mode}`,
-        summary: `Live autonomy session with ${acsSnapshot.live_session.turns} turns over ${Math.round(acsSnapshot.live_session.elapsed_minutes)} minutes.`,
-        timestamp: acsSnapshot.latest_note?.created_at || new Date().toISOString(),
-        sourceLabel: 'ACS live',
-        cta: 'Open ACS',
-        color: STATE_META.in_progress.color,
-        onPress: () => navigation.navigate('ACS'),
-      });
-    }
-
-    if (acsSnapshot?.daily_plan) {
-      items.push({
-        id: 'acs-plan',
-        state: 'in_progress',
-        kind: 'acs',
-        title: 'Today’s ACS plan',
-        summary: acsSnapshot.daily_plan,
-        timestamp: acsSnapshot.latest_note?.created_at || acsSnapshot.last_session?.ended_at || new Date().toISOString(),
-        sourceLabel: 'ACS plan',
-        cta: 'Open ACS',
-        color: STATE_META.in_progress.color,
-        onPress: () => navigation.navigate('ACS'),
-      });
-    }
-
-    (acsSnapshot?.directives || []).forEach((directive) => {
-      const directiveState = mapDirectiveState(directive.status);
-      items.push({
-        id: `acs-directive-${directive.id}`,
-        state: directiveState,
-        kind: 'acs',
-        title: directive.content,
-        summary: `${directive.directive_type} directive from ${directive.source || 'ACS'}.`,
-        timestamp: directive.created_at,
-        sourceLabel: 'ACS directive',
-        cta: 'Open ACS',
-        color: STATE_META[directiveState].color,
-        onPress: () => navigation.navigate('ACS'),
-      });
-    });
-
-    return items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [acsSnapshot, attentionItems, inboxItems, missions, navigation, notifications, tasks]);
-
-  const groupedItems = useMemo<Record<ItemState, UnifiedItem[]>>(() => ({
-    waiting: unifiedItems.filter((item) => item.state === 'waiting'),
-    in_progress: unifiedItems.filter((item) => item.state === 'in_progress'),
-    new: unifiedItems.filter((item) => item.state === 'new'),
-    done: unifiedItems.filter((item) => item.state === 'done'),
-    archived: unifiedItems.filter((item) => item.state === 'archived'),
-  }), [unifiedItems]);
-
-  const stateCounts = useMemo(() => ({
-    waiting: groupedItems.waiting.length,
-    in_progress: groupedItems.in_progress.length,
-    new: groupedItems.new.length,
-    done: groupedItems.done.length,
-    archived: groupedItems.archived.length,
-  }), [groupedItems]);
-
-  const highlightedSections = useMemo(() => {
-    const sectionOrder: ItemState[] = ['waiting', 'in_progress', 'new', 'done', 'archived'];
-
-    if (focus !== 'all') {
-      return [
-        {
-          state: focus,
-          items: groupedItems[focus],
+        return;
+      }
+      navigateToChat({
+        heartbeat: {
+          title: directive.title || 'Attention item',
+          message: directive.prompt || 'Help me handle this.',
+          priority: 'normal',
         },
-      ];
+      });
+      return;
     }
+    if (directive.type === 'open_url' && directive.url) {
+      Linking.openURL(directive.url).catch(() => {});
+    }
+  }, []);
 
-    return sectionOrder
-      .filter((state) => state !== 'archived' || groupedItems.archived.length > 0)
-      .map((state) => ({
-      state,
-      items: groupedItems[state].slice(0, state === 'archived' ? 3 : 4),
-    }));
-  }, [focus, groupedItems]);
+  const runAttentionAction = useCallback(async (
+    item: UnifiedItem,
+    actionId: string,
+    params?: Record<string, any>,
+  ) => {
+    setBusyId(item.id);
+    try {
+      const result = await apiClient.runAttentionAction(item.ref_id, actionId, params);
+      if (result?.directive) {
+        handleAttentionDirective(result.directive);
+      } else if (result?.note_id) {
+        navigateToNoteEditor(result.note_id);
+      }
+      reloadAndSync();
+    } catch {
+      Alert.alert('Error', 'That action failed — try again from chat.');
+    } finally {
+      setBusyId(null);
+    }
+  }, [reloadAndSync, handleAttentionDirective]);
 
-  const introText = useMemo(() => {
-    if (stateCounts.waiting > 0) {
-      return `Sara has ${stateCounts.waiting} item${stateCounts.waiting === 1 ? '' : 's'} waiting on you right now.`;
+  const handleQuickAction = useCallback((item: UnifiedItem, action: { id: string; label: string }) => {
+    if (action.id === 'remind_me') {
+      Alert.alert('Remind me', 'When should I remind you?', [
+        { text: '1 hour', onPress: () => runAttentionAction(item, action.id, { reminder_time: hoursFromNow(1) }) },
+        { text: '3 hours', onPress: () => runAttentionAction(item, action.id, { reminder_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(item, action.id, { reminder_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+      return;
     }
-    if (stateCounts.in_progress > 0) {
-      return `Sara is actively working on ${stateCounts.in_progress} background item${stateCounts.in_progress === 1 ? '' : 's'}.`;
+    if (action.id === 'add_to_calendar') {
+      Alert.alert('Add to calendar', 'When should this event be?', [
+        { text: 'In 1 hour', onPress: () => runAttentionAction(item, action.id, { start_time: hoursFromNow(1) }) },
+        { text: 'In 3 hours', onPress: () => runAttentionAction(item, action.id, { start_time: hoursFromNow(3) }) },
+        { text: 'Tomorrow 9am', onPress: () => runAttentionAction(item, action.id, { start_time: tomorrow9am() }) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+      return;
     }
-    if (stateCounts.new > 0) {
-      return `${stateCounts.new} new signal${stateCounts.new === 1 ? '' : 's'} came in across captures and notifications.`;
+    runAttentionAction(item, action.id);
+  }, [runAttentionAction]);
+
+  const handleDiscuss = useCallback((item: UnifiedItem) => {
+    navigateToChat({
+      notification: {
+        id: item.ref_id,
+        title: item.title,
+        message: item.body || '',
+        category: item.payload?.category || item.kind,
+        item_type: item.kind,
+      },
+    });
+  }, []);
+
+  const handleClearFyi = useCallback(async () => {
+    try {
+      await Promise.allSettled([
+        apiClient.markAllNotificationsRead(),
+        apiClient.markAllInboxRead(),
+      ]);
+      reloadAndSync();
+    } catch {
+      Alert.alert('Error', 'Could not clear updates right now.');
     }
-    return 'Everything is relatively calm. Use this screen to review assistant activity in one place.';
-  }, [stateCounts]);
+  }, [reloadAndSync]);
+
+  const handleItemPress = useCallback((item: UnifiedItem) => {
+    if (item.kind === 'capture') {
+      navigation.navigate('Inbox', { tab: 'content' });
+      return;
+    }
+    if (item.kind === 'task' && item.payload?.note_id) {
+      navigateToNoteEditor(item.payload.note_id);
+      return;
+    }
+    handleExpand(item);
+  }, [handleExpand, navigation]);
+
+  // ── Rendering ─────────────────────────────────────────────────────────
+
+  const renderCard = (item: UnifiedItem, section: 'needs_you' | 'fyi') => {
+    const expanded = expandedId === item.id;
+    const busy = busyId === item.id;
+    const accent = PRIORITY_COLORS[item.priority] || colors.primary;
+    const needsReplyBox = item.is_hitl || item.kind === 'task_clarification';
+
+    return (
+      <TouchableOpacity
+        key={item.id}
+        style={[styles.card, item.unread && styles.cardUnread]}
+        activeOpacity={0.85}
+        onPress={() => handleItemPress(item)}
+      >
+        <View style={styles.cardHeader}>
+          <Ionicons
+            name={KIND_ICONS[item.kind]}
+            size={16}
+            color={section === 'needs_you' ? accent : colors.textMuted}
+            style={styles.cardIcon}
+          />
+          <Text style={styles.cardTitle} numberOfLines={expanded ? undefined : 2}>
+            {item.title}
+          </Text>
+          {item.unread && <View style={[styles.unreadDot, { backgroundColor: accent }]} />}
+          <Text style={styles.cardTime}>{formatRelativeTime(item.created_at)}</Text>
+        </View>
+
+        {!!item.body && (
+          <Text style={styles.cardBody} numberOfLines={expanded ? undefined : 2}>
+            {item.body}
+          </Text>
+        )}
+
+        <View style={styles.cardMetaRow}>
+          <Text style={styles.cardSource}>{item.source}</Text>
+          {item.kind === 'task' && item.status === 'running' && (
+            <View style={styles.runningPill}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.runningText}>working</Text>
+            </View>
+          )}
+          {item.kind === 'task' && item.status === 'failed' && (
+            <Text style={styles.failedText}>failed</Text>
+          )}
+        </View>
+
+        {/* Inline reply for HITL questions and task clarifications */}
+        {needsReplyBox && (
+          <View style={styles.replyRow}>
+            <TextInput
+              style={styles.replyInput}
+              value={replyDrafts[item.id] || ''}
+              onChangeText={(text) => setReplyDrafts((prev) => ({ ...prev, [item.id]: text }))}
+              placeholder="Answer Sara..."
+              placeholderTextColor={colors.textMuted}
+              multiline
+              editable={!busy}
+            />
+            <TouchableOpacity
+              style={[styles.replySend, !(replyDrafts[item.id] || '').trim() && styles.replySendDisabled]}
+              onPress={() => handleReply(item)}
+              disabled={busy || !(replyDrafts[item.id] || '').trim()}
+            >
+              {busy ? (
+                <ActivityIndicator size="small" color={colors.text} />
+              ) : (
+                <Ionicons name="send" size={16} color={colors.text} />
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Action row */}
+        {section === 'needs_you' && (
+          <View style={styles.actionRow}>
+            {item.kind === 'attention' && !item.is_hitl &&
+              item.actions.map((action) => (
+                <TouchableOpacity
+                  key={action.id}
+                  style={styles.actionChip}
+                  onPress={() => handleQuickAction(item, action)}
+                  disabled={busy}
+                >
+                  <Text style={styles.actionChipText}>{action.label}</Text>
+                </TouchableOpacity>
+              ))}
+            {!!item.payload?.note_id && (
+              <TouchableOpacity
+                style={styles.actionChip}
+                onPress={() => navigateToNoteEditor(item.payload.note_id)}
+              >
+                <Text style={styles.actionChipText}>Open note</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.actionChip} onPress={() => handleDiscuss(item)}>
+              <Text style={styles.actionChipText}>Discuss</Text>
+            </TouchableOpacity>
+            {item.kind === 'attention' && (
+              <TouchableOpacity
+                style={[styles.actionChip, styles.actionChipDone]}
+                onPress={() => handleArchiveAttention(item)}
+                disabled={busy}
+              >
+                <Text style={[styles.actionChipText, styles.actionChipDoneText]}>Done</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {section === 'fyi' && expanded && item.kind === 'notification' && (
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.actionChip} onPress={() => handleDiscuss(item)}>
+              <Text style={styles.actionChipText}>Discuss</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </TouchableOpacity>
+    );
+  };
 
   if (loading) {
     return (
@@ -711,290 +467,70 @@ export default function AssistantInboxScreen() {
     );
   }
 
+  const subtitle =
+    counts.needs_you > 0
+      ? `${counts.needs_you} thing${counts.needs_you === 1 ? '' : 's'} need${counts.needs_you === 1 ? 's' : ''} you`
+      : counts.fyi_unread > 0
+        ? `Nothing needs you — ${counts.fyi_unread} unread update${counts.fyi_unread === 1 ? '' : 's'}`
+        : 'All clear';
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor={colors.primary}
-          />
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
         }
       >
-        <View style={styles.hero}>
-          <Text style={styles.eyebrow}>Assistant activity</Text>
+        <View style={styles.header}>
           <Text style={styles.title}>Inbox</Text>
-          <Text style={styles.subtitle}>{introText}</Text>
-          <Text style={styles.helperText}>
-            Captures, delegated work, and notifications are grouped by what you should do next.
-          </Text>
-          <Text style={styles.remainingText}>{remainingBadgeSummary}</Text>
-          <View style={styles.heroBreakdown}>
-            <TouchableOpacity
-              style={styles.breakdownCard}
-              activeOpacity={0.82}
-              onPress={() => navigation.navigate('Notifications')}
-            >
-              <Text style={styles.breakdownLabel}>Notifications</Text>
-              <Text style={styles.breakdownValue}>{sourceCounts.notifications}</Text>
-              <Text style={styles.breakdownMeta}>fresh and not dismissed</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.breakdownCard}
-              activeOpacity={0.82}
-              onPress={() => navigation.navigate('Inbox', { tab: 'attention' })}
-            >
-              <Text style={styles.breakdownLabel}>Attention</Text>
-              <Text style={styles.breakdownValue}>{sourceCounts.attention}</Text>
-              <Text style={styles.breakdownMeta}>waiting on you</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.breakdownCard}
-              activeOpacity={0.82}
-              onPress={() => navigation.navigate('Inbox', { tab: 'content' })}
-            >
-              <Text style={styles.breakdownLabel}>Captures</Text>
-              <Text style={styles.breakdownValue}>{sourceCounts.captures}</Text>
-              <Text style={styles.breakdownMeta}>unread items</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.breakdownCard}
-              activeOpacity={0.82}
-              onPress={() => navigation.navigate('AgentTasks')}
-            >
-              <Text style={styles.breakdownLabel}>Needs input</Text>
-              <Text style={styles.breakdownValue}>{sourceCounts.clarifications}</Text>
-              <Text style={styles.breakdownMeta}>task clarifications</Text>
-            </TouchableOpacity>
-          </View>
-          {(sourceCounts.notifications > 0 || sourceCounts.attention > 0 || sourceCounts.captures > 0) ? (
-            <View style={styles.heroActions}>
-              <TouchableOpacity
-                style={styles.heroButton}
-                onPress={handleClearAllSignals}
-              >
-                <Text style={styles.heroButtonText}>Clear All</Text>
-              </TouchableOpacity>
-              {sourceCounts.notifications > 0 ? (
-                <TouchableOpacity
-                  style={[styles.heroButton, styles.heroButtonSecondary]}
-                  onPress={handleMarkAllNotificationsSeen}
-                >
-                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
-                    Clear Notifications
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-              {sourceCounts.attention > 0 ? (
-                <TouchableOpacity
-                  style={[styles.heroButton, styles.heroButtonSecondary]}
-                  onPress={handleArchiveAllAttention}
-                >
-                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
-                    Archive Attention
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-              {sourceCounts.captures > 0 ? (
-                <TouchableOpacity
-                  style={[styles.heroButton, styles.heroButtonSecondary]}
-                  onPress={handleMarkAllCapturesReviewed}
-                >
-                  <Text style={[styles.heroButtonText, styles.heroButtonTextSecondary]}>
-                    Clear Captures
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
+          <Text style={styles.subtitle}>{subtitle}</Text>
+        </View>
+
+        {/* Needs you */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Needs you</Text>
+          {counts.needs_you > 0 && (
+            <View style={styles.countPill}>
+              <Text style={styles.countPillText}>{counts.needs_you}</Text>
             </View>
-          ) : null}
+          )}
         </View>
+        {needsYou.length === 0 ? (
+          <Text style={styles.emptyText}>Nothing needs you right now.</Text>
+        ) : (
+          needsYou.map((item) => renderCard(item, 'needs_you'))
+        )}
 
-        <View style={styles.summaryGrid}>
-          {(['waiting', 'in_progress', 'new', 'done', 'archived'] as ItemState[]).map((state) => {
-            const meta = STATE_META[state];
-            const isActive = focus === state;
-            return (
-              <TouchableOpacity
-                key={state}
-                style={[
-                  styles.summaryCard,
-                  { borderColor: meta.color + '30' },
-                  isActive && { backgroundColor: meta.color + '18' },
-                ]}
-                onPress={() => setFocus((current) => (current === state ? 'all' : state))}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.summaryLabel, { color: meta.color }]}>{meta.label}</Text>
-                <Text style={styles.summaryCount}>{stateCounts[state]}</Text>
-                <Text style={styles.summaryDescription}>{meta.description}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterRow}
-        >
-          {(['all', 'waiting', 'in_progress', 'new', 'done', 'archived'] as AssistantInboxFocus[]).map((option) => {
-            const active = focus === option;
-            const label = option === 'all' ? 'All activity' : STATE_META[option].label;
-            return (
-              <TouchableOpacity
-                key={option}
-                style={[styles.filterChip, active && styles.filterChipActive]}
-                onPress={() => setFocus(option)}
-              >
-                <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
-                  {label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        {highlightedSections.map(({ state, items }) => {
-          const meta = STATE_META[state];
-          return (
-            <View key={state} style={styles.section}>
-              <View style={styles.sectionHeader}>
-                <View>
-                  <Text style={styles.sectionTitle}>{meta.label}</Text>
-                  <Text style={styles.sectionDescription}>{meta.description}</Text>
-                </View>
-                <View style={[styles.sectionCountPill, { backgroundColor: meta.color + '18' }]}>
-                  <Text style={[styles.sectionCountText, { color: meta.color }]}>
-                    {groupedItems[state].length}
-                  </Text>
-                </View>
-              </View>
-
-              {items.length > 0 ? (
-                <View style={styles.sectionCard}>
-                  {items.map((item, index) => (
-                    <TouchableOpacity
-                      key={item.id}
-                      style={[
-                        styles.activityRow,
-                        index < items.length - 1 && styles.activityRowBorder,
-                      ]}
-                      onPress={() => {
-                        assistantAnalytics.track('assistant.inbox_item_opened', {
-                          kind: item.kind,
-                          state: item.state,
-                          source_label: item.sourceLabel,
-                          cta: item.cta,
-                        });
-                        item.onPress();
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <View style={[styles.activityDot, { backgroundColor: item.color }]} />
-                      <View style={styles.activityCopy}>
-                        <View style={styles.activityMetaRow}>
-                          <Text style={styles.kindLabel}>{KIND_LABELS[item.kind]}</Text>
-                          <Text style={styles.metaSeparator}>•</Text>
-                          <Text style={styles.sourceLabel}>{item.sourceLabel}</Text>
-                          <Text style={styles.metaSeparator}>•</Text>
-                          <Text style={styles.timeLabel}>{formatRelativeTime(item.timestamp)}</Text>
-                        </View>
-                        <Text style={styles.activityTitle} numberOfLines={2}>
-                          {item.title}
-                        </Text>
-                        <Text style={styles.activitySummary} numberOfLines={2}>
-                          {item.summary}
-                        </Text>
-                      </View>
-                      <Text style={styles.ctaLabel}>{item.cta}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              ) : (
-                <View style={styles.emptySection}>
-                  <Text style={styles.emptySectionText}>Nothing here right now.</Text>
-                </View>
-              )}
-            </View>
-          );
-        })}
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Detailed feeds</Text>
-          <Text style={styles.sectionDescription}>
-            Open the older dedicated views when you want deeper controls or more context.
-          </Text>
-
-          <View style={styles.feedGrid}>
-            {DETAIL_FEEDS.map((feed) => (
-              <TouchableOpacity
-                key={feed.key}
-                style={styles.feedCard}
-                onPress={() => {
-                  assistantAnalytics.track('assistant.inbox_item_opened', {
-                    kind: 'detail_feed',
-                    state: focus,
-                    source_label: feed.label,
-                    cta: 'Open feed',
-                  });
-                  feed.onPress(navigation);
-                }}
-                activeOpacity={0.82}
-              >
-                <Text style={styles.feedLabel}>{feed.label}</Text>
-                <Text style={styles.feedDescription}>{feed.description}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.footerCard}>
-          <Text style={styles.footerTitle}>Captured content</Text>
-          <Text style={styles.footerDescription}>
-            {contentUnread > 0
-              ? `${contentUnread} unread capture${contentUnread === 1 ? '' : 's'} still waiting for review.`
-              : 'No unread captures at the moment.'}
-          </Text>
-          <View style={styles.footerActions}>
-            <TouchableOpacity
-              style={styles.footerButton}
-              onPress={() => {
-                assistantAnalytics.track('assistant.inbox_item_opened', {
-                  kind: 'content',
-                  state: contentUnread > 0 ? 'new' : 'done',
-                  source_label: 'Captured content',
-                  cta: 'Open content inbox',
-                });
-                navigation.navigate('Inbox', { tab: 'content' });
-              }}
-            >
-              <Text style={styles.footerButtonText}>Open content inbox</Text>
+        {/* FYI */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>FYI</Text>
+          {counts.fyi_unread > 0 && (
+            <TouchableOpacity style={styles.clearButton} onPress={handleClearFyi}>
+              <Text style={styles.clearButtonText}>Mark all read</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.footerButton, styles.footerButtonSecondary]}
-              onPress={() => {
-                assistantAnalytics.track('assistant.inbox_item_opened', {
-                  kind: 'assistant_sort',
-                  state: focus,
-                  source_label: 'Assistant inbox review',
-                  cta: 'Ask Sara to sort it',
-                });
-                navigateToChat({
-                  heartbeat: {
-                    title: 'Assistant inbox review',
-                    message: 'Help me review what matters most in my assistant inbox.',
-                    priority: 'normal',
-                  },
-                });
-              }}
-            >
-              <Text style={[styles.footerButtonText, styles.footerButtonTextSecondary]}>
-                Ask Sara to sort it
-              </Text>
-            </TouchableOpacity>
-          </View>
+          )}
+        </View>
+        {fyi.length === 0 ? (
+          <Text style={styles.emptyText}>No recent updates.</Text>
+        ) : (
+          fyi.map((item) => renderCard(item, 'fyi'))
+        )}
+
+        {/* Compact links to the detail surfaces */}
+        <View style={styles.linksRow}>
+          <TouchableOpacity onPress={() => navigation.navigate('Notifications')}>
+            <Text style={styles.linkText}>All notifications</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate('Inbox', { tab: 'content' })}>
+            <Text style={styles.linkText}>Captures</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate('AgentTasks')}>
+            <Text style={styles.linkText}>Agent tasks</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate('ACS')}>
+            <Text style={styles.linkText}>ACS</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -1013,25 +549,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   content: {
-    padding: spacing.lg,
-    paddingBottom: spacing.xxl,
+    padding: spacing.md,
+    paddingBottom: spacing.xl * 2,
   },
-  hero: {
-    marginBottom: spacing.lg,
-    padding: spacing.lg,
-    borderRadius: borderRadius.xl,
-    backgroundColor: colors.assistant.panel,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    ...shadows.sm,
-  },
-  eyebrow: {
-    color: colors.assistant.passive,
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: spacing.xs,
+  header: {
+    marginBottom: spacing.md,
   },
   title: {
     color: colors.text,
@@ -1039,326 +561,179 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   subtitle: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    lineHeight: 24,
-    marginTop: spacing.sm,
-  },
-  helperText: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: spacing.sm,
-  },
-  remainingText: {
-    color: colors.text,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: spacing.sm,
-    fontWeight: '600',
-  },
-  heroBreakdown: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  breakdownCard: {
-    flexGrow: 1,
-    minWidth: 140,
-    padding: spacing.md,
-    borderRadius: borderRadius.lg,
-    backgroundColor: colors.assistant.panelRaised,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-  },
-  breakdownLabel: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
-  breakdownValue: {
-    color: colors.text,
-    fontSize: fontSizes.xxl,
-    fontWeight: '700',
-    marginTop: spacing.sm,
-  },
-  breakdownMeta: {
     color: colors.textMuted,
-    fontSize: fontSizes.xs,
-    lineHeight: 16,
-    marginTop: spacing.xs,
-  },
-  heroActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  heroButton: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.primary,
-  },
-  heroButtonSecondary: {
-    backgroundColor: colors.assistant.actionSoft,
-    borderWidth: 1,
-    borderColor: colors.assistant.borderStrong,
-  },
-  heroButtonText: {
-    color: '#fff',
     fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  heroButtonTextSecondary: {
-    color: colors.primary,
-  },
-  summaryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  summaryCard: {
-    width: '48%',
-    minWidth: 150,
-    padding: spacing.md,
-    borderRadius: borderRadius.lg,
-    backgroundColor: colors.assistant.panel,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    ...shadows.sm,
-  },
-  summaryLabel: {
-    fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  summaryCount: {
-    color: colors.text,
-    fontSize: fontSizes.xxl,
-    fontWeight: '700',
-    marginTop: spacing.sm,
-  },
-  summaryDescription: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.xs,
-    lineHeight: 18,
-    marginTop: spacing.sm,
-  },
-  filterRow: {
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.md,
-    gap: spacing.sm,
-  },
-  filterChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    backgroundColor: colors.assistant.panelMuted,
-  },
-  filterChipActive: {
-    borderColor: colors.assistant.borderStrong,
-    backgroundColor: colors.assistant.actionSoft,
-  },
-  filterChipText: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    fontWeight: '500',
-  },
-  filterChipTextActive: {
-    color: colors.primary,
-  },
-  section: {
-    marginTop: spacing.md,
+    marginTop: 2,
   },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    marginTop: spacing.md,
     marginBottom: spacing.sm,
-    gap: spacing.md,
+    gap: spacing.sm,
   },
   sectionTitle: {
     color: colors.text,
     fontSize: fontSizes.lg,
     fontWeight: '600',
   },
-  sectionDescription: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: 2,
-  },
-  sectionCountPill: {
-    minWidth: 34,
-    height: 34,
+  countPill: {
+    backgroundColor: colors.warning + '28',
     borderRadius: borderRadius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
   },
-  sectionCountText: {
-    fontSize: fontSizes.sm,
+  countPillText: {
+    color: colors.warning,
+    fontSize: fontSizes.xs,
     fontWeight: '700',
   },
-  sectionCard: {
-    backgroundColor: colors.assistant.panel,
-    borderRadius: borderRadius.xl,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    overflow: 'hidden',
-    ...shadows.sm,
+  clearButton: {
+    marginLeft: 'auto',
   },
-  activityRow: {
+  clearButtonText: {
+    color: colors.primary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  emptyText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    marginBottom: spacing.sm,
+  },
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  cardUnread: {
+    borderColor: 'rgba(130, 151, 182, 0.38)',
+  },
+  cardHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.sm,
-    padding: spacing.md,
+    gap: 6,
   },
-  activityRowBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: colors.assistant.border,
+  cardIcon: {
+    marginTop: 2,
   },
-  activityDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+  cardTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  unreadDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     marginTop: 6,
   },
-  activityCopy: {
-    flex: 1,
+  cardTime: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 2,
   },
-  activityMetaRow: {
+  cardBody: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    marginTop: spacing.xs,
+    lineHeight: 19,
+  },
+  cardMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: spacing.xs,
+    marginTop: spacing.xs,
+    gap: spacing.sm,
   },
-  kindLabel: {
-    color: colors.assistant.passive,
+  cardSource: {
+    color: colors.textMuted,
     fontSize: fontSizes.xs,
-    fontWeight: '600',
     textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
-  sourceLabel: {
-    color: colors.textMuted,
-    fontSize: fontSizes.xs,
+  runningPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  timeLabel: {
-    color: colors.textMuted,
-    fontSize: fontSizes.xs,
-  },
-  metaSeparator: {
-    color: colors.textMuted,
-    fontSize: fontSizes.xs,
-  },
-  activityTitle: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-    marginTop: spacing.xs,
-  },
-  activitySummary: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: spacing.xs,
-  },
-  ctaLabel: {
+  runningText: {
     color: colors.primary,
     fontSize: fontSizes.xs,
+  },
+  failedText: {
+    color: colors.error,
+    fontSize: fontSizes.xs,
     fontWeight: '600',
-    marginTop: 2,
+  },
+  replyRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginTop: spacing.sm,
+    gap: spacing.xs,
+  },
+  replyInput: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    color: colors.text,
+    fontSize: fontSizes.sm,
     paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.assistant.actionSoft,
-    overflow: 'hidden',
+    paddingVertical: 8,
+    maxHeight: 96,
   },
-  emptySection: {
-    backgroundColor: colors.assistant.panel,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    padding: spacing.lg,
-  },
-  emptySectionText: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-  },
-  feedGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
-  },
-  feedCard: {
-    width: '48%',
-    minWidth: 150,
-    backgroundColor: colors.assistant.panelMuted,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-    padding: spacing.md,
-  },
-  feedLabel: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-  },
-  feedDescription: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: spacing.xs,
-  },
-  footerCard: {
-    marginTop: spacing.lg,
-    padding: spacing.lg,
-    borderRadius: borderRadius.xl,
-    backgroundColor: colors.assistant.panel,
-    borderWidth: 1,
-    borderColor: colors.assistant.borderStrong,
-    ...shadows.sm,
-  },
-  footerTitle: {
-    color: colors.text,
-    fontSize: fontSizes.lg,
-    fontWeight: '600',
-  },
-  footerDescription: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.sm,
-    lineHeight: 20,
-    marginTop: spacing.sm,
-  },
-  footerActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  footerButton: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
+  replySend: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  footerButtonSecondary: {
-    backgroundColor: colors.assistant.panelMuted,
+  replySendDisabled: {
+    opacity: 0.4,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: spacing.sm,
+    gap: spacing.xs,
+  },
+  actionChip: {
     borderWidth: 1,
-    borderColor: colors.assistant.border,
+    borderColor: colors.border,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
   },
-  footerButtonText: {
+  actionChipText: {
     color: colors.text,
-    fontSize: fontSizes.sm,
+    fontSize: fontSizes.xs,
     fontWeight: '600',
   },
-  footerButtonTextSecondary: {
-    color: colors.assistant.passive,
+  actionChipDone: {
+    borderColor: colors.success + '60',
+    backgroundColor: colors.success + '14',
+  },
+  actionChipDoneText: {
+    color: colors.success,
+  },
+  linksRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginTop: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  linkText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
   },
 });

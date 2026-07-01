@@ -207,7 +207,9 @@ Return ONLY valid JSON, no other text."""
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.3,
-                    "max_tokens": 2000
+                    "max_tokens": 2000,
+                    # Local qwen: disable thinking or `content` comes back empty.
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers=headers
             )

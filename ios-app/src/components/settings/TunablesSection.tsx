@@ -271,7 +271,7 @@ const styles = StyleSheet.create({
     opacity: 0.3,
   },
   saveButtonText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.xs,
     fontWeight: '600',
   },

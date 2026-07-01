@@ -97,6 +97,12 @@ class PatternDetector:
         )
         detected_patterns.extend(habit_patterns)
 
+        # Detect home routines (doors, lights, motion) from HA activity
+        home_patterns = await self._detect_home_routine_patterns(
+            db, user_id, replays
+        )
+        detected_patterns.extend(home_patterns)
+
         logger.info(f"Detected {len(detected_patterns)} potential patterns")
 
         return detected_patterns
@@ -412,6 +418,110 @@ class PatternDetector:
         # For now, habits are tracked separately
         # This could analyze habit completion patterns if needed
         return []
+
+    async def _detect_home_routine_patterns(
+        self,
+        db: Session,
+        user_id: str,
+        replays: List[DayReplay]
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect daily home routines from HA entity activity.
+
+        Example: "Side door typically opens around 07:00"
+        """
+        patterns = []
+
+        # entity_id -> {replay_date -> set(active ET hours)}
+        entity_days: Dict[str, Dict[date, set]] = defaultdict(dict)
+        names: Dict[str, str] = {}
+        domains: Dict[str, str] = {}
+
+        for replay in replays:
+            for event in replay.events:
+                if event.source != DataSource.HOME or event.event_type != "home_entity_activity":
+                    continue
+                eid = event.details.get("entity_id")
+                if not eid:
+                    continue
+                entity_days[eid][replay.replay_date] = set(event.details.get("active_hours") or [])
+                names[eid] = event.details.get("friendly_name") or eid
+                domains[eid] = event.details.get("domain") or eid.split(".")[0]
+
+        for eid, day_hours in entity_days.items():
+            total_days = len(day_hours)
+            if total_days < max(self.MIN_OCCURRENCES, 3):
+                continue
+
+            # Count, per hour (±1h smoothing), on how many days it was active
+            hour_day_counts: Dict[int, int] = defaultdict(int)
+            for hours in day_hours.values():
+                smoothed = set()
+                for h in hours:
+                    smoothed.update({(h - 1) % 24, h, (h + 1) % 24})
+                for h in smoothed:
+                    hour_day_counts[h] += 1
+
+            # A routine hour recurs on most observed days
+            required = max(3, int(total_days * 0.6))
+            routine_hours = [h for h, c in hour_day_counts.items() if c >= required]
+            if not routine_hours:
+                continue
+
+            best_hour = max(routine_hours, key=lambda h: hour_day_counts[h])
+            time_str = f"{best_hour:02d}:00"
+            label = names[eid]
+            trigger_conditions = {"time": time_str, "entity_id": eid}
+
+            existing_id = await behavioral_pattern_service.find_similar_pattern(
+                db, user_id,
+                TriggerType.TIME,
+                trigger_conditions,
+                ActionType.SUGGESTION
+            )
+            if existing_id:
+                for d in sorted(day_hours):
+                    await behavioral_pattern_service.add_evidence(
+                        db, existing_id, d, f"{label} active"
+                    )
+                patterns.append({
+                    "type": "existing_updated",
+                    "pattern_id": existing_id,
+                    "entity_id": eid
+                })
+                continue
+
+            pattern_id = await behavioral_pattern_service.create_pattern(
+                db=db,
+                user_id=user_id,
+                trigger_type=TriggerType.TIME,
+                trigger_conditions=trigger_conditions,
+                action_type=ActionType.SUGGESTION,
+                action_payload={
+                    "entity_id": eid,
+                    "domain": domains[eid],
+                    "observation": f"{label} is typically active around {time_str}",
+                    "suggest_message": f"{label} is usually active around {time_str}."
+                },
+                description=f"{label} active around {time_str}",
+                source_context=(
+                    f"Observed {label} active around {time_str} on "
+                    f"{hour_day_counts[best_hour]} of {total_days} days"
+                ),
+                category=PatternCategory.HOME,
+                initial_evidence_date=min(day_hours)
+            )
+            for d in sorted(day_hours)[1:]:
+                await behavioral_pattern_service.add_evidence(db, pattern_id, d)
+
+            patterns.append({
+                "type": "new",
+                "pattern_id": pattern_id,
+                "entity_id": eid,
+                "typical_time": time_str
+            })
+
+        return patterns
 
     async def get_weather_history(
         self,

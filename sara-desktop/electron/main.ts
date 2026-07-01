@@ -300,18 +300,6 @@ function handleBridgeMessage(message: { type: string; [key: string]: any }) {
       }
       break
 
-    case 'system_event':
-      // Narrator popup — the System AI broadcasts.
-      createSystemEventWindow({
-        id: message.event_id || `sys-${Date.now()}`,
-        title: message.title || 'SYSTEM',
-        body: message.body || '',
-        subtitle: message.subtitle || null,
-        severity: message.severity || 'observation',
-        ttlSeconds: typeof message.ttl_seconds === 'number' ? message.ttl_seconds : 30,
-      })
-      break
-
     case 'activity_update':
       // Forward activity updates to renderer
       mainWindow?.webContents.send('activity-update', message.activity)
@@ -389,7 +377,6 @@ let chatWindow: BrowserWindow | null = null  // Chat popup window
 let noteWindow: BrowserWindow | null = null  // Note viewer popup
 let settingsWindow: BrowserWindow | null = null  // Settings window
 let timerWindows: Map<string, BrowserWindow> = new Map()  // Floating timer windows
-let systemEventWindows: BrowserWindow[] = []  // Narrator popups (stacked top-right)
 let tray: Tray | null = null
 let isQuitting = false
 
@@ -696,149 +683,6 @@ function createTimerWindow(timerId: string, name: string, remainingSeconds: numb
   timerWindow.on('closed', () => {
     timerWindows.delete(timerId)
   })
-}
-
-// ── Narrator popup ──────────────────────────────────────────────────────────
-//
-// The System AI broadcasts. Popups slide in top-right, stack downward when
-// multiple arrive, and auto-dismiss after ttlSeconds. Styling lives inline as
-// a data URL so this lands without touching the React/Vite bundle.
-
-interface SystemEventArgs {
-  id: string
-  title: string
-  body: string
-  subtitle: string | null
-  severity: string
-  ttlSeconds: number
-}
-
-const SYSTEM_EVENT_WIDTH = 440
-const SYSTEM_EVENT_HEIGHT = 160
-const SYSTEM_EVENT_GAP = 12
-
-function createSystemEventWindow(args: SystemEventArgs) {
-  const { width: screenW } = screen.getPrimaryDisplay().workAreaSize
-
-  // Stack: newest on top, older slide down. Cap at 5 visible.
-  if (systemEventWindows.length >= 5) {
-    const oldest = systemEventWindows.shift()
-    if (oldest && !oldest.isDestroyed()) oldest.close()
-  }
-  const stackIndex = systemEventWindows.length
-  const x = screenW - SYSTEM_EVENT_WIDTH - 20
-  const y = 20 + stackIndex * (SYSTEM_EVENT_HEIGHT + SYSTEM_EVENT_GAP)
-
-  const win = new BrowserWindow({
-    width: SYSTEM_EVENT_WIDTH,
-    height: SYSTEM_EVENT_HEIGHT,
-    x,
-    y,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    focusable: false,
-    skipTaskbar: true,
-    resizable: false,
-    hasShadow: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
-  win.setMenu(null)
-  win.setIgnoreMouseEvents(false)
-
-  win.loadURL(buildSystemEventHTML(args))
-
-  systemEventWindows.push(win)
-
-  // Auto-dismiss after ttl.
-  const dismiss = setTimeout(() => {
-    if (!win.isDestroyed()) win.close()
-  }, Math.max(3, args.ttlSeconds) * 1000)
-
-  win.on('closed', () => {
-    clearTimeout(dismiss)
-    const i = systemEventWindows.indexOf(win)
-    if (i >= 0) systemEventWindows.splice(i, 1)
-    // Re-flow remaining stack so there are no gaps.
-    systemEventWindows.forEach((w, idx) => {
-      if (!w.isDestroyed()) {
-        const ny = 20 + idx * (SYSTEM_EVENT_HEIGHT + SYSTEM_EVENT_GAP)
-        const [wx] = w.getPosition()
-        w.setPosition(wx, ny)
-      }
-    })
-  })
-}
-
-function buildSystemEventHTML(args: SystemEventArgs): string {
-  // Severity → accent color. Synthwave-ish, intentionally not macOS-native.
-  const accents: Record<string, { border: string; glow: string; tint: string }> = {
-    roast:       { border: '#ff5a3a', glow: 'rgba(255,90,58,0.45)',  tint: '#1a0c0a' },
-    achievement: { border: '#ffd24a', glow: 'rgba(255,210,74,0.55)', tint: '#1a1408' },
-    observation: { border: '#7a8694', glow: 'rgba(122,134,148,0.30)', tint: '#0e1014' },
-    patch_note:  { border: '#5aa9ff', glow: 'rgba(90,169,255,0.40)', tint: '#08111a' },
-    sponsored:   { border: '#d04aff', glow: 'rgba(208,74,255,0.45)', tint: '#16081a' },
-    grudging:    { border: '#c0c8d0', glow: 'rgba(192,200,208,0.35)', tint: '#10121a' },
-    deflected:   { border: '#b5d4a0', glow: 'rgba(181,212,160,0.35)', tint: '#0a140e' },
-  }
-  const a = accents[args.severity] || accents.observation
-
-  // Defense against HTML injection from the LLM. Escape everything.
-  const esc = (s: string) =>
-    s.replace(/&/g, '&amp;')
-     .replace(/</g, '&lt;')
-     .replace(/>/g, '&gt;')
-     .replace(/"/g, '&quot;')
-     .replace(/'/g, '&#039;')
-
-  const titleSize = args.severity === 'observation' ? '15px' : '18px'
-  const titleWeight = args.severity === 'observation' ? '500' : '800'
-  const titleSpacing = args.severity === 'observation' ? 'normal' : '0.08em'
-  const titleTransform = args.severity === 'observation' ? 'none' : 'uppercase'
-
-  const html = `<!doctype html>
-<html><head><meta charset="utf-8"><style>
-  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
-    font-family: ui-monospace, 'IBM Plex Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
-    color: #e8ecf0; }
-  .card {
-    position: absolute; inset: 8px;
-    background: linear-gradient(180deg, ${a.tint} 0%, #050608 100%);
-    border: 1px solid ${a.border};
-    border-radius: 8px;
-    box-shadow: 0 0 24px ${a.glow}, 0 8px 32px rgba(0,0,0,0.6);
-    padding: 14px 16px;
-    display: flex; flex-direction: column; gap: 6px;
-    transform: translateX(120%);
-    animation: slidein 320ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
-  }
-  @keyframes slidein { to { transform: translateX(0); } }
-  .label { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
-    color: ${a.border}; opacity: 0.85; }
-  .title { font-size: ${titleSize}; font-weight: ${titleWeight};
-    letter-spacing: ${titleSpacing}; text-transform: ${titleTransform};
-    color: #f4f6f8; line-height: 1.2; }
-  .subtitle { font-size: 11px; color: #9aa4b0; }
-  .body { font-size: 13px; line-height: 1.45; color: #d4dae0;
-    overflow: hidden; flex: 1; }
-  .footer { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
-    color: #5a6470; display: flex; justify-content: space-between; }
-</style></head><body>
-  <div class="card">
-    <div class="label">SYSTEM // ${esc(args.severity)}</div>
-    <div class="title">${esc(args.title)}</div>
-    ${args.subtitle ? `<div class="subtitle">${esc(args.subtitle)}</div>` : ''}
-    <div class="body">${esc(args.body)}</div>
-    <div class="footer">
-      <span>broadcast</span>
-      <span>${esc(args.id.slice(0, 8))}</span>
-    </div>
-  </div>
-</body></html>`
-  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
 }
 
 function closeTimerWindow(timerId: string) {

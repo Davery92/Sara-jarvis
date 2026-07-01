@@ -11,6 +11,7 @@ import {
   startEventActivity,
   updateEventActivity,
   endEventActivity,
+  endAllEventActivities,
 } from '../../modules/sara-native'
 
 export type EventKind = 'workout' | 'task'
@@ -43,6 +44,16 @@ export function endEvent(id: string): void {
   if (!isAvailable()) return
   try {
     endEventActivity(id)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Ends every event activity of a kind — reaps orphans left by a killed app. */
+export function endAllEvents(kind: EventKind | '' = ''): void {
+  if (!isAvailable()) return
+  try {
+    endAllEventActivities(kind)
   } catch {
     /* ignore */
   }

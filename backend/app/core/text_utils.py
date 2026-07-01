@@ -30,6 +30,31 @@ def is_local_base_url(base_url: str) -> bool:
     return ("11434" in u) or ("8080" in u) or ("8686" in u) or ("ollama" in u) or ("localhost" in u)
 
 
+# Claude models that reject non-default sampling params (temperature/top_p/top_k)
+# and budget_tokens — Anthropic returns HTTP 400 ("`temperature` is deprecated for
+# this model.") if any are sent, on both the native /messages API and the
+# OpenAI-compatible /chat/completions endpoint. Applies to Sonnet 5, Opus 4.7,
+# Opus 4.8, Fable 5, and Mythos 5. Older Claude models (Opus 4.6, Sonnet 4.6,
+# Haiku 4.5, and earlier) still accept these params.
+_CLAUDE_NO_SAMPLING_MARKERS = ("opus-4-7", "opus-4-8", "sonnet-5", "fable-5", "mythos-5")
+
+
+def claude_rejects_sampling_params(model_id: str) -> bool:
+    """True if this Claude model 400s when temperature/top_p/top_k is supplied."""
+    m = (model_id or "").lower()
+    if not m.startswith("claude"):
+        return False
+    return any(marker in m for marker in _CLAUDE_NO_SAMPLING_MARKERS)
+
+
+def claude_thinking_always_on(model_id: str) -> bool:
+    """True for Claude models where thinking is always on and an explicit
+    `thinking: {"type": "disabled"}` returns a 400 (Fable 5 / Mythos 5).
+    For these, omit the `thinking` field entirely."""
+    m = (model_id or "").lower()
+    return ("fable-5" in m) or ("mythos-5" in m)
+
+
 def safe_parse_iso_datetime(value: str) -> Optional[datetime]:
     if not value:
         return None
@@ -97,6 +122,7 @@ def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
 _KNOWN_TOOLS = {
     'create_note', 'search_notes', 'edit_note', 'delete_note', 'list_notes',
     'notes_create', 'notes_search', 'notes_edit', 'notes_delete', 'notes_list',
+    'notes_list_folders', 'notes_create_folder',
     'create_reminder', 'list_reminders', 'cancel_reminder',
     'reminders_create', 'reminders_list', 'reminders_cancel',
     'start_timer', 'timer_status', 'cancel_timer',

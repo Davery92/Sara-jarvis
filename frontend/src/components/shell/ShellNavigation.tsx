@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React from 'react'
 import { AppView } from '../../navigation/views'
 
 export interface ShellNavItem {
@@ -32,24 +32,6 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
   onLogout,
   onSetMobileMenuOpen,
 }) => {
-  const [isDesktopMoreOpen, setIsDesktopMoreOpen] = useState(false)
-  const desktopMoreRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    setIsDesktopMoreOpen(false)
-  }, [view])
-
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!desktopMoreRef.current?.contains(event.target as Node)) {
-        setIsDesktopMoreOpen(false)
-      }
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    return () => document.removeEventListener('mousedown', handlePointerDown)
-  }, [])
-
   const navDescriptions: Partial<Record<AppView, string>> = {
     dashboard: 'Home and overview',
     chat: 'Talk with Sara',
@@ -75,6 +57,36 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
         {count > 99 ? '99+' : count}
       </span>
     ) : null
+
+  const renderRailButton = (item: ShellNavItem) => {
+    const isActive = view === item.view
+    const badgeCount = getNavBadgeCount(item.view)
+
+    return (
+      <button
+        key={item.view}
+        onClick={() => onNavigate(item.view)}
+        className={[
+          'group relative flex h-11 w-11 items-center justify-center rounded-xl transition',
+          isActive
+            ? 'bg-teal-400/12 text-teal-200'
+            : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200',
+        ].join(' ')}
+        aria-label={item.label}
+        aria-current={isActive ? 'page' : undefined}
+      >
+        <span className="material-icons text-[20px]">{item.icon}</span>
+        {badgeCount > 0 && (
+          <span className="absolute right-1 top-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-teal-400/90 px-1 text-[10px] font-semibold leading-none text-slate-950">
+            {badgeCount > 9 ? '9+' : badgeCount}
+          </span>
+        )}
+        <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-3 hidden -translate-y-1/2 whitespace-nowrap rounded-lg border border-white/10 bg-[#0d1828] px-2.5 py-1.5 text-xs font-medium text-slate-200 shadow-xl group-hover:block">
+          {item.label}
+        </span>
+      </button>
+    )
+  }
 
   const renderNavButton = (item: ShellNavItem, options?: { mobile?: boolean; closeMenu?: boolean }) => {
     const isActive = view === item.view
@@ -206,94 +218,30 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
         </div>
       )}
 
-      <aside className="assistant-panel hidden md:flex md:w-[288px] flex-col gap-5 overflow-y-auto rounded-[2rem] p-4 scrollbar-hidden flex-shrink-0">
-        <div className="assistant-panel-soft rounded-3xl p-4">
-          <div className="mb-4 flex items-center gap-3">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/12 bg-white text-xl font-bold text-slate-950 shadow-lg shadow-cyan-950/20">
-              S
-            </div>
-            <div>
-              <div className="assistant-kicker mb-2">Assistant Workspace</div>
-              <h2 className="font-display text-xl font-semibold text-white">{assistantName}</h2>
-            </div>
-          </div>
-          <p className="text-sm leading-relaxed text-slate-500">
-            Primary surfaces stay close. Tools sit one layer deeper.
-          </p>
-        </div>
+      <aside className="hidden md:flex w-16 flex-col items-center flex-shrink-0 py-2">
+        <button
+          onClick={() => onNavigate('dashboard')}
+          className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-base font-bold text-slate-950 shadow-lg shadow-cyan-950/20 transition hover:scale-105"
+          title={assistantName}
+          aria-label={`${assistantName} home`}
+        >
+          S
+        </button>
 
-        <nav className="flex-1 space-y-5">
-          <div>
-            <p className="assistant-kicker px-1">Primary</p>
-            <div className="mt-3 space-y-2">
-              {primaryNavItems.map((item) => renderNavButton(item))}
-            </div>
-          </div>
-
-          {secondaryNavItems.length > 0 && (
-            <div ref={desktopMoreRef} className="border-t border-white/8 pt-5 relative">
-              <button
-                type="button"
-                onClick={() => setIsDesktopMoreOpen((prev) => !prev)}
-                className="flex w-full items-center justify-between rounded-md border border-white/8 bg-white/[0.03] px-4 py-3 text-left text-slate-300 transition hover:bg-white/[0.05] hover:text-white"
-                aria-expanded={isDesktopMoreOpen}
-                aria-controls="desktop-more-workspaces"
-              >
-                <span>
-                  <span className="assistant-kicker mb-2 block">Secondary</span>
-                  <span className="text-sm font-medium">More workspaces</span>
-                </span>
-                <span
-                  className={[
-                    'material-icons text-[20px] text-slate-500 transition-transform',
-                    isDesktopMoreOpen ? 'rotate-180 text-white' : '',
-                  ].join(' ')}
-                >
-                  {isDesktopMoreOpen ? 'expand_less' : 'expand_more'}
-                </span>
-              </button>
-
-              {isDesktopMoreOpen && (
-                <div
-                  id="desktop-more-workspaces"
-                  className="assistant-panel absolute inset-x-0 top-full z-20 mt-3 max-h-[60vh] overflow-y-auto rounded-md p-3 shadow-[0_20px_50px_rgba(2,8,23,0.48)]"
-                >
-                  <div className="px-2 pb-3 pt-1">
-                    <div className="assistant-kicker mb-2">More Workspaces</div>
-                    <p className="text-sm leading-relaxed text-slate-500">
-                      Secondary tools and assistant systems.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                  {secondaryNavItems.map((item) => renderNavButton(item))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+        <nav className="mt-6 flex flex-1 flex-col items-center gap-1">
+          {[...primaryNavItems, ...secondaryNavItems].map((item) => renderRailButton(item))}
         </nav>
 
-        <div className="assistant-panel-soft mt-auto rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <div className="assistant-kicker mb-2">Session</div>
-              <p className="font-medium text-white">Workspace active</p>
-            </div>
-            <span className="rounded-full bg-emerald-400/12 px-2 py-1 text-xs font-medium text-emerald-300">
-              Live
-            </span>
-          </div>
-          <button
-            onClick={onLogout}
-            className="flex w-full items-center justify-between rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
-          >
-            <span className="flex items-center gap-3">
-              <span className="material-icons text-[20px]">logout</span>
-              <span className="font-medium">Logout</span>
-            </span>
-            <span className="material-icons text-[18px] text-slate-500">arrow_forward</span>
-          </button>
-        </div>
+        <button
+          onClick={onLogout}
+          className="group relative flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-white/[0.05] hover:text-slate-200"
+          aria-label="Logout"
+        >
+          <span className="material-icons text-[20px]">logout</span>
+          <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-3 hidden -translate-y-1/2 whitespace-nowrap rounded-lg border border-white/10 bg-[#0d1828] px-2.5 py-1.5 text-xs font-medium text-slate-200 shadow-xl group-hover:block">
+            Logout
+          </span>
+        </button>
       </aside>
 
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/8 bg-[#09111ef2] backdrop-blur-xl overflow-x-auto scrollbar-hidden">

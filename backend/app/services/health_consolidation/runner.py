@@ -46,83 +46,39 @@ def _today_et() -> date:
         return datetime.now().date()
 
 
-def _read_anthropic_credentials() -> tuple[str, str]:
-    """Pull (api_key, model) from app_settings (preferred) or env. Same path the
-    chat route uses, so the weekly health pipeline runs on whatever Sonnet
-    version is currently configured for daily chat.
-    """
-    import os
-    api_key = ""
-    model = "claude-sonnet-4-5-20250929"
-    try:
-        with SessionLocal() as db:
-            row = db.execute(
-                text("SELECT key, value FROM app_settings WHERE key IN ('anthropic_api_key','openai_model','openai_base_url','ai_provider')")
-            ).all()
-            settings_map = {r.key: r.value for r in row}
-            api_key = (settings_map.get("anthropic_api_key") or "").strip()
-            chat_model = (settings_map.get("openai_model") or "").strip()
-            base_url = (settings_map.get("openai_base_url") or "").strip()
-            # Only borrow the chat model if it's actually pointed at Anthropic
-            if "anthropic.com" in base_url and chat_model.startswith("claude-"):
-                model = chat_model
-    except Exception as e:
-        logger.warning(f"Could not read anthropic settings from DB: {e}")
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    return api_key, model
-
-
 async def _llm_json(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0.3) -> Dict[str, Any]:
-    """Call Anthropic Sonnet directly and parse strict JSON.
+    """Run the weekly health pipeline on the local background LLM (qwen3.6-27b).
 
-    Weekly health is once-a-week, quality matters, cost is trivial — pinned to
-    the same Sonnet model the chat path uses. If no key is configured, raises.
+    All consolidation/background work runs locally — only interactive chat uses a
+    cloud model. Parses strict JSON from the model output.
     """
-    import httpx
+    from app.core.llm import get_background_llm_client
 
-    api_key, model = _read_anthropic_credentials()
-    if not api_key:
-        raise RuntimeError(
-            "Anthropic API key not configured. Set anthropic_api_key in app_settings "
-            "or ANTHROPIC_API_KEY env var to run the weekly health pipeline."
-        )
+    bg = get_background_llm_client()
+    resp = await bg.chat_completion(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        # Qwen: disable thinking for structured/JSON output, else `content` is empty.
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
 
-    payload = {
-        "model": model,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
-        if resp.status_code >= 400:
-            logger.error(f"Anthropic error {resp.status_code}: {resp.text[:800]}")
-            resp.raise_for_status()
-        data = resp.json()
-
-    # Extract concatenated text from the content block list
-    content = ""
-    for block in (data.get("content") or []):
-        if block.get("type") == "text":
-            content += block.get("text", "")
-    content = content.strip()
+    try:
+        content = (resp["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        content = ""
 
     if not content:
-        logger.error(f"Anthropic returned no text. Raw: {json.dumps(data, default=str)[:1500]}")
-        raise ValueError("Sonnet returned no parseable content")
+        logger.error(f"Local LLM returned no text. Raw: {json.dumps(resp, default=str)[:1500]}")
+        raise ValueError("Local model returned no parseable content")
 
     try:
         return _parse_json(content)
     except Exception as e:
-        logger.error(f"Failed to parse JSON from Sonnet: {e}. Content head: {content[:1500]}")
+        logger.error(f"Failed to parse JSON from local model: {e}. Content head: {content[:1500]}")
         raise
 
 
@@ -145,8 +101,8 @@ def _parse_json(content: str) -> Dict[str, Any]:
 
 def _resolved_model_label() -> str:
     try:
-        _, model = _read_anthropic_credentials()
-        return model
+        from app.core.llm import get_background_llm_client
+        return get_background_llm_client().primary_model
     except Exception:
         return "unknown"
 

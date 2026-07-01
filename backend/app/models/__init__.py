@@ -50,5 +50,6 @@ from .research_plan import ResearchPlan, ResearchMessage
 from .scheduled_job import ScheduledJob
 from .tunable_setting import TunableSetting
 from .external_workout import ExternalWorkout
-from .system_event import SystemEvent
 from .code_session import CodeSession
+from .managed_host import ManagedHost
+from .progress_photo import ProgressPhoto

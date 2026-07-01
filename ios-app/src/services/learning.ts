@@ -90,7 +90,9 @@ class LearningService {
     options?: { model?: string; force_regenerate?: boolean; module_limit?: number; num_ctx?: number }
   ): Promise<{ job_id: string; status: string }> {
     return apiClient.post(`/api/learn/blueprints/${blueprintId}/guides/generate`, {
-      model: options?.model || 'gpt-oss:120b',
+      // Omit model unless explicitly chosen — the backend picks its default
+      // (the old hardcoded gpt-oss:120b no longer exists anywhere).
+      ...(options?.model ? { model: options.model } : {}),
       force_regenerate: options?.force_regenerate ?? false,
       module_limit: options?.module_limit,
       num_ctx: options?.num_ctx ?? 32768,
@@ -138,7 +140,7 @@ class LearningService {
     options?: { model?: string; force_regenerate?: boolean; module_limit?: number; num_ctx?: number }
   ): Promise<{ job_id: string; status: string }> {
     return apiClient.post(`/api/learn/blueprints/${blueprintId}/lessons/generate`, {
-      model: options?.model || 'gpt-oss:120b',
+      ...(options?.model ? { model: options.model } : {}),
       force_regenerate: options?.force_regenerate ?? false,
       module_limit: options?.module_limit,
       num_ctx: options?.num_ctx ?? 65536,

@@ -14,10 +14,14 @@ import { chatService } from '../services/chat';
 import { voiceService } from '../services/voice';
 import { ImageAttachment } from '../services/imagePicker';
 import { apiClient } from '../services/api';
+import { handleSaraUiCommand, SaraUiCommand } from '../services/navigation';
 
 interface UseSaraChatOptions {
   source?: string;
   currentScreen?: string;
+  // Called when the backend emits a ui_command ("open my inbox").
+  // Defaults to handleSaraUiCommand (navigate to the screen).
+  onUiCommand?: (command: SaraUiCommand) => void;
 }
 
 export function useSaraChat(options?: UseSaraChatOptions) {
@@ -30,7 +34,8 @@ export function useSaraChat(options?: UseSaraChatOptions) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [voiceInitialized, setVoiceInitialized] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
+  // Empty = no override; the backend uses its configured default model.
+  const [selectedModel, setSelectedModel] = useState<string>('');
 
   const messagesRef = useRef<Message[]>([]);
   const streamingMessageRef = useRef('');
@@ -46,36 +51,41 @@ export function useSaraChat(options?: UseSaraChatOptions) {
 
     try {
       setIsLoadingHistory(true);
-      let savedConversationId: string | null = null;
+      const candidateIds: string[] = [];
 
       try {
         const sessionData = await chatService.getActiveSession();
-        if (sessionData.active && sessionData.session?.conversation_id) {
-          savedConversationId = sessionData.session.conversation_id;
+        const sessionConvId = sessionData.session?.conversation_id;
+        if (sessionData.active && sessionConvId && sessionConvId !== 'unknown') {
+          candidateIds.push(sessionConvId);
         }
       } catch {}
 
-      if (!savedConversationId) {
+      try {
         const activeResponse = await apiClient.get('/api/conversations/active');
-        savedConversationId = (activeResponse as any)?.conversation_id || null;
-      }
+        const activeConvId = (activeResponse as any)?.conversation_id || null;
+        if (activeConvId && !candidateIds.includes(activeConvId)) {
+          candidateIds.push(activeConvId);
+        }
+      } catch {}
 
-      if (!savedConversationId) return;
-
-      const messagesResponse = await apiClient.get(
-        `/api/conversations/${savedConversationId}/messages?limit=100`
-      );
-      const messagesData = messagesResponse as any;
-      if (messagesData && messagesData.length > 0) {
-        const loadedMessages: Message[] = messagesData.map((ep: any) => ({
-          id: ep.id,
-          role: ep.role,
-          content: ep.content,
-          created_at: ep.created_at,
-          episode_id: ep.id,
-        }));
-        setMessages(loadedMessages);
-        setConversationId(savedConversationId);
+      for (const savedConversationId of candidateIds) {
+        const messagesResponse = await apiClient.get(
+          `/api/conversations/${savedConversationId}/messages?limit=100`
+        );
+        const messagesData = messagesResponse as any;
+        if (messagesData && messagesData.length > 0) {
+          const loadedMessages: Message[] = messagesData.map((ep: any) => ({
+            id: ep.id,
+            role: ep.role,
+            content: ep.content,
+            created_at: ep.created_at,
+            episode_id: ep.id,
+          }));
+          setMessages(loadedMessages);
+          setConversationId(savedConversationId);
+          return;
+        }
       }
     } catch (error) {
       console.error('[useSaraChat] Error loading history:', error);
@@ -131,6 +141,13 @@ export function useSaraChat(options?: UseSaraChatOptions) {
           onSuggestedActions: (actions: SuggestedAction[]) => {
             setSuggestedActions(actions);
           },
+          onUiCommand: (command: SaraUiCommand) => {
+            if (options?.onUiCommand) {
+              options.onUiCommand(command);
+            } else {
+              handleSaraUiCommand(command);
+            }
+          },
         },
         (chunk: string) => {
           streamingMessageRef.current += chunk;
@@ -166,7 +183,7 @@ export function useSaraChat(options?: UseSaraChatOptions) {
         }
       );
     },
-    [conversationId, selectedModel, pendingCards, options?.source, options?.currentScreen]
+    [conversationId, selectedModel, pendingCards, options?.source, options?.currentScreen, options?.onUiCommand]
   );
 
   const handleVoiceMessage = useCallback(

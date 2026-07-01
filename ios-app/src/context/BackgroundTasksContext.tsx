@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { BackgroundTask } from '../types/api';
 import { backgroundTaskService } from '../services/backgroundTasks';
 import AgentClarificationModal from '../components/AgentClarificationModal';
-import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
+import { startEvent, updateEvent, endEvent, endAllEvents } from '../services/eventActivity';
 
 interface BackgroundTasksContextType {
   tasks: BackgroundTask[];
@@ -52,8 +52,19 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
 
   // "Sara is working on…" Live Activity for the currently-running task.
   const taskActivityRef = useRef<string | null>(null);
+  const reconciledOrphansRef = useRef(false);
   useEffect(() => {
     const running = tasks.find((t) => t.status === 'running');
+    // Once per app session, after the first real task fetch: reap task
+    // activities left behind by a previous session (app killed mid-task, or
+    // the completion push landed while we weren't running).
+    if (!reconciledOrphansRef.current && !running) {
+      reconciledOrphansRef.current = true;
+      endAllEvents('task');
+      taskActivityRef.current = null;
+      return;
+    }
+    reconciledOrphansRef.current = true;
     if (running) {
       // Prefer the live current-step label (code mode emits "editing X",
       // "running tests", "pushing branch"); fall back to the original request.

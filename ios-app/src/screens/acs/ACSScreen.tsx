@@ -159,33 +159,33 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 const KIND_COLOR: Record<string, string> = {
-  boot: '#10b981',
-  shutdown: '#71717a',
-  tick: '#52525b',
-  thought: '#818cf8',
-  reflection: '#a78bfa',
-  focus_set: '#38bdf8',
-  focus_clear: '#38bdf8',
-  notify_david: '#f59e0b',
-  inbox_pickup: '#22d3ee',
-  inbox_complete: '#10b981',
-  inbox_dismiss: '#fb923c',
-  tool_call: '#e879f9',
-  tool_result: '#e879f9',
-  external_event: '#a1a1aa',
-  error: '#ef4444',
+  boot: colors.success,
+  shutdown: colors.textMuted,
+  tick: colors.textMuted,
+  thought: colors.hues.indigo,
+  reflection: colors.hues.violet,
+  focus_set: colors.hues.sky,
+  focus_clear: colors.hues.sky,
+  notify_david: colors.warning,
+  inbox_pickup: colors.hues.cyan,
+  inbox_complete: colors.success,
+  inbox_dismiss: colors.hues.orange,
+  tool_call: colors.hues.fuchsia,
+  tool_result: colors.hues.fuchsia,
+  external_event: colors.textSecondary,
+  error: colors.error,
 };
 
 const URGENCY_COLOR: Record<Urgency, string> = {
-  high: '#ef4444',
-  normal: '#a1a1aa',
-  low: '#71717a',
+  high: colors.error,
+  normal: colors.textSecondary,
+  low: colors.textMuted,
 };
 
 const SOURCE_COLOR: Record<string, string> = {
-  reflection: '#a78bfa',
-  external_event: '#a1a1aa',
-  manual: '#f59e0b',
+  reflection: colors.hues.violet,
+  external_event: colors.textSecondary,
+  manual: colors.warning,
 };
 
 // ─── Main Component ──────────────────────────────────
@@ -477,7 +477,7 @@ function MindTab({
                   text={
                     item.status === 'in_progress' ? 'in progress' : 'queued'
                   }
-                  color={item.status === 'in_progress' ? '#22d3ee' : '#71717a'}
+                  color={item.status === 'in_progress' ? colors.hues.cyan : colors.textMuted}
                 />
                 <Text style={[styles.metaDim, { marginLeft: 'auto' }]}>
                   {timeAgo(item.created_at)}
@@ -507,7 +507,7 @@ function MindTab({
           activity.map((a) => {
             const expanded = expandedActivity.has(a.id);
             const hasBody = !!a.body && a.body.trim().length > 0;
-            const color = KIND_COLOR[a.kind] || '#a1a1aa';
+            const color = KIND_COLOR[a.kind] || colors.textSecondary;
             return (
               <TouchableOpacity
                 key={a.id}
@@ -548,8 +548,8 @@ function livenessLabel(d: DaemonStatus | null): { text: string; color: string } 
   if (d.state === 'never_started')
     return { text: 'never started', color: colors.textMuted };
   if (!d.is_alive) return { text: 'dead', color: colors.error };
-  if (d.state === 'thinking') return { text: 'thinking', color: '#818cf8' };
-  if (d.state === 'reflecting') return { text: 'reflecting', color: '#a78bfa' };
+  if (d.state === 'thinking') return { text: 'thinking', color: colors.hues.indigo };
+  if (d.state === 'reflecting') return { text: 'reflecting', color: colors.hues.violet };
   return { text: 'alive', color: colors.success };
 }
 
@@ -656,7 +656,7 @@ function InterestsTab({
                 <View style={styles.rowStart}>
                   <Badge
                     text={i.source.replace('_', ' ')}
-                    color={SOURCE_COLOR[i.source] || '#a78bfa'}
+                    color={SOURCE_COLOR[i.source] || colors.hues.violet}
                   />
                   <Text style={styles.interestName} numberOfLines={1}>
                     {i.display_name}
@@ -1238,7 +1238,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceLight,
   },
   queueBtnText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },
@@ -1339,7 +1339,7 @@ const styles = StyleSheet.create({
   },
   weightBarFill: {
     height: '100%',
-    backgroundColor: '#a78bfa',
+    backgroundColor: colors.hues.violet,
   },
   removeBtn: {
     fontSize: 11,
@@ -1399,7 +1399,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   btnTextOnSuccess: {
-    color: '#fff',
+    color: colors.text,
   },
   toolDetails: {
     marginTop: spacing.sm,
@@ -1417,7 +1417,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   codeBlock: {
-    backgroundColor: '#000',
+    backgroundColor: colors.background,
     color: colors.textSecondary,
     fontSize: 11,
     fontFamily: 'Menlo',

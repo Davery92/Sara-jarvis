@@ -32,6 +32,8 @@ interface SaraNativeModuleType {
   startEventActivity(id: string, kind: string, title: string, subtitle: string, startEpochMs: number): string | null
   updateEventActivity(id: string, subtitle: string, startEpochMs: number): void
   endEventActivity(id: string): void
+  /** Ends every event activity of the given kind ('' = all kinds). */
+  endAllEventActivities(kind: string): void
 }
 
 const SaraNative = requireOptionalNativeModule<SaraNativeModuleType>('SaraNative')
@@ -86,6 +88,10 @@ export function updateEventActivity(id: string, subtitle: string, startEpochMs: 
 
 export function endEventActivity(id: string): void {
   SaraNative?.endEventActivity(id)
+}
+
+export function endAllEventActivities(kind: 'workout' | 'task' | ''): void {
+  SaraNative?.endAllEventActivities(kind)
 }
 
 export default SaraNative

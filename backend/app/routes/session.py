@@ -84,6 +84,10 @@ async def update_active_session(
     topic_summary: Optional[str] = None,
 ) -> None:
     """Update the active session in Redis. Called from chat_stream on each turn."""
+    # Never store a placeholder id — clients resume whatever id is in here,
+    # and a bogus value blocks their fallback to /api/conversations/active.
+    if not conversation_id or conversation_id == "unknown":
+        return
     try:
         r = await _get_redis()
         key = SESSION_KEY.format(user_id=user_id)

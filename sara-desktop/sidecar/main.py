@@ -598,22 +598,6 @@ class SidecarService:
                     "message": payload.get("message")
                 })
 
-        elif cmd_type == "system_event":
-            # Narrator broadcast — forward the whole payload so Electron can
-            # style by severity and show full body/subtitle.
-            if self._electron_bridge:
-                await self._electron_bridge.send_message({
-                    "type": "system_event",
-                    "event_id": payload.get("id"),
-                    "title": payload.get("title"),
-                    "body": payload.get("body"),
-                    "subtitle": payload.get("subtitle"),
-                    "severity": payload.get("severity"),
-                    "ttl_seconds": payload.get("ttl_seconds", 30),
-                    "trigger_name": payload.get("trigger_name"),
-                    "trigger_context": payload.get("trigger_context", {}),
-                })
-
         elif cmd_type == "open_workspace":
             # Open the workbench-canvas workspace in browser
             url = payload.get("url", "https://canvas.avery.cloud")

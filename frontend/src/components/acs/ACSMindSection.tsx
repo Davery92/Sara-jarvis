@@ -73,27 +73,37 @@ function uptime(startedAt: string | null | undefined): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
-const KIND_STYLES: Record<string, { label: string; pill: string; text: string }> = {
-  boot:           { label: 'boot',     pill: 'bg-emerald-500/15 border-emerald-500/30', text: 'text-emerald-300' },
-  shutdown:       { label: 'shutdown', pill: 'bg-zinc-500/15 border-zinc-500/30',       text: 'text-zinc-300' },
-  thought:        { label: 'thought',  pill: 'bg-indigo-500/15 border-indigo-500/30',   text: 'text-indigo-200' },
-  reflection:     { label: 'reflect',  pill: 'bg-violet-500/15 border-violet-500/30',   text: 'text-violet-200' },
-  focus_set:      { label: 'focus',    pill: 'bg-sky-500/15 border-sky-500/30',         text: 'text-sky-200' },
-  focus_clear:    { label: 'unfocus',  pill: 'bg-sky-500/15 border-sky-500/30',         text: 'text-sky-200' },
-  notify_david:   { label: 'notified', pill: 'bg-amber-500/15 border-amber-500/30',     text: 'text-amber-200' },
-  inbox_pickup:   { label: 'pickup',   pill: 'bg-cyan-500/15 border-cyan-500/30',       text: 'text-cyan-200' },
-  inbox_complete: { label: 'done',     pill: 'bg-emerald-500/15 border-emerald-500/30', text: 'text-emerald-300' },
-  inbox_dismiss:  { label: 'dismiss',  pill: 'bg-orange-500/15 border-orange-500/30',   text: 'text-orange-200' },
-  tool_call:      { label: 'tool',     pill: 'bg-fuchsia-500/15 border-fuchsia-500/30', text: 'text-fuchsia-200' },
-  tool_result:    { label: 'result',   pill: 'bg-fuchsia-500/15 border-fuchsia-500/30', text: 'text-fuchsia-300' },
-  external_event: { label: 'event',    pill: 'bg-zinc-500/15 border-zinc-500/30',       text: 'text-zinc-200' },
-  error:          { label: 'error',    pill: 'bg-red-500/15 border-red-500/30',         text: 'text-red-300' },
+// Quiet kind chips: tiny mono uppercase, color on text/border only — no fills.
+const KIND_STYLES: Record<string, { label: string; chip: string }> = {
+  boot:           { label: 'boot',     chip: 'border-emerald-400/30 text-emerald-300' },
+  shutdown:       { label: 'shutdown', chip: 'border-white/15 text-slate-400' },
+  thought:        { label: 'thought',  chip: 'border-indigo-400/30 text-indigo-300' },
+  reflection:     { label: 'reflect',  chip: 'border-violet-400/30 text-violet-300' },
+  focus_set:      { label: 'focus',    chip: 'border-sky-400/30 text-sky-300' },
+  focus_clear:    { label: 'unfocus',  chip: 'border-sky-400/30 text-sky-300' },
+  notify_david:   { label: 'notified', chip: 'border-amber-400/30 text-amber-300' },
+  inbox_pickup:   { label: 'pickup',   chip: 'border-cyan-400/30 text-cyan-300' },
+  inbox_complete: { label: 'done',     chip: 'border-emerald-400/30 text-emerald-300' },
+  inbox_dismiss:  { label: 'dismiss',  chip: 'border-orange-400/30 text-orange-300' },
+  tool_call:      { label: 'tool',     chip: 'border-fuchsia-400/30 text-fuchsia-300' },
+  tool_result:    { label: 'result',   chip: 'border-fuchsia-400/30 text-fuchsia-300' },
+  external_event: { label: 'event',    chip: 'border-white/15 text-slate-400' },
+  error:          { label: 'error',    chip: 'border-rose-400/40 text-rose-300' },
 }
 
 const URGENCY_STYLES: Record<string, string> = {
-  high:   'bg-red-500/20 text-red-300 border-red-500/40',
-  normal: 'bg-zinc-500/20 text-zinc-300 border-zinc-500/40',
-  low:    'bg-zinc-700/40 text-zinc-400 border-zinc-700/60',
+  high:   'border-rose-400/40 text-rose-300',
+  normal: 'border-white/15 text-slate-400',
+  low:    'border-white/10 text-slate-500',
+}
+
+function SectionHeading({ label, action }: { label: string; action?: React.ReactNode }) {
+  return (
+    <div className="mb-3 flex items-baseline justify-between gap-3">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</h2>
+      {action}
+    </div>
+  )
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -198,89 +208,90 @@ export default function ACSMindSection() {
   }
 
   const livenessLabel = useMemo(() => {
-    if (!daemon) return { text: 'unknown', color: 'text-zinc-500', dot: 'bg-zinc-500' }
-    if (daemon.state === 'never_started') return { text: 'never started', color: 'text-zinc-500', dot: 'bg-zinc-500' }
-    if (!daemon.is_alive) return { text: 'dead', color: 'text-red-400', dot: 'bg-red-500' }
+    if (!daemon) return { text: 'unknown', color: 'text-slate-500', dot: 'bg-slate-500' }
+    if (daemon.state === 'never_started') return { text: 'never started', color: 'text-slate-500', dot: 'bg-slate-500' }
+    if (!daemon.is_alive) return { text: 'dead', color: 'text-rose-400', dot: 'bg-rose-500' }
     if (daemon.state === 'thinking') return { text: 'thinking', color: 'text-indigo-300', dot: 'bg-indigo-400' }
     if (daemon.state === 'reflecting') return { text: 'reflecting', color: 'text-violet-300', dot: 'bg-violet-400' }
     return { text: 'alive', color: 'text-emerald-400', dot: 'bg-emerald-400' }
   }, [daemon])
 
-  if (loading && !daemon) return <div className="text-zinc-400 p-4 text-sm">Loading…</div>
-  if (error && !daemon) return <div className="text-red-400 p-4 text-sm">{error}</div>
+  if (loading && !daemon) return <div className="p-4 text-sm text-slate-500">Loading…</div>
+  if (error && !daemon) return <div className="p-4 text-sm text-rose-400">{error}</div>
 
   return (
-    <div className="space-y-4">
-      {/* ── Liveness ──────────────────────────────────────── */}
-      <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-3">
-            <span className={`h-2.5 w-2.5 rounded-full ${livenessLabel.dot} ${daemon?.is_alive ? 'animate-pulse' : ''}`} />
-            <span className={`text-base font-semibold ${livenessLabel.color}`}>{livenessLabel.text}</span>
-            {daemon?.version && <span className="text-xs text-zinc-500">v{daemon.version}</span>}
-          </div>
-          <div className="text-xs text-zinc-500">
-            heartbeat {daemon?.last_heartbeat_at ? timeAgo(daemon.last_heartbeat_at) : '—'}
-          </div>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-          <div className="bg-gray-900/50 rounded p-2">
-            <div className="text-zinc-500">host</div>
-            <div className="text-zinc-200 font-medium truncate">{daemon?.hostname || '—'}</div>
-          </div>
-          <div className="bg-gray-900/50 rounded p-2">
-            <div className="text-zinc-500">pid</div>
-            <div className="text-zinc-200 font-medium">{daemon?.pid ?? '—'}</div>
-          </div>
-          <div className="bg-gray-900/50 rounded p-2">
-            <div className="text-zinc-500">uptime</div>
-            <div className="text-zinc-200 font-medium">{uptime(daemon?.started_at)}</div>
-          </div>
-          <div className="bg-gray-900/50 rounded p-2">
-            <div className="text-zinc-500">last tick</div>
-            <div className="text-zinc-200 font-medium truncate" title={daemon?.last_tick_summary || ''}>
-              {daemon?.last_tick_summary || '—'}
-            </div>
-          </div>
-        </div>
+    <div>
+      {/* ── Header: title + liveness inline ─────────────────── */}
+      <div className="flex min-h-[48px] flex-wrap items-center gap-x-3 gap-y-1">
+        <h1 className="font-display text-xl font-semibold text-white">Sara's mind</h1>
+        <span className="flex items-center gap-2 text-sm">
+          <span className={`h-2 w-2 rounded-full ${livenessLabel.dot} ${daemon?.is_alive ? 'animate-pulse' : ''}`} />
+          <span className={livenessLabel.color}>{livenessLabel.text}</span>
+          <span className="text-slate-500">
+            {daemon?.version && <>· v{daemon.version} </>}
+            · tick {daemon?.last_heartbeat_at ? timeAgo(daemon.last_heartbeat_at) : '—'}
+          </span>
+        </span>
       </div>
 
-      {/* ── Focus ────────────────────────────────────────── */}
-      <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-        <div className="flex items-baseline justify-between mb-2">
-          <h3 className="text-sm font-semibold text-zinc-200">Current focus</h3>
-          {focus?.set_at && <span className="text-xs text-zinc-500">set {timeAgo(focus.set_at)}</span>}
-        </div>
+      {/* ── Status: one compact definition row ──────────────── */}
+      <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1.5">
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-xs text-slate-500">host</span>
+          <span className="font-mono text-sm text-slate-200">{daemon?.hostname || '—'}</span>
+        </span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-xs text-slate-500">pid</span>
+          <span className="font-mono text-sm text-slate-200">{daemon?.pid ?? '—'}</span>
+        </span>
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-xs text-slate-500">uptime</span>
+          <span className="font-mono text-sm text-slate-200">{uptime(daemon?.started_at)}</span>
+        </span>
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="text-xs text-slate-500">last tick</span>
+          <span className="max-w-[28rem] truncate font-mono text-sm text-slate-200" title={daemon?.last_tick_summary || ''}>
+            {daemon?.last_tick_summary || '—'}
+          </span>
+        </span>
+      </div>
+
+      {/* ── Focus ────────────────────────────────────────────── */}
+      <section className="mt-10">
+        <SectionHeading
+          label="Current focus"
+          action={focus?.set_at ? <span className="text-xs text-slate-500">set {timeAgo(focus.set_at)}</span> : undefined}
+        />
         {focus?.topic ? (
           <>
-            <div className="text-zinc-100">{focus.topic}</div>
-            {focus.why && <div className="text-xs text-zinc-400 mt-1 italic">{focus.why}</div>}
+            <div className="text-[15px] text-slate-200">{focus.topic}</div>
+            {focus.why && <div className="mt-1 text-xs text-slate-500">{focus.why}</div>}
           </>
         ) : (
-          <div className="text-zinc-500 text-sm italic">between things</div>
+          <p className="text-sm text-slate-500">Between things.</p>
         )}
-      </div>
+      </section>
 
-      {/* ── Inbox ────────────────────────────────────────── */}
-      <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-        <div className="flex items-baseline justify-between mb-3">
-          <h3 className="text-sm font-semibold text-zinc-200">Queue</h3>
-          <span className="text-xs text-zinc-500">{inbox.length} active</span>
-        </div>
+      {/* ── Queue ────────────────────────────────────────────── */}
+      <section className="mt-10">
+        <SectionHeading
+          label="Queue"
+          action={<span className="text-xs text-slate-500">{inbox.length} active</span>}
+        />
 
         {/* New-item form */}
-        <form onSubmit={submitInbox} className="flex gap-2 mb-3">
+        <form onSubmit={submitInbox} className="mb-4 flex gap-2">
           <input
             type="text"
             value={newPrompt}
             onChange={(e) => setNewPrompt(e.target.value)}
             placeholder="Queue something for Sara…"
-            className="flex-1 bg-gray-900/60 border border-gray-700 rounded px-3 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30"
           />
           <select
             value={newUrgency}
             onChange={(e) => setNewUrgency(e.target.value as 'low' | 'normal' | 'high')}
-            className="bg-gray-900/60 border border-gray-700 rounded px-2 py-1.5 text-sm text-zinc-200 focus:outline-none"
+            className="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-sm text-slate-300 outline-none focus:border-teal-300/30"
           >
             <option value="low">low</option>
             <option value="normal">normal</option>
@@ -289,7 +300,7 @@ export default function ACSMindSection() {
           <button
             type="submit"
             disabled={!newPrompt.trim() || submitting}
-            className="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded transition-colors"
+            className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300 disabled:opacity-40"
           >
             Queue
           </button>
@@ -297,64 +308,69 @@ export default function ACSMindSection() {
 
         {/* Item list */}
         {inbox.length === 0 ? (
-          <div className="text-zinc-500 text-sm italic">empty — nothing queued for her</div>
+          <p className="text-sm text-slate-500">Nothing queued for her.</p>
         ) : (
           <ul className="space-y-2">
             {inbox.map((item) => (
-              <li key={item.id} className="bg-gray-900/40 rounded p-2.5 border border-gray-800">
-                <div className="flex items-start gap-2">
-                  <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${URGENCY_STYLES[item.urgency] || URGENCY_STYLES.normal} font-medium`}>
+              <li
+                key={item.id}
+                className={`rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5 ${
+                  item.urgency === 'high' ? 'border-l-2 border-l-rose-400/70' : ''
+                }`}
+              >
+                <div className="flex items-baseline gap-2">
+                  <span className={`rounded border px-1.5 py-px font-mono text-[10px] uppercase tracking-wide ${URGENCY_STYLES[item.urgency] || URGENCY_STYLES.normal}`}>
                     {item.urgency}
                   </span>
-                  <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border font-medium ${
+                  <span className={`rounded border px-1.5 py-px font-mono text-[10px] uppercase tracking-wide ${
                     item.status === 'in_progress'
-                      ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
-                      : 'bg-zinc-700/40 text-zinc-400 border-zinc-700/60'
+                      ? 'border-cyan-400/30 text-cyan-300'
+                      : 'border-white/15 text-slate-400'
                   }`}>
                     {item.status === 'in_progress' ? 'in progress' : 'queued'}
                   </span>
-                  <span className="text-[10px] text-zinc-500 ml-auto">{timeAgo(item.created_at)}</span>
+                  <span className="ml-auto text-xs text-slate-500">{timeAgo(item.created_at)}</span>
                 </div>
-                <div className="text-sm text-zinc-200 mt-1.5">{item.prompt}</div>
-                {item.context && <div className="text-xs text-zinc-400 mt-1 italic">{item.context}</div>}
-                <div className="text-[10px] text-zinc-600 mt-1">id={item.id.slice(0, 8)} • from {item.created_by}</div>
+                <div className="mt-1.5 text-[15px] text-slate-200">{item.prompt}</div>
+                {item.context && <div className="mt-1 text-xs text-slate-500">{item.context}</div>}
+                <div className="mt-1 font-mono text-xs text-slate-500">id={item.id.slice(0, 8)} · from {item.created_by}</div>
               </li>
             ))}
           </ul>
         )}
-      </div>
+      </section>
 
-      {/* ── Activity feed ─────────────────────────────────── */}
-      <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-        <div className="flex items-baseline justify-between mb-3">
-          <h3 className="text-sm font-semibold text-zinc-200">Activity</h3>
-          <span className="text-xs text-zinc-500">last {activity.length}</span>
-        </div>
+      {/* ── Activity feed ────────────────────────────────────── */}
+      <section className="mt-10">
+        <SectionHeading
+          label="Activity"
+          action={<span className="text-xs text-slate-500">last {activity.length}</span>}
+        />
         {activity.length === 0 ? (
-          <div className="text-zinc-500 text-sm italic">no activity yet</div>
+          <p className="text-sm text-slate-500">No activity yet.</p>
         ) : (
-          <ul className="space-y-1.5">
+          <ul className="space-y-0.5">
             {activity.map((a) => {
               const style = KIND_STYLES[a.kind] || KIND_STYLES.external_event
               const expanded = expandedActivity.has(a.id)
               const hasBody = !!a.body && a.body.trim().length > 0
               return (
-                <li key={a.id} className="bg-gray-900/30 rounded">
+                <li key={a.id}>
                   <button
                     onClick={() => hasBody && toggleActivity(a.id)}
-                    className={`w-full text-left px-2.5 py-1.5 flex items-start gap-2 ${hasBody ? 'hover:bg-gray-900/60 cursor-pointer' : 'cursor-default'}`}
+                    className={`flex w-full items-start gap-3 rounded-md px-2 py-1.5 text-left transition-colors ${hasBody ? 'cursor-pointer hover:bg-white/[0.04]' : 'cursor-default hover:bg-white/[0.04]'}`}
                   >
-                    <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${style.pill} ${style.text} font-medium shrink-0 mt-0.5`}>
+                    <span className={`mt-0.5 w-[4.5rem] shrink-0 rounded border px-1.5 py-px text-center font-mono text-[10px] uppercase tracking-wide ${style.chip}`}>
                       {style.label}
                     </span>
-                    <span className="text-[10px] text-zinc-500 shrink-0 mt-0.5 w-16">{timeAgo(a.created_at)}</span>
-                    <span className="text-sm text-zinc-200 flex-1">{a.summary}</span>
+                    <span className="min-w-0 flex-1 text-sm text-slate-200">{a.summary}</span>
                     {hasBody && (
-                      <span className="text-zinc-600 text-xs shrink-0 mt-0.5">{expanded ? '▾' : '▸'}</span>
+                      <span className="mt-0.5 shrink-0 text-xs text-slate-600">{expanded ? '▾' : '▸'}</span>
                     )}
+                    <span className="mt-0.5 w-16 shrink-0 text-right text-xs tabular-nums text-slate-500">{timeAgo(a.created_at)}</span>
                   </button>
                   {expanded && hasBody && (
-                    <div className="px-2.5 pb-2 pt-0 ml-[3.5rem] text-xs text-zinc-300 whitespace-pre-wrap">
+                    <div className="mb-1 ml-[5.25rem] whitespace-pre-wrap border-l border-white/8 py-1 pl-3 font-mono text-xs text-slate-500">
                       {a.body}
                     </div>
                   )}
@@ -363,9 +379,9 @@ export default function ACSMindSection() {
             })}
           </ul>
         )}
-      </div>
+      </section>
 
-      {error && <div className="text-xs text-red-400">{error}</div>}
+      {error && <div className="mt-4 text-xs text-rose-400">{error}</div>}
     </div>
   )
 }

@@ -22,6 +22,7 @@ export type AppView =
   | 'orchestrator-lab'
   | 'acs'
   | 'system-status'
+  | 'system'
 
 interface AppViewConfig {
   view: AppView
@@ -50,12 +51,13 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'inbox', path: '/inbox', title: 'Today', icon: 'inbox', keywords: ['today', 'inbox', 'priorities', 'attention', 'content'] },
   { view: 'knowledge', path: '/knowledge', title: 'Knowledge', icon: 'psychology', keywords: ['knowledge', 'pkg', 'personal', 'facts', 'preferences', 'people'] },
   { view: 'workspace', path: '/workspace', title: 'Canvas', icon: 'grid_view', keywords: ['canvas', 'workspace', 'workbench'] },
-  { view: 'automations', path: '/automations', title: 'Automations', icon: 'bolt', keywords: ['automations', 'agent', 'background', 'dispatch', 'missions'] },
+  { view: 'automations', path: '/automations', title: 'Agent Tasks', icon: 'bolt', keywords: ['automations', 'agent', 'tasks', 'background', 'dispatch', 'missions'] },
   { view: 'settings', path: '/settings', title: 'Settings', icon: 'settings', keywords: ['settings', 'preferences', 'config'] },
   { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: 'lock', keywords: ['privacy', 'security'], includeInPalette: false },
   { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: 'science', keywords: ['orchestrator', 'automation', 'lab'], includeInPalette: false },
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
   { view: 'system-status', path: '/system-status', title: 'System Status', icon: 'monitoring', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
+  { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {

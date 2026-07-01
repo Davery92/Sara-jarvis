@@ -551,8 +551,15 @@ async def run_code_message(request_db: Session, user_id: str, conversation_id, t
                 session.cancel_requested = True
                 db.commit()
                 msg = "Stopping the current run — it will halt after the in-flight step, commit, and push."
+            elif session:
+                # Nothing in flight, but set the flag anyway to win any race with
+                # a run that's just starting. `/code stop` cancels a run; use
+                # `/code off` to leave code mode entirely.
+                session.cancel_requested = True
+                db.commit()
+                msg = "Nothing is running right now. (Use `/code off` to leave code mode — `/code stop` only cancels an in-flight run.)"
             else:
-                msg = "Nothing is running."
+                msg = "You're not in code mode."
             await _emit(q, "text_chunk", content=msg)
             await _finish(q, msg, conversation_id)
             return

@@ -17,9 +17,11 @@ from sqlalchemy.orm import Session
 def previous_iso_week(today: date) -> tuple[date, date]:
     """Return (Mon, Sun) of the most recently completed ISO week relative to `today`.
 
-    Run-time semantics: when this fires Sunday 6 AM ET, today.weekday()==6 and we
-    return the previous Mon..Sun (which fully ended a week ago — Sunday-just-past
-    is still part of the in-progress week at that hour).
+    Run-time semantics: this is scheduled MONDAY 6 AM ET (cron `0 6 * * 1`), so
+    today.weekday()==0 and we return the Mon..Sun that ended yesterday — the week
+    that just finished, with fully complete data. NOTE: do NOT move this back to a
+    Sunday run — on a Sunday this returns the week-before-last (Sunday-just-past is
+    still mid-week), which is exactly the "two weeks ago" bug we fixed 2026-06-28.
     """
     days_since_monday = today.weekday()  # Mon=0..Sun=6
     week_end = today - timedelta(days=days_since_monday + 1)  # last Sunday

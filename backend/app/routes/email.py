@@ -451,7 +451,9 @@ Be helpful, concise, and actionable. If the email requires a response, you can d
                         {"role": "user", "content": request.message}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 1000
+                    "max_tokens": 1000,
+                    # Local qwen: disable thinking or `content` comes back empty.
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"}
             )

@@ -59,6 +59,14 @@ class DispatchAgentTaskTool(BaseTool):
                     "type": "string",
                     "description": "Working directory for sandbox execution (optional, e.g. ~/projects/myapp)",
                 },
+                "target_host": {
+                    "type": "string",
+                    "description": (
+                        "Optional name of a registered managed host (see /host list) to run the "
+                        "agent ON instead of the default sandbox VM. Use for tasks like "
+                        "'free up disk on gpu-box' or 'restart the service on web-01'."
+                    ),
+                },
             },
             "required": ["task_description"],
         }
@@ -67,6 +75,7 @@ class DispatchAgentTaskTool(BaseTool):
         task_description = kwargs.get("task_description", "")
         mode = kwargs.get("mode", "auto")
         working_directory = kwargs.get("working_directory")
+        target_host = kwargs.get("target_host")
 
         if not task_description:
             return ToolResult(success=False, message="No task description provided")
@@ -83,10 +92,14 @@ class DispatchAgentTaskTool(BaseTool):
                     task_description=task_description,
                     mode=mode,
                     working_directory=working_directory,
+                    target_host=target_host,
                 )
+                if result.get("status") == "error":
+                    return ToolResult(success=False, message=result.get("error", "Dispatch failed"))
+                _where = f" on {target_host}" if target_host else ""
                 return ToolResult(
                     success=True,
-                    message=f"Task dispatched ({mode} mode). Task ID: {result['task_id']}",
+                    message=f"Task dispatched ({mode} mode){_where}. Task ID: {result['task_id']}",
                     data=result,
                 )
             finally:

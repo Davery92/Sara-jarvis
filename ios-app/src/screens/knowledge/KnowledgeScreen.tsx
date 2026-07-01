@@ -102,9 +102,9 @@ function getFactProperties(fact: PKGFact): Array<{ key: string; value: string }>
 }
 
 function confidenceColor(c: number): string {
-  if (c >= 0.8) return '#4ade80';
-  if (c >= 0.5) return '#facc15';
-  return '#f87171';
+  if (c >= 0.8) return colors.success;
+  if (c >= 0.5) return colors.hues.amber;
+  return colors.error;
 }
 
 function confidenceLabel(c: number): string {
@@ -567,7 +567,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   addButtonText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },
@@ -625,7 +625,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   reextractButtonText: {
-    color: '#a78bfa',
+    color: colors.hues.violet,
     fontSize: fontSizes.sm,
     fontWeight: '500',
   },
@@ -730,7 +730,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(248, 113, 113, 0.3)',
   },
   deleteButtonText: {
-    color: '#f87171',
+    color: colors.error,
   },
 
   // Empty

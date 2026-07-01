@@ -14,7 +14,7 @@ import { APP_CONFIG } from '../config'
  */
 
 interface ExecutionEntry {
-  type: 'tool_call' | 'llm_response' | 'connected'
+  type: 'tool_call' | 'llm_response' | 'connected' | 'status' | 'heartbeat' | 'error'
   ts?: string
   round?: number
   tool?: string
@@ -22,6 +22,7 @@ interface ExecutionEntry {
   result?: string
   duration_ms?: number
   content?: string
+  message?: string
 }
 
 interface TaskDetail {
@@ -202,6 +203,7 @@ export const BackgroundTaskDetailDrawer: React.FC<BackgroundTaskDetailDrawerProp
 }) => {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [entries, setEntries] = useState<ExecutionEntry[]>([])
+  const [liveStatus, setLiveStatus] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [streamConnected, setStreamConnected] = useState(false)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -245,6 +247,7 @@ export const BackgroundTaskDetailDrawer: React.FC<BackgroundTaskDetailDrawerProp
         eventSourceRef.current = null
       }
       setStreamConnected(false)
+      setLiveStatus(null)
       return
     }
 
@@ -263,6 +266,14 @@ export const BackgroundTaskDetailDrawer: React.FC<BackgroundTaskDetailDrawerProp
           setStreamConnected(true)
           return
         }
+        // status/heartbeat are transient "what's happening now" signals — show
+        // them as a single live line, not as stacked permanent log entries.
+        if (entry.type === 'status' || entry.type === 'heartbeat') {
+          setLiveStatus(entry.message || null)
+          return
+        }
+        // A real action arrived — clear the transient "thinking…" line.
+        setLiveStatus(null)
         setEntries(prev => [...prev, entry])
       } catch {
         // Ignore parse errors
@@ -386,7 +397,7 @@ export const BackgroundTaskDetailDrawer: React.FC<BackgroundTaskDetailDrawerProp
             </div>
           )}
 
-          {!loading && detail && entries.length === 0 && (
+          {!loading && detail && entries.length === 0 && !(isRunning && liveStatus) && (
             <div className="text-center text-gray-500 text-sm py-8">
               {isRunning
                 ? 'Waiting for first agent action…'
@@ -401,8 +412,28 @@ export const BackgroundTaskDetailDrawer: React.FC<BackgroundTaskDetailDrawerProp
             if (entry.type === 'llm_response') {
               return <LlmResponseEntry key={`${entry.ts}-${idx}`} entry={entry} />
             }
+            if (entry.type === 'error') {
+              return (
+                <div key={`${entry.ts}-${idx}`} className="border border-red-500/40 bg-red-500/10 rounded-lg p-3">
+                  <p className="text-xs text-red-300 font-semibold mb-1">
+                    Error{entry.round != null ? ` · Round ${entry.round}` : ''}
+                  </p>
+                  <pre className="text-xs text-red-200 whitespace-pre-wrap font-mono">
+                    {entry.message || entry.content}
+                  </pre>
+                </div>
+              )
+            }
             return null
           })}
+
+          {/* Transient "what's happening now" line, fed by status/heartbeat events */}
+          {isRunning && liveStatus && (
+            <div className="flex items-center gap-2 text-xs text-blue-300 px-1 py-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+              {liveStatus}
+            </div>
+          )}
 
           {detail?.error && (
             <div className="border border-red-500/40 bg-red-500/10 rounded-lg p-3 mt-3">

@@ -153,8 +153,12 @@ class ResearchExecutor:
 
                 steps = plan.get("steps", [])
 
-            # All steps complete — synthesize findings
+            # All steps complete — synthesize findings. _synthesize_findings
+            # reopens its own fresh session for its writes; refresh here too so
+            # the final status update doesn't ride a connection the long step
+            # loop already let go stale.
             await self._synthesize_findings(db, plan)
+            db = self._reopen(db)
             await self._update_plan_status(
                 db, "complete", completed_at=datetime.now(timezone.utc)
             )
@@ -162,10 +166,34 @@ class ResearchExecutor:
 
         except Exception as e:
             logger.error("Research executor error: %s", e, exc_info=True)
-            await self._update_plan_status(db, "failed", error=str(e))
+            # Persist the failure on a guaranteed-fresh session — the working
+            # one may be the very thing that broke.
+            try:
+                db = self._reopen(db)
+                await self._update_plan_status(db, "failed", error=str(e))
+            except Exception as e2:
+                logger.error("Could not persist failed status: %s", e2)
         finally:
             await self.llm.close()
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _reopen(db):
+        """Close a possibly-stale session and return a fresh one.
+
+        Research runs span many minutes (web search + LLM per step), long
+        enough for Postgres to close an idle connection. Any DB write that
+        happens after a long no-DB stretch must run on a fresh session.
+        """
+        from app.db.session import get_db
+        try:
             db.close()
+        except Exception:
+            pass
+        return next(get_db())
 
     async def _execute_step(
         self,
@@ -411,6 +439,12 @@ Write in clean markdown format."""
                 max_tokens=4096,
             )
             synthesis = self.llm.get_text(response)
+
+            # The step loop + this synthesis call can span many minutes — long
+            # enough for Postgres to drop our connection. Reopen a fresh session
+            # for the writes so completed research is never lost to a stale
+            # connection (the IRMI brief failed at exactly this commit).
+            db = self._reopen(db)
 
             db.execute(
                 text("""

@@ -129,10 +129,20 @@ class NightlyDreamService:
             users = db.query(User).all()
             db.close()
             
+            eastern_yesterday = (
+                datetime.now(pytz.UTC).astimezone(self.eastern_tz) - timedelta(days=1)
+            ).date()
+
             for user in users:
                 await self._process_user_daily_conversations(user.id)
                 await self._consolidate_inbox_items(user.id)
-            
+                # Pattern detection learns from HA/workout/meal data, so it must
+                # run even on days with no chat — _process_user_daily_conversations
+                # returns early when there were no conversations yesterday.
+                await self._run_full_day_replay_and_pattern_detection(
+                    user.id, eastern_yesterday
+                )
+
             logger.info("🌙 Nightly dream cycle complete!")
             
         except Exception as e:
@@ -182,9 +192,8 @@ class NightlyDreamService:
             # Emit importance_decay event for memory self-curation
             await self._emit_importance_decay_event(user_id)
 
-            # Run FULL DAY REPLAY and PATTERN DETECTION
-            # This is the core of Sara's learning - replaying everything that happened
-            await self._run_full_day_replay_and_pattern_detection(user_id, eastern_yesterday.date())
+            # (Day replay + pattern detection moved to _run_nightly_dream_cycle so
+            # it runs even when there were no conversations yesterday.)
 
             logger.info(f"✅ Processed {len(conversation_sessions)} conversation sessions for user {user_id}")
             

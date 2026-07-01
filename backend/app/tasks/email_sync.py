@@ -6,7 +6,10 @@ Handles:
 - Email analysis (categorization, summarization, importance scoring)
 - Attachment processing and RiskNinja detection
 - Push notification triggers for important emails
-- Calendar invite detection and automatic event creation
+
+Note: automatic calendar-event creation from emails was removed — the real
+calendar syncs from David's phone (ios_calendar source). Meeting detection
+survives only as the has_meeting classification flag.
 """
 
 import logging
@@ -16,10 +19,6 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from html import unescape
-from zoneinfo import ZoneInfo
-
-# User's timezone for calendar events
-USER_TIMEZONE = ZoneInfo("America/New_York")
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now
@@ -389,13 +388,19 @@ def analyze_recent_emails(self, mailbox: str, user_id: str):
         raise
 
 
+# Minimum LLM importance score (0..1) an email must clear to ping David — and
+# even then only if it also needs a response (see should_notify below). Raise
+# toward 1.0 for fewer pings, lower for more. Kept here as one knob.
+EMAIL_NOTIFY_IMPORTANCE_MIN = 0.8
+
+
 async def _analyze_emails_async(mailbox: str, user_id: str):
     """Async implementation of email analysis."""
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy import select
 
-    from app.models.email import Email, EmailAttachment
+    from app.models.email import Email
     from app.services.notification_service import get_notification_service
     from app.core.config import settings
 
@@ -426,53 +431,17 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
             )
             emails = list(result.scalars().all())
 
-            # Also retry emails that were analyzed but may have missed meetings:
-            # analyzed, no calendar event, received in the last 7 days, not already
-            # flagged as has_meeting=True (those succeeded but event creation failed)
-            from sqlalchemy import and_, or_
-            retry_result = await db.execute(
-                select(Email).where(
-                    Email.mailbox == mailbox,
-                    Email.user_id == user_id,
-                    Email.analyzed_at.isnot(None),
-                    Email.calendar_event_id.is_(None),
-                    or_(Email.has_meeting.is_(None), Email.has_meeting == False),
-                    Email.received_at >= local_now() - timedelta(days=7),
-                ).order_by(Email.received_at.desc()).limit(20)
-            )
-            retry_emails = retry_result.scalars().all()
-            # Retry emails are for MEETING DETECTION ONLY — they've already
-            # been triaged once and should never fire a push notification.
-            # Previously the loop re-ran the full notification gate on them
-            # every 3-min sync, spamming the user about old emails.
-            retry_ids = {e.id for e in retry_emails}
-            if retry_emails:
-                logger.info(f"Retrying meeting detection for {len(retry_emails)} previously-analyzed emails")
-                emails.extend(retry_emails)
-
             notification_service = get_notification_service()
 
             for email in emails:
                 try:
-                    # First, check for ICS calendar invite attachments
-                    ics_meeting_info = None
-                    if not email.calendar_event_id:
-                        ics_meeting_info = await _check_for_ics_attachment(
-                            db, email, settings.msgraph_mailboxes[0] if settings.msgraph_mailboxes else email.mailbox
-                        )
-
                     # Analyze the email with LLM
                     analysis = await _analyze_single_email(email)
 
-                    # If we found an ICS attachment, use that meeting info (more accurate)
-                    if ics_meeting_info:
-                        analysis["has_meeting"] = True
-                        analysis["meeting_info"] = ics_meeting_info
-                        analysis["category"] = "meeting"
-                        if analysis["importance_score"] < 0.7:
-                            analysis["importance_score"] = 0.7
-
-                    # Update email with analysis results
+                    # Update email with analysis results. has_meeting stays a
+                    # classification flag only — auto-creating calendar events
+                    # from emails was removed; the real calendar syncs from
+                    # David's phone (ios_calendar source).
                     email.category = analysis["category"]
                     email.importance_score = analysis["importance_score"]
                     email.summary = analysis["summary"]
@@ -480,68 +449,32 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     email.analyzed_at = local_now()
                     email.has_meeting = analysis.get("has_meeting", False)
 
-                    # Create calendar event if this is a meeting email.
-                    # Wrap in a SAVEPOINT so a failure here only rolls back the
-                    # calendar-event insert, not the entire batch's analysis
-                    # updates. A bare db.rollback() here used to wipe every
-                    # email's staged analyzed_at/category/notification_sent
-                    # fields in the current transaction — the push had already
-                    # gone out, but the row reverted to "unanalyzed", so the
-                    # next sync re-pushed it. That was the source of the
-                    # repeating notifications for old emails.
-                    if analysis.get("has_meeting") and analysis.get("meeting_info") and not email.calendar_event_id:
-                        try:
-                            async with db.begin_nested():
-                                event_id = await _create_calendar_event_from_email(
-                                    db, user_id, email, analysis["meeting_info"]
-                                )
-                                if event_id:
-                                    email.calendar_event_id = event_id
-                                    email.calendar_event_created_at = local_now()
-                                    source_type = "ICS attachment" if ics_meeting_info else "email content"
-                                    logger.info(f"Created calendar event {event_id} from {source_type}: {email.subject}")
-                        except Exception as e:
-                            logger.error(f"Failed to create calendar event from email: {e}")
-
-                    # Check if we should send a notification
-                    should_notify = False
-                    notify_reason = None
-
-                    if analysis["importance_score"] >= 0.8:
-                        should_notify = True
-                        notify_reason = "high_importance"
-                    elif analysis["category"] == "support":
-                        should_notify = True
-                        notify_reason = "support_request"
-                    elif analysis["category"] == "urgent":
-                        should_notify = True
-                        notify_reason = "urgent_email"
-
-                    # Check for RiskNinja-relevant attachments
-                    att_result = await db.execute(
-                        select(EmailAttachment).where(
-                            EmailAttachment.email_id == email.id,
-                            EmailAttachment.is_riskninja_relevant == True
-                        )
+                    # Notify ONLY when the mail genuinely needs David: it must
+                    # BOTH be high-importance AND require an action/response from
+                    # him. Everything else — FYI mail, newsletters, automated
+                    # notifications, support/sales chatter that doesn't need him —
+                    # stays silent; he reads the inbox on his own schedule. This
+                    # replaces the old "ping on importance>=0.8 OR support OR
+                    # urgent OR any RiskNinja attachment" rule that fired on
+                    # nearly every new message.
+                    should_notify = (
+                        analysis["action_required"]
+                        and analysis["importance_score"] >= EMAIL_NOTIFY_IMPORTANCE_MIN
                     )
-                    rn_attachments = att_result.scalars().all()
-                    if rn_attachments:
-                        should_notify = True
-                        notify_reason = "riskninja_attachment"
+                    notify_reason = "needs_response" if should_notify else None
 
-                    # Send notification if needed. Skip entirely for retry
-                    # emails — they were already triaged on their first pass,
-                    # and this loop is only re-visiting them for meeting
-                    # detection. Re-notifying would spam the user about every
-                    # old email every 3 minutes.
-                    is_retry = email.id in retry_ids
-                    if should_notify and not email.notification_sent and not is_retry:
+                    # Send notification if needed. Dedup by conversation thread,
+                    # not per-message — an active back-and-forth ("Re: Re: ...")
+                    # used to push on every single reply because each message id
+                    # was a fresh topic. Thread-keyed topics let the 4h email
+                    # cooldown actually apply to follow-ups.
+                    if should_notify and not email.notification_sent:
                         await notification_service.notify_david(
                             title=f"New {analysis['category'].title()} Email",
                             body=f"From: {email.sender_name or email.sender_email}\n{email.subject}\n\n{analysis['summary'][:200]}",
                             priority="high" if analysis["importance_score"] >= 0.8 else "normal",
                             category="email",
-                            topic=f"email:{email.id}",
+                            topic=f"email-thread:{email.conversation_id or email.id}",
                             url=f"https://sara.avery.cloud/email/{email.id}"
                         )
                         email.notification_sent = True
@@ -571,470 +504,6 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
         await engine.dispose()
 
 
-async def _check_for_ics_attachment(db, email, mailbox: str) -> Optional[Dict[str, Any]]:
-    """
-    Check if an email has an ICS calendar attachment and parse it.
-
-    Args:
-        db: Database session
-        email: Email object
-        mailbox: Mailbox address for API calls
-
-    Returns:
-        Meeting info dict if ICS found and parsed, None otherwise
-    """
-    from sqlalchemy import select
-    from app.models.email import EmailAttachment
-    from app.services.msgraph_service import get_msgraph_service
-
-    try:
-        # Check for ICS attachments
-        result = await db.execute(
-            select(EmailAttachment).where(
-                EmailAttachment.email_id == email.id
-            )
-        )
-        attachments = result.scalars().all()
-
-        for attachment in attachments:
-            filename_lower = attachment.filename.lower()
-
-            # Check for ICS file extension or content type
-            is_ics = (
-                filename_lower.endswith('.ics') or
-                filename_lower.endswith('.ical') or
-                attachment.content_type in (
-                    'text/calendar',
-                    'application/ics',
-                    'application/icalendar'
-                )
-            )
-
-            if is_ics:
-                logger.info(f"Found ICS attachment: {attachment.filename} in email: {email.subject}")
-
-                # Parse the ICS attachment
-                msgraph = get_msgraph_service()
-                meeting_info = await _parse_ics_from_attachment(
-                    msgraph, mailbox, email.id, attachment.id, attachment.filename
-                )
-
-                if meeting_info:
-                    logger.info(f"Parsed ICS: {meeting_info.get('title')} at {meeting_info.get('start_time')}")
-                    return meeting_info
-
-        return None
-
-    except Exception as e:
-        logger.error(f"Error checking for ICS attachment: {e}")
-        return None
-
-
-async def _parse_ics_from_attachment(
-    msgraph,
-    mailbox: str,
-    email_id: str,
-    attachment_id: str,
-    attachment_name: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Download and parse an ICS calendar attachment.
-
-    Returns:
-        Dict with meeting_info if successful, None otherwise
-    """
-    try:
-        # Download the ICS file content
-        content = await msgraph.download_attachment(mailbox, email_id, attachment_id)
-        if not content:
-            logger.warning(f"Empty ICS attachment: {attachment_name}")
-            return None
-
-        # Decode the content
-        ics_text = content.decode('utf-8', errors='replace')
-
-        return _parse_ics_content(ics_text)
-
-    except Exception as e:
-        logger.error(f"Failed to parse ICS attachment {attachment_name}: {e}")
-        return None
-
-
-def _parse_ics_content(ics_text: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse ICS/iCalendar content and extract meeting details.
-
-    Args:
-        ics_text: Raw ICS file content as string
-
-    Returns:
-        Dict with title, start_time, end_time, location, description, organizer
-    """
-    try:
-        # Try using icalendar library if available
-        try:
-            from icalendar import Calendar
-            cal = Calendar.from_ical(ics_text)
-
-            for component in cal.walk():
-                if component.name == "VEVENT":
-                    # Extract event details
-                    summary = str(component.get('summary', '')) or 'Meeting'
-                    location = str(component.get('location', '')) or ''
-                    description = str(component.get('description', '')) or ''
-
-                    # Parse start time
-                    dtstart = component.get('dtstart')
-                    if dtstart:
-                        start_dt = dtstart.dt
-                        # Handle date vs datetime
-                        if hasattr(start_dt, 'hour'):
-                            # It's a datetime - ensure timezone aware
-                            if start_dt.tzinfo is None:
-                                start_dt = start_dt.replace(tzinfo=USER_TIMEZONE)
-                            start_time = start_dt.astimezone(ZoneInfo("UTC"))
-                        else:
-                            # It's a date (all-day event)
-                            start_time = datetime.combine(start_dt, datetime.min.time(), tzinfo=USER_TIMEZONE)
-                            start_time = start_time.astimezone(ZoneInfo("UTC"))
-                    else:
-                        logger.warning("No DTSTART in ICS event")
-                        return None
-
-                    # Parse end time
-                    dtend = component.get('dtend')
-                    if dtend:
-                        end_dt = dtend.dt
-                        if hasattr(end_dt, 'hour'):
-                            if end_dt.tzinfo is None:
-                                end_dt = end_dt.replace(tzinfo=USER_TIMEZONE)
-                            end_time = end_dt.astimezone(ZoneInfo("UTC"))
-                        else:
-                            end_time = datetime.combine(end_dt, datetime.max.time(), tzinfo=USER_TIMEZONE)
-                            end_time = end_time.astimezone(ZoneInfo("UTC"))
-                    else:
-                        # Default to 1 hour duration
-                        end_time = start_time + timedelta(hours=1)
-
-                    # Get organizer
-                    organizer = component.get('organizer')
-                    organizer_email = ''
-                    if organizer:
-                        organizer_str = str(organizer)
-                        if organizer_str.lower().startswith('mailto:'):
-                            organizer_email = organizer_str[7:]
-                        else:
-                            organizer_email = organizer_str
-
-                    return {
-                        "title": summary,
-                        "start_time": start_time.isoformat(),
-                        "end_time": end_time.isoformat(),
-                        "location": location,
-                        "description": description,
-                        "organizer": organizer_email,
-                        "source": "ics_attachment"
-                    }
-
-            logger.warning("No VEVENT found in ICS content")
-            return None
-
-        except ImportError:
-            # Fallback to regex parsing if icalendar not available
-            logger.info("icalendar library not available, using regex parsing")
-            return _parse_ics_with_regex(ics_text)
-
-    except Exception as e:
-        logger.error(f"Error parsing ICS content: {e}")
-        return None
-
-
-def _parse_ics_with_regex(ics_text: str) -> Optional[Dict[str, Any]]:
-    """
-    Fallback regex-based ICS parser when icalendar library is not available.
-    """
-    from dateutil import parser as dateutil_parser
-
-    try:
-        # Extract SUMMARY (title)
-        summary_match = re.search(r'SUMMARY[^:]*:(.+?)(?:\r?\n(?!\s)|$)', ics_text, re.DOTALL)
-        title = summary_match.group(1).strip() if summary_match else 'Meeting'
-        # Handle line folding (lines starting with space are continuations)
-        title = re.sub(r'\r?\n\s', '', title)
-
-        # Extract DTSTART
-        dtstart_match = re.search(r'DTSTART[^:]*:(\d{8}T?\d{0,6}Z?)', ics_text)
-        if not dtstart_match:
-            logger.warning("No DTSTART found in ICS")
-            return None
-
-        dtstart_str = dtstart_match.group(1)
-        start_time = _parse_ics_datetime(dtstart_str)
-        if not start_time:
-            return None
-
-        # Extract DTEND
-        dtend_match = re.search(r'DTEND[^:]*:(\d{8}T?\d{0,6}Z?)', ics_text)
-        if dtend_match:
-            end_time = _parse_ics_datetime(dtend_match.group(1))
-        else:
-            end_time = start_time + timedelta(hours=1)
-
-        # Extract LOCATION
-        location_match = re.search(r'LOCATION[^:]*:(.+?)(?:\r?\n(?!\s)|$)', ics_text, re.DOTALL)
-        location = location_match.group(1).strip() if location_match else ''
-        location = re.sub(r'\r?\n\s', '', location)
-
-        # Extract DESCRIPTION
-        desc_match = re.search(r'DESCRIPTION[^:]*:(.+?)(?:\r?\n(?!\s)|$)', ics_text, re.DOTALL)
-        description = desc_match.group(1).strip() if desc_match else ''
-        description = re.sub(r'\r?\n\s', '', description)
-
-        # Extract ORGANIZER
-        org_match = re.search(r'ORGANIZER[^:]*:(?:mailto:)?(.+?)(?:\r?\n|$)', ics_text, re.IGNORECASE)
-        organizer = org_match.group(1).strip() if org_match else ''
-
-        return {
-            "title": title,
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat() if end_time else None,
-            "location": location,
-            "description": description,
-            "organizer": organizer,
-            "source": "ics_attachment"
-        }
-
-    except Exception as e:
-        logger.error(f"Regex ICS parsing failed: {e}")
-        return None
-
-
-def _parse_ics_datetime(dt_str: str) -> Optional[datetime]:
-    """
-    Parse an ICS datetime string (e.g., 20240115T143000Z or 20240115).
-    """
-    try:
-        dt_str = dt_str.strip()
-
-        if 'T' in dt_str:
-            # DateTime format: YYYYMMDDTHHMMSS or YYYYMMDDTHHMMSSZ
-            if dt_str.endswith('Z'):
-                dt = datetime.strptime(dt_str, '%Y%m%dT%H%M%SZ')
-                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-            else:
-                dt = datetime.strptime(dt_str, '%Y%m%dT%H%M%S')
-                # Assume user's timezone if no Z suffix
-                dt = dt.replace(tzinfo=USER_TIMEZONE)
-                dt = dt.astimezone(ZoneInfo("UTC"))
-        else:
-            # Date-only format: YYYYMMDD (all-day event)
-            d = datetime.strptime(dt_str, '%Y%m%d').date()
-            dt = datetime.combine(d, datetime.min.time(), tzinfo=USER_TIMEZONE)
-            dt = dt.astimezone(ZoneInfo("UTC"))
-
-        return dt
-
-    except Exception as e:
-        logger.error(f"Failed to parse ICS datetime '{dt_str}': {e}")
-        return None
-
-
-def _normalize_meeting_title(title: str) -> str:
-    """Normalize a meeting title for dedup comparison.
-
-    Strips common prefixes like 'Updated invitation:', 'Re:', 'Fwd:' and
-    trailing participants/dates so the core meeting name is compared.
-    """
-    t = title.lower().strip()
-    for prefix in ["updated invitation:", "invitation:", "accepted:", "declined:",
-                    "tentative:", "canceled:", "cancelled:", "re:", "fwd:", "fw:"]:
-        if t.startswith(prefix):
-            t = t[len(prefix):].strip()
-    # Strip trailing email-style annotations like "@ Mon Mar 2..."
-    at_idx = t.find(" @ ")
-    if at_idx > 0:
-        t = t[:at_idx].strip()
-    # Strip trailing parenthesized emails like "(devadmin@riskninja.ai)"
-    paren_idx = t.rfind(" (")
-    if paren_idx > 0 and t.endswith(")"):
-        t = t[:paren_idx].strip()
-    return t
-
-
-async def _create_calendar_event_from_email(
-    db,
-    user_id: str,
-    email,
-    meeting_info: Dict[str, Any]
-) -> Optional[str]:
-    """
-    Create a calendar event from email meeting info.
-
-    Args:
-        db: Database session
-        user_id: User ID to create event for
-        email: Email object with meeting details
-        meeting_info: Dict with title, start_time, end_time, location, description
-
-    Returns:
-        Event ID if created, None otherwise
-    """
-    from app.tools.calendar import CalendarEvent
-    import uuid as uuid_module
-    from dateutil import parser as dateutil_parser
-
-    try:
-        # Parse meeting times
-        start_time_str = meeting_info.get("start_time")
-        end_time_str = meeting_info.get("end_time")
-
-        if not start_time_str:
-            logger.warning(f"No start_time in meeting_info for email: {email.subject}")
-            return None
-
-        # Parse datetime strings.
-        #
-        # NOTE: The LLM is instructed to emit naive local (Eastern) times. ICS
-        # attachments DO carry real timezone info and go through a separate
-        # path (_parse_ics_content) that already converts properly, so by the
-        # time meeting_info gets here from the LLM path, any offset present is
-        # almost certainly the LLM hallucinating "-05:00" from a stale prompt
-        # example — which silently shifts the wall-clock time by an hour
-        # whenever DST is in effect. To avoid that class of bug, we treat the
-        # LLM's datetime as a wall-clock string: strip any tzinfo and re-stamp
-        # with the user's current Eastern timezone (DST-aware via ZoneInfo).
-        is_from_ics = (meeting_info.get("source") == "ics_attachment")
-
-        def _parse_meeting_dt(value: str) -> Optional[datetime]:
-            try:
-                dt = dateutil_parser.parse(value)
-            except Exception as exc:
-                logger.warning(f"Failed to parse meeting datetime '{value}': {exc}")
-                return None
-            if is_from_ics:
-                # ICS path is trusted — keep its tz, normalize to ET, drop tz.
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=USER_TIMEZONE)
-                return dt.astimezone(USER_TIMEZONE).replace(tzinfo=None)
-            # LLM path — discard any offset and treat as local Eastern wall time.
-            if dt.tzinfo is not None:
-                logger.info(
-                    f"Stripping LLM-supplied offset {dt.tzinfo} from '{value}' "
-                    f"and treating as local Eastern (DST-aware)"
-                )
-                dt = dt.replace(tzinfo=None)
-            return dt
-
-        start_time = _parse_meeting_dt(start_time_str)
-        if start_time is None:
-            return None
-
-        # End time - default to 1 hour after start if not provided
-        if end_time_str:
-            end_time = _parse_meeting_dt(end_time_str) or (start_time + timedelta(hours=1))
-        else:
-            end_time = start_time + timedelta(hours=1)
-
-        # Build event title - use meeting_info title or email subject
-        title = meeting_info.get("title") or email.subject or "Meeting"
-
-        # Build description
-        description_parts = []
-        if meeting_info.get("description"):
-            description_parts.append(meeting_info["description"])
-
-        # Add source info
-        source_info = meeting_info.get("source", "email")
-        if source_info == "ics_attachment":
-            description_parts.append(f"\n\n---\nAuto-created by Sara from calendar invite in email:\nFrom: {email.sender_name} <{email.sender_email}>\nSubject: {email.subject}")
-        else:
-            description_parts.append(f"\n\n---\nAuto-created by Sara from email:\nFrom: {email.sender_name} <{email.sender_email}>\nSubject: {email.subject}")
-
-        description = "\n".join(description_parts)
-
-        # --- Dedup Strategy ---
-        # 1. Check if another email in the same conversation already created an event
-        # 2. Check for existing events with similar title on the same day
-        from sqlalchemy import select, and_, func
-        from app.models.email import Email as EmailModel
-
-        # Strategy 1: conversation-based dedup (updated invites share conversation_id)
-        if email.conversation_id:
-            thread_emails = (await db.execute(
-                select(EmailModel).where(
-                    EmailModel.conversation_id == email.conversation_id,
-                    EmailModel.calendar_event_id.isnot(None),
-                    EmailModel.id != email.id,
-                )
-            )).scalars().all()
-
-            for thread_email in thread_emails:
-                # Found a sibling email that already created an event — update it
-                existing_event = (await db.execute(
-                    select(CalendarEvent).where(
-                        CalendarEvent.id == thread_email.calendar_event_id,
-                    )
-                )).scalar_one_or_none()
-                if existing_event:
-                    existing_event.start_time = start_time
-                    existing_event.end_time = end_time
-                    existing_event.title = title
-                    existing_event.location = meeting_info.get("location") or existing_event.location
-                    existing_event.description = description[:2000]
-                    existing_event.updated_at = local_now()
-                    await db.flush()
-                    logger.info(f"Updated calendar event {existing_event.id} from conversation thread: {title}")
-                    return existing_event.id
-
-        # Strategy 2: title+date dedup (same day, similar title)
-        day_start = start_time.replace(hour=0, minute=0, second=0)
-        day_end = day_start + timedelta(days=1)
-        existing = (await db.execute(
-            select(CalendarEvent).where(and_(
-                CalendarEvent.user_id == user_id,
-                CalendarEvent.start_time >= day_start,
-                CalendarEvent.start_time < day_end,
-                CalendarEvent.source == "email_sync",
-            ))
-        )).scalars().all()
-
-        new_title_norm = _normalize_meeting_title(title)
-        for ex in existing:
-            ex_title_norm = _normalize_meeting_title(ex.title)
-            if ex_title_norm == new_title_norm or ex_title_norm in new_title_norm or new_title_norm in ex_title_norm:
-                # Update existing event (time may have changed)
-                ex.start_time = start_time
-                ex.end_time = end_time
-                ex.location = meeting_info.get("location") or ex.location
-                ex.description = description[:2000]
-                ex.updated_at = local_now()
-                await db.flush()
-                logger.info(f"Updated existing calendar event {ex.id} (title match): {title}")
-                return ex.id
-
-        # Create the calendar event
-        event = CalendarEvent(
-            id=str(uuid_module.uuid4()),
-            user_id=user_id,
-            title=title,
-            description=description[:2000],  # Limit description length
-            start_time=start_time,
-            end_time=end_time,
-            location=meeting_info.get("location") or "",
-            all_day=False,
-            source="email_sync",
-            is_completed=False
-        )
-
-        db.add(event)
-        await db.flush()
-
-        return event.id
-
-    except Exception as e:
-        logger.error(f"Error creating calendar event: {e}")
-        return None
-
 
 async def _analyze_single_email(email) -> Dict[str, Any]:
     """
@@ -1059,17 +528,6 @@ Received: {email.received_at.isoformat()}
 3. summary: A 1-2 sentence summary of the email's key points
 4. action_required: true if this email requires a response or action, false otherwise
 5. has_meeting: true ONLY if this email is a direct meeting invitation or scheduling request where David is a participant. NOT true for: webinars, online events, newsletters mentioning events, marketing emails about conferences, digest emails
-6. meeting_info: If has_meeting is true, provide meeting details as an object:
-   - title: Meeting title/subject (clean, no "Updated invitation:" prefix)
-   - start_time: ISO 8601 LOCAL datetime, NO timezone offset suffix
-     (e.g., "2026-04-06T10:00:00"). Use the wall-clock time as stated in
-     the email body. Do NOT append "Z", "-05:00", "-04:00", or any other
-     offset — the server will apply the user's current Eastern timezone
-     and handle DST correctly. Inventing an offset will cause the
-     resulting calendar event to be off by one hour.
-   - end_time: ISO 8601 LOCAL datetime, NO timezone offset suffix
-   - location: Meeting location or video call link (null if not specified)
-   - description: Brief description or agenda
 
 Consider these factors for importance:
 - Support requests from customers = high importance
@@ -1138,7 +596,6 @@ Respond ONLY with valid JSON, no markdown or explanation:"""
                 "summary": analysis.get("summary", email.body_preview[:200]),
                 "action_required": bool(analysis.get("action_required", False)),
                 "has_meeting": bool(analysis.get("has_meeting", False)),
-                "meeting_info": analysis.get("meeting_info", None)
             }
 
     except Exception as e:
@@ -1159,7 +616,6 @@ def _fallback_analysis(email) -> Dict[str, Any]:
     category = "notification"
     importance = 0.3
     has_meeting = False
-    meeting_info = None
 
     # Check for meeting indicators
     meeting_keywords = ["meeting", "invite", "calendar", "schedule", "call", "zoom", "teams", "webex", "appointment"]
@@ -1173,10 +629,6 @@ def _fallback_analysis(email) -> Dict[str, Any]:
             has_meeting = True
             category = "meeting"
             importance = 0.7
-
-    # If meeting detected, try to extract datetime from body
-    if has_meeting:
-        meeting_info = _extract_meeting_info_fallback(email)
 
     # Check for urgent indicators
     urgent_keywords = ["urgent", "asap", "critical", "deadline", "immediately", "time-sensitive"]
@@ -1213,49 +665,7 @@ def _fallback_analysis(email) -> Dict[str, Any]:
         "summary": email.body_preview[:200] if email.body_preview else "No preview available",
         "action_required": category in ["urgent", "support"],
         "has_meeting": has_meeting,
-        "meeting_info": meeting_info,
     }
-
-
-def _extract_meeting_info_fallback(email) -> Optional[Dict[str, Any]]:
-    """Try to extract meeting time from email body using regex patterns."""
-    from dateutil import parser as dateutil_parser
-
-    body = email.body_text or email.body_preview or ""
-    subject = email.subject or ""
-
-    # Common patterns: "January 15, 2026 at 2:00 PM", "2026-01-15T14:00:00",
-    # "When: Monday, March 2, 2026 10:00 AM", "Date: 3/2/2026 Time: 10:00 AM"
-    datetime_patterns = [
-        # "When: <datetime>"
-        r'when:\s*(.+?)(?:\n|$)',
-        # "Date: <date>" followed by optional "Time: <time>"
-        r'date:\s*(.+?)(?:\n|$)',
-        # ISO format
-        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})',
-        # "Month Day, Year at Time"
-        r'(\w+\s+\d{1,2},?\s+\d{4}\s+(?:at\s+)?\d{1,2}:\d{2}\s*(?:AM|PM)?)',
-    ]
-
-    for pattern in datetime_patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
-        if match:
-            try:
-                dt = dateutil_parser.parse(match.group(1).strip(), fuzzy=True)
-                # Assume Eastern timezone if naive
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=USER_TIMEZONE)
-                return {
-                    "title": subject,
-                    "start_time": dt.isoformat(),
-                    "end_time": (dt + timedelta(hours=1)).isoformat(),
-                    "location": None,
-                    "description": f"Auto-detected from email: {subject}",
-                }
-            except (ValueError, OverflowError):
-                continue
-
-    return None
 
 
 @celery_app.task(

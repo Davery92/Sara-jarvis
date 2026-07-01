@@ -9,9 +9,35 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Markdown from 'react-native-markdown-display';
+
+// Custom image rule: the default rule renders react-native-fit-image, which
+// async-fetches each remote image's size and re-renders — that's the known
+// trigger for "Each child in a list should have a unique key" warnings on notes
+// containing screenshots. A plain, explicitly-keyed <Image> avoids it.
+const markdownRules = {
+  image: (node: any) => {
+    const { src, alt } = node.attributes;
+    return (
+      <Image
+        key={node.key}
+        source={{ uri: src }}
+        style={{
+          width: '100%',
+          height: 220,
+          borderRadius: borderRadius.md,
+          marginVertical: spacing.sm,
+          backgroundColor: colors.surface,
+        }}
+        resizeMode="contain"
+        accessibilityLabel={alt}
+      />
+    );
+  },
+};
 import { notesService } from '../../services/notes';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
@@ -168,7 +194,7 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
           /* Rendered markdown view */
           <ScrollView style={styles.content}>
             <Text style={styles.viewTitle}>{title}</Text>
-            <Markdown style={markdownStyles}>{content || ' '}</Markdown>
+            <Markdown style={markdownStyles} rules={markdownRules}>{content || ' '}</Markdown>
           </ScrollView>
         )}
       </KeyboardAvoidingView>

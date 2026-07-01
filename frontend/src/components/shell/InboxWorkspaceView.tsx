@@ -14,16 +14,6 @@ interface InboxWorkspaceViewProps {
   onOpenNote?: (noteId: string) => void
 }
 
-function ViewLoadingState({ label }: { label: string }) {
-  return (
-    <div className="flex-1 min-h-0 flex items-center justify-center">
-      <div className="rounded-md border border-card bg-card px-4 py-3 text-sm text-gray-400">
-        {label}
-      </div>
-    </div>
-  )
-}
-
 export default function InboxWorkspaceView({
   inboxUnreadCount,
   inboxTab,
@@ -36,75 +26,56 @@ export default function InboxWorkspaceView({
 }: InboxWorkspaceViewProps) {
   const contentUnreadCount = Number(contentInboxStats?.unread || 0)
 
-  return (
-    <div className="flex-1 min-h-0 flex flex-col gap-4">
-      <div className="assistant-panel flex-shrink-0 rounded-md px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="font-display text-base font-semibold text-white">Inbox</h2>
-          <span className="text-xs text-slate-400">
-            {inboxUnreadCount > 0
-              ? `${inboxUnreadCount} waiting`
-              : 'Quiet'}
-          </span>
-        </div>
+  const stateBits: string[] = []
+  if (attentionUnreadCount > 0) {
+    stateBits.push(`${attentionUnreadCount} need${attentionUnreadCount === 1 ? 's' : ''} attention`)
+  }
+  if (contentUnreadCount > 0) {
+    stateBits.push(`${contentUnreadCount} ${contentUnreadCount === 1 ? 'capture' : 'captures'}`)
+  }
 
-        <div className="mt-2 rounded-md border border-white/8 bg-slate-950/35 p-1">
-          <div className="flex gap-1">
-            <button
-              onClick={() => onSelectInboxTab('content')}
-              className={[
-                'flex-1 rounded-md px-3 py-1.5 text-sm transition',
-                inboxTab === 'content'
-                  ? 'bg-teal-400/12 text-white shadow-[0_4px_12px_rgba(13,148,136,0.15)]'
-                  : 'text-slate-400 hover:bg-white/[0.04] hover:text-white',
-              ].join(' ')}
-            >
-              Captured
-              {contentUnreadCount > 0 ? <span className="ml-1.5 text-xs text-slate-500">· {contentUnreadCount}</span> : null}
-            </button>
-            <button
-              onClick={() => onSelectInboxTab('attention')}
-              className={[
-                'flex-1 rounded-md px-3 py-1.5 text-sm transition',
-                inboxTab === 'attention'
-                  ? 'bg-teal-400/12 text-white shadow-[0_4px_12px_rgba(13,148,136,0.15)]'
-                  : 'text-slate-400 hover:bg-white/[0.04] hover:text-white',
-              ].join(' ')}
-            >
-              Attention
-              {attentionUnreadCount > 0 ? <span className="ml-1.5 text-xs text-slate-500">· {attentionUnreadCount}</span> : null}
-            </button>
-          </div>
+  const tabClass = (active: boolean) =>
+    [
+      'border-b-2 pb-1 text-sm transition-colors',
+      active ? 'border-teal-300 text-white' : 'border-transparent text-slate-500 hover:text-slate-300',
+    ].join(' ')
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Slim header row: title + live state, quiet text tabs on the right */}
+      <div className="flex flex-shrink-0 items-baseline justify-between gap-4 px-1 pb-4">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h2 className="font-display text-xl font-semibold text-white">Today</h2>
+          {stateBits.length > 0 && (
+            <span className="truncate text-xs text-slate-500">{stateBits.join(' · ')}</span>
+          )}
+        </div>
+        <div className="flex flex-shrink-0 items-baseline gap-5">
+          <button onClick={() => onSelectInboxTab('content')} className={tabClass(inboxTab === 'content')}>
+            Captured
+            {contentUnreadCount > 0 && <span className="ml-1.5 text-xs text-slate-500">{contentUnreadCount}</span>}
+          </button>
+          <button onClick={() => onSelectInboxTab('attention')} className={tabClass(inboxTab === 'attention')}>
+            Attention
+            {attentionUnreadCount > 0 && <span className="ml-1.5 text-xs text-slate-500">{attentionUnreadCount}</span>}
+          </button>
         </div>
       </div>
 
-      <div className="assistant-panel-soft flex flex-col flex-1 min-h-0 overflow-hidden rounded-md p-2">
-        <div className="border-b border-white/8 px-4 pb-3 pt-2">
-          <p className="text-sm font-medium text-white">
-            {inboxTab === 'content' ? 'Captured content queue' : 'Assistant follow-up queue'}
-          </p>
-          <p className="mt-1 text-sm text-slate-500">
-            {inboxTab === 'content'
-              ? 'Open reports, notes, and saved material, then move directly into chat when needed.'
-              : 'Handle clarifications and mission handoffs before they turn into background noise.'}
-          </p>
-        </div>
-
-        <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2 pt-3">
-        <Suspense
-          fallback={
-            <ViewLoadingState
-              label={inboxTab === 'content' ? 'Loading content inbox…' : 'Loading attention inbox…'}
-            />
-          }
-        >
+      <div
+        className={
+          inboxTab === 'content'
+            ? 'flex flex-1 min-h-0 flex-col px-1'
+            : 'flex-1 min-h-0 overflow-y-auto px-1'
+        }
+      >
+        <Suspense fallback={<p className="pt-6 text-sm text-slate-500">Loading…</p>}>
           {inboxTab === 'content' ? (
             <ContentInbox onNavigateToChat={onOpenContentChat} />
           ) : (
             <AttentionInbox onStartChat={onOpenAttentionChat} onOpenNote={onOpenNote} />
           )}
         </Suspense>
-        </div>
       </div>
     </div>
   )

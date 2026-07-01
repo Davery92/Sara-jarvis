@@ -379,6 +379,12 @@ class ToolIntentClassifier:
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {
+        # RECIPES must precede FITNESS/NOTES: a recipe request often contains
+        # fitness keywords ('protein', 'meal') or 'save this' (NOTES), which would
+        # otherwise steal the intent and hide recipes_create from the model.
+        'RECIPES': [
+            'recipe', 'recipes',
+        ],
         'FITNESS': [
             'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
             'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
@@ -409,6 +415,17 @@ class ToolIntentClassifier:
         'WEB': [
             'search', 'look up', 'find out', 'google', 'look for',
             'research', 'news about', 'latest on', 'who is', 'what is'
+        ],
+        # Before MEMORY/HOME/CONVERSATIONAL: their broad keywords ('did i',
+        # 'is the', 'hey') would otherwise swallow "hey what's the notification?"
+        # / badge questions. Device-targeted phrasing ("send a notification to
+        # my pc") still wins via the priority check above.
+        'NOTIFICATIONS': [
+            'the notification', 'that notification', 'notifications',
+            'what notification', 'which notification', 'badge',
+            'did you send me', 'what did you send', 'did i miss',
+            'miss anything', 'missed anything', 'did you notify',
+            'why did you ping', 'pinged me', 'what was that alert',
         ],
         'MEMORY': [
             'remember', 'recall', 'earlier', 'yesterday', 'last time',
@@ -530,6 +547,7 @@ class ToolIntentClassifier:
     # Map intents to tool categories
     INTENT_TO_TOOL_CATEGORIES = {
         'CONVERSATIONAL': [],  # Will inherit from conversation context
+        'RECIPES': ['recipes'],  # Structured recipe storage (recipes_create, not notes)
         'FITNESS': ['fitness'],
         'NOTES': ['notes'],
         'TIME': ['time'],
@@ -541,6 +559,7 @@ class ToolIntentClassifier:
         'PROJECTS': ['projects'],
         'MORNING_BRIEF': ['morning_brief', 'time'],
         'AGENTS': ['agents', 'web'],
+        'NOTIFICATIONS': ['notifications'],  # Badge / "what's the notification?"
         'DEVICES': ['devices'],  # Cross-device commands
         'WORKSPACE': ['workspace', 'maps'],  # Canvas and map control
         'EMAIL': ['email'],  # Email search and reading

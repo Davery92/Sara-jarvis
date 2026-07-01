@@ -138,14 +138,14 @@ function emotionColor(tone: string | undefined): string {
   if (lower.includes('calm') || lower.includes('content')) return colors.success;
   if (lower.includes('curious') || lower.includes('engaged')) return colors.info;
   if (lower.includes('concern') || lower.includes('worry')) return colors.warning;
-  if (lower.includes('warm') || lower.includes('caring')) return '#ec4899';
+  if (lower.includes('warm') || lower.includes('caring')) return colors.hues.rose;
   if (lower.includes('focused')) return colors.secondary;
   return colors.accent;
 }
 
 function salienceColor(salience: number): string {
-  if (salience >= 0.8) return '#ef4444';
-  if (salience >= 0.5) return '#eab308';
+  if (salience >= 0.8) return colors.error;
+  if (salience >= 0.5) return colors.hues.amber;
   if (salience >= 0.3) return colors.info;
   return colors.textMuted;
 }
@@ -438,9 +438,9 @@ export default function SaraActivityScreen() {
 
   const renderAttentionItem = ({ item }: { item: any }) => {
     const isCompleted = item.status === 'completed';
-    const priorityColor = item.priority === 'critical' ? '#ef4444'
-      : item.priority === 'urgent' ? '#f97316'
-      : item.priority === 'high' ? '#eab308'
+    const priorityColor = item.priority === 'critical' ? colors.error
+      : item.priority === 'urgent' ? colors.hues.orange
+      : item.priority === 'high' ? colors.hues.amber
       : colors.textMuted;
     const actions = getAttentionActions(item);
     return (
@@ -503,7 +503,7 @@ export default function SaraActivityScreen() {
   const renderMissionItem = ({ item }: { item: any }) => {
     const stateColor = item.state === 'done' ? colors.success
       : item.state === 'running' ? colors.info
-      : item.state === 'failed' ? '#ef4444'
+      : item.state === 'failed' ? colors.error
       : colors.textMuted;
     const progress = item.total_steps > 0 ? (item.completed_steps / item.total_steps) : 0;
     return (

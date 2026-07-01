@@ -9,7 +9,7 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#18181b"
+      "backgroundColor": "#050b16"
     },
     "ios": {
       "supportsTablet": true,
@@ -46,7 +46,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#18181b"
+        "backgroundColor": "#050b16"
       },
       "package": "com.avery.sara",
       "permissions": [

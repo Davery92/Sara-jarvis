@@ -14,10 +14,11 @@ struct SaraEventLiveActivity: Widget {
           .foregroundStyle(.tint)
         VStack(alignment: .leading, spacing: 2) {
           Text(context.attributes.title).font(.headline).lineLimit(1)
-          Text(context.state.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          Text(context.isStale ? "No longer updating — open the app" : context.state.subtitle)
+            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         Spacer()
-        if context.state.startEpochMs > 0 {
+        if context.state.startEpochMs > 0 && !context.isStale {
           Text(timerInterval: elapsedRange(context.state.startEpochMs), countsDown: false)
             .font(.title3).monospacedDigit().frame(width: 64).multilineTextAlignment(.trailing)
         }

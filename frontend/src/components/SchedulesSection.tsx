@@ -34,9 +34,9 @@ function formatRelative(iso: string | null): string {
 
 function StatusDot({ status }: { status: string | null }) {
   const color =
-    status === 'success' ? 'bg-green-500'
-      : status === 'error' ? 'bg-red-500'
-        : 'bg-gray-600'
+    status === 'success' ? 'bg-emerald-400'
+      : status === 'error' ? 'bg-rose-400'
+        : 'bg-slate-600'
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} aria-label={status || 'never run'} />
 }
 
@@ -75,13 +75,13 @@ function EditModal({
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
       <form
         onSubmit={submit}
-        className="bg-gray-900 border border-gray-700 rounded-md p-6 max-w-lg w-full space-y-4 max-h-[90vh] overflow-y-auto"
+        className="rounded-2xl border border-white/10 bg-[#0c1626] p-6 max-w-lg w-full space-y-4 max-h-[90vh] overflow-y-auto"
       >
         <div>
-          <h3 className="text-lg font-semibold text-white">{job.display_name}</h3>
-          <p className="text-xs text-gray-500 font-mono">{job.task_name}</p>
+          <h3 className="font-display text-lg font-semibold text-white">{job.display_name}</h3>
+          <p className="text-xs text-slate-500 font-mono">{job.task_name}</p>
           {job.description && (
-            <p className="text-sm text-gray-400 mt-2">{job.description}</p>
+            <p className="text-sm text-slate-400 mt-2">{job.description}</p>
           )}
         </div>
 
@@ -91,22 +91,22 @@ function EditModal({
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="w-4 h-4"
+            className="w-4 h-4 accent-teal-400"
           />
-          <span className="text-sm text-gray-200">Enabled</span>
+          <span className="text-sm text-slate-200">Enabled</span>
         </label>
 
         {/* Schedule kind */}
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Schedule kind</label>
+          <label className="block text-xs text-slate-500 mb-1.5">Schedule kind</label>
           <div className="flex gap-2">
             <button
               type="button"
               onClick={() => setKind('cron')}
-              className={`px-3 py-1 rounded text-sm ${
+              className={`rounded-xl border px-3 py-1.5 text-sm transition-colors ${
                 kind === 'cron'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-800 text-gray-300 border border-gray-700'
+                  ? 'border-white/20 bg-white/[0.08] text-white'
+                  : 'border-white/10 text-slate-400 hover:bg-white/[0.06] hover:text-white'
               }`}
             >
               Cron
@@ -114,10 +114,10 @@ function EditModal({
             <button
               type="button"
               onClick={() => setKind('interval')}
-              className={`px-3 py-1 rounded text-sm ${
+              className={`rounded-xl border px-3 py-1.5 text-sm transition-colors ${
                 kind === 'interval'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-800 text-gray-300 border border-gray-700'
+                  ? 'border-white/20 bg-white/[0.08] text-white'
+                  : 'border-white/10 text-slate-400 hover:bg-white/[0.06] hover:text-white'
               }`}
             >
               Interval
@@ -128,7 +128,7 @@ function EditModal({
         {/* Cron editor */}
         {kind === 'cron' && (
           <div className="space-y-2">
-            <label className="block text-xs text-gray-400">
+            <label className="block text-xs text-slate-500">
               Cron expression (5 fields: minute hour day month weekday)
             </label>
             <input
@@ -136,12 +136,12 @@ function EditModal({
               value={cronExpr}
               onChange={(e) => setCronExpr(e.target.value)}
               placeholder="0 6 * * *"
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white font-mono text-sm"
+              className="w-full bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-2 text-white font-mono text-sm"
             />
             <select
               onChange={(e) => e.target.value && setCronExpr(e.target.value)}
               value=""
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-gray-300 text-sm"
+              className="w-full bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-2 text-slate-300 text-sm"
             >
               <option value="">— Pick a preset —</option>
               {CRON_PRESETS.map((p) => (
@@ -150,22 +150,22 @@ function EditModal({
                 </option>
               ))}
             </select>
-            <p className="text-xs text-gray-500">Times interpreted in {job.timezone}.</p>
+            <p className="text-xs text-slate-500">Times interpreted in {job.timezone}.</p>
           </div>
         )}
 
         {/* Interval editor */}
         {kind === 'interval' && (
           <div className="space-y-2">
-            <label className="block text-xs text-gray-400">Interval (seconds)</label>
+            <label className="block text-xs text-slate-500">Interval (seconds)</label>
             <input
               type="number"
               min={1}
               value={intervalSec}
               onChange={(e) => setIntervalSec(Number(e.target.value))}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white font-mono text-sm"
+              className="w-full bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-2 text-white font-mono text-sm"
             />
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-slate-500">
               {intervalSec >= 3600
                 ? `≈ ${(intervalSec / 3600).toFixed(2)} hours`
                 : intervalSec >= 60
@@ -176,7 +176,7 @@ function EditModal({
         )}
 
         {saveError && (
-          <p className="text-sm text-red-300 bg-red-950/40 border border-red-800/60 rounded p-2">
+          <p className="border-l-2 border-rose-400/70 pl-3 text-sm text-rose-200">
             {saveError}
           </p>
         )}
@@ -186,14 +186,14 @@ function EditModal({
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="px-4 py-2 text-sm text-gray-300 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700"
+            className="rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 hover:bg-white/[0.06] hover:text-white disabled:opacity-50"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={saving}
-            className="px-4 py-2 text-sm text-white bg-indigo-600 rounded hover:bg-indigo-500 disabled:opacity-50"
+            className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 hover:bg-teal-300 disabled:opacity-50"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>
@@ -279,24 +279,25 @@ export default function SchedulesSection() {
   const editingJob = data?.find((j) => j.key === editingKey) ?? null
 
   return (
-    <div className="mb-6 bg-card border border-card rounded-md p-6">
-      <div className="flex items-start justify-between gap-4 mb-4">
-        <div>
-          <h2 className="text-lg font-medium text-white mb-1">Scheduled Jobs</h2>
-          <p className="text-sm text-gray-400">
-            Edit when Sara's background tasks run. Changes take effect within ~60 seconds (next beat reload).
-          </p>
-        </div>
+    <div>
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+          Scheduled jobs
+        </h2>
         <button
           onClick={() => refetch()}
-          className="text-xs text-gray-400 hover:text-white px-2 py-1 border border-gray-700 rounded"
+          className="text-xs text-slate-500 hover:text-teal-300 transition-colors"
         >
           Refresh
         </button>
       </div>
 
       {runNowMessage && (
-        <div className="mb-3 text-sm text-indigo-200 bg-indigo-950/40 border border-indigo-800/60 rounded p-2">
+        <div
+          className={`mb-3 border-l-2 pl-3 text-sm text-slate-300 ${
+            runNowMessage.startsWith('Failed') ? 'border-rose-400/70' : 'border-teal-400/70'
+          }`}
+        >
           {runNowMessage}
         </div>
       )}
@@ -306,16 +307,16 @@ export default function SchedulesSection() {
         placeholder="Filter by name, key, category, or description…"
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
-        className="w-full mb-3 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
+        className="w-full mb-3 bg-white/[0.04] border border-white/10 rounded-xl focus:border-teal-300/30 outline-none px-3 py-2 text-sm text-white placeholder:text-slate-600"
       />
 
-      {isLoading && <p className="text-sm text-gray-500">Loading schedules…</p>}
-      {error && <p className="text-sm text-red-300">Failed to load schedules.</p>}
+      {isLoading && <p className="text-sm text-slate-500">Loading schedules…</p>}
+      {error && <p className="text-sm text-slate-500">Failed to load schedules.</p>}
 
       {systemHiddenCount > 0 && !showSystem && (
         <button
           onClick={() => setShowSystem(true)}
-          className="mb-3 text-xs text-gray-400 hover:text-white underline"
+          className="mb-3 text-xs text-slate-500 hover:text-teal-300 transition-colors"
         >
           Show {systemHiddenCount} internal/plumbing job{systemHiddenCount !== 1 ? 's' : ''} (watchers, pollers, heartbeats)
         </button>
@@ -323,25 +324,25 @@ export default function SchedulesSection() {
       {showSystem && (
         <button
           onClick={() => setShowSystem(false)}
-          className="mb-3 text-xs text-gray-400 hover:text-white underline"
+          className="mb-3 text-xs text-slate-500 hover:text-teal-300 transition-colors"
         >
           Hide internal jobs
         </button>
       )}
 
       {grouped.map(([category, jobs]) => (
-        <div key={category} className="mb-5">
-          <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">{category}</h3>
-          <div className="space-y-1">
+        <div key={category} className="mb-6">
+          <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 mb-1.5">
+            {category}
+          </h3>
+          <div>
             {jobs.map((job) => {
               const isExpanded = expandedKey === job.key
               return (
                 <div
                   key={job.key}
-                  className={`rounded border ${
-                    job.enabled
-                      ? 'bg-gray-800/50 border-gray-700'
-                      : 'bg-gray-900/50 border-gray-800 opacity-60'
+                  className={`rounded-lg hover:bg-white/[0.04] transition-colors ${
+                    job.enabled ? '' : 'opacity-60'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-3 px-3 py-2">
@@ -351,30 +352,30 @@ export default function SchedulesSection() {
                     >
                       <div className="flex items-center gap-2">
                         <StatusDot status={job.last_status} />
-                        <span className="text-sm text-white truncate">{job.display_name}</span>
+                        <span className="text-[15px] text-slate-200 truncate">{job.display_name}</span>
                         {job.visibility === 'system' && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700 rounded uppercase tracking-wide">
+                          <span className="text-[10px] px-1.5 py-0.5 border border-white/10 rounded text-slate-500 uppercase tracking-wide">
                             system
                           </span>
                         )}
                         {!job.enabled && (
-                          <span className="text-xs px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded">
+                          <span className="text-[10px] px-1.5 py-0.5 border border-white/10 rounded text-slate-500 uppercase tracking-wide">
                             disabled
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-500 truncate">
+                      <div className="text-xs text-slate-500 truncate">
                         {job.human_readable} · last run {formatRelative(job.last_run_at)}
                         {job.last_error && (
-                          <span className="text-red-400"> · err: {job.last_error.slice(0, 60)}</span>
+                          <span className="text-rose-300"> · err: {job.last_error.slice(0, 60)}</span>
                         )}
                       </div>
                     </button>
-                    <div className="flex gap-1 shrink-0">
+                    <div className="flex gap-1.5 shrink-0">
                       <button
                         onClick={() => runNowMutation.mutate(job.key)}
                         disabled={runNowMutation.isPending}
-                        className="text-xs px-2 py-1 text-indigo-200 bg-indigo-950/40 border border-indigo-800/60 rounded hover:bg-indigo-900/40"
+                        className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
                         title="Dispatch this task right now, bypassing the schedule"
                       >
                         Run now
@@ -385,20 +386,20 @@ export default function SchedulesSection() {
                           setEditingKey(job.key)
                         }}
                         disabled={!job.editable}
-                        className="text-xs px-2 py-1 text-gray-300 bg-gray-800 border border-gray-700 rounded hover:bg-gray-700 disabled:opacity-40"
+                        className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
                       >
                         Edit
                       </button>
                     </div>
                   </div>
                   {isExpanded && (
-                    <div className="px-3 pb-3 pt-1 text-xs text-gray-400 border-t border-gray-800">
+                    <div className="px-3 pb-3 pt-1 text-xs text-slate-500">
                       {job.description ? (
                         <p className="mb-1">{job.description}</p>
                       ) : (
-                        <p className="italic text-gray-600 mb-1">No description.</p>
+                        <p className="italic text-slate-600 mb-1">No description.</p>
                       )}
-                      <p className="font-mono text-gray-600">
+                      <p className="font-mono text-slate-600">
                         {job.task_name}
                         {job.queue && <> · queue: {job.queue}</>}
                       </p>

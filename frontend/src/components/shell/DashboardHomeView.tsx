@@ -2,12 +2,8 @@ import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+import { APP_CONFIG } from '../../config'
 import { AppView } from '../../navigation/views'
-import DashboardTasks from '../DashboardTasks'
-import SaraStatusCard from '../SaraStatusCard'
-import SaraActivityFeed from './SaraActivityFeed'
-import MissionControlBoard from '../MissionControlBoard'
-import SystemEventsTicker from '../SystemEventsTicker'
 
 interface DashboardHomeViewProps {
   attentionItems: any[]
@@ -41,6 +37,27 @@ interface DashboardHomeViewProps {
   connectedDevices: any[]
   standingOrders: any[]
   formatRelativeTime: (ts: string) => string
+  onAskSara?: (prompt: string) => void
+}
+
+function SectionHeading({ label, action }: { label: string; action?: React.ReactNode }) {
+  return (
+    <div className="mb-4 flex items-baseline justify-between gap-3">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</h2>
+      {action}
+    </div>
+  )
+}
+
+function QuietLink({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className="text-xs text-slate-500 transition-colors hover:text-teal-300"
+    >
+      {children}
+    </button>
+  )
 }
 
 function LiveTimer({ endTime, className = '' }: { endTime: string; className?: string }) {
@@ -60,16 +77,12 @@ function LiveTimer({ endTime, className = '' }: { endTime: string; className?: s
       const hours = Math.floor(diff / (1000 * 60 * 60))
       const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
       const seconds = Math.floor((diff % (1000 * 60)) / 1000)
-
-      if (hours > 0) {
-        setTimeLeft(`${hours}h ${minutes}m ${seconds}s`)
-      } else if (minutes > 0) {
-        setTimeLeft(`${minutes}m ${seconds}s`)
-      } else {
-        setTimeLeft(`${seconds}s`)
-      }
+      setTimeLeft(
+        hours > 0
+          ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+          : `${minutes}:${String(seconds).padStart(2, '0')}`
+      )
     }
-
     updateTimer()
     const interval = setInterval(updateTimer, 1000)
     return () => clearInterval(interval)
@@ -78,11 +91,221 @@ function LiveTimer({ endTime, className = '' }: { endTime: string; className?: s
   return <span className={className}>{timeLeft}</span>
 }
 
+/**
+ * StatChip — a single glanceable, clickable count in the header band.
+ * Renders nothing when the count is zero so the strip never shows noise.
+ */
+function StatChip({
+  count,
+  label,
+  onClick,
+  tone = 'default',
+}: {
+  count: number
+  label: string
+  onClick?: () => void
+  tone?: 'default' | 'amber' | 'teal'
+}) {
+  if (!count) return null
+  const toneClasses =
+    tone === 'amber'
+      ? 'border-amber-400/30 bg-amber-400/10 text-amber-200 hover:border-amber-300/50'
+      : tone === 'teal'
+        ? 'border-teal-400/25 bg-teal-400/[0.07] text-teal-200 hover:border-teal-300/40'
+        : 'border-white/10 bg-white/[0.03] text-slate-300 hover:border-white/20'
+  return (
+    <button
+      onClick={onClick}
+      disabled={!onClick}
+      className={`inline-flex items-baseline gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors ${toneClasses} ${
+        onClick ? '' : 'cursor-default'
+      }`}
+    >
+      <span className="font-semibold tabular-nums">{count}</span>
+      <span className="text-[11px] opacity-80">{label}</span>
+    </button>
+  )
+}
+
+/**
+ * WeatherCard — the richer weather read that anchors the top-right of the
+ * header band, giving the wide layout something to do above the fold.
+ */
+function WeatherCard({ weather, weatherEmoji }: { weather: any; weatherEmoji: Record<string, string> }) {
+  if (!weather) return null
+  const cur = weather.current || weather
+  const temp = Math.round(cur.temperature ?? cur.temp ?? 0)
+  const desc = cur.description || cur.summary || weather.description || ''
+  const emoji = weatherEmoji[cur.icon || weather.icon] || '🌡'
+  const hi = cur.temp_max ?? cur.high ?? weather.high
+  const lo = cur.temp_min ?? cur.low ?? weather.low
+  // feels_like occasionally arrives in a different unit than temperature; only
+  // show it when it's plausibly the same scale (within ~25° of the reading).
+  const feelsRaw = cur.feels_like ?? cur.apparent_temperature
+  const feels = feelsRaw != null && Math.abs(feelsRaw - temp) <= 25 ? feelsRaw : null
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.02] px-4 py-3">
+      <span className="text-3xl leading-none">{emoji}</span>
+      <div className="min-w-0">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-2xl font-semibold leading-none text-white">{temp}°</span>
+          {(hi != null || lo != null) && (
+            <span className="text-xs tabular-nums text-slate-500">
+              {hi != null ? `${Math.round(hi)}°` : ''}
+              {hi != null && lo != null ? ' / ' : ''}
+              {lo != null ? `${Math.round(lo)}°` : ''}
+            </span>
+          )}
+        </div>
+        {desc && <p className="mt-0.5 truncate text-xs capitalize text-slate-400">{desc}</p>}
+        {feels != null && (
+          <p className="text-[11px] text-slate-500">Feels {Math.round(feels)}°</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * ActivityDigest — "While you were away".
+ *
+ * Same data as the old right-rail feed, but humanized: thoughts, reflections,
+ * focus changes, and outreach read as sentences; raw tool calls and errors are
+ * collapsed into a single machinery line that expands on demand. Sara's work
+ * should read like a colleague's standup, not a log file.
+ */
+// Internal plumbing that leaks in as "thoughts"/"reflections" — goal-closure
+// retry loops, server-error recovery, etc. These are machinery talking to
+// itself, never news for David, so they're filtered out of the human feed.
+const DIGEST_NOISE = [
+  // Internal "goal" subsystem churn — closure/update/retry loops, zombie/stale
+  // goals, etc. The daemon phrases these many ways, so match goal + any verb.
+  /\bgoal\b[^.]*\b(closure|update|loop|attempt|retry|abandon|prune|refresh)/i,
+  /\b(zombie|stale|futile|dead|orphan)\b[^.]*\bgoal/i,
+  /\bgoal\b[^.]*\b(zombie|stale|futile|abandoned)/i,
+  /closure (loop|retry)/i,
+  /retry loop/i,
+  // Server / API error-recovery chatter.
+  /server (error|recovery)/i,
+  /\d{3} errors?\b/i,
+  /\bbackoff\b/i,
+  /persistent server/i,
+  /architecture goal/i,
+  // Idle filler — "quiet turn, nothing pressing" / "no active work".
+  /quiet turn/i,
+  /nothing (pressing|to do)/i,
+  /no active work/i,
+]
+const isDigestNoise = (text: string) => DIGEST_NOISE.some((re) => re.test(text || ''))
+
+function ActivityDigest({ timeAgo }: { timeAgo: (ts: string) => string }) {
+  const [items, setItems] = React.useState<any[]>([])
+  const [loaded, setLoaded] = React.useState(false)
+  const [showMachinery, setShowMachinery] = React.useState(false)
+
+  React.useEffect(() => {
+    let cancelled = false
+    const fetchActivity = async () => {
+      try {
+        const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/activity?limit=60`, {
+          credentials: 'include',
+        })
+        if (res.ok && !cancelled) {
+          setItems((await res.json()) || [])
+        }
+      } catch {
+        /* keep last good */
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    }
+    fetchActivity()
+    const t = setInterval(fetchActivity, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [])
+
+  const HUMAN_KINDS: Record<string, string> = {
+    boot: 'Woke up',
+    thought: 'Thought about',
+    reflection: 'Reflected',
+    focus_set: 'Started focusing on',
+    notify_david: 'Reached out',
+    inbox_pickup: 'Picked up',
+    inbox_complete: 'Finished',
+  }
+  const MACHINE_KINDS = new Set(['tool_call', 'tool_result', 'error'])
+
+  // Collapse runs of near-identical updates ("idle, nothing to do" × 5) into one
+  // line, and drop internal-plumbing chatter entirely.
+  const human = items
+    .filter((a) => HUMAN_KINDS[a.kind])
+    .filter((a) => !isDigestNoise(a.summary))
+    .filter((a, i, arr) => i === 0 || a.summary !== arr[i - 1].summary)
+    .slice(0, 6)
+  const machine = items.filter((a) => MACHINE_KINDS.has(a.kind))
+  const errorCount = machine.filter((a) => a.kind === 'error').length
+  const toolCount = machine.length - errorCount
+
+  return (
+    <section>
+      <SectionHeading label="While you were away" />
+      {!loaded ? (
+        <p className="text-sm text-slate-500">Checking…</p>
+      ) : human.length === 0 && machine.length === 0 ? (
+        <p className="text-sm text-slate-500">Quiet lately — nothing to report.</p>
+      ) : (
+        <div className="space-y-3">
+          {human.map((a) => (
+            <div key={a.id} className="flex items-baseline gap-3">
+              <p className="min-w-0 flex-1 text-[15px] leading-relaxed text-slate-300">
+                {(a.summary || HUMAN_KINDS[a.kind] || '').slice(0, 180)}
+                {(a.summary || '').length > 180 ? '…' : ''}
+              </p>
+              <span className="flex-shrink-0 text-xs tabular-nums text-slate-500">{timeAgo(a.created_at)}</span>
+            </div>
+          ))}
+          {human.length === 0 && (
+            <p className="text-sm text-slate-500">Working quietly in the background.</p>
+          )}
+          {machine.length > 0 && (
+            <div className="pt-1">
+              <button
+                onClick={() => setShowMachinery((v) => !v)}
+                className="text-xs text-slate-500 transition-colors hover:text-slate-300"
+              >
+                {toolCount > 0 && `${toolCount} tool ${toolCount === 1 ? 'call' : 'calls'}`}
+                {toolCount > 0 && errorCount > 0 && ' · '}
+                {errorCount > 0 && (
+                  <span className="text-rose-400/80">{errorCount} {errorCount === 1 ? 'error' : 'errors'}</span>
+                )}
+                <span className="ml-1.5 text-slate-600">{showMachinery ? '▴ hide' : '▾ details'}</span>
+              </button>
+              {showMachinery && (
+                <div className="mt-2 space-y-1.5 border-l border-white/8 pl-3">
+                  {machine.slice(0, 12).map((a) => (
+                    <div key={a.id} className="flex items-baseline gap-3">
+                      <p className={`min-w-0 flex-1 font-mono text-xs leading-relaxed ${a.kind === 'error' ? 'text-rose-300/80' : 'text-slate-500'}`}>
+                        {(a.summary || a.kind).slice(0, 140)}
+                      </p>
+                      <span className="flex-shrink-0 text-[11px] tabular-nums text-slate-600">{timeAgo(a.created_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function DashboardHomeView({
   attentionItems,
   attentionUnreadCount,
-  missions,
-  reminders,
   timers,
   calendarEvents,
   onNavigate,
@@ -106,340 +329,340 @@ export default function DashboardHomeView({
   expandedJournalEntries,
   onToggleJournalEntry,
   emotionEmoji,
-  saraStatus,
-  connectedDevices,
   standingOrders,
   formatRelativeTime,
+  onAskSara,
 }: DashboardHomeViewProps) {
+  const [askDraft, setAskDraft] = React.useState('')
+
   const contentUnreadCount = Number(contentInboxStats?.unread || 0)
-  const heroStats = [
-    {
-      label: 'Attention',
-      value: attentionUnreadCount,
-      detail: attentionUnreadCount > 0 ? 'Needs your input' : 'Quiet right now',
-      accent: 'text-teal-200',
-      icon: 'notifications_active',
-    },
-    {
-      label: 'Captures',
-      value: contentUnreadCount,
-      detail: contentUnreadCount > 0 ? 'Waiting in inbox' : 'Inbox is clear',
-      accent: 'text-sky-200',
-      icon: 'description',
-    },
-    {
-      label: 'Missions',
-      value: missionAwaitingCount > 0 ? missionAwaitingCount : runningMissionCount,
-      detail: missionAwaitingCount > 0 ? 'Waiting on you' : 'Running in background',
-      accent: missionAwaitingCount > 0 ? 'text-amber-200' : 'text-teal-200',
-      icon: 'bolt',
-    },
-  ]
+  const urgentAttention = attentionItems
+    .filter((item) => item.status === 'new' || item.status === 'sent')
+    .slice(0, 3)
+  const needsYouCount = attentionUnreadCount + missionAwaitingCount
+
+  // Upcoming events only — past events still render in the timeline but the
+  // header chip should count what's still ahead today.
+  const upcomingEvents = calendarEvents.filter((evt: any) => {
+    const end = new Date(evt.end_time || evt.end || evt.dtend || evt.start_time || evt.start)
+    return end.getTime() >= currentTime.getTime()
+  })
+
+  const dateLine = currentTime.toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  })
+
+  const submitAsk = (e: React.FormEvent) => {
+    e.preventDefault()
+    const prompt = askDraft.trim()
+    if (!prompt || !onAskSara) return
+    setAskDraft('')
+    onAskSara(prompt)
+  }
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-3 md:gap-4">
-      <div className="lg:col-span-2 space-y-3 md:space-y-4">
-        <div className="assistant-panel rounded-3xl p-4 md:p-5">
-          <div className="flex items-start justify-between gap-3 mb-3">
-            <div>
-              <div className="assistant-kicker mb-2">Today</div>
-              <h1 className="font-display text-xl md:text-2xl font-semibold text-white">{greeting}</h1>
-              {weather && (
-                <p className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1 text-xs text-slate-300">
-                  {weatherEmoji[weather.current?.icon || weather.icon] || weatherEmoji['clear-day']}{' '}
-                  {Math.round(weather.current?.temperature ?? weather.temperature ?? weather.temp ?? 0)}&deg;F
-                  <span className="text-slate-500">·</span>
-                  {weather.current?.description || weather.description || weather.summary || 'Clear'}
-                </p>
-              )}
-            </div>
-            {morningBrief && (
-              <button
-                onClick={onPlayBriefAudio}
-                className="flex items-center gap-1.5 rounded-2xl border border-teal-200/15 bg-teal-300/10 px-3.5 py-2 text-teal-100 transition-colors hover:bg-teal-300/16"
-              >
-                <span className="material-icons text-sm">{briefAudioPlaying ? 'pause' : 'play_arrow'}</span>
-                <span className="text-xs font-medium">{briefAudioPlaying ? 'Pause' : 'Listen'}</span>
-              </button>
-            )}
-          </div>
-
-          {morningBrief && (
-            <audio
-              ref={briefAudioRef}
-              onEnded={onBriefAudioEnded}
-              onPause={onBriefAudioPaused}
-              onError={onBriefAudioError}
-              style={{ display: 'none' }}
-            />
-          )}
-
-          {morningBriefLoading ? (
-            <div className="flex items-center gap-2 text-gray-500 py-4">
-              <div className="animate-spin w-4 h-4 border-2 border-gray-500 border-t-transparent rounded-full"></div>
-              <span className="text-sm">Loading brief...</span>
-            </div>
-          ) : morningBrief ? (
-            <div className="assistant-panel-soft rounded-2xl p-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="assistant-kicker">Morning Brief</div>
-                <button
-                  onClick={() => onNavigate('briefings')}
-                  className="rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1 text-[11px] text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
-                >
-                  Open full brief
-                </button>
-              </div>
-              <div
-                className="text-gray-300 text-sm leading-relaxed prose prose-invert prose-sm max-w-none
-                  prose-headings:text-gray-200 prose-headings:text-sm prose-headings:font-semibold prose-headings:mt-2 prose-headings:mb-1
-                  prose-p:my-1 prose-ul:my-1 prose-li:my-0 prose-strong:text-gray-200"
-              >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {(morningBrief.full_text || morningBrief.summary || '').slice(0, 600)}
-                </ReactMarkdown>
-              </div>
-            </div>
-          ) : (
-            <p className="text-gray-500 text-xs py-1">No brief available yet today.</p>
-          )}
-
-          <div className="mt-3 grid gap-2 md:grid-cols-3">
-            {heroStats.map((stat) => (
-              <button
-                key={stat.label}
-                onClick={() => {
-                  if (stat.label === 'Attention') onReviewAttentionInbox()
-                  if (stat.label === 'Captures') onNavigate('inbox')
-                  if (stat.label === 'Missions') onNavigate('automations')
-                }}
-                className="assistant-panel-soft rounded-2xl p-3 text-left transition hover:border-white/14 hover:bg-white/[0.05]"
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="assistant-kicker">{stat.label}</span>
-                  <span className={`material-icons text-base ${stat.accent}`}>{stat.icon}</span>
-                </div>
-                <div className="font-display text-xl text-white">{stat.value}</div>
-                <p className="mt-1 text-xs text-slate-400">{stat.detail}</p>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <MissionControlBoard
-          attentionItems={attentionItems}
-          attentionUnreadCount={attentionUnreadCount}
-          missions={missions}
-          reminders={reminders}
-          timers={timers}
-          calendarEvents={calendarEvents}
-          onNavigate={onNavigate}
-        />
-
-        <SystemEventsTicker />
-
-        <div className="assistant-panel-soft rounded-2xl p-3 md:p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-display text-sm font-semibold text-white">
-              {currentTime.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-            </h2>
-            <button onClick={() => onNavigate('calendar')} className="text-gray-500 hover:text-teal-400 transition-colors">
-              <span className="material-icons text-sm">open_in_new</span>
-            </button>
-          </div>
-          {calendarEvents.length > 0 ? (
-            <div className="space-y-2">
-              {calendarEvents.map((evt: any, i: number) => {
-                const start = new Date(evt.start_time || evt.start || evt.dtstart)
-                const end = new Date(evt.end_time || evt.end || evt.dtend)
-                const now = new Date()
-                const isNow = now >= start && now <= end
-                return (
-                  <div key={evt.id || i} className="flex items-stretch gap-3">
-                    <div className={`w-1 rounded-full flex-shrink-0 ${isNow ? 'bg-teal-400' : 'bg-gray-600'}`}></div>
-                    <div className="flex-1 py-1">
-                      <div className="flex items-baseline justify-between">
-                        <span className={`font-medium text-sm ${isNow ? 'text-teal-400' : 'text-gray-200'}`}>
-                          {evt.title || evt.summary}
-                        </span>
-                        <span className="text-xs text-gray-500 ml-2 flex-shrink-0">
-                          {start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-                          {' - '}
-                          {end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-                        </span>
-                      </div>
-                      {evt.location && <span className="text-xs text-gray-500">{evt.location}</span>}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-sm text-center py-3">No events today</p>
-          )}
-        </div>
-
-        <DashboardTasks onNavigate={onNavigate} />
-
-        <div className="assistant-panel-soft rounded-2xl p-3 md:p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <div className="assistant-kicker mb-1">Sara&apos;s Journal</div>
-              <h2 className="font-display text-sm font-semibold text-white">Recent inner notes</h2>
+    <div className="relative flex-1 overflow-y-auto min-h-0">
+      <div className="mx-auto w-full max-w-[1180px] px-4 pb-36 pt-4 md:px-8 md:pt-10">
+        {/* Header band — greeting + glanceable stats on the left, weather on the right */}
+        <header className="flex flex-wrap items-start justify-between gap-6">
+          <div className="min-w-0">
+            <h1 className="font-display text-3xl font-semibold leading-tight text-white md:text-[2.3rem]">
+              {greeting}, David.
+            </h1>
+            <p className="mt-2 text-[15px] text-slate-400">{dateLine}</p>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <StatChip
+                count={needsYouCount}
+                label={needsYouCount === 1 ? 'needs you' : 'need you'}
+                tone="amber"
+                onClick={onReviewAttentionInbox}
+              />
+              <StatChip
+                count={upcomingEvents.length}
+                label="ahead today"
+                tone="teal"
+                onClick={() => onNavigate('calendar')}
+              />
+              <StatChip
+                count={contentUnreadCount}
+                label={contentUnreadCount === 1 ? 'capture' : 'captures'}
+                onClick={() => onNavigate('inbox')}
+              />
+              <StatChip
+                count={runningMissionCount}
+                label={runningMissionCount === 1 ? 'mission running' : 'missions running'}
+                onClick={() => onNavigate('automations')}
+              />
+              <StatChip count={timers.length} label={timers.length === 1 ? 'timer' : 'timers'} />
             </div>
           </div>
-          {journalEntries.length > 0 ? (
-            <div className="space-y-3">
-              {journalEntries.slice(0, 5).map((entry: any, i: number) => {
-                const entryKey = String(entry.id || i)
-                const fullContent = entry.content || entry.details?.full_content || entry.summary || entry.text || ''
-                const isExpanded = expandedJournalEntries.has(entryKey)
-                const shouldTruncate = fullContent.length > 280 && !isExpanded
-                const displayText = shouldTruncate ? `${fullContent.slice(0, 280).trimEnd()}...` : fullContent
+          <WeatherCard weather={weather} weatherEmoji={weatherEmoji} />
+        </header>
 
-                return (
-                  <div key={entry.id || i} className="flex gap-3">
-                    <span className="text-xs text-gray-500 flex-shrink-0 w-14 pt-0.5 text-right">
-                      {entry.timestamp || entry.created_at
-                        ? new Date(entry.timestamp || entry.created_at).toLocaleTimeString('en-US', {
-                            hour: 'numeric',
-                            minute: '2-digit',
-                          })
-                        : ''}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap break-words">
-                        {displayText}
-                      </p>
-                      {fullContent.length > 280 && (
-                        <button
-                          onClick={() => onToggleJournalEntry(entryKey)}
-                          className="mt-1 text-xs text-teal-400 hover:text-teal-300 transition-colors"
-                        >
-                          {isExpanded ? 'Show less' : 'Read full entry'}
-                        </button>
-                      )}
-                      {entry.emotional_state && (
-                        <span className="text-xs text-gray-500 mt-0.5 inline-block">
-                          {emotionEmoji[entry.emotional_state] || ''} {entry.emotional_state}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-sm text-center py-3">No journal entries in the last 24 hours</p>
-          )}
-        </div>
-      </div>
-
-      <div className="lg:col-span-1 space-y-4 md:space-y-6">
-        <SaraStatusCard />
-
-        <SaraActivityFeed />
-
-        <div className="assistant-panel-muted rounded-2xl p-3">
-          <div className="assistant-kicker mb-2">Activity & Devices</div>
-          <h2 className="font-display text-sm font-semibold text-white mb-2">Current presence</h2>
-          {saraStatus && (
-            <div className="mb-4">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-lg">{emotionEmoji[saraStatus.emotional_state] || emotionEmoji.neutral}</span>
-                <span className="text-sm text-gray-300 capitalize">{saraStatus.emotional_state || 'neutral'}</span>
-              </div>
-              {saraStatus.latest_thought && (
-                <p className="text-xs text-gray-500 italic leading-relaxed">
-                  "{(saraStatus.latest_thought || '').slice(0, 120)}
-                  {(saraStatus.latest_thought || '').length > 120 ? '...' : ''}"
-                </p>
-              )}
-            </div>
-          )}
-          <div className="space-y-2">
-            {connectedDevices.length > 0 ? connectedDevices.map((dev: any, i: number) => (
-              <div key={dev.device_id || i} className="flex items-center gap-2">
-                <div
-                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    dev.is_connected ? 'bg-green-400' : dev.is_online ? 'bg-yellow-400' : 'bg-gray-600'
-                  }`}
-                ></div>
-                <span className="text-sm text-gray-300">{dev.friendly_name || dev.hostname || 'Unknown'}</span>
-                <span className="text-xs text-gray-500 ml-auto">{dev.platform || ''}</span>
-              </div>
-            )) : (
-              <p className="text-gray-500 text-xs">No devices connected</p>
-            )}
-          </div>
-        </div>
-
-        <div className="assistant-panel-muted rounded-2xl p-3">
-          <div className="assistant-kicker mb-2">Standing Orders</div>
-          <h2 className="font-display text-sm font-semibold text-white mb-2">Keep doing</h2>
-          {standingOrders.length > 0 ? (
-            <div className="space-y-2">
-              {standingOrders.slice(0, 5).map((order: any) => (
-                <div key={order.id} className="flex items-start gap-2">
-                  <span className="material-icons text-sm text-gray-500 mt-0.5" style={{ fontSize: '16px' }}>
-                    {order.trigger_type === 'timer'
-                      ? 'timer'
-                      : order.trigger_type === 'time'
-                        ? 'schedule'
-                        : order.trigger_type === 'climate'
-                          ? 'thermostat'
-                          : order.trigger_type === 'presence'
-                            ? 'sensors'
-                            : 'auto_awesome'}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-300 leading-tight">{order.description}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      {order.fires_at && (
-                        <span className="text-xs text-amber-400">
-                          {new Date(order.fires_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                        </span>
-                      )}
-                      {order.scheduled_time && (
-                        <span className="text-xs text-blue-400">
-                          {order.scheduled_time}
-                          {order.scheduled_days ? ` (${order.scheduled_days.join(', ')})` : ' daily'}
-                        </span>
-                      )}
-                      {!order.fires_at && !order.scheduled_time && (
-                        <span className="text-xs text-gray-500">{order.execution_count || 0} runs</span>
-                      )}
-                      {order.last_executed_at && (
-                        <span className="text-xs text-gray-600">&middot; {formatRelativeTime(order.last_executed_at)}</span>
-                      )}
-                      {order.trigger_config?.one_shot && (
-                        <span className="text-xs text-gray-600">&middot; one-time</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-xs text-center py-2">No active standing orders</p>
-          )}
-        </div>
-
-        {timers.length > 0 && (
-          <div className="assistant-panel-muted rounded-2xl p-3">
-            <div className="assistant-kicker mb-2">Active Timers</div>
-            <h2 className="font-display text-sm font-semibold text-white mb-2">Live countdowns</h2>
-            <div className="space-y-2">
-              {timers.map((timer: any) => (
-                <div key={timer.id} className="flex items-center justify-between bg-gray-800/50 p-2 rounded-lg">
-                  <span className="text-sm text-gray-300 truncate mr-2">{timer.title}</span>
-                  <LiveTimer endTime={timer.end_time} className="text-teal-400 font-mono text-sm flex-shrink-0" />
-                </div>
-              ))}
-            </div>
-          </div>
+        {morningBrief && (
+          <audio
+            ref={briefAudioRef}
+            onEnded={onBriefAudioEnded}
+            onPause={onBriefAudioPaused}
+            onError={onBriefAudioError}
+            style={{ display: 'none' }}
+          />
         )}
+
+        {/* Command-center grid — actionable + brief on the left, Sara's state on the right rail */}
+        <div className="mt-10 grid grid-cols-1 gap-x-12 gap-y-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
+          {/* LEFT — what needs you, the brief, the day */}
+          <div className="space-y-12">
+            {/* Needs you — the one thing the page exists to tell you */}
+            <section>
+              <SectionHeading label="Needs you" />
+              {needsYouCount > 0 ? (
+                <div className="space-y-3">
+                  {urgentAttention.map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={onReviewAttentionInbox}
+                      className="group flex w-full items-baseline gap-3 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-4 py-3 text-left transition-colors hover:border-amber-300/40 hover:bg-amber-400/[0.07]"
+                    >
+                      <span className="min-w-0 flex-1 text-[15px] font-medium leading-relaxed text-slate-100 group-hover:text-white">
+                        {item.title || 'Needs your input'}
+                      </span>
+                      <span className="flex-shrink-0 text-xs text-slate-500">
+                        {item.created_at ? formatRelativeTime(item.created_at) : ''}
+                      </span>
+                    </button>
+                  ))}
+                  {missionAwaitingCount > 0 && (
+                    <button
+                      onClick={() => onNavigate('automations')}
+                      className="group flex w-full items-baseline gap-3 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-4 py-3 text-left transition-colors hover:border-amber-300/40 hover:bg-amber-400/[0.07]"
+                    >
+                      <span className="text-[15px] font-medium leading-relaxed text-slate-100 group-hover:text-white">
+                        {missionAwaitingCount} {missionAwaitingCount === 1 ? 'mission is' : 'missions are'} waiting on a decision from you
+                      </span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="rounded-lg border border-white/8 bg-white/[0.02] px-4 py-3 text-[15px] text-slate-500">
+                  Nothing needs you right now.
+                </p>
+              )}
+            </section>
+
+            {/* Morning brief */}
+            <section>
+              <SectionHeading
+                label="Morning brief"
+                action={
+                  <div className="flex items-center gap-3">
+                    {morningBrief && (
+                      <QuietLink onClick={onPlayBriefAudio}>
+                        {briefAudioPlaying ? '⏸ Pause' : '▸ Listen'}
+                      </QuietLink>
+                    )}
+                    <QuietLink onClick={() => onNavigate('briefings')}>Open full brief →</QuietLink>
+                  </div>
+                }
+              />
+              {morningBriefLoading ? (
+                <p className="text-sm text-slate-500">Loading brief…</p>
+              ) : morningBrief ? (
+                <div
+                  className="prose prose-invert max-w-none rounded-xl border border-white/8 bg-white/[0.02] px-5 py-4 text-[15px] leading-relaxed text-slate-300
+                    prose-headings:mb-1 prose-headings:mt-3 prose-headings:text-[13px] prose-headings:font-semibold prose-headings:uppercase prose-headings:tracking-wide prose-headings:text-slate-400
+                    prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0.5 prose-strong:font-medium prose-strong:text-slate-100"
+                >
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {(() => {
+                      const text = morningBrief.full_text || morningBrief.summary || ''
+                      if (text.length <= 600) return text
+                      const cut = text.slice(0, 600)
+                      return `${cut.slice(0, Math.max(cut.lastIndexOf('\n'), cut.lastIndexOf(' ')))}…`
+                    })()}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">No brief available yet today.</p>
+              )}
+            </section>
+
+            {/* Today's schedule */}
+            <section>
+              <SectionHeading
+                label="Today"
+                action={<QuietLink onClick={() => onNavigate('calendar')}>Open calendar →</QuietLink>}
+              />
+              {calendarEvents.length > 0 ? (
+                <div className="space-y-2.5">
+                  {calendarEvents.map((evt: any, i: number) => {
+                    const start = new Date(evt.start_time || evt.start || evt.dtstart)
+                    const end = new Date(evt.end_time || evt.end || evt.dtend)
+                    const now = new Date()
+                    const isAllDay = Boolean(evt.all_day) || end.getTime() - start.getTime() >= 23 * 60 * 60 * 1000
+                    const isNow = !isAllDay && now >= start && now <= end
+                    const isPast = !isAllDay && now > end
+                    return (
+                      <div
+                        key={evt.id || i}
+                        className={`flex items-baseline gap-4 rounded-lg px-3 py-2 ${
+                          isNow ? 'bg-teal-400/[0.06]' : ''
+                        }`}
+                      >
+                        <span
+                          className={`w-[4.5rem] flex-shrink-0 text-right text-sm tabular-nums ${
+                            isNow ? 'font-medium text-teal-300' : 'text-slate-500'
+                          }`}
+                        >
+                          {isAllDay
+                            ? 'All day'
+                            : start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <span
+                            className={`text-[15px] ${
+                              isNow
+                                ? 'font-medium text-teal-200'
+                                : isPast
+                                  ? 'text-slate-500 line-through decoration-slate-700'
+                                  : 'text-slate-200'
+                            }`}
+                          >
+                            {evt.title || evt.summary}
+                            {isNow && <span className="ml-2 text-xs font-normal text-teal-400">now</span>}
+                          </span>
+                          {evt.location && <span className="ml-2 text-xs text-slate-500">{evt.location}</span>}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">No events today.</p>
+              )}
+            </section>
+
+            {/* Ongoing: standing orders + timers */}
+            {(standingOrders.length > 0 || timers.length > 0) && (
+              <section>
+                <SectionHeading label="Ongoing" />
+                <div className="space-y-2.5">
+                  {timers.map((timer: any) => (
+                    <div key={timer.id} className="flex items-baseline gap-4">
+                      <LiveTimer
+                        endTime={timer.end_time}
+                        className="w-[4.5rem] flex-shrink-0 text-right font-mono text-sm text-teal-300"
+                      />
+                      <span className="min-w-0 flex-1 truncate text-[15px] text-slate-200">{timer.title}</span>
+                    </div>
+                  ))}
+                  {standingOrders.slice(0, 4).map((order: any) => (
+                    <div key={order.id} className="flex items-baseline gap-4">
+                      <span className="w-[4.5rem] flex-shrink-0 text-right text-sm tabular-nums text-slate-500">
+                        {order.fires_at
+                          ? new Date(order.fires_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+                          : order.scheduled_time || '—'}
+                      </span>
+                      <span className="min-w-0 flex-1 text-[15px] leading-relaxed text-slate-300">
+                        {order.description}
+                        {order.trigger_config?.one_shot && (
+                          <span className="ml-2 text-xs text-slate-500">one-time</span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+
+          {/* RIGHT RAIL — what Sara's been up to */}
+          <aside className="space-y-12 lg:border-l lg:border-white/8 lg:pl-10">
+            {/* What Sara's been doing, in her own words */}
+            <ActivityDigest timeAgo={formatRelativeTime} />
+
+            {/* Sara's journal */}
+            {journalEntries.length > 0 && (
+              <section>
+                <SectionHeading label="Sara's journal" />
+                <div className="space-y-5">
+                  {journalEntries.slice(0, 3).map((entry: any, i: number) => {
+                    const entryKey = String(entry.id || i)
+                    const fullContent =
+                      entry.content || entry.details?.full_content || entry.summary || entry.text || ''
+                    const isExpanded = expandedJournalEntries.has(entryKey)
+                    const shouldTruncate = fullContent.length > 240 && !isExpanded
+                    const displayText = shouldTruncate
+                      ? `${fullContent.slice(0, 240).trimEnd()}…`
+                      : fullContent
+
+                    return (
+                      <div key={entry.id || i}>
+                        <p className="text-[14px] leading-relaxed text-slate-400 whitespace-pre-wrap break-words">
+                          {displayText}
+                        </p>
+                        <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-500">
+                          {(entry.timestamp || entry.created_at) && (
+                            <span>
+                              {new Date(entry.timestamp || entry.created_at).toLocaleTimeString('en-US', {
+                                hour: 'numeric',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                          )}
+                          {entry.emotional_state && (
+                            <span>
+                              {emotionEmoji[entry.emotional_state] || ''} {entry.emotional_state}
+                            </span>
+                          )}
+                          {fullContent.length > 240 && (
+                            <button
+                              onClick={() => onToggleJournalEntry(entryKey)}
+                              className="text-teal-400/80 transition-colors hover:text-teal-300"
+                            >
+                              {isExpanded ? 'Show less' : 'Read more'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )}
+          </aside>
+        </div>
       </div>
+
+      {/* Ask dock — Sara is always one keystroke away */}
+      {onAskSara && (
+        <div className="pointer-events-none sticky bottom-0 left-0 right-0">
+          <div className="mx-auto w-full max-w-[1180px] px-4 pb-4 md:px-8">
+            <form
+              onSubmit={submitAsk}
+              className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-white/10 bg-[#0c1626]/95 px-4 py-1.5 shadow-[0_8px_40px_rgba(2,8,23,0.6)] backdrop-blur-xl transition-colors focus-within:border-teal-300/30"
+            >
+              <span className="material-icons text-[18px] text-teal-300/70">auto_awesome</span>
+              <input
+                value={askDraft}
+                onChange={(e) => setAskDraft(e.target.value)}
+                placeholder="Ask Sara anything…"
+                className="min-w-0 flex-1 bg-transparent py-2.5 text-[15px] text-slate-100 placeholder-slate-500 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!askDraft.trim()}
+                className="rounded-xl p-2 text-slate-500 transition-colors enabled:text-teal-300 enabled:hover:bg-teal-400/10 disabled:opacity-40"
+                aria-label="Send to Sara"
+              >
+                <span className="material-icons text-[18px]">arrow_upward</span>
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -6,8 +6,9 @@ and logs activity to the database for pattern detection.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 import aiohttp
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -30,7 +31,16 @@ class HAWebsocketService:
         'sensor.cpu', 'sensor.memory', 'sensor.disk',
         'sensor.battery', 'sensor.uptime', 'sensor.last_boot',
         'update.', 'sensor.sun_', 'weather.',
-        'downstairs_light_box_kitchen_sensor',  # kitchen motion sensor — fires ~95x/hr for light automation, no signal value
+    }
+
+    # Noisy-but-meaningful entities: instead of excluding them outright, log
+    # only 'on' transitions and at most once per N seconds. The kitchen motion
+    # sensor fires ~95x/hr for the light automation, but it is currently the
+    # only live motion sensor in the house (the Ring sensors have been
+    # unavailable since 2025-12) — sampled, it's the sole presence signal
+    # pattern detection gets.
+    DEFAULT_RATE_LIMITED_ENTITIES = {
+        'binary_sensor.downstairs_light_box_kitchen_sensor': 300,
     }
 
     def __init__(
@@ -61,6 +71,8 @@ class HAWebsocketService:
         self.include_domains = include_domains or self.DEFAULT_INCLUDE_DOMAINS
         self.exclude_patterns = exclude_patterns or self.DEFAULT_EXCLUDE_PATTERNS
         self.require_state_change = require_state_change
+        self.rate_limited_entities: Dict[str, int] = dict(self.DEFAULT_RATE_LIMITED_ENTITIES)
+        self._last_logged_at: Dict[str, float] = {}
 
         self._message_id = 0
         self._running = False
@@ -152,6 +164,17 @@ class HAWebsocketService:
         # Skip if state didn't actually change (just attribute update)
         if self.require_state_change and from_state == to_state:
             return
+
+        # Sample rate-limited entities: 'on' transitions only, max one per window
+        rate_limit = self.rate_limited_entities.get(entity_id)
+        if rate_limit:
+            if to_state != 'on':
+                return
+            now_mono = time.monotonic()
+            last = self._last_logged_at.get(entity_id)
+            if last is not None and (now_mono - last) < rate_limit:
+                return
+            self._last_logged_at[entity_id] = now_mono
 
         # Extract metadata
         domain = entity_id.split('.')[0]

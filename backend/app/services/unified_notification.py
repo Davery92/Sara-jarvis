@@ -41,15 +41,6 @@ DEFAULT_COOLDOWNS = {
     "wellness": 24.0,
     "system_health": 0.5,
     "calendar_prep": 2.0,
-    # Narrator ("System AI") broadcasts. Per-severity so roasts can be
-    # throttled separately from achievements.
-    "narrator_roast": 4.0,
-    "narrator_achievement": 1.0,
-    "narrator_observation": 8.0,
-    "narrator_patch_note": 23.0,  # daily/weekly fires; this is just dedup
-    "narrator_sponsored": 48.0,
-    "narrator_grudging": 2.0,
-    "narrator_deflected": 2.0,
 }
 
 # Mapping from category → tunable key. Categories not in this map fall through
@@ -62,10 +53,6 @@ _TUNABLE_COOLDOWN_KEYS = {
     "health": "notification.cooldown.health_hours",
     "fitness": "notification.cooldown.health_hours",  # share the health knob
     "wellness": "notification.cooldown.health_hours",
-    # Only the two high-frequency narrator severities expose tunables;
-    # the rest are rare enough that the hardcoded defaults suffice.
-    "narrator_roast": "notification.cooldown.narrator_roast_hours",
-    "narrator_observation": "notification.cooldown.narrator_observation_hours",
 }
 
 
@@ -372,8 +359,7 @@ async def _send_notification_impl(
             return {"sent": False, "reason": "dedup", "topic": effective_topic}
 
     # Try desktop delivery via WebSocket first (real-time, no phone buzz).
-    # Callers that have their own custom desktop fanout (e.g. the narrator,
-    # which renders a styled SYSTEM_EVENT popup) pass _bypass_desktop=True
+    # Callers that have their own custom desktop fanout pass _bypass_desktop=True
     # to avoid a duplicate native SHOW_NOTIFICATION on top of their own UI.
     desktop_sent = False
     if not _bypass_desktop:
@@ -417,11 +403,16 @@ async def _send_notification_impl(
     # Send via mobile push only if desktop delivery failed or wasn't available
     success = desktop_sent
     if tokens and not desktop_sent:
+        # Logged above (when db is available), so the unread count already
+        # includes this notification. Without a db the push isn't logged and
+        # won't show on the Notifications screen, so keep the legacy badge.
+        unread_badge = await _get_unread_badge(db, user_id) if db else None
         push_success = await _send_push(
             tokens, title, message, priority, source,
             notification_id=notification_id,
             category=category,
             extra_data=extra_push_data,
+            badge=unread_badge,
         )
         success = success or push_success
 
@@ -569,7 +560,11 @@ async def send_consolidated_notification(
     if not tokens:
         return {"sent": False, "reason": "no_tokens"}
 
-    success = await _send_push(tokens, title, body, final_priority, source, category=category)
+    # These notifications are logged after the push, so add them to the count.
+    unread_badge = await _get_unread_badge(db, user_id) if db else None
+    if unread_badge is not None:
+        unread_badge += len(to_send)
+    success = await _send_push(tokens, title, body, final_priority, source, category=category, badge=unread_badge)
 
     # Log each notification
     if db:
@@ -1088,6 +1083,20 @@ async def _log_notification(
     return row[0] if row else None
 
 
+async def _get_unread_badge(db: AsyncSession, user_id: str) -> Optional[int]:
+    """App icon badge for pushes — same formula as the assistant-inbox badge
+    (unread attention + clarifications + unread unlinked notifications) so the
+    icon, tab badge, and inbox screen always agree."""
+    try:
+        from app.routes.assistant_inbox import BADGE_SQL
+        result = await _db_execute(db, text(BADGE_SQL), {"user_id": user_id})
+        row = result.fetchone()
+        return int(row[0]) if row else None
+    except Exception as e:
+        logger.debug(f"Unread badge count failed: {e}")
+        return None
+
+
 async def _get_push_tokens(db: AsyncSession, user_id: str) -> List[str]:
     """Get active push tokens using async session."""
     result = await _db_execute(db, text("""
@@ -1123,6 +1132,7 @@ async def _send_push(
     notification_id: Optional[int] = None,
     category: str = "general",
     extra_data: Optional[Dict[str, Any]] = None,
+    badge: Optional[int] = None,
 ) -> bool:
     """Send mobile push notification to all of the user's device tokens."""
     unique_tokens = [t for t in dict.fromkeys(tokens) if t]
@@ -1145,21 +1155,39 @@ async def _send_push(
         # set their own type or attach note_id / route hints for the iOS handler.
         push_data.update(extra_data)
 
+    # Deep-link target for tap / long-press routing on the client. Callers may
+    # set data.target (+ data.params) explicitly via extra_data; otherwise derive
+    # a sensible default from the category so EVERY notification opens somewhere
+    # relevant instead of falling back to a generic inbox.
+    if "target" not in push_data:
+        _target_map = {
+            "email": "email", "chat_response": "chat", "message": "chat",
+            "checkin": "chat", "check_in": "chat", "thread_followup": "chat",
+            "agent_task": "agent_tasks", "background_task": "agent_tasks", "research": "agent_tasks",
+            "agent_clarification": "chat",
+            "calendar": "calendar", "calendar_prep": "calendar", "schedule": "calendar",
+            "reminder": "inbox", "timer_complete": "inbox", "inbox_digest": "inbox",
+            "wellness": "fitness", "health": "fitness", "weekly_health_report": "fitness",
+            "recovery": "fitness", "fitness": "fitness",
+            "security": "system", "home": "system",
+            "acs_discovery": "acs", "acs_request": "acs", "acs_daemon": "acs",
+            "learning_review": "learn",
+        }
+        c = (category or "").lower()
+        s = (source or "").lower()
+        if c in _target_map:
+            push_data["target"] = _target_map[c]
+        elif any(k in s for k in ("deliberation", "subconscious", "system", "promotion")):
+            push_data["target"] = "system"
+        else:
+            push_data["target"] = "inbox"
+
     # Map category to interactive notification category id
     push_category_map = {
         "checkin": "MORNING_CHECKIN",
         "acs_discovery": "ACS_DISCOVERY",
         "calendar_prep": "SARA_INSIGHT",
         "system_health": "GENERAL_NUDGE",
-        # All narrator severities share one iOS category; severity-specific
-        # UX is handled client-side via data.severity.
-        "narrator_roast": "SYSTEM_EVENT",
-        "narrator_achievement": "SYSTEM_EVENT",
-        "narrator_observation": "SYSTEM_EVENT",
-        "narrator_patch_note": "SYSTEM_EVENT",
-        "narrator_sponsored": "SYSTEM_EVENT",
-        "narrator_grudging": "SYSTEM_EVENT",
-        "narrator_deflected": "SYSTEM_EVENT",
     }
     push_category_id = push_category_map.get(category, "GENERAL_NUDGE")
 
@@ -1173,7 +1201,9 @@ async def _send_push(
             "priority": push_priority,
             "categoryId": push_category_id,
             "_contentAvailable": True,
-            "badge": 1,
+            # Real unread count when the caller could compute it; the app icon
+            # badge then matches the Notifications screen instead of a stuck "1".
+            "badge": badge if badge is not None else 1,
         }
         for token in unique_tokens
     ]

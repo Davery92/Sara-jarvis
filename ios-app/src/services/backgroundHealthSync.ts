@@ -21,6 +21,10 @@ const HEALTH_SYNC_TASK = 'HEALTH_SYNC_BACKGROUND_TASK';
 const BACKGROUND_SYNC_KEY = '@sara_background_health_sync';
 const BACKGROUND_SYNC_COUNT_KEY = '@sara_background_sync_count';
 const LAST_WORKOUT_SYNC_KEY = '@sara_last_workout_sync';
+// One-time deep backfill so older watch workouts (before the app first synced)
+// get ingested too — the HR meld is retroactive, so this lights up past sessions.
+const WORKOUT_BACKFILL_KEY = '@sara_workout_backfill_done_v1';
+const WORKOUT_BACKFILL_DAYS = 365;
 
 // Types for granular health metrics
 interface HealthMetric {
@@ -366,19 +370,30 @@ async function syncWorkoutsToBackend(): Promise<{ count: number; success: boolea
     if (!healthKitService.isHealthKitAvailable()) return { count: 0, success: false };
 
     const cursorStr = await AsyncStorage.getItem(LAST_WORKOUT_SYNC_KEY);
+    const backfillDone = await AsyncStorage.getItem(WORKOUT_BACKFILL_KEY);
     const now = new Date();
-    // Default to 7 days ago if no cursor; otherwise cursor minus 1h overlap window
-    const since = cursorStr
-      ? new Date(parseInt(cursorStr, 10) - 60 * 60 * 1000)
-      : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    // One-time deep backfill of older watch workouts; then cursor minus 1h
+    // overlap; falling back to 7 days if there's somehow no cursor. The backend
+    // dedupes on (user_id, source, external_id), so re-ingesting is harmless.
+    let since: Date;
+    if (!backfillDone) {
+      since = new Date(now.getTime() - WORKOUT_BACKFILL_DAYS * 24 * 60 * 60 * 1000);
+    } else if (cursorStr) {
+      since = new Date(parseInt(cursorStr, 10) - 60 * 60 * 1000);
+    } else {
+      since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    }
 
     const workouts = await healthKitService.getWorkoutsForSync(since, now);
     if (workouts.length === 0) {
+      // Still mark the backfill done so we don't re-scan a year every run.
+      if (!backfillDone) await AsyncStorage.setItem(WORKOUT_BACKFILL_KEY, '1');
       return { count: 0, success: true };
     }
 
     await apiClient.post('/api/health/workouts/batch', { workouts });
     await AsyncStorage.setItem(LAST_WORKOUT_SYNC_KEY, now.getTime().toString());
+    if (!backfillDone) await AsyncStorage.setItem(WORKOUT_BACKFILL_KEY, '1');
     console.log(`[BackgroundHealth] Synced ${workouts.length} workouts since ${since.toISOString()}`);
     return { count: workouts.length, success: true };
   } catch (error) {

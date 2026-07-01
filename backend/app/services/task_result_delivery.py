@@ -35,7 +35,24 @@ async def deliver_task_result(
     from app.routes.task_events import is_sse_connected, publish_task_event
     from app.routes.presence import is_user_in_chat, get_active_clients
 
+    # Tell-once ledger: a task completion is a one-shot fact. Whatever path
+    # re-invokes delivery later (resume, recovery, a second caller), David
+    # hears about a given task_id exactly once, ever.
+    if _already_delivered(user_id, task_id, db):
+        logger.info(f"Task {task_id} completion already delivered once — skipping re-delivery")
+        return
+    # Record BEFORE sending: if a send half-fails we'd rather miss one ping
+    # than ever repeat one — repeats are the failure mode that erodes trust.
+    _record_delivered(user_id, task_id, task_query, db)
+
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
+
+    # When the task produced a report note, the completion push should DEEP-LINK
+    # straight to that note on tap. The iOS handler opens the note directly for
+    # `research_complete` (navigateToNoteEditor(data.note_id)), whereas
+    # `background_task` only routes to the inbox — so pick the note-opening type
+    # whenever we have a note. (`background_task` stays for note-less tasks.)
+    note_push_type = "research_complete" if result_note_id else "background_task"
 
     # --- Path 1 & 2: Web SSE connected ---
     if is_sse_connected(user_id):
@@ -91,25 +108,72 @@ async def deliver_task_result(
             logger.info(f"Delivered task {task_id} via iOS push task_chat_inject")
         else:
             await _send_push(user_id, {
-                "type": "background_task",
+                "type": note_push_type,
                 "task_id": task_id,
                 "status": "completed",
                 "note_id": result_note_id,
+                "result_note_id": result_note_id,
             }, "Background task complete", _short_summary(task_query), db)
-            logger.info(f"Delivered task {task_id} via iOS push background_task")
+            logger.info(f"Delivered task {task_id} via iOS push {note_push_type}")
         return
 
     # --- Path 5: Nobody's home — standard push ---
     await _send_push(user_id, {
-        "type": "background_task",
+        "type": note_push_type,
         "task_id": task_id,
         "status": "completed",
         "note_id": result_note_id,
+        "result_note_id": result_note_id,
     }, "Background task complete", _short_summary(task_query), db)
-    logger.info(f"Delivered task {task_id} via fallback push notification")
+    logger.info(f"Delivered task {task_id} via fallback push notification ({note_push_type})")
 
 
 # --- Helpers ---
+
+
+def _already_delivered(user_id: str, task_id: str, db: Session) -> bool:
+    """Check the notification ledger for this task — no time window, told once is told forever."""
+    try:
+        from sqlalchemy import text
+        row = db.execute(
+            text("""
+                SELECT 1 FROM notification_log
+                WHERE user_id = :uid AND topic = :topic AND sent = true
+                LIMIT 1
+            """),
+            {"uid": user_id, "topic": f"task_complete:{task_id}"},
+        ).fetchone()
+        return row is not None
+    except Exception as e:
+        logger.warning(f"Ledger check failed (delivering anyway): {e}")
+        return False
+
+
+def _record_delivered(user_id: str, task_id: str, task_query: str, db: Session) -> None:
+    """Write the tell-once ledger entry for this task completion."""
+    try:
+        from sqlalchemy import text
+        db.execute(
+            text("""
+                INSERT INTO notification_log
+                    (user_id, topic, category, title, message, priority, source, cooldown_hours, sent)
+                VALUES
+                    (:uid, :topic, 'agent_task', 'Background task complete', :msg,
+                     'normal', 'task_result_delivery', 0, true)
+            """),
+            {
+                "uid": user_id,
+                "topic": f"task_complete:{task_id}",
+                "msg": task_query[:500],
+            },
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to record delivery ledger entry: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _compose_chat_message(query: str, summary: str, note_title: Optional[str]) -> str:

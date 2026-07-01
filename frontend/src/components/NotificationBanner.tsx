@@ -23,22 +23,24 @@ interface NotificationBannerProps {
 interface TaskNotification {
   id: string
   task: BackgroundTask
-  shown: boolean
   dismissed: boolean
 }
 
+// Only surface results that just landed. Anything older is history — it lives
+// in the background-tasks indicator, not in a banner replayed on every login.
+const FRESH_WINDOW_MS = 30 * 60 * 1000
+const VISIBLE_LIMIT = 3
+const AUTO_DISMISS_MS = 12000
+
 export const NotificationBanner: React.FC<NotificationBannerProps> = ({
   onNavigateToWorkspace,
-  onShowToast
 }) => {
   const [notifications, setNotifications] = useState<TaskNotification[]>([])
   const [seenTaskIds, setSeenTaskIds] = useState<Set<string>>(() => {
-    // Load from localStorage
     const stored = localStorage.getItem('seen_background_tasks')
     return stored ? new Set(JSON.parse(stored)) : new Set()
   })
 
-  // Poll for completed background tasks
   const pollForTasks = useCallback(async () => {
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/api/background-tasks/recent?limit=10`, {
@@ -50,67 +52,55 @@ export const NotificationBanner: React.FC<NotificationBannerProps> = ({
       const data = await response.json()
       const tasks: BackgroundTask[] = data.tasks || []
 
-      // Find newly completed tasks that we haven't seen
-      const newCompletedTasks = tasks.filter(task =>
+      const unseenDone = tasks.filter(task =>
         (task.status === 'completed' || task.status === 'failed') &&
         !seenTaskIds.has(task.id)
       )
+      if (unseenDone.length === 0) return
 
-      if (newCompletedTasks.length > 0) {
-        // Add new notifications
-        const newNotifications: TaskNotification[] = newCompletedTasks.map(task => ({
-          id: `notif-${task.id}`,
-          task,
-          shown: true,
-          dismissed: false
-        }))
+      // Everything unseen gets marked seen, but only fresh results get a banner.
+      const now = Date.now()
+      const fresh = unseenDone.filter(task => {
+        const finished = new Date(task.completed_at || task.created_at).getTime()
+        return now - finished < FRESH_WINDOW_MS
+      })
 
-        setNotifications(prev => [...newNotifications, ...prev])
-
-        // Mark as seen
-        const newSeenIds = new Set(seenTaskIds)
-        newCompletedTasks.forEach(task => newSeenIds.add(task.id))
-        setSeenTaskIds(newSeenIds)
-        localStorage.setItem('seen_background_tasks', JSON.stringify([...newSeenIds]))
+      if (fresh.length > 0) {
+        setNotifications(prev => [
+          ...fresh.map(task => ({ id: `notif-${task.id}`, task, dismissed: false })),
+          ...prev,
+        ])
       }
+
+      const newSeenIds = new Set(seenTaskIds)
+      unseenDone.forEach(task => newSeenIds.add(task.id))
+      setSeenTaskIds(newSeenIds)
+      localStorage.setItem('seen_background_tasks', JSON.stringify([...newSeenIds]))
     } catch (error) {
       console.error('Failed to poll for background tasks:', error)
     }
   }, [seenTaskIds])
 
-  // Set up polling interval
   useEffect(() => {
-    // Initial poll
     pollForTasks()
-
-    // Poll every 10 seconds
     const interval = setInterval(pollForTasks, 10000)
-
     return () => clearInterval(interval)
   }, [pollForTasks])
 
-  // Auto-dismiss notifications after 8 seconds
+  // Each notification dismisses itself on a fixed clock — timers are keyed by
+  // id so one dismissal never resets the others.
   useEffect(() => {
-    const timers: Array<ReturnType<typeof setTimeout>> = []
-
-    notifications.forEach(notif => {
-      if (notif.shown && !notif.dismissed) {
-        const timer = setTimeout(() => {
-          handleDismiss(notif.id)
-        }, 8000)
-        timers.push(timer)
-      }
-    })
-
-    return () => timers.forEach(timer => clearTimeout(timer))
-  }, [notifications])
+    const timers = notifications
+      .filter(n => !n.dismissed)
+      .map(n => setTimeout(() => handleDismiss(n.id), AUTO_DISMISS_MS))
+    return () => timers.forEach(clearTimeout)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifications.map(n => n.id).join(',')])
 
   const handleDismiss = (notifId: string) => {
     setNotifications(prev =>
       prev.map(n => n.id === notifId ? { ...n, dismissed: true } : n)
     )
-
-    // Remove from DOM after animation
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== notifId))
     }, 300)
@@ -118,94 +108,62 @@ export const NotificationBanner: React.FC<NotificationBannerProps> = ({
 
   const handleClick = (notification: TaskNotification) => {
     const task = notification.task
-
     if (task.status === 'completed' && task.result_note_id && onNavigateToWorkspace) {
       onNavigateToWorkspace(task.result_note_id)
     }
-
     handleDismiss(notification.id)
   }
 
-  // Filter out dismissed notifications
-  const activeNotifications = notifications.filter(n => !n.dismissed)
+  const activeNotifications = notifications.filter(n => !n.dismissed).slice(0, VISIBLE_LIMIT)
 
   if (activeNotifications.length === 0) {
     return null
   }
 
   return (
-    <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 space-y-2 max-w-lg w-full min-w-[300px] px-4">
+    <div className="fixed left-1/2 top-4 z-50 w-full max-w-md -translate-x-1/2 space-y-2 px-4">
       {activeNotifications.map(notification => {
         const task = notification.task
         const isSuccess = task.status === 'completed'
-        const queryPreview = task.original_query.length > 60
-          ? task.original_query.substring(0, 60) + '...'
+        const queryPreview = task.original_query.length > 80
+          ? task.original_query.substring(0, 80) + '…'
           : task.original_query
 
         return (
           <div
             key={notification.id}
             onClick={() => handleClick(notification)}
-            className={`
-              w-full p-4 rounded-lg shadow-lg cursor-pointer
-              transform transition-all duration-300 ease-out
-              ${notification.dismissed ? 'opacity-0 -translate-y-2' : 'opacity-100 translate-y-0'}
-              ${isSuccess
-                ? 'bg-green-900/95 border border-green-500/50 hover:bg-green-800/95'
-                : 'bg-red-900/95 border border-red-500/50 hover:bg-red-800/95'
-              }
-            `}
+            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border border-white/8 border-l-2 bg-[#0c1626]/95 py-2.5 pl-3 pr-2 shadow-[0_8px_30px_rgba(2,8,23,0.5)] backdrop-blur-xl transition-all duration-300 hover:border-white/15 ${
+              isSuccess ? 'border-l-emerald-400/80' : 'border-l-rose-400/80'
+            }`}
           >
-            <div className="flex items-start gap-3">
-              {/* Icon */}
-              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${
-                isSuccess ? 'bg-green-500/20' : 'bg-red-500/20'
-              }`}>
-                <span className={`material-icons text-lg ${
-                  isSuccess ? 'text-green-400' : 'text-red-400'
-                }`}>
-                  {isSuccess ? 'check_circle' : 'error'}
-                </span>
-              </div>
-
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className={`text-sm font-semibold ${
-                    isSuccess ? 'text-green-300' : 'text-red-300'
-                  }`}>
-                    {isSuccess ? 'Research Complete' : 'Research Failed'}
-                  </span>
-                  <span className="text-xs text-gray-400">
-                    {new Date(task.completed_at || task.created_at).toLocaleTimeString()}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-200 mt-1 truncate">
-                  {queryPreview}
-                </p>
-                {isSuccess && (
-                  <p className="text-xs text-green-400/80 mt-1">
-                    Click to view results
-                  </p>
-                )}
-                {!isSuccess && task.error_message && (
-                  <p className="text-xs text-red-400/80 mt-1 truncate">
-                    {task.error_message}
-                  </p>
-                )}
-              </div>
-
-              {/* Close button */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDismiss(notification.id)
-                }}
-                className="flex-shrink-0 p-1 hover:bg-white/10 rounded"
-              >
-                <span className="material-icons text-gray-400 text-sm">close</span>
-              </button>
+            <span className={`material-icons mt-0.5 text-[16px] ${isSuccess ? 'text-emerald-300' : 'text-rose-300'}`}>
+              {isSuccess ? 'check' : 'priority_high'}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] leading-snug text-slate-200">
+                <span className={`font-medium ${isSuccess ? 'text-emerald-200' : 'text-rose-200'}`}>
+                  {isSuccess ? 'Done:' : 'Couldn’t finish:'}
+                </span>{' '}
+                {queryPreview}
+              </p>
+              {isSuccess && task.result_note_id && (
+                <p className="mt-0.5 text-xs text-slate-500">Click to open the result</p>
+              )}
+              {!isSuccess && task.error_message && (
+                <p className="mt-0.5 truncate text-xs text-slate-500">{task.error_message}</p>
+              )}
             </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                handleDismiss(notification.id)
+              }}
+              className="rounded-md p-1 text-slate-500 transition hover:bg-white/[0.06] hover:text-white"
+              title="Dismiss"
+            >
+              <span className="material-icons text-[14px]">close</span>
+            </button>
           </div>
         )
       })}

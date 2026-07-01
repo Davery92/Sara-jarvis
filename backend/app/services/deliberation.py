@@ -53,6 +53,7 @@ class TaskProposal:
 @dataclass
 class DeliberationResult:
     thought: str = ""
+    journal_note: str = ""
     notification_proposals: List[NotificationProposal] = field(default_factory=list)
     home_actions: List[HomeActionProposal] = field(default_factory=list)
     task_proposals: List[TaskProposal] = field(default_factory=list)
@@ -140,6 +141,7 @@ class DeliberationEngine:
         try:
             parsed = self._parse_response(raw)
             result.thought = parsed.get("thought", "")
+            result.journal_note = parsed.get("journal_note", "")
             result.handoff_note = parsed.get("handoff_note", "")
             result.watching_for = parsed.get("watching_for", "")
 

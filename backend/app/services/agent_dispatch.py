@@ -50,6 +50,87 @@ async def _publish_dispatch_event(task_id: str, entry: dict):
 # Working directory on the sandbox VM
 DISPATCH_WORKING_DIR = "~/sandbox"
 
+# Playwright runner for the `browse` tool. Lives on the VM at
+# ~/.sara-browse/browse.js and is (re)written on demand so the capability
+# self-heals across VM resets. Drives the snap-bundled Chromium directly
+# (executablePath) so NO root/system libraries are needed — the snap ships its
+# own libs. Args: <url> [screenshot_path] [wait_for_selector]; prints JSON.
+BROWSE_DIR = "~/.sara-browse"
+BROWSE_CHROME = "/snap/chromium/current/usr/lib/chromium-browser/chrome"
+BROWSE_JS = r'''const { chromium } = require('playwright');
+(async () => {
+  const url = process.argv[2];
+  const shot = process.argv[3] || '';
+  const waitFor = process.argv[4] || '';
+  const out = { url };
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true, executablePath: '__CHROME__', args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage'] });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (waitFor) { try { await page.waitForSelector(waitFor, { timeout: 10000 }); } catch (e) {} }
+    await page.waitForTimeout(800);
+    out.title = await page.title();
+    out.text = (await page.evaluate(() => document.body ? document.body.innerText : '')).slice(0, 8000);
+    out.links = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('a')).slice(0, 40)
+        .map(a => ({ text: (a.innerText||'').trim().slice(0,80), href: a.href }))
+        .filter(l => l.href && l.text));
+    if (shot) { await page.screenshot({ path: shot, fullPage: false }); out.screenshot = shot; }
+    out.ok = true;
+  } catch (e) {
+    out.ok = false; out.error = String(e).slice(0, 500);
+  } finally {
+    if (browser) await browser.close();
+  }
+  process.stdout.write(JSON.stringify(out));
+})();
+'''.replace("__CHROME__", BROWSE_CHROME)
+
+
+BROWSE_SHOTS_DIR = os.path.abspath(os.environ.get("BROWSE_SHOTS_DIR", "/app/uploads/browse"))
+
+
+async def _pull_browse_screenshot(bridge: VMBridge, vm_rel_path: str) -> str | None:
+    """scp a browse screenshot off the VM and return a servable URL, or None.
+
+    `vm_rel_path` is relative to ~/.sara-browse (e.g. 'shots/abc.png').
+    """
+    try:
+        os.makedirs(BROWSE_SHOTS_DIR, exist_ok=True)
+        name = f"{uuid.uuid4().hex}.png"
+        local_path = os.path.join(BROWSE_SHOTS_DIR, name)
+        home = f"/home/{bridge.config.username}"
+        remote = f"{home}/.sara-browse/{vm_rel_path}"
+        res = await bridge.scp_from_vm(remote, local_path)
+        if getattr(res, "exit_code", 1) != 0 or not os.path.isfile(local_path):
+            logger.warning(f"[browse] scp screenshot failed: {getattr(res, 'stderr', '')[:200]}")
+            return None
+        # Must match the host the CLIENT app uses to reach the API — NOT
+        # settings.backend_url (that points at the frontend domain and returns
+        # HTML). Dev: the LAN backend; prod: set BROWSE_SHOTS_BASE_URL=https://sara-api.avery.cloud
+        base = os.environ.get("BROWSE_SHOTS_BASE_URL", "http://10.185.1.180:8000").rstrip("/")
+        return f"{base}/api/browse-shots/{name}"
+    except Exception as e:
+        logger.warning(f"[browse] screenshot pull error: {e}")
+        return None
+
+
+async def _ensure_browse_runner(bridge: VMBridge) -> None:
+    """Write ~/.sara-browse/browse.js on the VM if it's missing (idempotent)."""
+    check = await bridge.execute_command(
+        f"test -f {BROWSE_DIR}/browse.js && echo yes || echo no", timeout=20,
+    )
+    if "yes" in check.stdout:
+        return
+    marker = "SARA_BROWSE_EOF"
+    escaped = BROWSE_JS.replace("\\", "\\\\")
+    cmd = (
+        f"mkdir -p {BROWSE_DIR}/shots && cat > {BROWSE_DIR}/browse.js << '{marker}'\n"
+        f"{escaped}\n{marker}"
+    )
+    await bridge.execute_command(cmd, timeout=30)
+
 
 def _resolve_vm_path(path: str, working_dir: str, username: str = "sara") -> str:
     """Resolve a path argument from the dispatch LLM into a concrete VM path.
@@ -175,6 +256,56 @@ DISPATCH_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "start_code_task",
+            "description": (
+                "Hand off a CODING task to Sara's dedicated autonomous coder (the same engine "
+                "as the /code chat mode). It clones the GitHub repo on the VM, edits, runs tests, "
+                "commits, and pushes a branch — all in the background. Use this when the work is "
+                "real software changes against a git repo, rather than ad-hoc shell. Returns once "
+                "the coder is dispatched; it finishes asynchronously and notifies the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Clear description of the code change to make.",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Optional GitHub repo as 'owner/name'. Omit to use the most-recent/default repo.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browse",
+            "description": (
+                "Open a web page in a real headless browser (Playwright/Chromium) on the "
+                "sandbox VM and get back the page title, visible text, links, and a "
+                "screenshot. Use this to TEST or INSPECT a web app/page, verify a deploy "
+                "rendered, read JS-heavy sites that web_search can't, or check a UI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL to open (http/https)."},
+                    "wait_for": {
+                        "type": "string",
+                        "description": "Optional CSS selector to wait for before reading (e.g. '#app', '.results').",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "report_complete",
             "description": (
                 "Signal that the task is complete. Call this when you have finished "
@@ -200,7 +331,7 @@ DISPATCH_TOOLS = [
 
 
 async def _execute_dispatch_tool(
-    bridge: VMBridge, name: str, args: dict, working_dir: str,
+    bridge: VMBridge, name: str, args: dict, working_dir: str, user_id: str | None = None,
 ) -> str:
     """Execute a dispatch tool call via VMBridge."""
     try:
@@ -270,6 +401,83 @@ async def _execute_dispatch_tool(
             except Exception as e:
                 return f"Web search error: {e}"
 
+        elif name == "start_code_task":
+            if not user_id:
+                return "Error: start_code_task is unavailable in this context (no user)."
+            task = (args.get("task") or "").strip()
+            if not task:
+                return "Error: no task provided"
+            repo = (args.get("repo") or "").strip()
+            try:
+                from app.services import code_mode
+                acks: list[str] = []
+
+                async def _drain(text: str):
+                    q: asyncio.Queue = asyncio.Queue()
+                    await code_mode.run_code_message(None, user_id, None, text, q)
+                    while True:
+                        ev = await q.get()
+                        if ev is None:
+                            break
+                        if ev.get("type") == "text_chunk":
+                            acks.append(ev.get("data", {}).get("content", ""))
+
+                # Bind a specific repo first if requested, then dispatch the task.
+                if repo:
+                    await _drain(f"/code start {repo}")
+                await _drain(f"/code {task}")
+                msg = (acks[-1] if acks else "Coder dispatched.").strip()
+                return f"Code task handed off to the autonomous coder.\n{msg}"
+            except Exception as e:
+                logger.error(f"[dispatch] start_code_task failed: {e}", exc_info=True)
+                return f"Failed to start code task: {e}"
+
+        elif name == "browse":
+            url = (args.get("url") or "").strip()
+            if not url:
+                return "Error: no url provided"
+            if not re.match(r"^https?://", url):
+                url = "https://" + url
+            wait_for = (args.get("wait_for") or "").strip()
+            await _ensure_browse_runner(bridge)
+            shot = f"shots/{uuid.uuid4().hex[:12]}.png"
+            cmd = (
+                f"cd {BROWSE_DIR} && node browse.js {shlex.quote(url)} "
+                f"{shlex.quote(shot)} {shlex.quote(wait_for)} 2>/dev/null"
+            )
+            result = await bridge.execute_command(cmd, timeout=90)
+            raw = result.stdout.strip()
+            try:
+                data = json.loads(raw)
+            except Exception:
+                combined = result.stdout + result.stderr
+                hint = ""
+                if "Cannot find module 'playwright'" in combined:
+                    hint = " (playwright npm missing on VM — `cd ~/.sara-browse && npm i playwright`)"
+                elif "shared libraries" in combined or "libatk" in combined:
+                    hint = " (browser libs missing — falls back from snap chromium; check executablePath)"
+                return f"Browse failed: couldn't parse browser output{hint}. Raw: {raw[:300]}"
+            if not data.get("ok"):
+                return f"Browse error for {url}: {data.get('error', 'unknown')}"
+            lines = [f"# {data.get('title') or '(no title)'}", f"URL: {data.get('url')}"]
+            if data.get("screenshot"):
+                shot_url = await _pull_browse_screenshot(bridge, data["screenshot"])
+                if shot_url:
+                    # Embed as a markdown image so the agent can drop it straight
+                    # into its report and David sees it inline.
+                    lines.append(f"Screenshot (embed in your report): ![screenshot of {url}]({shot_url})")
+                else:
+                    lines.append(f"Screenshot saved on VM: ~/.sara-browse/{data['screenshot']}")
+            text = (data.get("text") or "").strip()
+            if text:
+                lines.append("\n## Visible text\n" + text[:6000])
+            links = data.get("links") or []
+            if links:
+                lines.append("\n## Links")
+                for l in links[:25]:
+                    lines.append(f"- [{l.get('text','')}]({l.get('href','')})")
+            return "\n".join(lines)[:9000]
+
         elif name == "report_complete":
             summary = args.get("summary", "Task complete")
             return f"__TASK_COMPLETE__:{summary}"
@@ -334,6 +542,48 @@ async def _dispatch_llm_call(
     raise last_error
 
 
+async def _dispatch_llm_call_with_heartbeat(
+    messages: list[dict],
+    model: str | None,
+    tools: list[dict],
+    task_id: str | None,
+    rounds: int,
+    heartbeat_secs: float = 15.0,
+):
+    """Run _dispatch_llm_call while emitting periodic heartbeat events.
+
+    The LLM call can legitimately take many minutes (a large synthesis over the
+    MLX endpoint can run up to the 30-min ceiling). With no events during that
+    window the live view shows a blank pane and looks hung. This pulses a
+    `heartbeat` event every ~15s so the watcher can see the model is still
+    working, and surfaces a visible `error` event if the call fails.
+    """
+    call = asyncio.ensure_future(_dispatch_llm_call(messages, model=model, tools=tools))
+    waited = 0
+    try:
+        while True:
+            done, _ = await asyncio.wait({call}, timeout=heartbeat_secs)
+            if done:
+                return call.result()  # re-raises any exception from the call
+            waited += int(heartbeat_secs)
+            if task_id:
+                await _publish_dispatch_event(task_id, {
+                    "type": "heartbeat",
+                    "ts": local_now().isoformat(),
+                    "round": rounds,
+                    "message": f"Waiting on model… ({waited}s)",
+                })
+    except Exception as e:
+        if task_id:
+            await _publish_dispatch_event(task_id, {
+                "type": "error",
+                "ts": local_now().isoformat(),
+                "round": rounds,
+                "message": f"Model call failed: {type(e).__name__}: {e}",
+            })
+        raise
+
+
 # Compaction tuning. Empirically the failure mode is "22 web_searches × ~3-10 KB
 # each, then the model can't fit the prompt." `KEEP_RECENT_TOOL_RESULTS` is the
 # sliding window of full-fidelity tool results the model sees; older ones are
@@ -394,6 +644,151 @@ _PREAMBLE_TAIL_PHRASES = (
 )
 
 
+# The model sometimes writes its tool calls as prose instead of emitting real
+# structured tool_calls — e.g. '[Calling tool: browse("https://...")]' or a raw
+# <tool_call> block. Those were never executed, so a "final" response containing
+# them is an abandoned turn, not a deliverable.
+_TEXT_TOOL_CALL_RE = re.compile(
+    r"\[calling\s+tool\b"  # any separator: "[Calling tool: x]", "[Calling tool=x]", …
+    r"|<tool_call>|\[tool_call\]"
+    r"|^\s*\{\s*\"name\"\s*:\s*\"\w+\"\s*,\s*\"arguments\"",
+    re.I | re.M,
+)
+
+
+def _contains_text_tool_calls(text: str) -> bool:
+    return bool(text and _TEXT_TOOL_CALL_RE.search(text))
+
+
+# qwen intermittently drops out of its JSON <tool_call> format into an XML-ish
+# dialect (`<function=web_search>\n<parameter=query>…</parameter>\n</function>`)
+# that the server's parser doesn't recognize — the calls land in `content` and
+# nothing executes. Nudging doesn't reliably recover it (observed failing 2/2
+# runs on 2026-06-12), so we re-parse that dialect and execute the calls.
+_TEXT_FUNC_BLOCK_RE = re.compile(r"<function=([\w.\-]+)>(.*?)</function>", re.S)
+_TEXT_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\s*(.*?)\s*</parameter>", re.S)
+
+
+def _parse_text_tool_calls(content: str, valid_names: set) -> list[dict]:
+    """Salvage tool calls the model wrote as text. Returns OpenAI-shaped
+    tool_call dicts (arguments JSON-encoded), skipping unknown tool names."""
+    calls = []
+    for m in _TEXT_FUNC_BLOCK_RE.finditer(content or ""):
+        name, body = m.group(1), m.group(2)
+        if name not in valid_names:
+            continue
+        args = {k: v for k, v in _TEXT_PARAM_RE.findall(body)}
+        calls.append({
+            "id": f"salvaged_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        })
+    return calls
+
+
+def _strip_text_tool_calls(content: str) -> str:
+    """Remove salvaged text-format call blocks so the model's own malformed
+    syntax doesn't stay in history and reinforce the habit next round."""
+    cleaned = _TEXT_FUNC_BLOCK_RE.sub("", content or "")
+    cleaned = cleaned.replace("<tool_call>", "").replace("</tool_call>", "")
+    return cleaned.strip()
+
+
+# ── Final-report synthesis ───────────────────────────────────────────────────
+#
+# The tool-use loop is reliable at GATHERING and unreliable at WRITING: after
+# many rounds of tool calls the local model tends to end with two sentences
+# and a screenshot gallery instead of the asked-for report. Rather than nudge
+# a tool-fatigued context into long-form writing, we run one clean no-tools
+# completion over a digest of everything the run gathered. That call has one
+# job — write the deliverable — and does it far more consistently.
+
+_RESEARCH_TOOLS = {"web_search", "web_fetch", "browse", "search_memory",
+                   "search_notes", "read_file"}
+
+_MD_HEADER_RE = re.compile(r"^#{1,3} \S", re.M)
+
+
+def _is_report_grade(text: str) -> bool:
+    """Does the loop's final output already read like a written deliverable?
+    Screenshot galleries and bare URLs don't count as substance."""
+    if not text:
+        return False
+    substance = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    substance = re.sub(r"^\s*\*\*https?://\S+\*\*\s*$", "", substance, flags=re.M)
+    substance = substance.strip()
+    return len(substance) >= 1200 and len(_MD_HEADER_RE.findall(substance)) >= 2
+
+
+def _digest_execution_log(execution_log: list, cap: int = 60000) -> str:
+    """Compact the run's research tool results into one synthesis-ready digest."""
+    parts = []
+    total = 0
+    for e in execution_log or []:
+        if e.get("type") != "tool_call" or e.get("tool") not in _RESEARCH_TOOLS:
+            continue
+        args = json.dumps(e.get("args") or {})[:200]
+        result = str(e.get("result") or "")[:6000]
+        chunk = f"### {e.get('tool')} {args}\n{result}\n"
+        if total + len(chunk) > cap:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "\n".join(parts)
+
+
+async def _synthesize_report(
+    task_description: str, execution_log: list, draft: str,
+) -> str | None:
+    """Dedicated no-tools writing pass. Returns the report markdown (starting
+    with a '# ' title line), or None when there's nothing to write from or
+    the pass itself produced junk."""
+    digest = _digest_execution_log(execution_log)
+    if len(digest) < 1500:
+        return None
+    user_parts = [f"## Task\n{task_description}"]
+    if draft and draft.strip():
+        user_parts.append(f"## The agent's own closing notes\n{draft.strip()[:3000]}")
+    user_parts.append(f"## Gathered material\n{digest}")
+    messages = [
+        {"role": "system", "content": (
+            "You are writing the final deliverable for a completed research "
+            "task. You are given the task and the raw material gathered "
+            "(search results, page contents). Write the full report now — "
+            "comprehensive, well-structured markdown, starting with a single "
+            "'# ' title line naming the deliverable (use the title the task "
+            "asked for, if it specified one). Use only the gathered material; "
+            "if something the task asked for is not in the material, note it "
+            "briefly under a 'Gaps' heading instead of inventing it. No "
+            "preamble, no meta-commentary — output the report only."
+        )},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    try:
+        result = await _dispatch_llm_call(messages, model=None, tools=None,
+                                          max_retries=2)
+        content = ((result.get("choices") or [{}])[0]
+                   .get("message", {}).get("content") or "").strip()
+        if len(content) >= 800 and not _contains_text_tool_calls(content):
+            return content
+        logger.warning(
+            "[dispatch] synthesis pass produced unusable output (%d chars)",
+            len(content),
+        )
+    except Exception as e:
+        logger.warning(f"[dispatch] synthesis pass failed: {e}")
+    return None
+
+
+# Returned (success=False) when the model keeps narrating tool calls as text
+# after nudging. Listed in the caller's salvage sentinels so empty-handed runs
+# fail loudly instead of shipping a transcript as a "report".
+FAKE_TOOL_CALL_FAILURE = (
+    "The agent kept writing its tool calls as plain text instead of executing "
+    "them, so no actual research was performed and no report was produced."
+)
+
+
 def _looks_like_preamble(text: str) -> bool:
     """Detect when an LLM 'final' text response is actually a preamble — the
     model announced what it was about to write, but never wrote it. Symptoms:
@@ -422,6 +817,7 @@ async def _dispatch_llm_loop(
     working_dir: str,
     max_rounds: int = 50,
     task_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, bool, list[dict]]:
     """Multi-round LLM tool-use loop. Returns (output, success, execution_log).
 
@@ -433,10 +829,21 @@ async def _dispatch_llm_loop(
     """
     rounds = 0
     execution_log: list[dict] = []
+    tools_executed = 0
     # Cap how many times we'll nudge past a preamble — without this, a model
     # stuck in announce-mode could burn the full max_rounds budget on filler.
     preamble_nudges_used = 0
     max_preamble_nudges = 2
+
+    # Let the live view show something the moment the loop starts, before the
+    # first (possibly slow) LLM call publishes any tool/response event.
+    if task_id:
+        await _publish_dispatch_event(task_id, {
+            "type": "status",
+            "ts": local_now().isoformat(),
+            "round": 0,
+            "message": "Starting — sending the task to the model…",
+        })
 
     while rounds < max_rounds:
         compacted = _compact_tool_history(messages)
@@ -446,7 +853,19 @@ async def _dispatch_llm_loop(
                 compacted, rounds, KEEP_RECENT_TOOL_RESULTS,
             )
 
-        result = await _dispatch_llm_call(messages, model=model, tools=tools)
+        # Tell the watcher we're calling the model this round, so the pane isn't
+        # blank while the call is in flight (heartbeats follow if it runs long).
+        if task_id:
+            await _publish_dispatch_event(task_id, {
+                "type": "status",
+                "ts": local_now().isoformat(),
+                "round": rounds,
+                "message": "Thinking…" if rounds == 0 else f"Thinking… (round {rounds + 1})",
+            })
+
+        result = await _dispatch_llm_call_with_heartbeat(
+            messages, model=model, tools=tools, task_id=task_id, rounds=rounds,
+        )
 
         choices = result.get("choices", [])
         if not choices:
@@ -458,22 +877,43 @@ async def _dispatch_llm_loop(
         finish_reason = choice.get("finish_reason")
 
         if not tool_calls:
+            salvaged = _parse_text_tool_calls(
+                msg.get("content") or "",
+                {t["function"]["name"] for t in tools},
+            )
+            if salvaged:
+                logger.warning(
+                    "[dispatch] Salvaged %d text-format tool call(s) the server "
+                    "didn't parse (round %d)", len(salvaged), rounds,
+                )
+                msg["content"] = _strip_text_tool_calls(msg.get("content") or "")
+                tool_calls = salvaged
+
+        if not tool_calls:
             content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
 
-            # Two ways the "no tool calls" branch can be a lie:
+            # Three ways the "no tool calls" branch can be a lie:
             #   1. finish_reason="length" — the model was mid-output when
             #      max_tokens cut it off. Treating that as the final answer
             #      ships a truncated deliverable.
             #   2. Content reads as a preamble ("…let me create it:") — the
             #      model announced the deliverable but never produced it.
+            #   3. Content contains tool calls written as plain text
+            #      ("[Calling tool: browse(...)]") — the model thought it was
+            #      calling tools but nothing was executed.
             truncated = finish_reason == "length"
             preamble = _looks_like_preamble(content)
-            if (truncated or preamble) and preamble_nudges_used < max_preamble_nudges:
+            fake_tool_calls = _contains_text_tool_calls(content)
+            # 4. A few-sentence "final" after a long tool session, without ever
+            #    calling report_complete — the deliverable never materialized.
+            thin_final = tools_executed >= 3 and len((content or "").strip()) < 500
+            if (truncated or preamble or fake_tool_calls or thin_final) \
+                    and preamble_nudges_used < max_preamble_nudges:
                 preamble_nudges_used += 1
                 logger.warning(
                     "[dispatch] Rejecting premature finish (round=%s, truncated=%s, "
-                    "preamble=%s, nudge=%s/%s); tail=%r",
-                    rounds, truncated, preamble,
+                    "preamble=%s, fake_tool_calls=%s, thin_final=%s, nudge=%s/%s); tail=%r",
+                    rounds, truncated, preamble, fake_tool_calls, thin_final,
                     preamble_nudges_used, max_preamble_nudges,
                     (content or "")[-160:],
                 )
@@ -499,6 +939,23 @@ async def _dispatch_llm_loop(
                         "result. Use write_file to save long documents, or call "
                         "report_complete with the complete content."
                     )
+                elif fake_tool_calls:
+                    nudge = (
+                        "You wrote your tool calls as plain text in your response — they "
+                        "were NOT executed. Nothing happens unless you emit them as real "
+                        "function/tool calls. Re-issue them as actual tool calls now, and "
+                        "once you have what you need, call report_complete with the full "
+                        "report content."
+                    )
+                elif thin_final:
+                    nudge = (
+                        f"You've executed {tools_executed} tools but ended with only a few "
+                        "sentences and never called report_complete. That is not the "
+                        "deliverable. If you are finished, call report_complete NOW with "
+                        "the FULL report content as the summary — everything you found, "
+                        "fully written out. If you are not finished, continue working "
+                        "with real tool calls."
+                    )
                 else:
                     nudge = (
                         "You announced the deliverable but didn't actually produce it. "
@@ -521,6 +978,10 @@ async def _dispatch_llm_loop(
             execution_log.append(entry)
             if task_id:
                 await _publish_dispatch_event(task_id, entry)
+            if fake_tool_calls:
+                # Nudges exhausted and the model is still narrating tool calls
+                # instead of executing them — there is no deliverable here.
+                return FAKE_TOOL_CALL_FAILURE, False, execution_log
             return final_text, True, execution_log
 
         # Log LLM reasoning/content if present
@@ -553,8 +1014,9 @@ async def _dispatch_llm_loop(
             logger.info(f"[dispatch] Tool call: {tool_name}({json.dumps(tool_args)[:200]})")
 
             tool_start = time.monotonic()
-            output = await _execute_dispatch_tool(bridge, tool_name, tool_args, working_dir)
+            output = await _execute_dispatch_tool(bridge, tool_name, tool_args, working_dir, user_id=user_id)
             tool_duration_ms = int((time.monotonic() - tool_start) * 1000)
+            tools_executed += 1
 
             # Log tool call
             entry = {
@@ -633,6 +1095,24 @@ class AgentDispatchService:
         config = get_vm_config_from_settings(preferences)
         return VMBridge(config)
 
+    def _resolve_bridge(self, db: Session, user_id: str, task) -> tuple[VMBridge, str, Optional[str]]:
+        """Pick the SSH transport for a task.
+
+        If task_metadata names a `target_host` (a registered ManagedHost), the
+        agent runs on THAT machine. Otherwise it runs on the user's sandbox VM.
+
+        Returns (bridge, label, working_dir_override).
+        """
+        target = (task.task_metadata or {}).get("target_host") if task else None
+        if target:
+            from app.services import host_inspector
+            host = host_inspector.get_host(db, user_id, target)
+            if host:
+                # Remote managed hosts have no ~/sandbox scaffold — work from $HOME.
+                return host_inspector.bridge_for(host), f"{host.name} ({host.hostname})", "~"
+            logger.warning(f"[dispatch] target_host '{target}' not found, using sandbox VM")
+        return self._get_bridge(db, user_id), "sandbox VM", None
+
     async def _classify_task(self, task_description: str) -> tuple[str, str, list]:
         """Classify a task as 'internal' or 'sandbox' using a fast LLM call.
 
@@ -692,6 +1172,7 @@ class AgentDispatchService:
         mode: str = "auto",
         working_directory: Optional[str] = None,
         notify_on_complete: bool = False,
+        target_host: Optional[str] = None,
     ) -> dict:
         """Dispatch a task to the appropriate execution mode.
 
@@ -740,6 +1221,18 @@ class AgentDispatchService:
             "notify_on_complete": notify_on_complete,
             "started_at": local_now().isoformat(),
         }
+        # Optional: dispatch the agent to a registered managed host instead of
+        # the default sandbox VM. Validated here so a bad name fails fast.
+        if target_host:
+            from app.services import host_inspector
+            _mh = host_inspector.get_host(db, user_id, target_host)
+            if not _mh:
+                return {
+                    "task_id": None,
+                    "status": "error",
+                    "error": f"No managed host named '{target_host}'. Add it with /host add first.",
+                }
+            task_metadata["target_host"] = _mh.name
         if used_skill_ids:
             task_metadata["used_skill_ids"] = used_skill_ids
             task_metadata["skill_context"] = self._format_skills_for_prompt(relevant_skills)
@@ -1009,6 +1502,9 @@ class AgentDispatchService:
                     continue  # Still running, skip
 
             task.status = "failed"
+            # error_message is what the task list/detail UIs render — leaving
+            # it empty made restart-orphaned tasks look like silent failures.
+            task.error_message = "Task interrupted by a backend restart — retry to re-run it"
             meta = task.task_metadata or {}
             meta["error"] = "Task abandoned by server restart"
             meta["recovered_at"] = local_now().isoformat()
@@ -1235,6 +1731,39 @@ class AgentDispatchService:
         if stuck_tasks:
             db.commit()
 
+        # Reconcile orphaned missions: several terminal task paths historically
+        # missed the mission update, leaving missions stuck in running/pending
+        # forever (they surface as un-closable "open tasks" in the apps). Mirror
+        # the linked task's terminal state; missions with no surviving task that
+        # haven't moved in 24h are failed.
+        open_missions = (
+            db.query(Mission)
+            .filter(
+                Mission.user_id == user_id,
+                Mission.state.in_(["running", "pending"]),
+            )
+            .all()
+        )
+        reconciled = 0
+        for m in open_missions:
+            linked = (
+                db.query(BackgroundTask)
+                .filter(BackgroundTask.task_metadata["mission_id"].astext == str(m.id))
+                .order_by(BackgroundTask.created_at.desc())
+                .first()
+            )
+            if linked and linked.status in ("completed", "failed", "cancelled", "superseded"):
+                m.state = "done" if linked.status == "completed" else "failed"
+                m.completed_at = m.completed_at or local_now()
+                reconciled += 1
+            elif not linked and m.updated_at and m.updated_at < cutoff - timedelta(hours=20):
+                m.state = "failed"
+                m.completed_at = local_now()
+                reconciled += 1
+        if reconciled:
+            db.commit()
+            logger.info(f"[dispatch] Reconciled {reconciled} orphaned missions to terminal state")
+
         tasks = (
             db.query(BackgroundTask)
             .filter(
@@ -1429,8 +1958,10 @@ class AgentDispatchService:
             )
             await self._emit_progress(user_id, task_id, "completed",
                                       summary=summary[:200])
-            await self._notify(user_id, task_id, "completed",
-                               f"Agent task completed: {task_description[:100]}")
+            # NOTE: no generic _notify() here — _deliver_result_to_user already
+            # sent the user-facing push (deep-linked to the result note) and an
+            # attention-inbox item. A second "Agent Task Update" push would just
+            # double-notify without opening the note.
             await self._notify_completion(user_id, task_id, task_description,
                                           summary, notify_on_complete)
 
@@ -1594,8 +2125,10 @@ class AgentDispatchService:
             )
             await self._emit_progress(user_id, task_id, "completed",
                                       summary=summary[:200])
-            await self._notify(user_id, task_id, "completed",
-                               f"Agent task completed: {task_description[:100]}")
+            # NOTE: no generic _notify() here — _deliver_result_to_user already
+            # sent the user-facing push (deep-linked to the result note) and an
+            # attention-inbox item. A second "Agent Task Update" push would just
+            # double-notify without opening the note.
             await self._notify_completion(user_id, task_id, task_description,
                                           summary, notify_on_complete)
 
@@ -1661,10 +2194,23 @@ class AgentDispatchService:
             await self._emit_progress(user_id, task_id, "running",
                                       summary="Connecting to agent VM...")
 
-            bridge = self._get_bridge(db, user_id)
+            bridge, host_label, working_dir_override = self._resolve_bridge(db, user_id, task)
             vm_status = await bridge.test_connection()
 
             if vm_status != VMConnectionStatus.CONNECTED:
+                # A task explicitly targeting a managed host can't fall back to
+                # internal tools (those can't reach the host) — fail clearly.
+                if working_dir_override is not None:
+                    msg = f"Couldn't reach {host_label} over SSH ({vm_status.value})."
+                    self._update_mission_step(db, mission_id, 0, "failed",
+                                              result_data={"error": msg})
+                    task.status = "failed"
+                    task.error_message = msg
+                    self._update_mission_state(db, mission_id, "failed")
+                    db.commit()
+                    await self._emit_progress(user_id, task_id, "failed", summary=msg)
+                    await self._notify_completion(db, user_id, task_id, "failed", msg)
+                    return
                 # Fall back to internal mode
                 logger.warning(f"[dispatch] VM {vm_status.value}, falling back to internal mode for task {task_id}")
                 self._update_mission_step(db, mission_id, 0, "done",
@@ -1694,11 +2240,11 @@ class AgentDispatchService:
             if skill_context:
                 prompt += "\n\n" + skill_context
 
-            working_dir = DISPATCH_WORKING_DIR
+            working_dir = working_dir_override or DISPATCH_WORKING_DIR
             system_prompt = (
-                f"You are Sara, an AI assistant with shell access to a sandbox VM.\n"
+                f"You are Sara, an AI assistant with shell access to {host_label}.\n"
                 f"Working directory: {working_dir}\n\n"
-                f"You have tools to run shell commands, read/write files on the VM.\n"
+                f"You have tools to run shell commands, read/write files on this machine.\n"
                 f"Complete the task below. When finished, call report_complete with a summary.\n"
                 f"If a command fails, try to diagnose and fix the issue.\n"
                 f"Do not give up without trying at least a few approaches."
@@ -1713,26 +2259,58 @@ class AgentDispatchService:
                 bridge=bridge, working_dir=working_dir,
                 max_rounds=50,
                 task_id=task_id,
+                user_id=user_id,
             )
 
             meta = task.task_metadata or {}
             meta["execution_log"] = execution_log
 
             if not success:
-                self._update_mission_step(db, mission_id, 1, "failed",
-                                          error=output[:500])
-                self._update_mission_state(db, mission_id, "failed")
-                task.status = "failed"
-                meta["error"] = output[:5000]
-                task.task_metadata = {**meta}
-                db.commit()
-                used_skill_ids = meta.get("used_skill_ids", [])
-                self._track_skill_usage(db, used_skill_ids, succeeded=False)
-                await self._emit_progress(user_id, task_id, "failed",
-                                          summary=output[:200])
-                await self._notify(user_id, task_id, "failed",
-                                   f"Agent task failed: {output[:200]}")
-                return
+                # success=False also covers benign endings — the max-rounds cap
+                # or report_complete(success=False) — where the agent still
+                # produced something usable (a written report, or browser
+                # screenshots). Pushing a bald "Agent task failed" in that case
+                # throws the real work away and reads as a false alarm. So only
+                # treat it as a HARD failure (status=failed + notify) when there
+                # is nothing to salvage; otherwise fall through and deliver a
+                # PARTIAL result, staying quiet on the failure channel.
+                salvage = (output or "").strip()
+                sentinels = ("(Maximum tool-call rounds reached)",
+                             "LLM returned no choices",
+                             FAKE_TOOL_CALL_FAILURE)
+                is_sentinel = any(salvage.startswith(s) for s in sentinels)
+                gallery = self._collect_browse_screenshots(execution_log)
+                has_usable_output = (bool(salvage) and not is_sentinel) or bool(gallery)
+
+                if not has_usable_output:
+                    self._update_mission_step(db, mission_id, 1, "failed",
+                                              error=output[:500])
+                    self._update_mission_state(db, mission_id, "failed")
+                    task.status = "failed"
+                    meta["error"] = output[:5000]
+                    task.task_metadata = {**meta}
+                    db.commit()
+                    used_skill_ids = meta.get("used_skill_ids", [])
+                    self._track_skill_usage(db, used_skill_ids, succeeded=False)
+                    await self._emit_progress(user_id, task_id, "failed",
+                                              summary=output[:200])
+                    await self._notify(user_id, task_id, "failed",
+                                       f"Agent task failed: {output[:200]}")
+                    return
+
+                # Salvageable — record it as partial and let the completion
+                # path below create + deliver the result note as usual.
+                logger.info(
+                    "[dispatch] task %s ended success=False but has usable output "
+                    "(%d chars text, screenshots=%s); delivering as partial result",
+                    task_id, len(salvage), bool(gallery),
+                )
+                meta["partial"] = True
+                if is_sentinel or not salvage:
+                    output = (
+                        "⚠️ The agent stopped before formally wrapping up — "
+                        "here's what it gathered before stopping."
+                    )
 
             # Completed
             self._update_mission_step(db, mission_id, 1, "done",
@@ -1742,6 +2320,37 @@ class AgentDispatchService:
             self._update_mission_step(db, mission_id, 2, "running")
 
             summary = output or "Task completed"
+
+            # Writing pass: if the run gathered research material but the
+            # loop's final output isn't already a real report, synthesize the
+            # deliverable in a dedicated no-tools call over the gathered
+            # material. This is what turns "did the research" into "wrote the
+            # report" reliably.
+            research_calls = sum(
+                1 for e in execution_log
+                if e.get("type") == "tool_call" and e.get("tool") in _RESEARCH_TOOLS
+            )
+            if research_calls >= 3 and not _is_report_grade(summary):
+                await self._emit_progress(user_id, task_id, "running",
+                                          summary="Writing final report...")
+                report = await _synthesize_report(
+                    task_description, execution_log, summary,
+                )
+                if report:
+                    logger.info(
+                        "[dispatch] synthesized final report (%d chars) for task %s "
+                        "— loop output was not report-grade (%d chars)",
+                        len(report), task_id, len(summary or ""),
+                    )
+                    meta["synthesized_report"] = True
+                    summary = report
+
+            # Deterministically append any browser screenshots captured during
+            # the run — the local model is unreliable about embedding them, so
+            # we build the gallery from the execution log regardless.
+            gallery = self._collect_browse_screenshots(execution_log)
+            if gallery and "/browse-shots/" not in summary:
+                summary = f"{summary}\n\n{gallery}"
 
             task.status = "completed"
             task.completed_at = local_now()
@@ -1796,8 +2405,10 @@ class AgentDispatchService:
             )
             await self._emit_progress(user_id, task_id, "completed",
                                       summary=summary[:200])
-            await self._notify(user_id, task_id, "completed",
-                               f"Agent task completed: {task_description[:100]}")
+            # NOTE: no generic _notify() here — _deliver_result_to_user already
+            # sent the user-facing push (deep-linked to the result note) and an
+            # attention-inbox item. A second "Agent Task Update" push would just
+            # double-notify without opening the note.
             await self._notify_completion(user_id, task_id, task_description,
                                           summary, notify_on_complete)
 
@@ -2051,6 +2662,37 @@ class AgentDispatchService:
         return created_ids
 
     @staticmethod
+    def _collect_browse_screenshots(execution_log: list) -> str:
+        """Build a markdown screenshot gallery from `browse` tool results.
+
+        Each browse result embeds `![…](…/browse-shots/<id>.png)`. We pull those
+        out (with the page URL as a label) so screenshots always appear in the
+        report even when the model forgets to embed them.
+        """
+        if not execution_log:
+            return ""
+        img_re = re.compile(r"!\[[^\]]*\]\((https?://[^)\s]+/browse-shots/[^)\s]+)\)")
+        seen: set[str] = set()
+        items: list[str] = []
+        for e in execution_log:
+            if e.get("type") != "tool_call" or e.get("tool") != "browse":
+                continue
+            result = e.get("result") or ""
+            m = img_re.search(result)
+            if not m:
+                continue
+            shot_url = m.group(1)
+            if shot_url in seen:
+                continue
+            seen.add(shot_url)
+            page = (e.get("args") or {}).get("url") or ""
+            label = f"**{page}**\n\n" if page else ""
+            items.append(f"{label}![screenshot]({shot_url})")
+        if not items:
+            return ""
+        return "## Screenshots\n\n" + "\n\n".join(items)
+
+    @staticmethod
     def _extract_file_paths(summary: str, execution_log: list = None) -> List[str]:
         """Extract VM file paths from agent output and execution log."""
         paths = set()
@@ -2085,6 +2727,40 @@ class AgentDispatchService:
 
     async def _create_result_note(
         self, db: Session, user_id: str, task_description: str, output: str,
+        artifacts: List[str] = None,
+    ) -> Optional[str]:
+        """Create a note in the Agent Workspace folder with the task result.
+
+        If the output is a real report (starts with a '# Title' line), the
+        note takes that title and leads with the content — the task prompt is
+        demoted to a footer. Otherwise falls back to the 'Agent Result:'
+        wrapper so thin outputs are still clearly labeled as agent output.
+        """
+        first_line = (output or "").lstrip().split("\n", 1)[0]
+        title_match = re.match(r"^#\s+(\S.{3,150})$", first_line)
+        if title_match:
+            note_title = title_match.group(1).strip()
+            # Drop the title line from the body — the note title carries it.
+            body = (output or "").lstrip().split("\n", 1)
+            body = body[1].lstrip("\n") if len(body) > 1 else ""
+            footer = f"\n\n---\n*Agent task:* {task_description[:500]}"
+            return await self._create_result_note_raw(
+                db, user_id, note_title, body + footer, artifacts,
+            )
+        return await self._create_result_note_raw(
+            db, user_id,
+            f"Agent Result: {task_description[:80]}",
+            (
+                f"# Agent Task Result\n\n"
+                f"**Task:** {task_description}\n\n"
+                f"---\n\n"
+                f"{output}"
+            ),
+            artifacts,
+        )
+
+    async def _create_result_note_raw(
+        self, db: Session, user_id: str, note_title: str, note_body: str,
         artifacts: List[str] = None,
     ) -> Optional[str]:
         """Create a note in the Agent Workspace folder with the task result.
@@ -2128,14 +2804,8 @@ class AgentDispatchService:
             note = Note(
                 id=note_id,
                 user_id=user_id,
-                title=f"Agent Result: {task_description[:80]}",
-                content=(
-                    f"# Agent Task Result\n\n"
-                    f"{files_header}"
-                    f"**Task:** {task_description}\n\n"
-                    f"---\n\n"
-                    f"{output}"
-                ),
+                title=note_title,
+                content=f"{files_header}{note_body}",
                 folder_id=folder_id,
             )
             db.add(note)
@@ -2168,6 +2838,18 @@ class AgentDispatchService:
         task_description: str, summary: str, note_id: Optional[str],
     ):
         """Push task result to both chat delivery and attention inbox."""
+        # Use the real note title when we have one — "Agent: <task echo>" in
+        # the push tells David nothing the task prompt didn't.
+        note_title = f"Agent: {task_description[:80]}"
+        if note_id:
+            try:
+                from app.models.note import Note
+                n = db.query(Note).filter(Note.id == note_id).first()
+                if n and n.title:
+                    note_title = n.title
+            except Exception:
+                pass
+
         # 1. Real-time chat injection / push notification
         try:
             from app.services.task_result_delivery import deliver_task_result
@@ -2176,7 +2858,7 @@ class AgentDispatchService:
                 task_id=task_id,
                 task_query=task_description,
                 result_note_id=note_id,
-                result_note_title=f"Agent: {task_description[:80]}",
+                result_note_title=note_title,
                 result_summary=summary[:2000],
                 db=db,
             )

@@ -51,6 +51,7 @@ class StandingOrderService:
         action_config: Dict,
         source: str = "user",
         pattern_id: Optional[int] = None,
+        condition: Optional[Any] = None,
     ) -> Dict:
         """
         Create a new standing order.
@@ -69,10 +70,11 @@ class StandingOrderService:
         result = db.execute(text("""
             INSERT INTO standing_order
             (user_id, description, trigger_type, trigger_config, action_type, action_config,
-             source, pattern_id, status, created_at)
+             source, pattern_id, condition, status, created_at)
             VALUES
             (:user_id, :description, :trigger_type, CAST(:trigger_config AS jsonb), :action_type,
-             CAST(:action_config AS jsonb), :source, :pattern_id, 'active', NOW())
+             CAST(:action_config AS jsonb), :source, :pattern_id,
+             CAST(:condition AS jsonb), 'active', NOW())
             RETURNING id
         """), {
             "user_id": user_id,
@@ -83,6 +85,7 @@ class StandingOrderService:
             "action_config": json.dumps(action_config),
             "source": source,
             "pattern_id": pattern_id,
+            "condition": json.dumps(condition) if condition else None,
         })
         order_id = result.fetchone()[0]
         db.commit()
@@ -97,7 +100,7 @@ class StandingOrderService:
 
         result = db.execute(text("""
             SELECT id, description, trigger_type, trigger_config, action_type, action_config,
-                   source, status, last_executed_at, execution_count, created_at
+                   source, status, last_executed_at, execution_count, created_at, condition
             FROM standing_order
             WHERE user_id = :user_id AND status = :status
             ORDER BY created_at DESC
@@ -111,6 +114,7 @@ class StandingOrderService:
                 "trigger_config": r.trigger_config if isinstance(r.trigger_config, dict) else json.loads(r.trigger_config or "{}"),
                 "action_type": r.action_type,
                 "action_config": r.action_config if isinstance(r.action_config, dict) else json.loads(r.action_config or "{}"),
+                "condition": self._parse_condition(r.condition),
                 "source": r.source,
                 "status": r.status,
                 "last_executed_at": r.last_executed_at.isoformat() if r.last_executed_at else None,
@@ -169,7 +173,7 @@ class StandingOrderService:
 
         # Get active orders matching trigger type
         result = db.execute(text("""
-            SELECT id, description, trigger_type, trigger_config, action_type, action_config
+            SELECT id, description, trigger_type, trigger_config, action_type, action_config, condition
             FROM standing_order
             WHERE user_id = :user_id AND status = 'active' AND trigger_type = :trigger_type
         """), {"user_id": DAVID_USER_ID, "trigger_type": trigger_type})
@@ -178,6 +182,7 @@ class StandingOrderService:
         for order in result.fetchall():
             trigger_config = order.trigger_config if isinstance(order.trigger_config, dict) else json.loads(order.trigger_config or "{}")
             action_config = order.action_config if isinstance(order.action_config, dict) else json.loads(order.action_config or "{}")
+            condition = self._parse_condition(order.condition)
 
             if self._trigger_matches(trigger_type, trigger_config, context):
                 # Check cooldown (don't execute same order more than once per period)
@@ -192,6 +197,12 @@ class StandingOrderService:
                     minutes_since = (datetime.now(USER_TZ) - last_exec.executed_at.replace(tzinfo=USER_TZ)).total_seconds() / 60
                     if minutes_since < cooldown_minutes:
                         continue
+
+                # Conditional gate — e.g. "only if I'm not in focus mode / a meeting".
+                cond_ok, cond_reason = await self._evaluate_condition(db, condition, context)
+                if not cond_ok:
+                    logger.info(f"Standing order #{order.id} '{order.description}' skipped — condition not met: {cond_reason}")
+                    continue
 
                 # Execute the action
                 success = await self._execute_action(order.action_type, action_config, context)
@@ -245,7 +256,7 @@ class StandingOrderService:
         from sqlalchemy import text
 
         result = db.execute(text("""
-            SELECT id, description, trigger_config, action_type, action_config
+            SELECT id, description, trigger_config, action_type, action_config, condition
             FROM standing_order
             WHERE user_id = :user_id AND status = 'active' AND trigger_type = 'time'
         """), {"user_id": DAVID_USER_ID})
@@ -254,6 +265,7 @@ class StandingOrderService:
         for order in result.fetchall():
             trigger_config = order.trigger_config if isinstance(order.trigger_config, dict) else json.loads(order.trigger_config or "{}")
             action_config = order.action_config if isinstance(order.action_config, dict) else json.loads(order.action_config or "{}")
+            condition = self._parse_condition(order.condition)
 
             target_hour = trigger_config.get("hour")
             target_minute = trigger_config.get("minute", 0)
@@ -286,12 +298,18 @@ class StandingOrderService:
             if last_exec:
                 continue
 
+            # Conditional gate — e.g. "wake me at 6 UNLESS I slept badly".
+            cond_ok, cond_reason = await self._evaluate_condition(db, condition, {"time": now.isoformat()})
+            if not cond_ok:
+                logger.info(f"Standing order #{order.id} '{order.description}' skipped — condition not met: {cond_reason}")
+                continue
+
             # Execute
             success = await self._execute_action(order.action_type, action_config, {"time": now.isoformat()})
 
             await self._log_action(
                 db, order.id, order.action_type, action_config,
-                trigger_context={"time": now.isoformat(), "trigger_type": "time"},
+                trigger_context={"time": now.isoformat(), "trigger_type": "time", "condition": cond_reason},
                 success=success, description=order.description,
             )
 
@@ -346,6 +364,85 @@ class StandingOrderService:
                 return str(required_id) == str(actual_id)
 
         return False
+
+    def _parse_condition(self, raw) -> Optional[Any]:
+        """JSONB condition -> dict/list (or None). Tolerates string-encoded JSON."""
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, (dict, list)):
+            return raw
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    async def _evaluate_condition(self, db, condition, context: Dict) -> tuple:
+        """
+        Evaluate a standing order's optional condition at fire time. This is
+        what turns a mechanical trigger into a contextual one — "wake me at 6
+        UNLESS I slept badly", "only if I'm not in focus mode".
+
+        A condition is a dict, or a list of dicts (ALL must pass). Each dict has
+        a "type" plus type-specific params. Returns (passes, reason). Missing
+        data fails OPEN (action still fires) so a sensor gap never silently
+        swallows a wake-up.
+        """
+        if not condition:
+            return True, ""
+        conds = condition if isinstance(condition, list) else [condition]
+        reasons = []
+        for c in conds:
+            if not isinstance(c, dict):
+                continue
+            ok, reason = await self._check_one_condition(db, (c.get("type") or "").lower(), c)
+            reasons.append(reason)
+            if not ok:
+                return False, reason
+        return True, "; ".join(r for r in reasons if r)
+
+    async def _check_one_condition(self, db, ctype: str, c: Dict) -> tuple:
+        """Evaluate a single condition clause. Fail-open on missing data/errors."""
+        from sqlalchemy import text
+        try:
+            if ctype in ("sleep_quality", "sleep"):
+                min_hours = float(c.get("min_hours", 6.0))
+                row = db.execute(text("""
+                    SELECT sleep_hours FROM daily_recovery_log
+                    WHERE user_id = :uid AND sleep_hours IS NOT NULL
+                    ORDER BY log_date DESC LIMIT 1
+                """), {"uid": DAVID_USER_ID}).fetchone()
+                if not row or row[0] is None:
+                    return True, "no sleep data (fail-open)"
+                slept = float(row[0])
+                if slept < min_hours:
+                    return False, f"slept {slept:.1f}h (< {min_hours:.0f}h)"
+                return True, f"slept {slept:.1f}h"
+
+            if ctype in ("activity_state", "activity"):
+                from app.services.activity_state_machine import activity_state_machine
+                snap = activity_state_machine.current
+                state = (snap.state.value if hasattr(snap.state, "value") else str(snap.state)).lower()
+                if "not_in" in c and state in [str(s).lower() for s in c["not_in"]]:
+                    return False, f"activity={state} (blocked)"
+                if "in" in c and state not in [str(s).lower() for s in c["in"]]:
+                    return False, f"activity={state} (not allowed)"
+                if "equals" in c and state != str(c["equals"]).lower():
+                    return False, f"activity={state} (≠ {c['equals']})"
+                return True, f"activity={state}"
+
+            if ctype == "interruptibility":
+                from app.services.activity_state_machine import activity_state_machine
+                score = float(getattr(activity_state_machine.current, "interruptibility", 0.5))
+                min_score = float(c.get("min", 0.0))
+                if score < min_score:
+                    return False, f"interruptibility {score:.2f} (< {min_score:.2f})"
+                return True, f"interruptibility {score:.2f}"
+
+        except Exception as e:
+            logger.warning(f"Condition eval failed ({ctype}): {e}")
+            return True, f"{ctype} eval error (fail-open)"
+
+        return True, f"unknown condition '{ctype}' (ignored)"
 
     async def _execute_action(self, action_type: str, config: Dict, context: Dict) -> bool:
         """Execute a standing order action."""

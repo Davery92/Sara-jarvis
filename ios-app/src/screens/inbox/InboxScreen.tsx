@@ -98,9 +98,9 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const ATTENTION_PRIORITY_COLORS: Record<string, string> = {
-  critical: '#ef4444',
-  urgent: '#f97316',
-  high: '#eab308',
+  critical: colors.error,
+  urgent: colors.hues.orange,
+  high: colors.hues.amber,
   normal: colors.info,
   low: colors.textMuted,
 };
@@ -167,7 +167,7 @@ function SwipeableArchiveRow({ children, onArchive }: { children: React.ReactNod
   return (
     <View style={{ overflow: 'hidden' }}>
       <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.error, justifyContent: 'center', alignItems: 'flex-end', paddingRight: spacing.lg }]}>
-        <Text style={{ color: '#fff', fontWeight: '600', fontSize: fontSizes.sm }}>Archive</Text>
+        <Text style={{ color: colors.text, fontWeight: '600', fontSize: fontSizes.sm }}>Archive</Text>
       </View>
       <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
         {children}
@@ -666,7 +666,7 @@ export default function InboxScreen() {
           styles.itemCard,
           isUnread && styles.itemCardUnread,
           isCompleted && styles.itemCardCompleted,
-          isHitl && !isCompleted && { borderLeftWidth: 3, borderLeftColor: '#f97316' },
+          isHitl && !isCompleted && { borderLeftWidth: 3, borderLeftColor: colors.hues.orange },
         ]}
         onPress={() => {
           const nextExpanded = isExpanded ? null : item.id;
@@ -1369,18 +1369,18 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     paddingTop: spacing.sm,
     borderTopWidth: 1,
-    borderTopColor: '#f9731633',
+    borderTopColor: 'rgba(251, 146, 60, 0.20)',
   },
   hitlQuestionBox: {
-    backgroundColor: '#f9731618',
+    backgroundColor: 'rgba(251, 146, 60, 0.10)',
     borderWidth: 1,
-    borderColor: '#f9731633',
+    borderColor: 'rgba(251, 146, 60, 0.20)',
     borderRadius: borderRadius.md,
     padding: spacing.sm,
     marginBottom: spacing.sm,
   },
   hitlQuestionLabel: {
-    color: '#f97316',
+    color: colors.hues.orange,
     fontSize: fontSizes.xs,
     fontWeight: '600',
     marginBottom: 4,
@@ -1397,7 +1397,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: '#f9731644',
+    borderColor: 'rgba(251, 146, 60, 0.26)',
     borderRadius: borderRadius.md,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
@@ -1405,13 +1405,13 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
   },
   hitlReplySend: {
-    backgroundColor: '#f9731622',
+    backgroundColor: 'rgba(251, 146, 60, 0.14)',
     borderRadius: borderRadius.md,
     paddingHorizontal: spacing.md,
     justifyContent: 'center',
   },
   hitlReplySendText: {
-    color: '#f97316',
+    color: colors.hues.orange,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },

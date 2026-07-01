@@ -30,6 +30,73 @@ def _to_naive_local(dt: datetime, tz: ZoneInfo) -> datetime:
     return dt
 
 
+def _supersede_email_duplicates(db: Session, user_id: str, ios_event: CalendarEvent) -> None:
+    """When the iPhone syncs in an event Sara already created from an email
+    invite, the iOS copy wins: repoint any linked emails at it and delete the
+    email_sync duplicate. Match = similar normalized title, same day, starts
+    within 90 minutes."""
+    try:
+        from datetime import timedelta
+        from app.tasks.email_sync import _normalize_meeting_title
+        from app.models.email import Email as EmailModel
+
+        day_start = ios_event.start_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        candidates = db.query(CalendarEvent).filter(
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.source == "email_sync",
+            CalendarEvent.start_time >= day_start,
+            CalendarEvent.start_time < day_end,
+        ).all()
+
+        ios_norm = _normalize_meeting_title(ios_event.title)
+        for dup in candidates:
+            dup_norm = _normalize_meeting_title(dup.title)
+            titles_match = (
+                dup_norm == ios_norm or dup_norm in ios_norm or ios_norm in dup_norm
+            )
+            if not titles_match:
+                continue
+            minutes_apart = abs((dup.start_time - ios_event.start_time).total_seconds()) / 60
+            if minutes_apart > 90:
+                continue
+            db.query(EmailModel).filter(
+                EmailModel.calendar_event_id == dup.id
+            ).update({"calendar_event_id": ios_event.id})
+            db.delete(dup)
+            logger.info(
+                f"iOS sync superseded email_sync event {dup.id} "
+                f"('{dup.title}') with {ios_event.id}"
+            )
+    except Exception as e:
+        logger.warning(f"Cross-source supersede check failed: {e}")
+
+
+@router.get("/ownership")
+async def get_calendar_ownership(current_user: User = Depends(get_current_user)):
+    """The calendar→owner mapping used to attribute events to family members."""
+    from app.services.calendar_ownership import get_config
+    return get_config(force_reload=True)
+
+
+@router.put("/ownership")
+async def update_calendar_ownership(
+    overrides: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Replace the stored ownership overrides (merged over built-in defaults).
+
+    Shape: {"self_name": str, "family_members": {name: relation},
+            "calendar_owners": {calendar_name: "self"|"family"|"per_event"|<member name>}}
+    """
+    from app.services.calendar_ownership import save_config
+    allowed = {"self_name", "family_members", "calendar_owners"}
+    unknown = set(overrides) - allowed
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown keys: {sorted(unknown)}")
+    return save_config(overrides)
+
+
 @router.get("/events", response_model=List[CalendarEventResponse])
 async def list_calendar_events(
     start_date: Optional[str] = None,
@@ -341,6 +408,7 @@ async def sync_ios_calendar_events(
                 )
                 db.add(new_event)
                 db.flush()
+                _supersede_email_duplicates(db, current_user.id, new_event)
 
             synced += 1
         except Exception as e:

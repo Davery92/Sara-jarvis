@@ -63,13 +63,10 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
             phase = dict(phase_row._mapping)
             phase_name = phase["name"]
 
-            # Determine training vs rest day
-            sess = db.execute(text("""
-                SELECT id FROM workout_session
-                WHERE user_id = :uid AND session_date = :d
-                LIMIT 1
-            """), {"uid": user_id, "d": today}).fetchone()
-            is_training = sess is not None
+            # Determine training vs rest day — shared definition so this never
+            # contradicts the morning brief (session logged OR scheduled template).
+            from app.services.training_day import is_training_day
+            is_training = is_training_day(db, user_id, today)["is_training_day"]
 
             if is_training:
                 target = {

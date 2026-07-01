@@ -14,22 +14,20 @@ function useSaraBadges() {
 
   const fetchBadges = useCallback(async () => {
     try {
-      const [statusData, attentionData, notificationData] = await Promise.allSettled([
+      const [statusData, badgeData] = await Promise.allSettled([
         apiClient.get('/api/sara/status'),
-        apiClient.getAttentionCount(),
-        apiClient.get('/api/notifications?limit=100'),
+        // Shared server-side formula — same number as the app icon badge and
+        // the inbox screen counts.
+        apiClient.getInboxBadge(),
       ]);
 
       if (statusData.status === 'fulfilled') {
         const status = statusData.value as any;
         setChatBadge((status?.pending_observations || 0) > 0);
       }
-      const attentionUnread = attentionData.status === 'fulfilled' ? ((attentionData.value as any)?.unread || 0) : 0;
-      const notificationUnread = notificationData.status === 'fulfilled'
-        ? ((((notificationData.value as any)?.notifications) || []).filter((item: any) => !item?.read_at && !item?.engaged && !item?.dismissed_at).length)
-        : 0;
-
-      setAssistantInboxBadge(attentionUnread + notificationUnread);
+      if (badgeData.status === 'fulfilled') {
+        setAssistantInboxBadge(badgeData.value || 0);
+      }
     } catch {}
   }, []);
 
@@ -205,7 +203,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   badgeCountText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 10,
     fontWeight: '700',
   },

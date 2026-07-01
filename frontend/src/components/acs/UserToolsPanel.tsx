@@ -142,35 +142,29 @@ export default function UserToolsPanel() {
     const isPending = !t.enabled
     const activeVersion = t.active_version?.version
     return (
-      <li key={t.id} className="bg-gray-900/40 rounded border border-gray-800">
-        <div className="px-3 py-2 flex items-start gap-3">
-          <span
-            className={`mt-1 h-2 w-2 rounded-full shrink-0 ${
-              t.enabled ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
-            }`}
-            title={t.enabled ? 'enabled' : 'pending review'}
-          />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="text-sm font-mono text-zinc-100">{t.name}</span>
-              <span className="text-[10px] text-zinc-500">v{activeVersion ?? '?'}</span>
+      <li key={t.id} className={isPending ? 'border-l-2 border-amber-400/70 pl-3' : ''}>
+        <div className="group flex items-start gap-3 rounded-md px-2 py-2 transition-colors hover:bg-white/[0.04]">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="font-mono text-sm text-slate-200">{t.name}</span>
+              <span className="font-mono text-xs text-slate-500">v{activeVersion ?? '?'}</span>
               {t.latest_version && t.latest_version.version !== activeVersion && (
-                <span className="text-[10px] text-amber-400">
-                  (latest v{t.latest_version.version} not active)
+                <span className="text-xs text-amber-300/80">
+                  latest v{t.latest_version.version} not active
                 </span>
               )}
-              <span className="text-[10px] text-zinc-500 ml-auto">
+              <span className="ml-auto text-xs text-slate-500">
                 {t.invocation_count_24h} calls/24h
               </span>
             </div>
-            <div className="text-xs text-zinc-400 mt-0.5">{t.description}</div>
+            <div className="mt-0.5 text-xs text-slate-500">{t.description}</div>
           </div>
-          <div className="flex gap-1 shrink-0">
+          <div className="flex shrink-0 items-center gap-2">
             {isPending ? (
               <button
                 onClick={() => enable(t.name)}
                 disabled={busy === t.name}
-                className="text-xs px-2 py-1 bg-emerald-600/80 hover:bg-emerald-500 disabled:bg-gray-700 text-white rounded"
+                className="rounded-lg border border-white/10 px-2 py-1 text-xs text-teal-300 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
               >
                 Enable
               </button>
@@ -178,20 +172,20 @@ export default function UserToolsPanel() {
               <button
                 onClick={() => disable(t.name)}
                 disabled={busy === t.name}
-                className="text-xs px-2 py-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-zinc-200 rounded"
+                className="text-xs text-slate-500 transition-colors hover:text-slate-300 disabled:opacity-40"
               >
                 Disable
               </button>
             )}
             <button
               onClick={() => toggle(t.name)}
-              className="text-xs px-2 py-1 text-zinc-400 hover:text-zinc-200"
+              className="text-xs text-slate-500 transition-colors hover:text-slate-300"
             >
               {isExpanded ? '▾' : '▸'}
             </button>
             <button
               onClick={() => remove(t.name)}
-              className="text-xs px-2 py-1 text-zinc-600 hover:text-red-400"
+              className="text-xs text-slate-600 transition-colors hover:text-rose-400"
               title="Delete"
             >
               ✕
@@ -200,36 +194,36 @@ export default function UserToolsPanel() {
         </div>
 
         {isExpanded && (
-          <div className="border-t border-gray-800 px-3 py-2 space-y-3">
+          <div className="ml-2 mt-1 space-y-4 border-l border-white/8 py-1 pl-4">
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Args schema</div>
-              <pre className="text-[11px] bg-black/40 rounded p-2 text-zinc-300 overflow-x-auto">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Args schema</div>
+              <pre className="overflow-x-auto rounded-lg bg-black/30 p-2 font-mono text-[11px] text-slate-400">
                 {JSON.stringify(t.args_schema, null, 2)}
               </pre>
             </div>
 
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                 Versions ({v.length})
               </div>
-              <ul className="space-y-1">
+              <ul className="space-y-2">
                 {v.map((ver) => (
-                  <li key={ver.id} className="bg-black/30 rounded p-2">
+                  <li key={ver.id}>
                     <div className="flex items-baseline gap-2 text-xs">
-                      <span className="font-mono text-zinc-200">v{ver.version}</span>
+                      <span className="font-mono text-slate-200">v{ver.version}</span>
                       {ver.version === activeVersion && (
-                        <span className="text-[10px] text-emerald-400 uppercase">active</span>
+                        <span className="font-mono text-[10px] uppercase tracking-wide text-emerald-300">active</span>
                       )}
-                      <span className="text-[10px] text-zinc-500">
+                      <span className="text-slate-500">
                         {timeAgo(ver.created_at)} ago
                       </span>
                       {ver.notes && (
-                        <span className="text-[10px] text-zinc-400 italic ml-auto truncate">
+                        <span className="ml-auto truncate text-slate-500">
                           “{ver.notes}”
                         </span>
                       )}
                     </div>
-                    <pre className="text-[11px] mt-1 bg-black/60 rounded p-2 text-zinc-300 overflow-x-auto whitespace-pre-wrap break-all">
+                    <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-black/30 p-2 font-mono text-[11px] text-slate-400">
                       {ver.code}
                     </pre>
                   </li>
@@ -238,40 +232,38 @@ export default function UserToolsPanel() {
             </div>
 
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                 Recent invocations ({inv.length})
               </div>
               {inv.length === 0 ? (
-                <div className="text-xs text-zinc-500 italic">no calls yet</div>
+                <div className="text-xs text-slate-500">No calls yet.</div>
               ) : (
-                <ul className="space-y-1">
+                <ul className="space-y-2">
                   {inv.map((iv) => (
-                    <li key={iv.id} className="bg-black/30 rounded p-2 text-xs">
+                    <li key={iv.id} className={`text-xs ${iv.error ? 'border-l-2 border-rose-400/70 pl-2' : ''}`}>
                       <div className="flex items-baseline gap-2">
-                        <span
-                          className={`text-[10px] uppercase tracking-wide px-1 rounded border ${
-                            iv.error
-                              ? 'bg-red-500/15 text-red-300 border-red-500/30'
-                              : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                          }`}
-                        >
+                        <span className={`rounded border px-1 font-mono text-[10px] uppercase tracking-wide ${
+                          iv.error
+                            ? 'border-rose-400/40 text-rose-300'
+                            : 'border-emerald-400/30 text-emerald-300'
+                        }`}>
                           {iv.error ? 'error' : 'ok'}
                         </span>
-                        <span className="text-zinc-500">{timeAgo(iv.started_at)} ago</span>
+                        <span className="text-slate-500">{timeAgo(iv.started_at)} ago</span>
                         {iv.duration_ms !== null && (
-                          <span className="text-zinc-500 ml-auto">{iv.duration_ms}ms</span>
+                          <span className="ml-auto tabular-nums text-slate-500">{iv.duration_ms}ms</span>
                         )}
                       </div>
-                      <pre className="text-[11px] mt-1 text-zinc-400 whitespace-pre-wrap break-all">
+                      <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-slate-500">
                         args: {JSON.stringify(iv.args)}
                       </pre>
                       {iv.error && (
-                        <pre className="text-[11px] mt-1 text-red-300 whitespace-pre-wrap break-all">
+                        <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-rose-300/80">
                           {iv.error}
                         </pre>
                       )}
                       {iv.result !== null && iv.result !== undefined && (
-                        <pre className="text-[11px] mt-1 text-zinc-300 whitespace-pre-wrap break-all">
+                        <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-slate-400">
                           → {JSON.stringify(iv.result)}
                         </pre>
                       )}
@@ -287,42 +279,40 @@ export default function UserToolsPanel() {
   }
 
   return (
-    <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h3 className="text-sm font-semibold text-zinc-200">Tools</h3>
-        <span className="text-xs text-zinc-500">
+    <section className="pt-6">
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Tools</h2>
+        <span className="text-xs text-slate-500">
           {active.length} active{pending.length > 0 ? ` · ${pending.length} pending review` : ''}
         </span>
       </div>
 
-      {loading && <div className="text-zinc-500 text-sm italic">Loading…</div>}
-      {error && <div className="text-red-400 text-sm mb-2">{error}</div>}
+      {loading && <p className="text-sm text-slate-500">Loading…</p>}
+      {error && <p className="mb-2 text-sm text-rose-400">{error}</p>}
 
       {pending.length > 0 && (
-        <div className="mb-3">
-          <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1">
+        <div className="mb-4">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-300/80">
             Pending review
           </div>
-          <ul className="space-y-2">{pending.map(renderTool)}</ul>
+          <ul className="space-y-1">{pending.map(renderTool)}</ul>
         </div>
       )}
 
       {active.length > 0 && (
         <div>
           {pending.length > 0 && (
-            <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Active
             </div>
           )}
-          <ul className="space-y-2">{active.map(renderTool)}</ul>
+          <ul className="space-y-1">{active.map(renderTool)}</ul>
         </div>
       )}
 
       {!loading && tools.length === 0 && !error && (
-        <div className="text-zinc-500 text-sm italic">
-          no user tools yet — Sara will propose these as she works
-        </div>
+        <p className="text-sm text-slate-500">No user tools yet — Sara will propose these as she works.</p>
       )}
-    </div>
+    </section>
   )
 }

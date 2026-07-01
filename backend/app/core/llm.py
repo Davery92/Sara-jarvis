@@ -292,7 +292,8 @@ class LLMClientWithFailover:
         tool_choice: str = "auto",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        extra_body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Send chat completion with automatic failover.
@@ -312,7 +313,7 @@ class LLMClientWithFailover:
 
         client, url = self._get_active_client_and_url()
         model_for_url = self.fallback_model if url == self.fallback_url else None
-        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens, model_override=model_for_url)
+        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens, model_override=model_for_url, extra_body=extra_body)
         req_timeout = timeout or self.request_timeout
 
         try:
@@ -352,7 +353,7 @@ class LLMClientWithFailover:
 
                     fallback_payload = self._build_payload(
                         messages, tools, tool_choice, temperature, max_tokens,
-                        model_override=self.fallback_model
+                        model_override=self.fallback_model, extra_body=extra_body
                     )
                     response = await self._fallback_client.post("/chat/completions", json=fallback_payload, timeout=req_timeout)
                     response.raise_for_status()
@@ -383,7 +384,8 @@ class LLMClientWithFailover:
         tool_choice: str,
         temperature: float,
         max_tokens: Optional[int],
-        model_override: Optional[str] = None
+        model_override: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Build request payload for OpenAI-compatible endpoint"""
         payload = {
@@ -398,6 +400,9 @@ class LLMClientWithFailover:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
+
+        if extra_body:
+            payload.update(extra_body)
 
         return payload
 
@@ -445,9 +450,17 @@ class LLMClientWithFailover:
         payload = {
             "model": self.model,
             "messages": filtered_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens or 4096,
         }
+
+        # Reasoning-only Claude models (Sonnet 5, Opus 4.7/4.8, Fable 5) 400 on
+        # `temperature`; only include it for models that accept sampling params.
+        from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
+        if claude_rejects_sampling_params(self.model):
+            if not claude_thinking_always_on(self.model):
+                payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["temperature"] = temperature
 
         if system_content:
             payload["system"] = system_content

@@ -237,8 +237,8 @@ class BehavioralPatternService:
                         confidence = :confidence,
                         status = :status,
                         source_context = CASE
-                            WHEN :context IS NOT NULL
-                            THEN source_context || E'\n' || :context
+                            WHEN CAST(:context AS TEXT) IS NOT NULL
+                            THEN source_context || E'\n' || CAST(:context AS TEXT)
                             ELSE source_context
                         END,
                         updated_at = NOW()
@@ -714,6 +714,12 @@ class BehavioralPatternService:
 
     def _conditions_similar(self, cond1: Dict, cond2: Dict) -> bool:
         """Check if two trigger conditions are similar enough to be the same pattern."""
+        # Entity-scoped patterns (home routines) are only the same pattern if
+        # they concern the same entity — otherwise every light active at the
+        # same hour collapses into one pattern.
+        if cond1.get("entity_id") != cond2.get("entity_id"):
+            return False
+
         # For weather triggers, check if thresholds are close
         if "temp_below_f" in cond1 and "temp_below_f" in cond2:
             if abs(cond1["temp_below_f"] - cond2["temp_below_f"]) <= 10:

@@ -144,9 +144,14 @@ export default function HealthDataScreen({ navigation }: Props) {
               });
               setBackfillStatus(result.message);
               if (result.success) {
+                // Show already-synced counts too, so "0 new" doesn't read as "nothing synced".
+                const workoutsTotal = result.workoutsInserted + result.workoutsDuplicate;
+                const workoutsPart = result.workoutsInserted > 0
+                  ? `${result.workoutsInserted} new workouts`
+                  : `${workoutsTotal} workouts (all already synced)`;
                 showToast(
                   'success',
-                  `Backfilled ${result.daysProcessed} days · ${result.metricsInserted} metrics · ${result.workoutsInserted} workouts`,
+                  `Backfilled ${result.daysProcessed} days · ${result.metricsInserted} new metrics · ${workoutsPart}`,
                 );
               } else {
                 showToast('error', result.message || 'Backfill failed');

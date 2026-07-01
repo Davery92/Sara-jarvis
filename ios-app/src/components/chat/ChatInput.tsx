@@ -16,9 +16,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { voiceService } from '../../services/voice';
 import { imagePickerService, ImageAttachment } from '../../services/imagePicker';
+import { documentPickerService, DocumentAttachment } from '../../services/documentPicker';
 
 interface ChatInputProps {
-  onSend: (message: string, images?: ImageAttachment[]) => void;
+  onSend: (message: string, images?: ImageAttachment[], documents?: DocumentAttachment[]) => void;
   onVoiceMessage?: (audioUri: string) => void;
   onHoldToTalkStart?: () => void;
   onFocus?: () => void;
@@ -45,65 +46,69 @@ export default function ChatInput({
   const [message, setMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
+  const [attachedDocuments, setAttachedDocuments] = useState<DocumentAttachment[]>([]);
   const scaleAnim = useState(new Animated.Value(1))[0];
 
   // Show recording indicator for both manual and continuous modes
   const showRecording = isRecording || isListeningContinuous;
 
+  const hasAttachments = attachedImages.length > 0 || attachedDocuments.length > 0;
+
   const handleSend = () => {
-    if ((message.trim() || attachedImages.length > 0) && !disabled) {
-      onSend(message.trim(), attachedImages.length > 0 ? attachedImages : undefined);
+    if ((message.trim() || hasAttachments) && !disabled) {
+      onSend(
+        message.trim(),
+        attachedImages.length > 0 ? attachedImages : undefined,
+        attachedDocuments.length > 0 ? attachedDocuments : undefined,
+      );
       setMessage('');
       setAttachedImages([]);
+      setAttachedDocuments([]);
     }
+  };
+
+  const pickGallery = async () => {
+    const image = await imagePickerService.pickFromGallery();
+    if (image) setAttachedImages(prev => [...prev, image]);
+  };
+
+  const takePhoto = async () => {
+    const image = await imagePickerService.takePhoto();
+    if (image) setAttachedImages(prev => [...prev, image]);
+  };
+
+  const pickDocument = async () => {
+    const doc = await documentPickerService.pickDocument();
+    if (doc) setAttachedDocuments(prev => [...prev, doc]);
   };
 
   const handleAddImage = () => {
     if (Platform.OS === 'ios') {
       ActionSheetIOS.showActionSheetWithOptions(
         {
-          options: ['Cancel', 'Choose from Gallery', 'Take a Photo'],
+          options: ['Cancel', 'Choose from Gallery', 'Take a Photo', 'Choose a File'],
           cancelButtonIndex: 0,
         },
         async (buttonIndex) => {
           if (buttonIndex === 1) {
-            const image = await imagePickerService.pickFromGallery();
-            if (image) {
-              setAttachedImages(prev => [...prev, image]);
-            }
+            await pickGallery();
           } else if (buttonIndex === 2) {
-            const image = await imagePickerService.takePhoto();
-            if (image) {
-              setAttachedImages(prev => [...prev, image]);
-            }
+            await takePhoto();
+          } else if (buttonIndex === 3) {
+            await pickDocument();
           }
         }
       );
     } else {
       // Android fallback - show Alert with options
       Alert.alert(
-        'Add Image',
+        'Add Attachment',
         'Choose an option',
         [
           { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Choose from Gallery',
-            onPress: async () => {
-              const image = await imagePickerService.pickFromGallery();
-              if (image) {
-                setAttachedImages(prev => [...prev, image]);
-              }
-            },
-          },
-          {
-            text: 'Take a Photo',
-            onPress: async () => {
-              const image = await imagePickerService.takePhoto();
-              if (image) {
-                setAttachedImages(prev => [...prev, image]);
-              }
-            },
-          },
+          { text: 'Choose from Gallery', onPress: pickGallery },
+          { text: 'Take a Photo', onPress: takePhoto },
+          { text: 'Choose a File', onPress: pickDocument },
         ]
       );
     }
@@ -111,6 +116,17 @@ export default function ChatInput({
 
   const removeImage = (index: number) => {
     setAttachedImages(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const removeDocument = (index: number) => {
+    setAttachedDocuments(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const formatFileSize = (bytes?: number) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const handleVoicePressIn = async () => {
@@ -233,6 +249,31 @@ export default function ChatInput({
           </ScrollView>
         )}
 
+        {/* Attached Documents Preview */}
+        {attachedDocuments.length > 0 && (
+          <View style={styles.documentPreviewContainer}>
+            {attachedDocuments.map((doc, index) => (
+              <View key={index} style={styles.documentChip}>
+                <Ionicons name="document-text-outline" size={18} color={colors.primary} />
+                <View style={styles.documentChipInfo}>
+                  <Text style={styles.documentChipName} numberOfLines={1}>
+                    {doc.name}
+                  </Text>
+                  {!!formatFileSize(doc.size) && (
+                    <Text style={styles.documentChipSize}>{formatFileSize(doc.size)}</Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={styles.removeDocumentButton}
+                  onPress={() => removeDocument(index)}
+                >
+                  <Ionicons name="close" size={14} color={colors.text} />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
+
         <View style={styles.inputContainer}>
           {/* Add image button */}
           <TouchableOpacity
@@ -251,12 +292,11 @@ export default function ChatInput({
           placeholderTextColor={colors.textMuted}
           onFocus={onFocus}
           multiline
-          maxLength={2000}
           editable={!disabled && !isRecording && !continuousVoiceMode}
             onSubmitEditing={handleSend}
             blurOnSubmit={false}
           />
-          {voiceEnabled && onVoiceMessage && !message.trim() && attachedImages.length === 0 && !continuousVoiceMode ? (
+          {voiceEnabled && onVoiceMessage && !message.trim() && !hasAttachments && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.voiceButton,
@@ -274,14 +314,14 @@ export default function ChatInput({
                 color={colors.text}
               />
             </TouchableOpacity>
-          ) : (message.trim() || attachedImages.length > 0) && !continuousVoiceMode ? (
+          ) : (message.trim() || hasAttachments) && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                ((!message.trim() && attachedImages.length === 0) || disabled) && styles.sendButtonDisabled,
+                ((!message.trim() && !hasAttachments) || disabled) && styles.sendButtonDisabled,
               ]}
               onPress={handleSend}
-              disabled={(!message.trim() && attachedImages.length === 0) || disabled}
+              disabled={(!message.trim() && !hasAttachments) || disabled}
             >
               <Ionicons name="arrow-up" size={18} color={colors.text} />
             </TouchableOpacity>
@@ -473,5 +513,41 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
     lineHeight: 18,
+  },
+  documentPreviewContainer: {
+    marginBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  documentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+  },
+  documentChipInfo: {
+    flex: 1,
+  },
+  documentChipName: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  documentChipSize: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginTop: 1,
+  },
+  removeDocumentButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

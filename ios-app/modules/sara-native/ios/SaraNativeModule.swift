@@ -113,7 +113,10 @@ public class SaraNativeModule: Module {
         let attrs = SaraEventAttributes(id: id, kind: kind, title: title)
         let state = SaraEventAttributes.ContentState(subtitle: subtitle, startEpochMs: startEpochMs)
         do {
-          let content = ActivityContent(state: state, staleDate: nil)
+          // Updates arrive every ~10s while the app polls; if none land for
+          // 30 min the app is gone and the activity should read as stale
+          // instead of "working" forever.
+          let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(30 * 60))
           let activity = try Activity.request(attributes: attrs, content: content, pushType: nil)
           return activity.id
         } catch {
@@ -130,7 +133,7 @@ public class SaraNativeModule: Module {
         Task {
           for activity in Activity<SaraEventAttributes>.activities where activity.attributes.id == id {
             let state = SaraEventAttributes.ContentState(subtitle: subtitle, startEpochMs: startEpochMs)
-            await activity.update(ActivityContent(state: state, staleDate: nil))
+            await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(30 * 60)))
           }
         }
       }
@@ -142,6 +145,19 @@ public class SaraNativeModule: Module {
       if #available(iOS 16.2, *) {
         Task {
           for activity in Activity<SaraEventAttributes>.activities where activity.attributes.id == id {
+            await activity.end(nil, dismissalPolicy: .immediate)
+          }
+        }
+      }
+      #endif
+    }
+
+    Function("endAllEventActivities") { (kind: String) in
+      #if canImport(ActivityKit)
+      if #available(iOS 16.2, *) {
+        Task {
+          for activity in Activity<SaraEventAttributes>.activities
+          where kind.isEmpty || activity.attributes.kind == kind {
             await activity.end(nil, dismissalPolicy: .immediate)
           }
         }

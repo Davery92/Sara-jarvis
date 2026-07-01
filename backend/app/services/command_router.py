@@ -32,8 +32,6 @@ class CommandType(str, Enum):
     WRITE_CLIPBOARD = "write_clipboard"
     FOCUS_WINDOW = "focus_window"
     TYPE_INTO_WINDOW = "type_into_window"
-    # Narrator: render a System AI popup. Payload is a serialized SystemEvent.
-    SYSTEM_EVENT = "system_event"
 
 
 @dataclass

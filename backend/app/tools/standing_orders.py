@@ -68,7 +68,10 @@ class StandingOrderCreateTool(BaseTool):
     def description(self) -> str:
         return (
             "Create a new standing order — a pre-authorized action Sara can execute autonomously. "
-            "Use when David says 'always lock doors at midnight' or 'turn off lights when I leave'."
+            "Use when David says 'always lock doors at midnight' or 'turn off lights when I leave'. "
+            "Supports an optional CONDITION that must hold at fire time, which turns a mechanical "
+            "trigger into a contextual one — e.g. 'wake me at 6 unless I slept badly' or 'remind me "
+            "only if I'm not in a meeting'. See the condition parameter."
         )
 
     @property
@@ -95,6 +98,20 @@ class StandingOrderCreateTool(BaseTool):
                 "action_config": {
                     "type": "object",
                     "description": "For 'home_control': {service, entity_id}. For 'notification': {title, message, urgency}. For bulk actions: {}.",
+                },
+                "condition": {
+                    "type": "object",
+                    "description": (
+                        "OPTIONAL gate the trigger must satisfy to actually fire. Omit for an "
+                        "unconditional order. A single clause, or a list of clauses (ALL must pass). "
+                        "Clause types: "
+                        "{type:'sleep_quality', min_hours:6} — only if David slept at least min_hours "
+                        "last night (use for 'wake me UNLESS I slept badly'); "
+                        "{type:'activity_state', not_in:['focused_work','in_meeting']} — only if his "
+                        "current activity isn't in the list (also supports in:[...] / equals:'...'); "
+                        "{type:'interruptibility', min:0.5} — only if he's interruptible enough. "
+                        "Missing sensor data fails open (the action still fires)."
+                    ),
                 },
             },
             "required": ["description", "trigger_type", "trigger_config", "action_type", "action_config"],
@@ -124,6 +141,7 @@ class StandingOrderCreateTool(BaseTool):
                     action_type=kwargs["action_type"],
                     action_config=kwargs.get("action_config", {}),
                     source="user",
+                    condition=kwargs.get("condition"),
                 )
 
                 msg = f"Standing order created: {kwargs['description']}"

@@ -188,9 +188,12 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
             snapshot.hours_since_last_chat = round(delta, 1)
 
         # ── Calendar (next event + today's count) ──
+        # calendar_event.start_time is naive local (ET); query and subtract
+        # with naive ET or the comparison shifts by the UTC offset (and the
+        # aware-naive subtraction raises, silently dropping next_event).
         from zoneinfo import ZoneInfo
         tz = ZoneInfo("America/New_York")
-        now_tz = datetime.now(tz)
+        now_tz = datetime.now(tz).replace(tzinfo=None)
         today_start = now_tz.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start.replace(hour=23, minute=59, second=59)
 
@@ -202,8 +205,10 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         """), {"uid": user_id, "now": now_tz}).fetchone()
 
         if next_event:
+            from app.services.calendar_ownership import classify_event, ownership_prefix
+            ownership = classify_event(next_event.title, next_event.ios_calendar_name)
             cal_label = f" [{next_event.ios_calendar_name}]" if next_event.ios_calendar_name else ""
-            snapshot.next_event_title = f"{next_event.title}{cal_label}"
+            snapshot.next_event_title = f"{ownership_prefix(ownership)}{next_event.title}{cal_label}"
             delta_min = (next_event.start_time - now_tz).total_seconds() / 60
             snapshot.next_event_minutes_away = int(delta_min)
 

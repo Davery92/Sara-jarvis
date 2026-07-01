@@ -133,11 +133,9 @@ class EnhancedNeo4jService:
                     # 5. Store tags and create relationships
                     self._store_tags(tx, content_id, tags)
 
-                    # 6. Store temporal information
-                    self._store_temporal_info(tx, content_id, metadata.temporal_info)
-
-                    # 7. Store actionable items as separate nodes
-                    self._store_actionable_items(tx, content_id, metadata.actionable_items)
+                    # TemporalInfo/ActionItem nodes intentionally not stored:
+                    # nothing reads them, and CREATE-per-run duplicated them into
+                    # hundreds of thousands of orphans (cleaned up 2026-06).
 
                 logger.info(f"✅ Stored intelligent content: {content_id}")
                 return True

@@ -2,7 +2,8 @@
  * SaraOverlayContext
  *
  * Tracks the current screen name and Sara floating overlay state.
- * Hidden on the Sara tab (full chat already there).
+ * Hidden only on the full Chat screen (Sara is already there) — the orb
+ * shows everywhere else, including the Home (Sara tab) brief.
  * Uses navigationRef (not useNavigationState) so it can live outside NavigationContainer.
  */
 
@@ -36,14 +37,17 @@ function getCurrentScreenName(): string {
     const mainRoute = state.routes.find((r) => r.name === 'Main');
     if (mainRoute && mainRoute.state) {
       const appState = mainRoute.state;
-      const tabsRoute = appState.routes?.find((r: any) => r.name === 'MainTabs');
-      if (tabsRoute && tabsRoute.state) {
-        const tabState = tabsRoute.state;
-        const activeTab = tabState.routes?.[tabState.index ?? 0];
-        return activeTab?.name ?? 'Sara';
-      }
-      // Stack screen (Notes, Documents, etc.)
+      // Use the ACTIVE stack route — a pushed screen (Chat, Notes, …) sits on
+      // top of MainTabs, so finding MainTabs by name would misreport the screen.
       const activeRoute = appState.routes?.[appState.index ?? 0];
+      if (activeRoute?.name === 'MainTabs') {
+        const tabState = activeRoute.state;
+        if (tabState) {
+          const activeTab = tabState.routes?.[tabState.index ?? 0];
+          return activeTab?.name ?? 'Sara';
+        }
+        return 'Sara';
+      }
       return activeRoute?.name ?? 'Sara';
     }
     return 'Sara';
@@ -64,8 +68,8 @@ export function SaraOverlayProvider({ children }: { children: React.ReactNode })
       if (screen !== prevScreenRef.current) {
         prevScreenRef.current = screen;
         setCurrentScreen(screen);
-        // Collapse mini-chat when switching tabs
-        if (screen === 'Sara') {
+        // Collapse mini-chat when entering the full chat screen
+        if (screen === 'Chat') {
           setModeRaw('orb');
         }
       }
@@ -77,8 +81,8 @@ export function SaraOverlayProvider({ children }: { children: React.ReactNode })
     setModeRaw(newMode);
   }, []);
 
-  // Auto-hide on Sara tab
-  const effectiveMode = currentScreen === 'Sara' ? 'hidden' : mode;
+  // Auto-hide only on the full chat screen
+  const effectiveMode = currentScreen === 'Chat' ? 'hidden' : mode;
 
   return (
     <SaraOverlayContext.Provider value={{ mode: effectiveMode, currentScreen, setMode }}>

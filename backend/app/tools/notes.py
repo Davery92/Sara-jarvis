@@ -1,7 +1,8 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 from app.tools.base import BaseTool, ToolResult
 from app.models.note import Note
+from app.models.folder import Folder
 from app.services.embeddings import get_embedding
 from app.db.session import get_db
 from sqlalchemy.orm import Session
@@ -10,6 +11,48 @@ import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_folder(
+    db: Session,
+    user_id: str,
+    folder_id: Optional[str] = None,
+    folder_name: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a folder reference to a folder_id.
+
+    Returns (folder_id, error_message). If both are None, the note belongs at root.
+    Accepts either an explicit folder_id or a case-insensitive folder name.
+    """
+    if folder_id:
+        folder = db.query(Folder).filter(
+            Folder.id == folder_id,
+            Folder.user_id == user_id,
+        ).first()
+        if not folder:
+            return None, f"No folder found with id '{folder_id}'"
+        return folder.id, None
+
+    if folder_name:
+        name = folder_name.strip().lstrip("/")
+        matches = db.query(Folder).filter(
+            Folder.user_id == user_id,
+            Folder.name.ilike(name),
+        ).all()
+        if not matches:
+            return None, (
+                f"No folder named '{folder_name}' exists. "
+                "Use notes_create_folder to make one, or notes_list_folders to see existing folders."
+            )
+        if len(matches) > 1:
+            ids = ", ".join(m.id for m in matches)
+            return None, (
+                f"Multiple folders named '{folder_name}' exist ({ids}). "
+                "Pass an explicit folder_id to disambiguate."
+            )
+        return matches[0].id, None
+
+    return None, None
 
 
 class NotesCreateTool(BaseTool):
@@ -35,39 +78,57 @@ class NotesCreateTool(BaseTool):
                 "content": {
                     "type": "string",
                     "description": "The note content"
+                },
+                "folder_name": {
+                    "type": "string",
+                    "description": "Optional folder name to file the note under (e.g. 'Recipes'). The folder must already exist; use notes_create_folder first if needed."
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Optional explicit folder ID. Prefer folder_name unless disambiguating duplicates."
                 }
             },
             "required": ["content"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Create a new note"""
-        
+
         title = kwargs.get("title", "")
         content = kwargs.get("content")
-        
+        folder_id_arg = kwargs.get("folder_id")
+        folder_name_arg = kwargs.get("folder_name")
+
         if not content:
             return ToolResult(
                 success=False,
                 message="Note content is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
+            # Resolve target folder (by id or name) if one was requested
+            resolved_folder_id, folder_err = _resolve_folder(
+                db, user_id, folder_id_arg, folder_name_arg
+            )
+            if folder_err:
+                return ToolResult(success=False, message=folder_err)
+
             # Get embedding for the note
             full_text = f"{title}\n{content}" if title else content
             embedding = await get_embedding(full_text)
-            
+
             # Create note
             note = Note(
                 user_id=user_id,
                 title=title,
                 content=content,
+                folder_id=resolved_folder_id,
                 embedding=embedding
             )
-            
+
             db.add(note)
             db.commit()
             db.refresh(note)
@@ -87,9 +148,13 @@ class NotesCreateTool(BaseTool):
                     "note_id": str(note.id),
                     "title": note.title,
                     "content": note.content,
+                    "folder_id": note.folder_id,
                     "created_at": note.created_at.isoformat()
                 },
-                message=f"Created note: {title or 'Untitled'}"
+                message=(
+                    f"Created note: {title or 'Untitled'}"
+                    + (f" (in folder {folder_name_arg or resolved_folder_id})" if resolved_folder_id else "")
+                )
             )
             
         except Exception as e:
@@ -276,40 +341,50 @@ class NotesEditTool(BaseTool):
                 "content": {
                     "type": "string",
                     "description": "New content for the note"
+                },
+                "folder_name": {
+                    "type": "string",
+                    "description": "Optional: move the note into this folder (by name). The folder must already exist."
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Optional: move the note into this folder (by explicit ID). Pass 'root' to move the note out of any folder."
                 }
             },
             "required": ["note_id"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Edit an existing note"""
-        
+
         note_id = kwargs.get("note_id")
         new_title = kwargs.get("title")
         new_content = kwargs.get("content")
-        
+        folder_id_arg = kwargs.get("folder_id")
+        folder_name_arg = kwargs.get("folder_name")
+
         if not note_id:
             return ToolResult(
                 success=False,
                 message="Note ID is required"
             )
-        
+
         db_gen = get_db()
         db: Session = next(db_gen)
-        
+
         try:
             # Find the note
             note = db.query(Note).filter(
                 Note.id == note_id,
                 Note.user_id == user_id
             ).first()
-            
+
             if not note:
                 return ToolResult(
                     success=False,
                     message="Note not found"
                 )
-            
+
             # Update fields
             updated = False
             if new_title is not None:
@@ -318,7 +393,20 @@ class NotesEditTool(BaseTool):
             if new_content is not None:
                 note.content = new_content
                 updated = True
-            
+
+            # Optional folder move
+            if folder_id_arg is not None and folder_id_arg.lower() in ("root", "none", ""):
+                note.folder_id = None
+                updated = True
+            elif folder_id_arg or folder_name_arg:
+                resolved_folder_id, folder_err = _resolve_folder(
+                    db, user_id, folder_id_arg, folder_name_arg
+                )
+                if folder_err:
+                    return ToolResult(success=False, message=folder_err)
+                note.folder_id = resolved_folder_id
+                updated = True
+
             if not updated:
                 return ToolResult(
                     success=False,
@@ -767,5 +855,167 @@ class NotesMergeTool(BaseTool):
         except Exception as e:
             db.rollback()
             return ToolResult(success=False, message=f"Failed to merge notes: {e}")
+        finally:
+            db.close()
+
+
+class NotesListFoldersTool(BaseTool):
+    """Tool for listing the user's note folders."""
+
+    @property
+    def name(self) -> str:
+        return "notes_list_folders"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List the folders in the knowledge garden, with their IDs, full paths, "
+            "and note counts. Use this to discover folder IDs before filing or listing "
+            "notes in a folder."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            folders = db.query(Folder).filter(
+                Folder.user_id == user_id
+            ).order_by(Folder.name).all()
+
+            # Build id->name map for path resolution
+            by_id = {f.id: f for f in folders}
+
+            def full_path(folder: Folder) -> str:
+                parts = [folder.name]
+                seen = {folder.id}
+                parent_id = folder.parent_id
+                while parent_id and parent_id in by_id and parent_id not in seen:
+                    seen.add(parent_id)
+                    parent = by_id[parent_id]
+                    parts.append(parent.name)
+                    parent_id = parent.parent_id
+                return "/" + "/".join(reversed(parts))
+
+            folder_list = []
+            for f in folders:
+                note_count = db.query(Note).filter(Note.folder_id == f.id).count()
+                folder_list.append({
+                    "folder_id": f.id,
+                    "name": f.name,
+                    "path": full_path(f),
+                    "parent_id": f.parent_id,
+                    "notes_count": note_count,
+                })
+
+            return ToolResult(
+                success=True,
+                data={"folders": folder_list, "total": len(folder_list)},
+                message=(
+                    f"Found {len(folder_list)} folder(s)"
+                    if folder_list else
+                    "No folders yet — the knowledge garden has no folders. Use notes_create_folder to make one."
+                ),
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to list folders: {e}")
+        finally:
+            db.close()
+
+
+class NotesCreateFolderTool(BaseTool):
+    """Tool for creating a note folder."""
+
+    @property
+    def name(self) -> str:
+        return "notes_create_folder"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create a new folder in the knowledge garden. Optionally nest it under an "
+            "existing parent folder. Returns the new folder's ID so notes can be filed into it. "
+            "If a folder with the same name already exists under the same parent, the existing "
+            "one is returned instead of creating a duplicate."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for the new folder",
+                },
+                "parent_folder_name": {
+                    "type": "string",
+                    "description": "Optional name of an existing folder to nest this one under",
+                },
+                "parent_folder_id": {
+                    "type": "string",
+                    "description": "Optional explicit parent folder ID (prefer parent_folder_name)",
+                },
+            },
+            "required": ["name"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        name = (kwargs.get("name") or "").strip()
+        parent_id_arg = kwargs.get("parent_folder_id")
+        parent_name_arg = kwargs.get("parent_folder_name")
+
+        if not name:
+            return ToolResult(success=False, message="Folder name is required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            # Resolve parent folder if requested
+            parent_id, parent_err = _resolve_folder(
+                db, user_id, parent_id_arg, parent_name_arg
+            )
+            if parent_err:
+                return ToolResult(success=False, message=parent_err)
+
+            # Dedupe: same name under same parent → return existing
+            existing = db.query(Folder).filter(
+                Folder.user_id == user_id,
+                Folder.name.ilike(name),
+                Folder.parent_id == parent_id,
+            ).first()
+            if existing:
+                return ToolResult(
+                    success=True,
+                    data={
+                        "folder_id": existing.id,
+                        "name": existing.name,
+                        "parent_id": existing.parent_id,
+                        "already_existed": True,
+                    },
+                    message=f"Folder '{name}' already exists — using it.",
+                )
+
+            folder = Folder(name=name, parent_id=parent_id, user_id=user_id)
+            db.add(folder)
+            db.commit()
+            db.refresh(folder)
+
+            return ToolResult(
+                success=True,
+                data={
+                    "folder_id": folder.id,
+                    "name": folder.name,
+                    "parent_id": folder.parent_id,
+                    "already_existed": False,
+                },
+                message=f"Created folder: {name}",
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to create folder: {e}")
         finally:
             db.close()

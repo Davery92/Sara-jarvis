@@ -63,6 +63,15 @@ def serialize_note(note: Note, include_user_id: bool = False) -> NoteResponse:
 @router.get("", response_model=List[NoteResponse])
 async def list_notes(
     folder_id: Optional[str] = None,
+    include_content: bool = Query(
+        True,
+        description=(
+            "Include full note body. Default True for backward compatibility. "
+            "Pass false to get only a short excerpt — the vault list view does "
+            "this to avoid shipping multi-MB of note bodies on every page load; "
+            "full content is fetched lazily via GET /notes/{id} when a note opens."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -75,7 +84,13 @@ async def list_notes(
     Explicitly skips the `embedding` column (vector(1024), ~4KB per row) —
     the list response doesn't use it and loading it across 500 rows added
     ~2MB of pgvector overhead per request.
+
+    When include_content=false, `content` is truncated to a short excerpt
+    (EXCERPT_CHARS) so previews/search-by-snippet still work while the payload
+    drops from ~5MB to a few hundred KB.
     """
+    EXCERPT_CHARS = 400
+
     query = db.query(
         Note.id, Note.user_id, Note.folder_id, Note.title, Note.content,
         Note.tags, Note.starred, Note.created_at, Note.updated_at,
@@ -90,11 +105,17 @@ async def list_notes(
 
     rows = query.order_by(Note.updated_at.desc()).limit(500).all()
 
+    def _body(content: Optional[str]) -> str:
+        text = content or ""
+        if include_content or len(text) <= EXCERPT_CHARS:
+            return text
+        return text[:EXCERPT_CHARS]
+
     return [
         NoteResponse(
             id=row.id,
             title=row.title,
-            content=row.content,
+            content=_body(row.content),
             folder_id=row.folder_id,
             tags=normalize_note_tags(row.tags),
             starred=bool(row.starred),

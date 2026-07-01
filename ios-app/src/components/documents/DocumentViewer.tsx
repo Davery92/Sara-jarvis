@@ -49,7 +49,7 @@ export default function DocumentViewer({ document }: DocumentViewerProps) {
             <Text style={styles.metadataLabel}>Status:</Text>
             <View style={[
               styles.categoryBadge,
-              { backgroundColor: document.is_processed === 'true' ? '#10b981' : document.is_processed === 'error' ? '#ef4444' : '#f59e0b' }
+              { backgroundColor: document.is_processed === 'true' ? colors.success : document.is_processed === 'error' ? colors.error : colors.warning }
             ]}>
               <Text style={styles.categoryText}>
                 {document.is_processed === 'true' ? 'Processed' : document.is_processed === 'error' ? 'Error' : 'Processing'}

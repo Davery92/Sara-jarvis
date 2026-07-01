@@ -100,7 +100,7 @@ export default function MessageBubble({ message, onCardAction }: MessageBubblePr
                 return isAssistant ? (
                   <SimpleMarkdown key={idx} style={styles.text}>{part.text}</SimpleMarkdown>
                 ) : (
-                  <SimpleMarkdown key={idx} style={[styles.text, isUser && styles.userText]} linkStyle={{ color: '#93c5fd' }}>{part.text}</SimpleMarkdown>
+                  <SimpleMarkdown key={idx} style={[styles.text, isUser && styles.userText]} linkStyle={{ color: colors.hues.sky }}>{part.text}</SimpleMarkdown>
                 );
               }
               return null;
@@ -109,7 +109,7 @@ export default function MessageBubble({ message, onCardAction }: MessageBubblePr
         ) : isAssistant ? (
           <SimpleMarkdown style={styles.text}>{message.content}</SimpleMarkdown>
         ) : (
-          <SimpleMarkdown style={[styles.text, isUser && styles.userText]} linkStyle={{ color: '#93c5fd' }}>{message.content}</SimpleMarkdown>
+          <SimpleMarkdown style={[styles.text, isUser && styles.userText]} linkStyle={{ color: colors.hues.sky }}>{message.content}</SimpleMarkdown>
         )}
 
         {/* Star rating for assistant messages */}
@@ -208,14 +208,14 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: -8,
     right: 8,
-    backgroundColor: colors.success || '#22c55e',
+    backgroundColor: colors.success,
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 10,
     zIndex: 1,
   },
   copiedText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 11,
     fontWeight: '600',
   },

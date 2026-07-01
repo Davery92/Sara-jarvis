@@ -18,6 +18,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt --ignore-installed \
     && pip install email-validator aiofiles lxml_html_clean
 
+# Install Playwright's Chromium + system libraries for browser-based source
+# fetching (JS-rendered / bot-blocked pages the httpx fetch can't read).
+# --with-deps runs apt at build time (root) so there is no runtime sudo blocker.
+# Browsers live in a world-readable path so any runtime user can launch them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium
+
 # Create a stable non-root runtime user for dev containers that need access to
 # host-mounted files under /home/david (SSH keys, generated artifacts, etc.).
 RUN groupadd -g 1000 david \

@@ -1,6 +1,6 @@
 /**
  * Content Inbox — Share URLs, Reddit posts, PDFs, and text to Sara.
- * Two-panel layout: item list + detail/reader.
+ * Full-width item list; reader pane appears on selection.
  */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -42,22 +42,6 @@ interface InboxStats {
   total: number;
 }
 
-// Content type icons
-const TYPE_ICONS: Record<string, string> = {
-  url: '🔗',
-  reddit: '🟠',
-  pdf: '📄',
-  text: '📝',
-  document: '📎',
-};
-
-const STATUS_BADGES: Record<string, string> = {
-  unread: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  read: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
-  kept: 'bg-green-500/20 text-green-400 border-green-500/30',
-  discarded: 'bg-red-500/20 text-red-400 border-red-500/30',
-};
-
 interface ContentInboxProps {
   onNavigateToChat?: (inboxItemId: string, title: string) => void;
 }
@@ -93,25 +77,6 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
   }, [apiUrl]);
 
   // Load items + stats
-  const loadItems = useCallback(async () => {
-    setLoading(true);
-    try {
-      const statusParam = filter !== 'all' ? `?status=${filter}` : '';
-      const [itemsData, statsData] = await Promise.all([
-        apiFetch(`/api/inbox${statusParam}&limit=100`.replace('?&', '?').replace(/^\/api\/inbox&/, '/api/inbox?')),
-        apiFetch('/api/inbox/stats'),
-      ]);
-      // Fix: handle case where statusParam is empty
-      setItems(Array.isArray(itemsData) ? itemsData : []);
-      setStats(statsData);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [apiFetch, filter]);
-
-  // Properly construct the URL for list
   const loadItemsList = useCallback(async () => {
     setLoading(true);
     try {
@@ -312,29 +277,35 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
     { key: 'kept', label: 'Kept', count: stats.kept },
   ];
 
+  const rowBorder = (item: InboxItem) => {
+    if (item.extraction_status === 'failed') return 'border-rose-400/70';
+    if (item.status === 'unread') return 'border-sky-400/70';
+    return 'border-transparent';
+  };
+
   return (
-    <div className="flex flex-col h-full bg-gray-900">
-      {/* Share input bar */}
-      <div className="flex-shrink-0 p-4 border-b border-gray-700/50">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Capture input */}
+      <div className="flex-shrink-0 pb-4">
         <div className="flex gap-2">
           <input
             type="text"
             value={shareUrl}
             onChange={(e) => setShareUrl(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleShareUrl()}
-            placeholder="Paste a URL or type something to save..."
-            className="flex-1 bg-gray-800 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-teal-500"
+            placeholder="Paste a URL or type something to save…"
+            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-[15px] text-slate-100 placeholder-slate-500 outline-none transition-colors focus:border-teal-300/30"
           />
           <button
             onClick={handleShareUrl}
             disabled={!shareUrl.trim() || shareLoading}
-            className="px-4 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+            className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300 disabled:bg-white/[0.06] disabled:text-slate-500"
           >
-            {shareLoading ? '...' : 'Save'}
+            {shareLoading ? '…' : 'Save'}
           </button>
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors"
+            className="rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
             title="Upload file"
           >
             +
@@ -348,338 +319,300 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
           />
         </div>
         {error && (
-          <div className="mt-2 text-red-400 text-sm">{error}</div>
+          <p className="mt-2 text-sm text-rose-300">{error}</p>
         )}
       </div>
 
-      {/* Main two-panel layout */}
-      <div className="flex flex-1 min-h-0">
-        {/* Left panel — item list */}
-        <div className="w-96 flex-shrink-0 border-r border-gray-700/50 flex flex-col">
+      <div className="flex min-h-0 flex-1">
+        {/* Item list — full width until something is selected */}
+        <div
+          className={
+            selectedItem
+              ? 'hidden w-80 flex-shrink-0 flex-col border-r border-white/8 pr-4 md:flex'
+              : 'flex min-w-0 flex-1 flex-col'
+          }
+        >
           {/* Filter tabs */}
-          <div className="flex gap-1 p-2 border-b border-gray-700/30">
+          <div className="flex flex-shrink-0 gap-4 px-3 pb-3">
             {tabs.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setFilter(tab.key)}
-                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                  filter === tab.key
-                    ? 'bg-teal-600/20 text-teal-400'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                className={`text-xs transition-colors ${
+                  filter === tab.key ? 'text-white' : 'text-slate-500 hover:text-slate-300'
                 }`}
               >
                 {tab.label}
-                {tab.count > 0 && (
-                  <span className="ml-1.5 text-xs opacity-60">({tab.count})</span>
-                )}
+                {tab.count > 0 && <span className="ml-1 text-slate-600">{tab.count}</span>}
               </button>
             ))}
           </div>
 
-          {/* Item list */}
-          <div className="flex-1 overflow-y-auto">
+          {/* Rows */}
+          <div className="min-h-0 flex-1 overflow-y-auto">
             {loading && items.length === 0 ? (
-              <div className="p-4 text-gray-500 text-center">Loading...</div>
+              <p className="px-3 pt-3 text-sm text-slate-500">Loading…</p>
             ) : items.length === 0 ? (
-              <div className="p-8 text-gray-500 text-center">
-                <div className="text-3xl mb-2">📥</div>
-                <div className="font-medium">No items yet</div>
-                <div className="text-sm mt-1">Paste a URL above to get started</div>
-              </div>
+              <p className="px-3 pt-3 text-sm text-slate-500">Nothing captured yet.</p>
             ) : (
               items.map((item) => (
                 <button
                   key={item.id}
                   onClick={() => selectItem(item.id)}
-                  className={`w-full text-left p-3 border-b border-gray-800/50 hover:bg-gray-800/50 transition-colors ${
-                    selectedItem?.id === item.id ? 'bg-gray-800 border-l-2 border-l-teal-500' : ''
+                  className={`w-full border-l-2 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.04] ${rowBorder(item)} ${
+                    selectedItem?.id === item.id ? 'bg-white/[0.04]' : ''
                   }`}
                 >
-                  <div className="flex items-start gap-3">
-                    <span className="text-lg flex-shrink-0 mt-0.5">
-                      {TYPE_ICONS[item.content_type] || '📄'}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-sm font-medium truncate ${
-                          item.status === 'unread' ? 'text-white' : 'text-gray-300'
-                        }`}>
-                          {item.title || 'Untitled'}
-                        </span>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-0.5 truncate">
-                        {item.original_url ? getDomain(item.original_url) : item.content_type}
-                        {item.word_count ? ` · ${item.word_count} words` : ''}
-                      </div>
-                      {item.description && (
-                        <div className="text-xs text-gray-500 mt-1 line-clamp-2">
-                          {item.description}
-                        </div>
-                      )}
-                      <div className="flex items-center gap-2 mt-1.5">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${STATUS_BADGES[item.status] || STATUS_BADGES.read}`}>
-                          {item.status}
-                        </span>
-                        {item.extraction_status === 'pending' && (
-                          <span className="text-[10px] text-yellow-500">extracting...</span>
-                        )}
-                        {item.extraction_status === 'failed' && (
-                          <span className="text-[10px] text-red-500">failed</span>
-                        )}
-                        <span className="text-[10px] text-gray-600 ml-auto">
-                          {timeAgo(item.shared_at)}
-                        </span>
-                      </div>
-                    </div>
+                  <div
+                    className={`truncate text-[15px] ${
+                      item.status === 'unread' ? 'font-medium text-slate-100' : 'text-slate-200'
+                    }`}
+                  >
+                    {item.title || 'Untitled'}
                   </div>
+                  <div className="mt-0.5 flex items-baseline gap-2 text-xs text-slate-500">
+                    <span className="min-w-0 truncate">
+                      {item.original_url ? getDomain(item.original_url) : item.content_type}
+                      {item.word_count ? ` · ${item.word_count} words` : ''}
+                      {item.status === 'kept' ? ' · kept' : item.status === 'discarded' ? ' · discarded' : ''}
+                      {item.extraction_status === 'pending' ? ' · extracting…' : ''}
+                      {item.extraction_status === 'failed' ? ' · extraction failed' : ''}
+                    </span>
+                    <span className="ml-auto flex-shrink-0 tabular-nums">{timeAgo(item.shared_at)}</span>
+                  </div>
+                  {item.description && !selectedItem && (
+                    <div className="mt-0.5 truncate text-xs text-slate-500">{item.description}</div>
+                  )}
                 </button>
               ))
             )}
           </div>
         </div>
 
-        {/* Right panel — detail */}
-        <div className="flex-1 flex flex-col min-w-0">
-          {selectedItem ? (
-            <>
-              {/* Detail header */}
-              <div className="flex-shrink-0 p-4 border-b border-gray-700/50">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <h2 className="text-lg font-semibold text-white truncate">
-                      {TYPE_ICONS[selectedItem.content_type]} {selectedItem.title || 'Untitled'}
-                    </h2>
-                    <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
-                      {selectedItem.original_url && (
-                        <a
-                          href={selectedItem.original_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="hover:text-teal-400 truncate max-w-md"
-                        >
-                          {getDomain(selectedItem.original_url)}
-                        </a>
-                      )}
-                      {selectedItem.word_count && (
-                        <span>{selectedItem.word_count.toLocaleString()} words</span>
-                      )}
-                      <span>{timeAgo(selectedItem.shared_at)}</span>
-                      {selectedItem.discussed && (
-                        <span className="text-teal-400 text-xs">discussed</span>
-                      )}
-                      {selectedItem.consolidated && (
-                        <span className="text-purple-400 text-xs">in memory</span>
-                      )}
-                    </div>
+        {/* Reader — only rendered when an item is selected */}
+        {selectedItem && (
+          <div className="flex min-w-0 flex-1 flex-col md:pl-5">
+            {/* Reader header */}
+            <div className="flex-shrink-0 border-b border-white/8 pb-3">
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <h2 className="truncate font-display text-lg font-semibold text-white">
+                    {selectedItem.title || 'Untitled'}
+                  </h2>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                    {selectedItem.original_url && (
+                      <a
+                        href={selectedItem.original_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="max-w-md truncate transition-colors hover:text-teal-300"
+                      >
+                        {getDomain(selectedItem.original_url)}
+                      </a>
+                    )}
+                    {selectedItem.word_count && (
+                      <span>{selectedItem.word_count.toLocaleString()} words</span>
+                    )}
+                    <span>{timeAgo(selectedItem.shared_at)}</span>
+                    {selectedItem.discussed && <span>discussed</span>}
+                    {selectedItem.consolidated && <span>in memory</span>}
                   </div>
                 </div>
+                <button
+                  onClick={() => setSelectedItem(null)}
+                  className="flex-shrink-0 text-xs text-slate-500 transition-colors hover:text-slate-300"
+                  title="Close"
+                >
+                  ✕ Close
+                </button>
+              </div>
 
-                {/* Action bar */}
-                <div className="flex gap-2 mt-3">
+              {/* Actions — quiet text, destructive quietest */}
+              <div className="mt-2.5 flex flex-wrap items-baseline gap-x-4 gap-y-1.5">
+                <button
+                  onClick={() => updateStatus(selectedItem.id, 'kept')}
+                  disabled={selectedItem.status === 'kept'}
+                  className={`text-xs transition-colors ${
+                    selectedItem.status === 'kept'
+                      ? 'cursor-default text-teal-300/80'
+                      : 'text-slate-400 hover:text-teal-300'
+                  }`}
+                >
+                  {selectedItem.status === 'kept' ? 'Kept' : 'Keep'}
+                </button>
+                {onNavigateToChat && (
                   <button
-                    onClick={() => updateStatus(selectedItem.id, 'kept')}
-                    disabled={selectedItem.status === 'kept'}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                      selectedItem.status === 'kept'
-                        ? 'bg-green-600/20 text-green-400 cursor-default'
-                        : 'bg-green-600/10 text-green-400 hover:bg-green-600/20 border border-green-500/30'
-                    }`}
+                    onClick={discussItem}
+                    className="text-xs text-teal-300/90 transition-colors hover:text-teal-200"
                   >
-                    {selectedItem.status === 'kept' ? 'Kept' : 'Keep'}
+                    Discuss with Sara
                   </button>
+                )}
+                {selectedItem.original_url && (
+                  <a
+                    href={selectedItem.original_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-slate-400 transition-colors hover:text-slate-200"
+                  >
+                    Open source
+                  </a>
+                )}
+                <span className="ml-auto flex items-baseline gap-4">
                   <button
                     onClick={() => updateStatus(selectedItem.id, 'discarded')}
                     disabled={selectedItem.status === 'discarded'}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    className={`text-xs transition-colors ${
                       selectedItem.status === 'discarded'
-                        ? 'bg-red-600/20 text-red-400 cursor-default'
-                        : 'bg-red-600/10 text-red-400 hover:bg-red-600/20 border border-red-500/30'
+                        ? 'cursor-default text-slate-600'
+                        : 'text-slate-500 hover:text-rose-300'
                     }`}
                   >
                     {selectedItem.status === 'discarded' ? 'Discarded' : 'Discard'}
                   </button>
-                  {onNavigateToChat && (
-                    <button
-                      onClick={discussItem}
-                      className="px-3 py-1.5 rounded-md text-sm font-medium bg-teal-600/10 text-teal-400 hover:bg-teal-600/20 border border-teal-500/30 transition-colors"
-                    >
-                      Discuss with Sara
-                    </button>
-                  )}
-                  {selectedItem.original_url && (
-                    <a
-                      href={selectedItem.original_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-3 py-1.5 rounded-md text-sm font-medium bg-gray-700/50 text-gray-300 hover:bg-gray-700 transition-colors"
-                    >
-                      Open Source
-                    </a>
-                  )}
                   <button
                     onClick={() => deleteItem(selectedItem.id)}
-                    className="px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors ml-auto"
+                    className="text-xs text-slate-500 transition-colors hover:text-rose-300"
                   >
                     Delete
                   </button>
-                </div>
-
-                {/* Original / Text toggle — only for items with files */}
-                {selectedItem.storage_key && (
-                  <div className="flex gap-1 mt-3 bg-gray-800/50 rounded-lg p-1 w-fit">
-                    <button
-                      onClick={() => setViewMode('original')}
-                      className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
-                        viewMode === 'original'
-                          ? 'bg-gray-700 text-white'
-                          : 'text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      Original
-                    </button>
-                    <button
-                      onClick={() => setViewMode('text')}
-                      className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
-                        viewMode === 'text'
-                          ? 'bg-gray-700 text-white'
-                          : 'text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      Text
-                    </button>
-                  </div>
-                )}
+                </span>
               </div>
 
-              {/* Content body */}
-              <div className="flex-1 overflow-y-auto p-4">
-                {selectedItem.extraction_status === 'pending' || selectedItem.extraction_status === 'extracting' ? (
-                  <div className="text-center text-gray-500 py-12">
-                    <div className="text-4xl mb-3 animate-pulse">⏳</div>
-                    <div>Extracting content...</div>
-                    <button
-                      onClick={() => selectItem(selectedItem.id)}
-                      className="mt-3 text-teal-400 hover:text-teal-300 text-sm"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                ) : selectedItem.extraction_status === 'failed' ? (
-                  <div className="text-center text-red-400 py-12">
-                    <div className="text-4xl mb-3">❌</div>
-                    <div>Extraction failed</div>
-                    <div className="text-sm text-gray-500 mt-1">
-                      {selectedItem.original_url && (
-                        <a href={selectedItem.original_url} target="_blank" rel="noopener noreferrer"
-                          className="text-teal-400 hover:text-teal-300">
-                          Open original source
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                ) : viewMode === 'original' && selectedItem.storage_key ? (
-                  // Native file viewer
-                  fileLoading ? (
-                    <div className="text-center text-gray-500 py-12">
-                      <div className="text-4xl mb-3 animate-pulse">📄</div>
-                      <div>Loading file...</div>
-                    </div>
-                  ) : docxHtml ? (
-                    // DOCX rendered as HTML
-                    <div
-                      className="prose prose-invert prose-sm max-w-none"
-                      dangerouslySetInnerHTML={{ __html: docxHtml }}
-                    />
-                  ) : fileBlobUrl && (selectedItem.mime_type?.includes('pdf') || selectedItem.original_filename?.endsWith('.pdf')) ? (
-                    // PDF in native browser viewer
-                    <iframe
-                      src={fileBlobUrl}
-                      className="w-full h-full min-h-[600px] rounded-lg border border-gray-700/50"
-                      title={selectedItem.title || 'PDF viewer'}
-                    />
-                  ) : fileBlobUrl && selectedItem.mime_type?.startsWith('image/') ? (
-                    // Images
-                    <div className="flex justify-center">
-                      <img
-                        src={fileBlobUrl}
-                        alt={selectedItem.title || 'Uploaded image'}
-                        className="max-w-full max-h-[80vh] object-contain rounded-lg"
-                      />
-                    </div>
-                  ) : fileBlobUrl ? (
-                    // Other file types — download button
-                    <div className="text-center text-gray-500 py-12">
-                      <div className="text-4xl mb-3">📎</div>
-                      <div className="mb-3">
-                        {selectedItem.original_filename || 'File'}
-                        {selectedItem.file_size && (
-                          <span className="text-sm ml-2">({(selectedItem.file_size / 1024 / 1024).toFixed(1)} MB)</span>
-                        )}
-                      </div>
+              {/* Original / Text toggle — only for items with files */}
+              {selectedItem.storage_key && (
+                <div className="mt-2.5 flex gap-4">
+                  <button
+                    onClick={() => setViewMode('original')}
+                    className={`border-b-2 pb-0.5 text-xs transition-colors ${
+                      viewMode === 'original'
+                        ? 'border-teal-300 text-white'
+                        : 'border-transparent text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    Original
+                  </button>
+                  <button
+                    onClick={() => setViewMode('text')}
+                    className={`border-b-2 pb-0.5 text-xs transition-colors ${
+                      viewMode === 'text'
+                        ? 'border-teal-300 text-white'
+                        : 'border-transparent text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    Text
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Reader body */}
+            <div className="min-h-0 flex-1 overflow-y-auto pt-4">
+              {selectedItem.extraction_status === 'pending' || selectedItem.extraction_status === 'extracting' ? (
+                <p className="text-sm text-slate-500">
+                  Extracting content…{' '}
+                  <button
+                    onClick={() => selectItem(selectedItem.id)}
+                    className="text-slate-400 transition-colors hover:text-teal-300"
+                  >
+                    Refresh
+                  </button>
+                </p>
+              ) : selectedItem.extraction_status === 'failed' ? (
+                <p className="text-sm text-slate-500">
+                  Extraction failed.
+                  {selectedItem.original_url && (
+                    <>
+                      {' '}
                       <a
-                        href={fileBlobUrl}
-                        download={selectedItem.original_filename || 'download'}
-                        className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-lg font-medium transition-colors inline-block"
+                        href={selectedItem.original_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-slate-400 transition-colors hover:text-teal-300"
                       >
-                        Download
+                        Open the original source
                       </a>
-                    </div>
-                  ) : (
-                    <div className="text-center text-gray-500 py-12">
-                      Failed to load file
-                    </div>
-                  )
-                ) : selectedItem.extracted_text ? (
-                  <div className="prose prose-invert prose-sm max-w-none">
-                    {/* Reddit-specific: show metadata header */}
-                    {selectedItem.content_type === 'reddit' && selectedItem.meta && (
-                      <div className="mb-4 p-3 bg-orange-500/5 rounded-lg border border-orange-500/20">
-                        <div className="flex items-center gap-3 text-sm text-gray-400">
-                          <span className="text-orange-400 font-medium">
-                            r/{selectedItem.meta.subreddit}
-                          </span>
-                          <span>u/{selectedItem.meta.author}</span>
-                          <span>{selectedItem.meta.score} points</span>
-                          <span>{selectedItem.meta.num_comments} comments</span>
-                        </div>
-                      </div>
-                    )}
+                    </>
+                  )}
+                </p>
+              ) : viewMode === 'original' && selectedItem.storage_key ? (
+                // Native file viewer
+                fileLoading ? (
+                  <p className="text-sm text-slate-500">Loading file…</p>
+                ) : docxHtml ? (
+                  // DOCX rendered as HTML
+                  <div
+                    className="prose prose-invert prose-sm max-w-[75ch]"
+                    dangerouslySetInnerHTML={{ __html: docxHtml }}
+                  />
+                ) : fileBlobUrl && (selectedItem.mime_type?.includes('pdf') || selectedItem.original_filename?.endsWith('.pdf')) ? (
+                  // PDF in native browser viewer
+                  <iframe
+                    src={fileBlobUrl}
+                    className="h-full min-h-[600px] w-full rounded-md border border-white/10"
+                    title={selectedItem.title || 'PDF viewer'}
+                  />
+                ) : fileBlobUrl && selectedItem.mime_type?.startsWith('image/') ? (
+                  // Images
+                  <div className="flex justify-center">
+                    <img
+                      src={fileBlobUrl}
+                      alt={selectedItem.title || 'Uploaded image'}
+                      className="max-h-[80vh] max-w-full rounded-md object-contain"
+                    />
+                  </div>
+                ) : fileBlobUrl ? (
+                  // Other file types — download
+                  <div className="pt-6 text-center">
+                    <p className="text-sm text-slate-400">
+                      {selectedItem.original_filename || 'File'}
+                      {selectedItem.file_size && (
+                        <span className="text-slate-500"> · {(selectedItem.file_size / 1024 / 1024).toFixed(1)} MB</span>
+                      )}
+                    </p>
+                    <a
+                      href={fileBlobUrl}
+                      download={selectedItem.original_filename || 'download'}
+                      className="mt-3 inline-block rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
+                    >
+                      Download
+                    </a>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">Couldn't load the file.</p>
+                )
+              ) : selectedItem.extracted_text ? (
+                <div className="max-w-[75ch]">
+                  {/* Reddit-specific metadata line */}
+                  {selectedItem.content_type === 'reddit' && selectedItem.meta && (
+                    <p className="mb-3 text-xs text-slate-500">
+                      r/{selectedItem.meta.subreddit} · u/{selectedItem.meta.author} ·{' '}
+                      {selectedItem.meta.score} points · {selectedItem.meta.num_comments} comments
+                    </p>
+                  )}
 
-                    {/* PDF: show page count */}
-                    {selectedItem.content_type === 'pdf' && selectedItem.meta?.page_count && (
-                      <div className="mb-4 p-3 bg-blue-500/5 rounded-lg border border-blue-500/20 text-sm text-gray-400">
-                        PDF document — {selectedItem.meta.page_count} pages
-                        {selectedItem.file_size && (
-                          <span> · {(selectedItem.file_size / 1024 / 1024).toFixed(1)} MB</span>
-                        )}
-                      </div>
-                    )}
+                  {/* PDF: page count line */}
+                  {selectedItem.content_type === 'pdf' && selectedItem.meta?.page_count && (
+                    <p className="mb-3 text-xs text-slate-500">
+                      PDF · {selectedItem.meta.page_count} pages
+                      {selectedItem.file_size && (
+                        <span> · {(selectedItem.file_size / 1024 / 1024).toFixed(1)} MB</span>
+                      )}
+                    </p>
+                  )}
 
+                  <div className="prose prose-invert prose-sm max-w-none text-[15px] leading-relaxed text-slate-300">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {selectedItem.extracted_text}
                     </ReactMarkdown>
                   </div>
-                ) : (
-                  <div className="text-center text-gray-500 py-12">
-                    No content extracted
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-gray-500">
-              <div className="text-center">
-                <div className="text-5xl mb-3">📥</div>
-                <div className="text-lg font-medium">Content Inbox</div>
-                <div className="text-sm mt-1">
-                  Save URLs, Reddit posts, PDFs, and notes.
-                  <br />
-                  Kept items are consolidated into memory overnight.
                 </div>
-              </div>
+              ) : (
+                <p className="text-sm text-slate-500">No content extracted.</p>
+              )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

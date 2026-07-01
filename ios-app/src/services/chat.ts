@@ -1,11 +1,13 @@
 import apiClient, { ChatOptions } from './api';
 import { Message, MessageContent } from '../types/api';
 import { ImageAttachment } from './imagePicker';
+import { DocumentAttachment } from './documentPicker';
 
 export interface SendMessageParams {
   messages: Message[];  // Changed from single message to full conversation history
   conversationId?: string;
   images?: ImageAttachment[];  // Optional images to attach to the last message
+  documents?: DocumentAttachment[];  // Optional documents (PDF/Word/text) to attach to the last message
   model?: string;  // Optional model override
   ephemeral?: boolean;  // If true, chat won't be saved to memory
   inboxItemId?: string;  // Pre-load inbox item content for discussion
@@ -15,6 +17,7 @@ export interface SendMessageParams {
   onContentCard?: (card: any) => void;
   onToolStatus?: (status: { tool: string; status: string }) => void;
   onSuggestedActions?: (actions: any[]) => void;
+  onUiCommand?: (command: any) => void;
 }
 
 export interface ChatResponse {
@@ -36,18 +39,28 @@ class ChatService {
     const formattedMessages = params.messages.map((msg, index) => {
       let content: MessageContent = msg.content;
 
-      // If this is the last message and we have images, format as multimodal
-      if (index === params.messages.length - 1 && params.images && params.images.length > 0) {
+      // If this is the last message and we have attachments, format as multimodal
+      const isLast = index === params.messages.length - 1;
+      const hasImages = !!params.images && params.images.length > 0;
+      const hasDocuments = !!params.documents && params.documents.length > 0;
+      if (isLast && (hasImages || hasDocuments)) {
         const textContent = typeof msg.content === 'string'
           ? msg.content
           : (msg.content as any[]).find(c => c.type === 'text')?.text || '';
 
         content = [
           // Add images first
-          ...params.images.map(img => ({
+          ...(params.images || []).map(img => ({
             type: 'image' as const,
             data: img.base64,
             media_type: img.type,
+          })),
+          // Then documents (backend extracts text from these)
+          ...(params.documents || []).map(doc => ({
+            type: 'document' as const,
+            data: doc.base64,
+            media_type: doc.mimeType,
+            filename: doc.name,
           })),
           // Then add text
           { type: 'text' as const, text: textContent },
@@ -97,6 +110,9 @@ class ChatService {
       }
       if (params.onSuggestedActions) {
         chatOptions.onSuggestedActions = params.onSuggestedActions;
+      }
+      if (params.onUiCommand) {
+        chatOptions.onUiCommand = params.onUiCommand;
       }
 
       await apiClient.streamChat(

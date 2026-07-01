@@ -5,14 +5,11 @@ import {
   ArrowsPointingInIcon,
   ArrowsPointingOutIcon,
   ArrowPathIcon,
-  ChatBubbleLeftRightIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderIcon,
-  FolderPlusIcon,
   MagnifyingGlassIcon,
   PlusIcon,
-  Squares2X2Icon,
   StarIcon as StarIconOutline,
   TrashIcon,
   XMarkIcon,
@@ -162,139 +159,6 @@ function branchHasUnread(branch: FolderBranch, unreadIds: Set<string>): boolean 
 }
 
 const ROOT_BUCKET = '__root__'
-const NOTES_THEME_OVERRIDES = `
-  .notes-workspace-theme {
-    color: #cbd5e1;
-  }
-
-  .notes-workspace-theme [class~="bg-white"],
-  .notes-workspace-theme [class~="bg-white/80"],
-  .notes-workspace-theme [class~="bg-white/70"] {
-    background-color: rgba(15, 23, 42, 0.92) !important;
-  }
-
-  .notes-workspace-theme [class~="bg-slate-50"],
-  .notes-workspace-theme [class~="bg-slate-50/80"],
-  .notes-workspace-theme [class~="bg-slate-50/70"] {
-    background-color: rgba(15, 23, 42, 0.76) !important;
-  }
-
-  .notes-workspace-theme [class~="bg-indigo-50"],
-  .notes-workspace-theme [class~="bg-indigo-50/70"] {
-    background-color: rgba(30, 41, 59, 0.88) !important;
-  }
-
-  .notes-workspace-theme [class~="bg-rose-50"] {
-    background-color: rgba(76, 5, 25, 0.6) !important;
-  }
-
-  .notes-workspace-theme [class~="border-slate-200"],
-  .notes-workspace-theme [class~="border-slate-200/80"],
-  .notes-workspace-theme [class~="border-white/70"],
-  .notes-workspace-theme [class~="border-white/60"] {
-    border-color: rgba(51, 65, 85, 0.95) !important;
-  }
-
-  .notes-workspace-theme [class~="border-indigo-100"] {
-    border-color: rgba(34, 211, 238, 0.28) !important;
-  }
-
-  .notes-workspace-theme [class~="bg-indigo-600"] {
-    background-color: #0891b2 !important;
-  }
-
-  .notes-workspace-theme [class~="hover:bg-indigo-700"]:hover {
-    background-color: #0e7490 !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-900"] {
-    color: #f8fafc !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-800"] {
-    color: #e2e8f0 !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-700"] {
-    color: #cbd5e1 !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-600"] {
-    color: #94a3b8 !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-500"] {
-    color: #64748b !important;
-  }
-
-  .notes-workspace-theme [class~="text-slate-400"] {
-    color: #475569 !important;
-  }
-
-  .notes-workspace-theme [class~="text-indigo-600"],
-  .notes-workspace-theme [class~="text-indigo-700"] {
-    color: #67e8f9 !important;
-  }
-
-  .notes-workspace-theme [class~="placeholder:text-slate-400"]::placeholder {
-    color: #475569 !important;
-  }
-
-  .notes-workspace-theme [class~="hover:text-indigo-600"]:hover {
-    color: #67e8f9 !important;
-  }
-
-  .notes-workspace-theme [class~="hover:border-indigo-200"]:hover,
-  .notes-workspace-theme [class~="focus:border-indigo-200"]:focus,
-  .notes-workspace-theme [class~="focus:border-indigo-400"]:focus {
-    border-color: rgba(34, 211, 238, 0.38) !important;
-  }
-
-  .notes-workspace-theme [class~="focus:ring-indigo-100"]:focus,
-  .notes-workspace-theme [class~="ring-indigo-100"] {
-    --tw-ring-color: rgba(34, 211, 238, 0.18) !important;
-  }
-
-  .notes-workspace-theme [class~="ring-amber-100"] {
-    --tw-ring-color: rgba(251, 191, 36, 0.18) !important;
-  }
-
-  .notes-workspace-theme [class~="hover:bg-slate-50"]:hover,
-  .notes-workspace-theme [class~="hover:bg-slate-100"]:hover,
-  .notes-workspace-theme [class~="hover:bg-white"]:hover {
-    background-color: rgba(30, 41, 59, 0.9) !important;
-  }
-
-  .notes-workspace-theme [class~="hover:bg-indigo-50/40"]:hover {
-    background-color: rgba(8, 145, 178, 0.12) !important;
-  }
-
-  .notes-workspace-theme [class~="hover:bg-teal-50/40"]:hover {
-    background-color: rgba(20, 184, 166, 0.12) !important;
-  }
-
-  .notes-workspace-theme .prose {
-    color: #cbd5e1;
-  }
-
-  .notes-workspace-theme .prose :where(h1, h2, h3, h4, strong, th) {
-    color: #f8fafc;
-  }
-
-  .notes-workspace-theme .prose :where(p, li, td, blockquote) {
-    color: #cbd5e1;
-  }
-
-  .notes-workspace-theme .prose a,
-  .notes-workspace-theme .prose code {
-    color: #67e8f9;
-  }
-
-  .notes-workspace-theme .prose blockquote {
-    border-left-color: rgba(34, 211, 238, 0.55);
-    background-color: rgba(30, 41, 59, 0.72);
-  }
-`
 
 function extractWikiLinkTitles(content: string): string[] {
   const titles: string[] = []
@@ -556,22 +420,22 @@ function CreateDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-3xl border border-white/60 bg-white p-6 shadow-2xl shadow-slate-900/10"
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0c1626] p-6 shadow-[0_8px_40px_rgba(2,8,23,0.6)]"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">{label}</h2>
-            <p className="mt-1 text-sm text-slate-500">Parent: {parentLabel}</p>
+            <h2 className="font-display text-lg font-semibold text-white">{label}</h2>
+            <p className="mt-1 text-xs text-slate-500">Parent: {parentLabel}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-white/[0.06] hover:text-slate-200"
             aria-label="Close dialog"
           >
             <XMarkIcon className="h-5 w-5" />
@@ -579,7 +443,7 @@ function CreateDialog({
         </div>
 
         <div className="mt-5">
-          <label className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <label className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
             {kind === 'note' ? 'Title' : 'Name'}
           </label>
           <input
@@ -588,7 +452,7 @@ function CreateDialog({
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
-            className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+            className="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-teal-300/30 placeholder:text-slate-600"
           />
         </div>
 
@@ -596,7 +460,7 @@ function CreateDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+            className="rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
           >
             Cancel
           </button>
@@ -604,7 +468,7 @@ function CreateDialog({
             type="button"
             onClick={onSubmit}
             disabled={pending || !value.trim()}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition hover:bg-teal-300 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
           >
             {pending ? 'Saving...' : kind === 'note' ? 'Create note' : 'Create folder'}
           </button>
@@ -628,16 +492,16 @@ function FolderTree({
 }: FolderTreeProps) {
   const [unfiledCollapsed, setUnfiledCollapsed] = useState(true)
   return (
-    <div className="space-y-1">
+    <div className="space-y-0.5">
       <button
         type="button"
         onClick={() => onSelectFolder(null)}
-        className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition ${
-          selectedFolderId === null ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+        className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
+          selectedFolderId === null ? 'bg-white/[0.06] text-white' : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
         }`}
       >
         <span className="font-medium">Workspace</span>
-        <span className="text-xs">{rootNotes.length + branches.length}</span>
+        <span className="text-xs text-slate-600">{rootNotes.length + branches.length}</span>
       </button>
 
       {branches.map((branch) => (
@@ -657,34 +521,34 @@ function FolderTree({
       ))}
 
       {rootNotes.length > 0 && (
-        <div className="space-y-1 rounded-md border border-slate-200/80 bg-slate-50/80 p-2">
+        <div className="space-y-0.5 pt-2">
           <button
             type="button"
             onClick={() => setUnfiledCollapsed(c => !c)}
-            className="flex w-full items-center gap-1 px-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 hover:text-slate-600"
+            className="flex w-full items-center gap-1 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 transition-colors hover:text-slate-300"
           >
             {unfiledCollapsed ? <ChevronRightIcon className="h-3 w-3" /> : <ChevronDownIcon className="h-3 w-3" />}
             <span>Unfiled</span>
             {rootNotes.some((n) => unreadNoteIds.has(n.id)) && (
-              <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />
+              <span className="h-1.5 w-1.5 rounded-full bg-teal-300/80 flex-shrink-0" />
             )}
-            <span className="ml-auto text-[10px] font-normal">{rootNotes.length}</span>
+            <span className="ml-auto text-[10px] font-normal text-slate-600">{rootNotes.length}</span>
           </button>
           {!unfiledCollapsed && rootNotes.map((note) => (
             <button
               key={note.id}
               type="button"
               onClick={() => onSelectNote(note.id)}
-              className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition ${
+              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
                 activeNoteId === note.id
-                  ? 'bg-white text-slate-900 shadow-sm ring-1 ring-indigo-100'
-                  : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                  ? 'bg-white/[0.06] text-white'
+                  : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
               }`}
             >
-              <span className="h-2 w-2 rounded-full bg-teal-500" />
+              <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
               <span className="min-w-0 flex-1 truncate">{note.title.trim() || 'Untitled'}</span>
-              {unreadNoteIds.has(note.id) && <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />}
-              {starredNotes.has(note.id) && <StarIconSolid className="h-4 w-4 text-amber-400" />}
+              {unreadNoteIds.has(note.id) && <span className="h-1.5 w-1.5 rounded-full bg-teal-300/80 flex-shrink-0" />}
+              {starredNotes.has(note.id) && <StarIconSolid className="h-3.5 w-3.5 text-amber-300/80" />}
             </button>
           ))}
         </div>
@@ -720,40 +584,40 @@ function FolderBranchNode({
   const leftPad = depth * 12
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-0.5">
       <button
         type="button"
         onClick={() => {
           onSelectFolder(branch.folder.id)
           onToggleFolder(branch.folder.id)
         }}
-        className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
+        className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
           selectedFolderId === branch.folder.id
-            ? 'bg-indigo-50 text-indigo-700'
-            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+            ? 'bg-white/[0.06] text-white'
+            : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
         }`}
-        style={{ paddingLeft: 12 + leftPad }}
+        style={{ paddingLeft: 8 + leftPad }}
       >
-        {isExpanded ? <ChevronDownIcon className="h-4 w-4" /> : <ChevronRightIcon className="h-4 w-4" />}
+        {isExpanded ? <ChevronDownIcon className="h-3.5 w-3.5 text-slate-600" /> : <ChevronRightIcon className="h-3.5 w-3.5 text-slate-600" />}
         {branch.folder.name === "Sara's Notes" ? (
-          <svg className="h-4 w-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="h-4 w-4 text-purple-300/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
           </svg>
         ) : (
-          <FolderIcon className="h-4 w-4 text-indigo-500" />
+          <FolderIcon className="h-4 w-4 text-slate-500" />
         )}
         <span className="min-w-0 flex-1 truncate">{branch.folder.name}</span>
         {branchHasUnread(branch, unreadNoteIds) && (
-          <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />
+          <span className="h-1.5 w-1.5 rounded-full bg-teal-300/80 flex-shrink-0" />
         )}
         {branch.folder.name === "Sara's Notes" && (
-          <span className="text-[10px] font-medium text-purple-400 bg-purple-400/10 px-1.5 py-0.5 rounded">Sara</span>
+          <span className="text-[10px] font-medium text-purple-300/70">Sara</span>
         )}
-        <span className="text-[11px]">{branch.notes.length + branch.children.length}</span>
+        <span className="text-[11px] text-slate-600">{branch.notes.length + branch.children.length}</span>
       </button>
 
       {isExpanded && (
-        <div className="space-y-1">
+        <div className="space-y-0.5">
           {branch.children.map((child) => (
             <FolderBranchNode
               key={child.folder.id}
@@ -773,8 +637,8 @@ function FolderBranchNode({
           {groupNotesByDate(branch.notes).map((group) => (
             <div key={group.label}>
               <div
-                className="px-2 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400"
-                style={{ paddingLeft: 36 + leftPad }}
+                className="px-2 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-widest text-slate-600"
+                style={{ paddingLeft: 30 + leftPad }}
               >
                 {group.label}
               </div>
@@ -783,19 +647,19 @@ function FolderBranchNode({
                   key={note.id}
                   type="button"
                   onClick={() => onSelectNote(note.id)}
-                  className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
+                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
                     activeNoteId === note.id
-                      ? 'bg-white text-slate-900 shadow-sm ring-1 ring-indigo-100'
-                      : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                      ? 'bg-white/[0.06] text-white'
+                      : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
                   }`}
-                  style={{ paddingLeft: 36 + leftPad }}
+                  style={{ paddingLeft: 30 + leftPad }}
                 >
-                  <span className={`h-2 w-2 rounded-full ${unreadNoteIds.has(note.id) ? 'bg-blue-500' : branch.folder.name === "Sara's Notes" ? 'bg-purple-400' : 'bg-slate-300'}`} />
+                  <span className={`h-1.5 w-1.5 rounded-full ${unreadNoteIds.has(note.id) ? 'bg-teal-300/80' : branch.folder.name === "Sara's Notes" ? 'bg-purple-300/60' : 'bg-slate-600'}`} />
                   <span className="min-w-0 flex-1 truncate">{note.title.trim() || 'Untitled'}</span>
                   {branch.folder.name === "Sara's Notes" && (
-                    <span className="text-[9px] font-medium text-purple-400">Sara</span>
+                    <span className="text-[9px] font-medium text-purple-300/70">Sara</span>
                   )}
-                  {starredNotes.has(note.id) && <StarIconSolid className="h-4 w-4 text-amber-400" />}
+                  {starredNotes.has(note.id) && <StarIconSolid className="h-3.5 w-3.5 text-amber-300/80" />}
                 </button>
               ))}
             </div>
@@ -870,16 +734,16 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 px-4 pt-24 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/60 px-4 pt-24 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl shadow-slate-900/10"
+        className="w-full max-w-2xl overflow-hidden rounded-2xl border border-white/10 bg-[#0c1626] shadow-[0_8px_40px_rgba(2,8,23,0.6)]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-slate-200 px-5 py-4">
-          <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
-            <MagnifyingGlassIcon className="h-5 w-5 text-slate-400" />
+        <div className="border-b border-white/8 px-5 py-4">
+          <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3 transition-colors focus-within:border-teal-300/30">
+            <MagnifyingGlassIcon className="h-5 w-5 text-slate-500" />
             <input
               ref={inputRef}
               value={query}
@@ -894,9 +758,9 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
                 }
               }}
               placeholder="Jump to a note, folder, or tag..."
-              className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-600"
             />
-            <span className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
               esc
             </span>
           </div>
@@ -904,9 +768,9 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
 
         <div className="max-h-[26rem] overflow-y-auto p-3">
           {results.length === 0 ? (
-            <div className="rounded-md border border-dashed border-slate-200 px-4 py-10 text-center text-sm text-slate-500">
+            <p className="px-4 py-10 text-center text-sm text-slate-500">
               No notes matched that search.
-            </div>
+            </p>
           ) : (
             <div className="space-y-1">
               {results.map(({ note }) => {
@@ -920,10 +784,10 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
                       onSelect(note.id)
                       onClose()
                     }}
-                    className="flex w-full items-start justify-between gap-4 rounded-md px-4 py-3 text-left transition hover:bg-slate-50"
+                    className="flex w-full items-start justify-between gap-4 rounded-xl px-4 py-3 text-left transition-colors hover:bg-white/[0.04]"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-slate-900">{note.title.trim() || 'Untitled'}</div>
+                      <div className="truncate text-sm font-medium text-slate-100">{note.title.trim() || 'Untitled'}</div>
                       <div className="mt-1 truncate text-xs text-slate-500">{meta?.folderPath || 'Unfiled'}</div>
                       <div className="mt-2 text-xs text-slate-500">{meta?.preview || 'No content yet'}</div>
                     </div>
@@ -931,7 +795,7 @@ function CommandPalette({ notes, noteMeta, onClose, onSelect }: CommandPalettePr
                       {(meta?.tags || []).slice(0, 3).map((tag) => (
                         <span
                           key={`${note.id}-${tag}`}
-                          className="rounded-full bg-indigo-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-600"
+                          className="rounded-full bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-400"
                         >
                           #{tag}
                         </span>
@@ -952,27 +816,34 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
   const markdown = useMemo(() => buildWikiMarkdown(content, titleLookup), [content, titleLookup])
 
   return (
-    <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-p:text-slate-700 prose-strong:text-slate-900 prose-code:text-indigo-700 prose-a:no-underline">
+    <div className="prose prose-invert max-w-none text-[15px] leading-relaxed prose-headings:text-white prose-strong:text-slate-100 prose-a:no-underline">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          h1: ({ children }) => <h1 className="mb-4 text-3xl font-semibold tracking-tight">{children}</h1>,
-          h2: ({ children }) => <h2 className="mb-3 mt-8 text-xl font-semibold tracking-tight">{children}</h2>,
-          h3: ({ children }) => <h3 className="mb-2 mt-6 text-lg font-semibold">{children}</h3>,
-          p: ({ children }) => <p className="mb-3 leading-7 text-slate-700">{children}</p>,
-          ul: ({ children }) => <ul className="mb-4 space-y-2 pl-5 text-slate-700">{children}</ul>,
-          ol: ({ children }) => <ol className="mb-4 space-y-2 pl-5 text-slate-700">{children}</ol>,
+          h1: ({ children }) => <h1 className="mb-4 font-display text-2xl font-semibold tracking-tight text-white">{children}</h1>,
+          h2: ({ children }) => <h2 className="mb-3 mt-8 font-display text-xl font-semibold tracking-tight text-white">{children}</h2>,
+          h3: ({ children }) => <h3 className="mb-2 mt-6 text-lg font-semibold text-white">{children}</h3>,
+          p: ({ children }) => <p className="mb-3 text-[15px] leading-relaxed text-slate-300">{children}</p>,
+          ul: ({ children }) => <ul className="mb-4 space-y-2 pl-5 text-[15px] leading-relaxed text-slate-300">{children}</ul>,
+          ol: ({ children }) => <ol className="mb-4 space-y-2 pl-5 text-[15px] leading-relaxed text-slate-300">{children}</ol>,
           li: ({ children }) => <li className="pl-1">{children}</li>,
           blockquote: ({ children }) => (
-            <blockquote className="my-5 rounded-r-2xl border-l-4 border-indigo-500 bg-indigo-50/70 px-4 py-3 text-slate-600">
+            <blockquote className="my-5 border-l-2 border-teal-400/50 pl-4 text-slate-400">
               {children}
             </blockquote>
           ),
-          code: ({ inline, className, children, ...props }: any) => {
-            if (inline) {
+          code: ({ className, children, ...props }: any) => {
+            // react-markdown v9 dropped the `inline` prop, so we detect block
+            // code ourselves: a fenced block has a `language-*` class OR its text
+            // spans multiple lines. Everything else is an inline span — otherwise
+            // single-backtick code wrongly renders as a full-width black box.
+            const text = String(children ?? '')
+            const isBlock = /language-/.test(className || '') || text.includes('\n')
+
+            if (!isBlock) {
               return (
                 <code
-                  className="text-[0.92em] font-medium text-indigo-600"
+                  className="rounded-[5px] border border-slate-600/40 bg-slate-700/30 px-1.5 py-0.5 text-[0.88em] font-medium text-cyan-200"
                   {...props}
                 >
                   {children}
@@ -981,7 +852,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
             }
 
             return (
-              <pre className="my-4 overflow-x-auto rounded-md border border-slate-200 bg-slate-950 px-4 py-4 text-sm text-slate-100">
+              <pre className="my-4 overflow-x-auto rounded-xl border border-slate-700/50 bg-slate-800/40 px-4 py-3.5 text-[13.5px] leading-relaxed text-slate-100">
                 <code className={className} {...props}>
                   {children}
                 </code>
@@ -1001,7 +872,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
                 <button
                   type="button"
                   onClick={() => onSelectNote(noteId)}
-                  className="rounded-md border-b border-dashed border-indigo-300 font-medium text-indigo-600 transition hover:text-indigo-700"
+                  className="border-b border-dashed border-teal-300/40 font-medium text-teal-300 transition-colors hover:text-teal-200"
                 >
                   {children}
                 </button>
@@ -1010,7 +881,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
 
             if (href.startsWith('missing-note://')) {
               return (
-                <span className="rounded-md border-b border-dashed border-rose-300 font-medium text-rose-500">
+                <span className="border-b border-dashed border-rose-300/40 font-medium text-rose-300/80">
                   {children}
                 </span>
               )
@@ -1019,7 +890,7 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
             return (
               <a
                 href={href}
-                className="font-medium text-indigo-600 underline decoration-indigo-200 underline-offset-2 transition hover:text-indigo-700"
+                className="font-medium text-teal-300 underline decoration-teal-300/30 underline-offset-2 transition-colors hover:text-teal-200"
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -1028,15 +899,15 @@ function NoteContent({ content, titleLookup, onSelectNote }: NoteContentProps) {
             )
           },
           table: ({ children }) => (
-            <div className="my-5 overflow-x-auto rounded-md border border-slate-200">
+            <div className="my-5 overflow-x-auto rounded-xl border border-white/10">
               <table className="w-full border-collapse text-sm">{children}</table>
             </div>
           ),
-          thead: ({ children }) => <thead className="bg-slate-50">{children}</thead>,
+          thead: ({ children }) => <thead className="bg-white/[0.04]">{children}</thead>,
           tbody: ({ children }) => <tbody>{children}</tbody>,
-          tr: ({ children }) => <tr className="border-b border-slate-200 last:border-b-0">{children}</tr>,
-          th: ({ children }) => <th className="px-4 py-3 text-left font-semibold text-slate-900">{children}</th>,
-          td: ({ children }) => <td className="px-4 py-3 text-slate-600">{children}</td>,
+          tr: ({ children }) => <tr className="border-b border-white/8 last:border-b-0">{children}</tr>,
+          th: ({ children }) => <th className="px-4 py-3 text-left font-semibold text-slate-200">{children}</th>,
+          td: ({ children }) => <td className="px-4 py-3 text-slate-400">{children}</td>,
         }}
       >
         {markdown}
@@ -1279,7 +1150,7 @@ function GraphView({ nodes, edges, activeNoteId, onSelectNote }: GraphViewProps)
 
   if (nodes.length === 0) {
     return (
-      <div className="flex h-full min-h-[26rem] items-center justify-center rounded-3xl border border-dashed border-slate-700/80 bg-slate-950/70 text-sm text-slate-400">
+      <div className="flex h-full min-h-[26rem] items-center justify-center text-sm text-slate-500">
         Add some notes with `[[wiki links]]` to build a graph.
       </div>
     )
@@ -1290,7 +1161,7 @@ function GraphView({ nodes, edges, activeNoteId, onSelectNote }: GraphViewProps)
   return (
     <canvas
       ref={canvasRef}
-      className="block h-full min-h-[30rem] w-full rounded-3xl border border-slate-800/80 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.14),_transparent_42%),radial-gradient(circle_at_top_right,_rgba(20,184,166,0.10),_transparent_38%),linear-gradient(180deg,_rgba(2,6,23,0.98),_rgba(15,23,42,0.96))]"
+      className="block h-full min-h-[30rem] w-full rounded-2xl border border-white/8 bg-[#050b16]"
       style={{ cursor: isInteracting ? 'grabbing' : hoveredNoteId ? 'pointer' : 'grab' }}
       onPointerDown={(event) => {
         const hit = getNodeAtPoint(event.clientX, event.clientY)
@@ -1361,6 +1232,9 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
   const [notes, setNotes] = useState<NoteRecord[]>([])
   const [folders, setFolders] = useState<FolderRecord[]>([])
   const [dbConnections, setDbConnections] = useState<{ source: string; target: string }[]>([])
+  const graphLoadedRef = useRef(false)
+  const contentLoadedRef = useRef<Set<string>>(new Set())
+  const [contentVersion, setContentVersion] = useState(0)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -1371,7 +1245,8 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
   const [showPalette, setShowPalette] = useState(false)
   const [showRightPanel, setShowRightPanel] = useState(false)
   const [isFocusMode, setIsFocusMode] = useState(false)
-  const [editorMode, setEditorMode] = useState<'preview' | 'edit'>('edit')
+  const [editorMode, setEditorMode] = useState<'preview' | 'edit'>('preview')
+  const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [draftTitle, setDraftTitle] = useState('')
   const [draftContent, setDraftContent] = useState('')
   const [draftTagsText, setDraftTagsText] = useState('')
@@ -1397,10 +1272,14 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
       setErrorMessage(null)
 
       try {
-        const [notesResponse, foldersResponse, graphResponse] = await Promise.all([
-          fetch(`${APP_CONFIG.apiUrl}/notes`, { credentials: 'include' }),
+        // Critical path: only the vault list + folders. We request notes WITHOUT
+        // full bodies (include_content=false) so the payload is a few hundred KB
+        // instead of ~5MB; full content is lazy-loaded when a note is opened.
+        // Graph data (~2MB, ~10k links) is NOT loaded here — it's fetched lazily
+        // the first time the Graph view is opened.
+        const [notesResponse, foldersResponse] = await Promise.all([
+          fetch(`${APP_CONFIG.apiUrl}/notes?include_content=false`, { credentials: 'include' }),
           fetch(`${APP_CONFIG.apiUrl}/folders`, { credentials: 'include' }),
-          fetch(`${APP_CONFIG.apiUrl}/notes/graph-data`, { credentials: 'include' }),
         ])
 
         if (!notesResponse.ok || !foldersResponse.ok) {
@@ -1411,18 +1290,6 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
           notesResponse.json() as Promise<NoteRecord[]>,
           foldersResponse.json() as Promise<FolderRecord[]>,
         ])
-
-        // Load DB connections for graph view
-        if (graphResponse.ok) {
-          try {
-            const graphData = await graphResponse.json() as { links?: { source: string; target: string }[] }
-            if (graphData.links) {
-              setDbConnections(graphData.links.map((l) => ({ source: l.source, target: l.target })))
-            }
-          } catch {
-            // Graph data is optional — wiki links still work
-          }
-        }
 
         if (cancelled) {
           return
@@ -1461,6 +1328,34 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
       cancelled = true
     }
   }, [])
+
+  // Lazy-load graph connections (~2MB / ~10k links) only the first time the
+  // Graph view is opened — keeps it off the initial page-load critical path.
+  useEffect(() => {
+    if (!showGraph || graphLoadedRef.current) {
+      return
+    }
+    graphLoadedRef.current = true
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`${APP_CONFIG.apiUrl}/notes/graph-data`, { credentials: 'include' })
+        if (!res.ok) {
+          graphLoadedRef.current = false
+          return
+        }
+        const data = (await res.json()) as { links?: { source: string; target: string }[] }
+        if (!cancelled && data.links) {
+          setDbConnections(data.links.map((l) => ({ source: l.source, target: l.target })))
+        }
+      } catch {
+        graphLoadedRef.current = false // allow a retry on next open
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [showGraph])
 
   const folderMap = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders])
 
@@ -1599,6 +1494,36 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
       setReadVersion((v) => v + 1)
     }
 
+    // The vault list ships only excerpts (include_content=false). Fetch the full
+    // body once per note before hydrating the editor, so editing/save and the
+    // isDirty check operate on complete content — otherwise a truncated excerpt
+    // would make the note look permanently "dirty" and could overwrite the body.
+    if (!contentLoadedRef.current.has(activeNote.id)) {
+      const targetId = activeNote.id
+      let cancelled = false
+      void (async () => {
+        try {
+          const res = await fetch(`${APP_CONFIG.apiUrl}/notes/${targetId}`, { credentials: 'include' })
+          if (res.ok) {
+            const full = normalizeIncomingNote((await res.json()) as NoteRecord)
+            if (!cancelled) {
+              setNotes((current) => current.map((n) => (n.id === targetId ? { ...n, content: full.content } : n)))
+            }
+          }
+        } catch {
+          // keep the excerpt if the fetch fails — better than nothing
+        } finally {
+          if (!cancelled) {
+            contentLoadedRef.current.add(targetId)
+            setContentVersion((v) => v + 1) // re-run this effect to hydrate
+          }
+        }
+      })()
+      return () => {
+        cancelled = true
+      }
+    }
+
     if (hydratedNoteIdRef.current !== activeNote.id) {
       hydratedNoteIdRef.current = activeNote.id
       setDraftTitle(activeNote.title || '')
@@ -1607,7 +1532,18 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
       setDraftStarred(Boolean(activeNote.starred))
       setSaveState('saved')
     }
-  }, [activeNote])
+  }, [activeNote, contentVersion])
+
+  // When the editor flips into edit mode, drop the cursor into the body so the
+  // user can start typing immediately (single-pane "click to edit" feel).
+  useEffect(() => {
+    if (editorMode === 'edit') {
+      const el = editorTextareaRef.current
+      if (el) {
+        el.focus()
+      }
+    }
+  }, [editorMode, activeNoteId])
 
   const isDirty = Boolean(
     activeNote &&
@@ -1718,6 +1654,7 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
       }
 
       const created = normalizeIncomingNote((await response.json()) as NoteRecord)
+      contentLoadedRef.current.add(created.id) // freshly created: body is already complete
       setNotes((current) => sortNotes([created, ...current]))
       setShowCreateNote(false)
       setCreateName('')
@@ -1993,170 +1930,124 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
   const selectedFolderLabel = selectedFolderId ? buildFolderPath(selectedFolderId, folderMap) : 'Workspace root'
 
   return (
-    <div className="notes-workspace-theme h-full min-h-0 bg-[radial-gradient(circle_at_top_right,_rgba(34,211,238,0.12),_transparent_30%),radial-gradient(circle_at_bottom_left,_rgba(20,184,166,0.10),_transparent_35%),linear-gradient(180deg,_#020617,_#0f172a_40%,_#020617)]">
-      <style>{NOTES_THEME_OVERRIDES}</style>
+    <div className={isFocusMode ? 'fixed inset-0 z-[60] bg-[#050b16]' : 'h-full min-h-0'}>
       <div className="flex h-full min-h-0 flex-col overflow-hidden px-4 pb-4 pt-3 sm:px-6 lg:px-8">
         <div className={`flex min-h-0 flex-1 flex-col ${isFocusMode ? 'gap-2' : 'gap-3'}`}>
           {!isFocusMode && (
-          <section className="assistant-panel-soft rounded-md px-4 py-3 sm:px-5">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <div className="min-w-0 max-w-3xl">
-                <div className="assistant-kicker mb-2">Knowledge Workspace</div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">
-                    Notes
-                  </h1>
-                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    {notes.length} notes
-                  </span>
-                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    {folders.length} folders
-                  </span>
-                  <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    {graphData.edges.length} links
-                  </span>
-                </div>
-                <p className="mt-1 text-sm text-slate-500">
-                  Vault on the side, note in the center.
-                </p>
-              </div>
+          <header className="flex flex-wrap items-center gap-x-3 gap-y-2 py-1">
+            <h1 className="font-display text-xl font-semibold text-white">Notes</h1>
+            <span className="text-xs text-slate-500">
+              {notes.length} {notes.length === 1 ? 'note' : 'notes'} · {folders.length}{' '}
+              {folders.length === 1 ? 'folder' : 'folders'}
+            </span>
 
-              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCreateName('')
-                      setShowCreateFolder(true)
-                      setShowCreateNote(false)
-                    }}
-                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-200 hover:text-indigo-600"
-                  >
-                    <FolderPlusIcon className="h-4 w-4" />
-                    Folder
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCreateName('')
-                      setShowCreateNote(true)
-                      setShowCreateFolder(false)
-                    }}
-                    className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700"
-                  >
-                    <PlusIcon className="h-4 w-4" />
-                    New note
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowGraph((current) => !current)}
-                    className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
-                      showGraph
-                        ? 'bg-indigo-600 text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-200 hover:text-indigo-600'
-                    }`}
-                  >
-                    <Squares2X2Icon className="h-4 w-4" />
-                    {showGraph ? 'Editor' : 'Graph'}
-                  </button>
-                  {!showGraph && (
-                    <button
-                      type="button"
-                      onClick={() => setIsFocusMode(true)}
-                      className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
-                    >
-                      <ArrowsPointingOutIcon className="h-4 w-4" />
-                      Focus mode
-                    </button>
-                  )}
-                  {!showGraph && (
-                    <button
-                      type="button"
-                      onClick={() => setShowRightPanel((current) => !current)}
-                      className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
-                    >
-                      {showRightPanel ? 'Hide details' : 'Show details'}
-                    </button>
-                  )}
-              </div>
+            <div className="ml-auto flex flex-wrap items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateName('')
+                  setShowCreateFolder(true)
+                  setShowCreateNote(false)
+                }}
+                className="rounded-lg px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+              >
+                + Folder
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowGraph((current) => !current)}
+                className="rounded-lg px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+              >
+                {showGraph ? 'Editor' : 'Graph'}
+              </button>
+              {!showGraph && (
+                <button
+                  type="button"
+                  onClick={() => setIsFocusMode(true)}
+                  className="rounded-lg px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+                >
+                  Focus
+                </button>
+              )}
+              {!showGraph && (
+                <button
+                  type="button"
+                  onClick={() => setShowRightPanel((current) => !current)}
+                  className="rounded-lg px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+                >
+                  {showRightPanel ? 'Hide details' : 'Details'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateName('')
+                  setShowCreateNote(true)
+                  setShowCreateFolder(false)
+                }}
+                className="ml-1 inline-flex items-center gap-1.5 rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition hover:bg-teal-300"
+              >
+                <PlusIcon className="h-4 w-4" />
+                New note
+              </button>
             </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium text-slate-500">
-              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
-                {showGraph ? 'Map view' : activeNote ? activeNote.title.trim() || 'Untitled note' : 'Vault'}
-              </span>
-              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
-                {selectedFolderLabel}
-              </span>
-              <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5">
-                {editorMode === 'edit' ? 'Editing' : 'Previewing'}
-              </span>
-              </div>
-          </section>
+          </header>
           )}
 
           {errorMessage && (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <div className="border-l-2 border-rose-400/70 py-1 pl-4 text-sm text-rose-200">
               {errorMessage}
             </div>
           )}
 
           {loading ? (
-              <div className="assistant-panel-soft flex min-h-[30rem] items-center justify-center rounded-md border border-slate-200 bg-slate-50">
-                <div className="flex items-center gap-3 text-sm font-medium text-slate-500">
-                  <ArrowPathIcon className="h-5 w-5 animate-spin" />
+              <div className="flex min-h-[30rem] flex-1 items-center justify-center">
+                <div className="flex items-center gap-3 text-sm text-slate-500">
+                  <ArrowPathIcon className="h-4 w-4 animate-spin" />
                   Loading your vault...
                 </div>
               </div>
             ) : (
-              <div className={`assistant-panel-soft flex min-h-0 flex-1 overflow-hidden ${isFocusMode ? 'rounded-md p-0.5' : 'rounded-md p-1.5'}`}>
-                <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-md md:flex-row">
+                <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
                   {!isFocusMode && (
-                  <aside className="flex w-full min-h-[14rem] max-h-[40vh] shrink-0 flex-col overflow-hidden border-b border-slate-200 bg-slate-50/80 md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r xl:w-[18rem]">
-                    <div className="border-b border-slate-200 px-4 py-2">
-                      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Context:</div>
-                        <div className="text-sm font-medium text-slate-900">{selectedFolderLabel}</div>
-                      </div>
-                    </div>
-
-                    <div className="border-b border-slate-200 px-4 py-3">
-                      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2">
-                        <MagnifyingGlassIcon className="h-4 w-4 text-slate-400" />
+                  <aside className="flex w-full min-h-[14rem] max-h-[40vh] shrink-0 flex-col overflow-hidden border-b border-white/8 pb-3 md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r md:pb-0 md:pr-4 xl:w-[18rem]">
+                    <div className="pb-3">
+                      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 transition-colors focus-within:border-teal-300/30">
+                        <MagnifyingGlassIcon className="h-4 w-4 text-slate-500" />
                         <input
                           value={searchQuery}
                           onChange={(event) => setSearchQuery(event.target.value)}
                           placeholder="Search notes/folders"
-                          className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+                          className="w-full bg-transparent text-sm text-slate-200 outline-none placeholder:text-slate-600"
                         />
                         <button
                           type="button"
                           onClick={() => setShowPalette(true)}
-                          className="hidden rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500 transition hover:border-indigo-200 hover:text-indigo-600 sm:block"
+                          className="hidden whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600 transition-colors hover:text-teal-300 sm:block"
                         >
-                          Cmd/Ctrl + P
+                          ⌘P
                         </button>
                       </div>
                     </div>
 
-                    <div className="max-h-24 overflow-y-auto border-b border-slate-200 px-4 py-2">
-                      <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Starred</div>
+                    <div className="max-h-28 overflow-y-auto py-2">
+                      <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Starred</div>
                       {starredList.length === 0 ? (
-                        <div className="rounded-md border border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500">
-                          Star key notes to pin them here.
-                        </div>
+                        <p className="px-2 text-xs text-slate-600">Star key notes to pin them here.</p>
                       ) : (
-                        <div className="space-y-1">
+                        <div className="space-y-0.5">
                           {starredList.map((note) => (
                             <button
                               key={note.id}
                               type="button"
                               onClick={() => void selectNote(note.id)}
-                              className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition ${
+                              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors ${
                                 activeNoteId === note.id
-                                  ? 'bg-white text-slate-900 shadow-sm ring-1 ring-amber-100'
-                                  : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                                  ? 'bg-white/[0.06] text-white'
+                                  : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
                               }`}
                             >
-                              <StarIconSolid className="h-4 w-4 text-amber-400" />
+                              <StarIconSolid className="h-3.5 w-3.5 text-amber-300/80" />
                               <span className="min-w-0 flex-1 truncate">{note.title.trim() || 'Untitled'}</span>
                             </button>
                           ))}
@@ -2164,12 +2055,12 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                       )}
                     </div>
 
-                    <div className="min-h-0 flex-[1.35] overflow-y-auto px-4 py-3">
-                      <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Vault</div>
+                    <div className="min-h-0 flex-[1.35] overflow-y-auto py-3">
+                      <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Vault</div>
                       {treeData.rootNotes.length === 0 && treeData.branches.length === 0 ? (
-                        <div className="rounded-md border border-dashed border-slate-200 bg-white px-4 py-5 text-sm text-slate-500">
+                        <p className="px-2 text-sm text-slate-500">
                           {normalizedQuery ? 'No notes match that search.' : 'Create your first note to get started.'}
-                        </div>
+                        </p>
                       ) : (
                         <FolderTree
                           branches={treeData.branches}
@@ -2196,18 +2087,18 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                       )}
                     </div>
 
-                    <div className="max-h-24 overflow-y-auto border-t border-slate-200 px-4 py-2">
-                      <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tags</div>
-                      <div className="flex flex-wrap gap-2">
+                    <div className="max-h-24 overflow-y-auto pt-2">
+                      <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Tags</div>
+                      <div className="flex flex-wrap gap-1.5 px-2">
                         {allTags.length === 0 ? (
-                          <span className="text-xs text-slate-500">Add `#tags` in note text.</span>
+                          <span className="text-xs text-slate-600">Add `#tags` in note text.</span>
                         ) : (
                           allTags.slice(0, 10).map((tag) => (
                             <button
                               key={tag}
                               type="button"
                               onClick={() => setSearchQuery(tag)}
-                              className="rounded-full border border-indigo-100 bg-indigo-50 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-indigo-600 transition hover:bg-indigo-100"
+                              className="rounded-full bg-white/[0.06] px-2.5 py-0.5 text-[11px] text-slate-400 transition-colors hover:text-teal-300"
                             >
                               #{tag}
                             </button>
@@ -2220,12 +2111,10 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
 
                   <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
                     {showGraph ? (
-                      <div className="flex min-h-[32rem] flex-1 flex-col p-5">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                          <span>Drag nodes to reorganize. Drag empty space to pan. Click a node to jump to that note.</span>
-                          <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                            Cmd/Ctrl + G
-                          </span>
+                      <div className="flex min-h-[32rem] flex-1 flex-col pl-0 pt-1 md:pl-5">
+                        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3 text-xs text-slate-500">
+                          <span>Drag nodes to reorganize · drag empty space to pan · click a node to open it</span>
+                          <span className="hidden uppercase tracking-[0.14em] text-slate-600 sm:block">⌘G</span>
                         </div>
                         <div className="flex-1 min-h-[30rem]">
                           <GraphView
@@ -2239,164 +2128,183 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                     ) : activeNote ? (
                       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
                         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                          <div className={`border-b border-slate-200 ${isFocusMode ? 'px-6 py-4' : 'px-5 py-3'}`}>
-                            <div className="flex flex-col gap-3">
-                              <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                              <div className="min-w-0 flex-1">
+                          <div className={isFocusMode ? 'px-6 pb-2 pt-6' : 'px-1 pb-2 pt-4 md:px-5'}>
+                            <div className="mx-auto w-full max-w-[75ch]">
+                              <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
                                 <input
                                   value={draftTitle}
                                   onChange={(event) => setDraftTitle(event.target.value)}
                                   placeholder="Untitled"
-                                  className="w-full bg-transparent text-2xl font-semibold tracking-tight text-slate-900 outline-none placeholder:text-slate-400 sm:text-3xl"
+                                  className="min-w-0 flex-1 basis-64 bg-transparent font-display text-2xl font-semibold text-white outline-none placeholder:text-slate-600 md:text-3xl"
                                 />
-                                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs font-medium text-slate-500">
-                                  <span>In {activeMeta?.folderPath || 'Unfiled'}</span>
-                                  <span>Created {formatShortDate(activeNote.created_at)}</span>
-                                  <span>Updated {formatLongDate(activeNote.updated_at)}</span>
-                                  <span>{activeMeta?.wordCount || 0} words</span>
-                                  <span
-                                    className={`rounded-full px-2.5 py-1 ${
-                                      saveState === 'error'
-                                        ? 'bg-rose-50 text-rose-600'
-                                        : saveState === 'saving'
-                                        ? 'bg-amber-50 text-amber-600'
-                                        : 'bg-emerald-50 text-emerald-600'
+
+                                <div className="flex flex-shrink-0 items-center gap-0.5 pt-1">
+                                  {onChatAboutNote && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onChatAboutNote(draftTitle, draftContent)}
+                                      className="rounded-lg px-2 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+                                      title="Discuss this note with Sara"
+                                    >
+                                      Chat about this
+                                    </button>
+                                  )}
+
+                                  {editorMode === 'edit' ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        void saveActiveNote(false)
+                                        setEditorMode('preview')
+                                      }}
+                                      className="rounded-lg px-2 py-1.5 text-xs text-teal-300 transition-colors hover:text-teal-200"
+                                      title="Finish editing (Esc)"
+                                    >
+                                      Done
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditorMode('edit')}
+                                      className="rounded-lg px-2 py-1.5 text-xs text-slate-500 transition-colors hover:text-teal-300"
+                                      title="Edit this note"
+                                    >
+                                      Edit
+                                    </button>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => setDraftStarred((current) => !current)}
+                                    className={`rounded-lg p-1.5 transition-colors ${
+                                      draftStarred ? 'text-amber-300' : 'text-slate-500 hover:text-amber-300'
                                     }`}
+                                    title={draftStarred ? 'Unstar' : 'Star'}
+                                    aria-label={draftStarred ? 'Unstar this note' : 'Star this note'}
                                   >
-                                    {saveState === 'error' ? 'Save failed' : saveState === 'saving' ? 'Saving...' : 'Saved'}
-                                  </span>
+                                    {draftStarred ? (
+                                      <StarIconSolid className="h-4 w-4" />
+                                    ) : (
+                                      <StarIconOutline className="h-4 w-4" />
+                                    )}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsFocusMode((current) => !current)}
+                                    className="rounded-lg p-1.5 text-slate-500 transition-colors hover:text-slate-200"
+                                    title={isFocusMode ? 'Exit focus' : 'Focus'}
+                                    aria-label={isFocusMode ? 'Exit focus mode' : 'Enter focus mode'}
+                                  >
+                                    {isFocusMode ? (
+                                      <ArrowsPointingInIcon className="h-4 w-4" />
+                                    ) : (
+                                      <ArrowsPointingOutIcon className="h-4 w-4" />
+                                    )}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => void deleteCurrentNote()}
+                                    className="rounded-lg p-1.5 text-slate-500 transition-colors hover:text-rose-300"
+                                    title="Delete note"
+                                    aria-label="Delete note"
+                                  >
+                                    <TrashIcon className="h-4 w-4" />
+                                  </button>
                                 </div>
                               </div>
 
-                              <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-                                <button
-                                  type="button"
-                                  onClick={() => setIsFocusMode((current) => !current)}
-                                  className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:text-indigo-600"
+                              <div className="mt-1.5 text-xs text-slate-500">
+                                {activeMeta?.folderPath || 'Unfiled'} · created {formatShortDate(activeNote.created_at)} ·
+                                updated {formatLongDate(activeNote.updated_at)} · {activeMeta?.wordCount || 0} words ·{' '}
+                                <span
+                                  className={
+                                    saveState === 'error'
+                                      ? 'text-rose-300'
+                                      : saveState === 'saving'
+                                      ? 'text-slate-400'
+                                      : 'text-slate-500'
+                                  }
                                 >
-                                  {isFocusMode ? (
-                                    <ArrowsPointingInIcon className="h-4 w-4" />
-                                  ) : (
-                                    <ArrowsPointingOutIcon className="h-4 w-4" />
-                                  )}
-                                  {isFocusMode ? 'Exit focus' : 'Focus'}
-                                </button>
-                                {onChatAboutNote && (
-                                  <button
-                                    type="button"
-                                    onClick={() => onChatAboutNote(draftTitle, draftContent)}
-                                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-teal-200 hover:text-teal-600"
-                                    title="Discuss this note with Sara"
-                                  >
-                                    <ChatBubbleLeftRightIcon className="h-4 w-4" />
-                                    Chat about this
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => setDraftStarred((current) => !current)}
-                                  className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition ${
-                                    draftStarred
-                                      ? 'bg-amber-50 text-amber-700'
-                                      : 'border border-slate-200 bg-white text-slate-600 hover:border-amber-200 hover:text-amber-600'
-                                  }`}
-                                >
-                                  {draftStarred ? (
-                                    <StarIconSolid className="h-4 w-4" />
-                                  ) : (
-                                    <StarIconOutline className="h-4 w-4" />
-                                  )}
-                                  {draftStarred ? 'Starred' : 'Star'}
-                                </button>
-
-                                <div className="inline-flex rounded-md border border-slate-200 bg-white p-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => setEditorMode('preview')}
-                                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                                      editorMode === 'preview' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:text-indigo-600'
-                                    }`}
-                                  >
-                                    Preview
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setEditorMode('edit')}
-                                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                                      editorMode === 'edit' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:text-indigo-600'
-                                    }`}
-                                  >
-                                    Edit
-                                  </button>
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={() => void deleteCurrentNote()}
-                                  className="inline-flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-100"
-                                >
-                                  <TrashIcon className="h-4 w-4" />
-                                  Delete
-                                </button>
-                              </div>
+                                  {saveState === 'error' ? 'save failed' : saveState === 'saving' ? 'saving…' : 'saved'}
+                                </span>
                               </div>
                             </div>
                           </div>
 
-                          <div className={`min-h-0 flex-1 overflow-y-auto ${isFocusMode ? 'px-0 py-0' : 'px-5 py-3'}`}>
+                          <div className={`min-h-0 flex-1 overflow-y-auto ${isFocusMode ? 'px-6 pb-10 pt-2' : 'px-1 pb-10 pt-2 md:px-5'}`}>
                             {editorMode === 'edit' ? (
                               <textarea
+                                ref={editorTextareaRef}
                                 value={draftContent}
                                 onChange={(event) => setDraftContent(event.target.value)}
-                                placeholder="Write with markdown and [[wiki links]]..."
-                                className={`w-full resize-none text-slate-800 outline-none transition focus:border-indigo-200 focus:ring-0 ${
-                                  isFocusMode
-                                    ? 'min-h-full border-0 bg-transparent px-10 py-8 text-lg leading-9 md:h-full md:min-h-0'
-                                    : 'min-h-[24rem] rounded-3xl border border-slate-200 bg-slate-50 px-6 py-6 text-base leading-8 md:h-full md:min-h-0'
-                                }`}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Escape') {
+                                    event.preventDefault()
+                                    void saveActiveNote(false)
+                                    setEditorMode('preview')
+                                  }
+                                }}
+                                placeholder="Write with markdown and [[wiki links]]...  (Esc to preview)"
+                                className="mx-auto block h-full min-h-[24rem] w-full max-w-[75ch] resize-none bg-transparent font-mono text-[15px] leading-relaxed text-slate-200 outline-none placeholder:text-slate-600"
                               />
                             ) : (
-                              <div className={`${isFocusMode ? 'min-h-full bg-transparent px-10 py-8' : 'min-h-full rounded-3xl border border-slate-200 bg-white px-8 py-7 shadow-sm'}`}>
-                                <NoteContent
-                                  content={draftContent || 'No content yet.'}
-                                  titleLookup={titleLookup}
-                                  onSelectNote={(noteId) => void selectNote(noteId)}
-                                />
-              </div>
-            )}
-        </div>
-      </div>
+                              <div
+                                onDoubleClick={() => setEditorMode('edit')}
+                                title="Double-click to edit"
+                                className="mx-auto min-h-[24rem] w-full max-w-[75ch] cursor-text"
+                              >
+                                {draftContent.trim() ? (
+                                  <NoteContent
+                                    content={draftContent}
+                                    titleLookup={titleLookup}
+                                    onSelectNote={(noteId) => void selectNote(noteId)}
+                                  />
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditorMode('edit')}
+                                    className="text-left text-sm text-slate-500 transition-colors hover:text-teal-300"
+                                  >
+                                    This note is empty — click to start writing.
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
 
                         {showRightPanel && !isFocusMode && (
-                          <aside className="w-full max-h-[34vh] overflow-y-auto border-t border-slate-200 bg-slate-50/70 p-5 md:max-h-none md:w-80 md:border-l md:border-t-0">
-                            <div className="space-y-6">
+                          <aside className="w-full max-h-[34vh] overflow-y-auto border-t border-white/8 py-4 md:max-h-none md:w-72 md:border-l md:border-t-0 md:py-2 md:pl-5">
+                            <div className="space-y-8">
                               <section>
-                                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Properties</div>
-                                <div className="mt-3 space-y-2 rounded-3xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                                <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Properties</div>
+                                <div className="space-y-2 text-sm">
                                   <div className="flex items-center justify-between gap-3">
-                                    <span>Path</span>
-                                    <span className="max-w-[10rem] truncate text-right text-slate-900">{activeMeta?.folderPath || 'Unfiled'}</span>
+                                    <span className="text-slate-500">Path</span>
+                                    <span className="max-w-[10rem] truncate text-right text-slate-200">{activeMeta?.folderPath || 'Unfiled'}</span>
                                   </div>
                                   <div className="flex items-center justify-between gap-3">
-                                    <span>Words</span>
-                                    <span className="text-slate-900">{activeMeta?.wordCount || 0}</span>
+                                    <span className="text-slate-500">Words</span>
+                                    <span className="text-slate-200">{activeMeta?.wordCount || 0}</span>
                                   </div>
                                   <div className="flex items-center justify-between gap-3">
-                                    <span>Outgoing</span>
-                                    <span className="text-slate-900">{outgoingLinks.length}</span>
+                                    <span className="text-slate-500">Outgoing</span>
+                                    <span className="text-slate-200">{outgoingLinks.length}</span>
                                   </div>
                                   <div className="flex items-center justify-between gap-3">
-                                    <span>Backlinks</span>
-                                    <span className="text-slate-900">{backlinks.length}</span>
+                                    <span className="text-slate-500">Backlinks</span>
+                                    <span className="text-slate-200">{backlinks.length}</span>
                                   </div>
                                   <div className="pt-2">
                                     <label className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                                      Move To
+                                      Move to
                                     </label>
                                     <select
                                       value={activeNote.folder_id || ''}
                                       onChange={(event) => void moveNoteToFolder(activeNote.id, event.target.value || null)}
-                                      className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
+                                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-300 outline-none transition focus:border-teal-300/30"
                                     >
                                       <option value="">Workspace root</option>
                                       {folderOptions.map((folder) => (
@@ -2410,56 +2318,25 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                               </section>
 
                               <section>
-                                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tags</div>
-                                <div className="mt-3 rounded-3xl border border-slate-200 bg-white p-4">
-                                  <label className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                                    Comma Separated
-                                  </label>
-                                  <input
-                                    value={draftTagsText}
-                                    onChange={(event) => setDraftTagsText(event.target.value)}
-                                    placeholder="architecture, memory, research"
-                                    className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-200 focus:ring-2 focus:ring-indigo-100"
-                                  />
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    {draftTags.length === 0 ? (
-                                      <span className="text-sm text-slate-500">No saved tags yet.</span>
-                                    ) : (
-                                      draftTags.map((tag) => (
-                                        <button
-                                          key={tag}
-                                          type="button"
-                                          onClick={() => setSearchQuery(tag)}
-                                          className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-600 transition hover:bg-indigo-100"
-                                        >
-                                          #{tag}
-                                        </button>
-                                      ))
-                                    )}
-                                  </div>
-                                </div>
-                              </section>
-
-                              <section>
-                                <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                                  <span>Backlinks</span>
-                                  <span>{backlinks.length}</span>
-                                </div>
-                                <div className="mt-3 space-y-2">
-                                  {backlinks.length === 0 ? (
-                                    <div className="rounded-3xl border border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500">
-                                      No backlinks yet.
-                                    </div>
+                                <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Tags</div>
+                                <input
+                                  value={draftTagsText}
+                                  onChange={(event) => setDraftTagsText(event.target.value)}
+                                  placeholder="architecture, memory, research"
+                                  className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-300 outline-none transition focus:border-teal-300/30 placeholder:text-slate-600"
+                                />
+                                <div className="mt-3 flex flex-wrap gap-1.5">
+                                  {draftTags.length === 0 ? (
+                                    <span className="text-xs text-slate-600">No saved tags yet.</span>
                                   ) : (
-                                    backlinks.map((note) => (
+                                    draftTags.map((tag) => (
                                       <button
-                                        key={note.id}
+                                        key={tag}
                                         type="button"
-                                        onClick={() => void selectNote(note.id)}
-                                        className="w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-indigo-200 hover:bg-indigo-50/40"
+                                        onClick={() => setSearchQuery(tag)}
+                                        className="rounded-full bg-white/[0.06] px-2.5 py-0.5 text-[11px] text-slate-400 transition-colors hover:text-teal-300"
                                       >
-                                        <div className="truncate text-sm font-semibold text-slate-900">{note.title.trim() || 'Untitled'}</div>
-                                        <div className="mt-1 truncate text-xs text-slate-500">{noteMeta.get(note.id)?.folderPath || 'Unfiled'}</div>
+                                        #{tag}
                                       </button>
                                     ))
                                   )}
@@ -2467,25 +2344,47 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                               </section>
 
                               <section>
-                                <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                                <div className="mb-3 flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                                  <span>Backlinks</span>
+                                  <span>{backlinks.length}</span>
+                                </div>
+                                <div className="space-y-0.5">
+                                  {backlinks.length === 0 ? (
+                                    <p className="text-xs text-slate-600">No backlinks yet.</p>
+                                  ) : (
+                                    backlinks.map((note) => (
+                                      <button
+                                        key={note.id}
+                                        type="button"
+                                        onClick={() => void selectNote(note.id)}
+                                        className="w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/[0.04]"
+                                      >
+                                        <div className="truncate text-sm text-slate-300">{note.title.trim() || 'Untitled'}</div>
+                                        <div className="truncate text-xs text-slate-600">{noteMeta.get(note.id)?.folderPath || 'Unfiled'}</div>
+                                      </button>
+                                    ))
+                                  )}
+                                </div>
+                              </section>
+
+                              <section>
+                                <div className="mb-3 flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
                                   <span>Outgoing</span>
                                   <span>{outgoingLinks.length}</span>
                                 </div>
-                                <div className="mt-3 space-y-2">
+                                <div className="space-y-0.5">
                                   {outgoingLinks.length === 0 ? (
-                                    <div className="rounded-3xl border border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500">
-                                      Add `[[Note Title]]` links to connect notes.
-                                    </div>
+                                    <p className="text-xs text-slate-600">Add `[[Note Title]]` links to connect notes.</p>
                                   ) : (
                                     outgoingLinks.map((note) => (
                                       <button
                                         key={note.id}
                                         type="button"
                                         onClick={() => void selectNote(note.id)}
-                                        className="w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-teal-200 hover:bg-teal-50/40"
+                                        className="w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/[0.04]"
                                       >
-                                        <div className="truncate text-sm font-semibold text-slate-900">{note.title.trim() || 'Untitled'}</div>
-                                        <div className="mt-1 truncate text-xs text-slate-500">{noteMeta.get(note.id)?.folderPath || 'Unfiled'}</div>
+                                        <div className="truncate text-sm text-slate-300">{note.title.trim() || 'Untitled'}</div>
+                                        <div className="truncate text-xs text-slate-600">{noteMeta.get(note.id)?.folderPath || 'Unfiled'}</div>
                                       </button>
                                     ))
                                   )}
@@ -2497,18 +2396,11 @@ export default function Notes({ onChatAboutNote }: NotesProps = {}) {
                       </div>
                     ) : (
                       <div className="flex flex-1 items-center justify-center p-8 text-center">
-                        <div>
-                          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-md bg-indigo-50 text-indigo-600">
-                            <PlusIcon className="h-7 w-7" />
-                          </div>
-                          <h2 className="mt-4 text-xl font-semibold text-slate-900">Your vault is empty</h2>
-                          <p className="mt-2 text-sm text-slate-500">Create a note to start building the graph.</p>
-                        </div>
+                        <p className="text-sm text-slate-500">Your vault is empty — create a note to get started.</p>
                       </div>
                     )}
                   </main>
                 </div>
-              </div>
             )}
           </div>
         </div>

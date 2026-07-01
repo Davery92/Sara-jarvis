@@ -1476,6 +1476,46 @@ async def _deliberation_fallback_async():
     return {"status": "no_deliberation_needed", "pruned": pruned}
 
 
+# ─── Proactive Check-ins ────────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.autonomy.proactive_checkin_sweep",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def proactive_checkin_sweep(self):
+    """
+    Occasional 'how's it going' pings + post-meeting follow-ups, gated by
+    interruptibility and anti-nag caps. Runs every ~15 min during waking hours.
+    """
+    try:
+        from app.services.proactive_checkins import run_checkin_sweep
+        return _run_async(run_checkin_sweep(DEFAULT_USER_ID))
+    except Exception as e:
+        logger.error(f"Proactive check-in sweep failed: {e}")
+        return {"error": str(e)}
+
+
+@celery_app.task(
+    name="app.tasks.autonomy.scan_ended_meetings",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def scan_ended_meetings(self):
+    """
+    Open a one-shot follow-up thread for any real meeting that just ended.
+    The check-in sweep delivers it once David is interruptible.
+    """
+    try:
+        from app.services.proactive_checkins import scan_ended_meetings as _scan
+        return _run_async(_scan(DEFAULT_USER_ID))
+    except Exception as e:
+        logger.error(f"Ended-meeting scan failed: {e}")
+        return {"error": str(e)}
+
+
 # ─── Consolidation Task (Phase 4: Deep Reflection) ──────────────
 
 @celery_app.task(

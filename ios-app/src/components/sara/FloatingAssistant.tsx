@@ -15,7 +15,7 @@ import {
   Pressable,
   FlatList,
   TextInput,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Dimensions,
 } from 'react-native';
@@ -29,14 +29,21 @@ import { voiceService } from '../../services/voice';
 import MessageBubble from '../chat/MessageBubble';
 import StreamingIndicator from '../chat/StreamingIndicator';
 import { colors, shadows } from '../../styles/theme';
-import { navigateToChat } from '../../services/navigation';
+import { navigateToChat, handleSaraUiCommand } from '../../services/navigation';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const MINI_CHAT_HEIGHT = SCREEN_HEIGHT * 0.55;
+const MINI_CHAT_BOTTOM = 100; // matches styles.miniChatContainer.bottom
 
 export default function FloatingAssistant() {
   const { mode, currentScreen, setMode } = useSaraOverlay();
-  const chat = useSaraChat({ source: 'ios_overlay', currentScreen });
+  const handleUiCommand = useCallback((command: any) => {
+    // Collapse the mini-chat so the screen Sara just opened is visible.
+    if (handleSaraUiCommand(command)) {
+      setTimeout(() => setMode('orb'), 600);
+    }
+  }, [setMode]);
+  const chat = useSaraChat({ source: 'ios_overlay', currentScreen, onUiCommand: handleUiCommand });
   const presence = useSaraPresence();
 
   const [inputText, setInputText] = useState('');
@@ -53,6 +60,38 @@ export default function FloatingAssistant() {
   const flatListRef = useRef<FlatList>(null);
   const breatheAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const keyboardShift = useRef(new Animated.Value(0)).current;
+
+  // KeyboardAvoidingView can't handle an absolutely-positioned panel, so
+  // translate the mini-chat above the keyboard ourselves. The panel already
+  // sits MINI_CHAT_BOTTOM px off the screen bottom — only shift the overlap.
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    // Never push the panel header under the status bar / dynamic island.
+    const maxShift = Math.max(0, SCREEN_HEIGHT - MINI_CHAT_BOTTOM - MINI_CHAT_HEIGHT - 64);
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      const overlap = Math.max(0, e.endCoordinates.height - MINI_CHAT_BOTTOM + 8);
+      Animated.timing(keyboardShift, {
+        toValue: -Math.min(overlap, maxShift),
+        duration: e.duration || 250,
+        useNativeDriver: true,
+      }).start();
+    });
+    const hideSub = Keyboard.addListener(hideEvent, (e) => {
+      Animated.timing(keyboardShift, {
+        toValue: 0,
+        duration: e?.duration || 250,
+        useNativeDriver: true,
+      }).start();
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [keyboardShift]);
 
   // Emphatic daemon reactions (focus_set / notify_david) give the orb a heartbeat —
   // the "she just noticed something" moment, mirroring the web presence chip.
@@ -279,7 +318,7 @@ export default function FloatingAssistant() {
                 <Ionicons
                   name={isRecording ? 'mic' : 'hourglass'}
                   size={isRecording ? 24 : 22}
-                  color="#fff"
+                  color={colors.text}
                 />
               </View>
             )}
@@ -295,21 +334,20 @@ export default function FloatingAssistant() {
             {
               transform: [
                 {
-                  translateY: miniChatAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [MINI_CHAT_HEIGHT, 0],
-                  }),
+                  translateY: Animated.add(
+                    miniChatAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [MINI_CHAT_HEIGHT, 0],
+                    }),
+                    keyboardShift,
+                  ),
                 },
               ],
               opacity: miniChatAnim,
             },
           ]}
         >
-          <KeyboardAvoidingView
-            style={styles.miniChatInner}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            keyboardVerticalOffset={20}
-          >
+          <View style={styles.miniChatInner}>
             {/* Header */}
             <View style={styles.miniHeader}>
               <TouchableOpacity onPress={handleExpand} style={styles.miniExpandBtn}>
@@ -390,12 +428,12 @@ export default function FloatingAssistant() {
                   <Ionicons
                     name={isRecording ? 'mic' : 'mic-outline'}
                     size={20}
-                    color={isRecording ? '#fff' : colors.textMuted}
+                    color={isRecording ? colors.text : colors.textMuted}
                   />
                 </TouchableOpacity>
               )}
             </View>
-          </KeyboardAvoidingView>
+          </View>
         </Animated.View>
       )}
     </>

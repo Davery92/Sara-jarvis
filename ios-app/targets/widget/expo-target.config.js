@@ -3,8 +3,8 @@ module.exports = {
   type: "widget",
   icon: "../../assets/icon.png",
   colors: {
-    $accent: "#0d7ff2",
-    $widgetBackground: { light: "#ffffff", dark: "#18181b" },
+    $accent: "#14b8a6",
+    $widgetBackground: { light: "#ffffff", dark: "#050b16" },
   },
   // Must match the App Group declared in app.json entitlements and the native module.
   entitlements: {

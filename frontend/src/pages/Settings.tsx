@@ -1,10 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import {
-  BellAlertIcon,
-  Cog6ToothIcon,
-  CpuChipIcon,
-  ShieldCheckIcon,
-} from '@heroicons/react/24/outline'
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import {
   getCalmMode, setCalmMode, getEnhancedVisuals, setEnhancedVisuals,
   getAIProvider, setAIProvider, getAIApiKey, setAIApiKey,
@@ -39,6 +33,25 @@ interface MorningBriefDetail {
   recovery_text: string | null
   has_recovery_audio: boolean
   generated_at: string | null
+}
+
+const inputCls =
+  'w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30'
+const labelCls = 'mb-1.5 block text-sm text-slate-300'
+const hintCls = 'mt-1 text-xs text-slate-500'
+const btnSecondary =
+  'rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white disabled:opacity-50 disabled:cursor-not-allowed'
+const btnPrimary =
+  'rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300 disabled:opacity-50 disabled:cursor-not-allowed'
+const quietLinkCls = 'text-xs text-slate-500 transition-colors hover:text-teal-300'
+
+function SectionHeading({ label, action }: { label: string; action?: ReactNode }) {
+  return (
+    <div className="mb-4 flex items-baseline justify-between gap-3">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</h2>
+      {action}
+    </div>
+  )
 }
 
 function ConnectedDevices() {
@@ -117,72 +130,32 @@ function ConnectedDevices() {
     return `${diffDays}d ago`
   }
 
-  if (isLoading) {
-    return (
-      <div className="mt-8 bg-card border border-card rounded-md p-6">
-        <div className="animate-pulse">
-          <div className="h-6 bg-gray-700 rounded w-48 mb-4"></div>
-          <div className="space-y-3">
-            <div className="h-16 bg-gray-800 rounded"></div>
-            <div className="h-16 bg-gray-800 rounded"></div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="mt-8 bg-card border border-card rounded-md p-6">
-        <div className="flex items-center mb-4">
-          <svg className="w-6 h-6 text-teal-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-          </svg>
-          <h3 className="text-lg font-medium text-white">Connected Devices</h3>
-        </div>
-        <p className="text-gray-400 text-sm">Failed to load devices. Please try again later.</p>
-      </div>
-    )
-  }
-
   const devices = data?.devices || []
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-md p-6">
-      <div className="flex items-center mb-4">
-        <svg className="w-6 h-6 text-teal-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-        </svg>
-        <h3 className="text-lg font-medium text-white">Connected Devices</h3>
-      </div>
-
-      <p className="text-gray-400 text-sm mb-6">
-        Desktop agents running the Sara companion app. Devices send activity and screenshots to provide context.
-      </p>
-
-      {devices.length === 0 ? (
-        <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-6 text-center">
-          <svg className="w-12 h-12 text-gray-600 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-          </svg>
-          <p className="text-gray-400 text-sm">No devices connected yet.</p>
-          <p className="text-gray-500 text-xs mt-1">Download and run the desktop app to connect.</p>
-        </div>
+    <section className="mt-12">
+      <SectionHeading label="Connected devices" />
+      {isLoading ? (
+        <p className="text-sm text-slate-500">Checking devices…</p>
+      ) : error ? (
+        <p className="text-sm text-slate-500">Couldn't load devices right now.</p>
+      ) : devices.length === 0 ? (
+        <p className="text-sm text-slate-500">No devices connected yet — download and run the desktop app to connect.</p>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-1">
           {devices.map((device) => (
             <div
               key={device.device_id}
-              className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-4 py-3"
+              className="flex items-center justify-between rounded-lg px-2 py-2.5 transition-colors hover:bg-white/[0.04]"
             >
               <div className="flex items-center gap-4 flex-1 min-w-0">
                 {/* Online status dot */}
-                <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
-                  device.is_online ? 'bg-green-500' : 'bg-gray-500'
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  device.is_online ? 'bg-emerald-400' : 'bg-slate-600'
                 }`} />
 
                 {/* Platform icon */}
-                <div className="text-gray-400 flex-shrink-0">
+                <div className="text-slate-500 flex-shrink-0">
                   {getPlatformIcon(device.platform)}
                 </div>
 
@@ -198,29 +171,29 @@ function ConnectedDevices() {
                           if (e.key === 'Enter') saveEdit(device.device_id)
                           if (e.key === 'Escape') setEditingDevice(null)
                         }}
-                        className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm w-48 focus:outline-none focus:border-teal-500"
+                        className="w-48 rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1 text-sm text-slate-100 outline-none focus:border-teal-300/30"
                         autoFocus
                       />
                       <button
                         onClick={() => saveEdit(device.device_id)}
                         disabled={updateNameMutation.isPending}
-                        className="text-teal-400 hover:text-teal-300 text-sm"
+                        className="text-xs text-teal-300 transition-colors hover:text-teal-200"
                       >
                         Save
                       </button>
                       <button
                         onClick={() => setEditingDevice(null)}
-                        className="text-gray-400 hover:text-gray-300 text-sm"
+                        className={quietLinkCls}
                       >
                         Cancel
                       </button>
                     </div>
                   ) : (
                     <>
-                      <div className="text-white font-medium truncate">
+                      <div className="truncate text-[15px] text-slate-200">
                         {device.friendly_name || device.hostname || 'Unknown Device'}
                       </div>
-                      <div className="text-xs text-gray-500 truncate">
+                      <div className="truncate text-xs text-slate-500">
                         {device.device_id.slice(0, 30)}...
                       </div>
                     </>
@@ -228,9 +201,9 @@ function ConnectedDevices() {
                 </div>
 
                 {/* Activity */}
-                <div className="text-xs text-gray-400 flex-shrink-0 hidden sm:block">
+                <div className="text-xs text-slate-500 flex-shrink-0 hidden sm:block">
                   {device.is_online ? (
-                    <span className="text-green-400">{device.activity_level}</span>
+                    <span>{device.activity_level}</span>
                   ) : (
                     <span>{formatLastActivity(device.last_activity_at)}</span>
                   )}
@@ -239,10 +212,10 @@ function ConnectedDevices() {
 
               {/* Actions */}
               {editingDevice !== device.device_id && (
-                <div className="flex items-center gap-2 ml-4">
+                <div className="flex items-center gap-3 ml-4">
                   <button
                     onClick={() => startEdit(device)}
-                    className="px-2 py-1 text-xs text-gray-400 hover:text-white transition"
+                    className={quietLinkCls}
                     title="Edit name"
                   >
                     Edit
@@ -254,7 +227,7 @@ function ConnectedDevices() {
                       }
                     }}
                     disabled={removeDeviceMutation.isPending}
-                    className="px-2 py-1 text-xs text-red-400 hover:text-red-300 transition"
+                    className="text-xs text-slate-500 transition-colors hover:text-rose-300 disabled:opacity-50"
                     title="Remove device"
                   >
                     Remove
@@ -265,7 +238,7 @@ function ConnectedDevices() {
           ))}
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
@@ -300,88 +273,65 @@ function TokenUsageStats() {
   }
 
   if (isLoading) {
-    return (
-      <div className="animate-pulse">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[1, 2, 3, 4].map(i => (
-            <div key={i} className="bg-gray-800 rounded-lg p-4 h-20"></div>
-          ))}
-        </div>
-      </div>
-    )
+    return <p className="text-sm text-slate-500">Loading token usage…</p>
   }
 
   if (error) {
-    return (
-      <div className="text-red-400 text-sm">
-        Failed to load token statistics. The feature may not be available yet.
-      </div>
-    )
+    return <p className="text-sm text-slate-500">Token statistics aren't available right now.</p>
   }
 
   return (
     <div className="space-y-4">
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wide">Total Tokens</div>
-          <div className="text-2xl font-bold text-teal-400 mt-1">
-            {formatNumber(tokenStats?.total_tokens || 0)}
+      {/* Stats */}
+      <div className="grid grid-cols-2 gap-x-8 gap-y-5 md:grid-cols-4">
+        {[
+          ['Total tokens', tokenStats?.total_tokens || 0],
+          ['Prompt', tokenStats?.total_prompt_tokens || 0],
+          ['Completion', tokenStats?.total_completion_tokens || 0],
+          ['Requests', tokenStats?.total_requests || 0],
+        ].map(([label, value]) => (
+          <div key={label as string}>
+            <div className="text-2xl font-semibold tabular-nums text-white">{formatNumber(value as number)}</div>
+            <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              {label as string}
+            </div>
           </div>
-        </div>
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wide">Prompt Tokens</div>
-          <div className="text-2xl font-bold text-blue-400 mt-1">
-            {formatNumber(tokenStats?.total_prompt_tokens || 0)}
-          </div>
-        </div>
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wide">Completion Tokens</div>
-          <div className="text-2xl font-bold text-purple-400 mt-1">
-            {formatNumber(tokenStats?.total_completion_tokens || 0)}
-          </div>
-        </div>
-        <div className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wide">Total Requests</div>
-          <div className="text-2xl font-bold text-green-400 mt-1">
-            {formatNumber(tokenStats?.total_requests || 0)}
-          </div>
-        </div>
+        ))}
       </div>
 
       {/* Meta Info & Reset */}
-      <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
-        <div className="text-gray-400">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="text-xs text-slate-500">
           {tokenStats?.last_reset_at ? (
-            <span>Tracking since: {formatDate(tokenStats.last_reset_at)}</span>
+            <span>Tracking since {formatDate(tokenStats.last_reset_at)}</span>
           ) : (
-            <span>Tracking since: Start</span>
+            <span>Tracking since start</span>
           )}
           {tokenStats?.updated_at && (
-            <span className="ml-4 text-gray-500">Last update: {formatDate(tokenStats.updated_at)}</span>
+            <span className="ml-3">Last update {formatDate(tokenStats.updated_at)}</span>
           )}
         </div>
 
         {!showResetConfirm ? (
           <button
             onClick={() => setShowResetConfirm(true)}
-            className="px-3 py-1.5 text-xs font-medium text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg hover:bg-red-900/30 transition-colors"
+            className={quietLinkCls}
           >
-            Reset Counter
+            Reset counter
           </button>
         ) : (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">Are you sure?</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-400">Are you sure?</span>
             <button
               onClick={() => resetMutation.mutate()}
               disabled={resetMutation.isPending}
-              className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+              className="text-xs text-rose-300 transition-colors hover:text-rose-200 disabled:opacity-50"
             >
-              {resetMutation.isPending ? 'Resetting...' : 'Yes, Reset'}
+              {resetMutation.isPending ? 'Resetting…' : 'Yes, reset'}
             </button>
             <button
               onClick={() => setShowResetConfirm(false)}
-              className="px-3 py-1.5 text-xs font-medium text-gray-400 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
+              className={quietLinkCls}
             >
               Cancel
             </button>
@@ -404,6 +354,7 @@ interface DownloadInfo {
 }
 
 function DesktopAppDownloads() {
+  const [showInstallNotes, setShowInstallNotes] = useState(false)
   const { data, isLoading, error } = useQuery({
     queryKey: ['downloads'],
     queryFn: async () => {
@@ -456,31 +407,21 @@ function DesktopAppDownloads() {
 
   if (isLoading) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-md p-6">
-        <div className="animate-pulse">
-          <div className="h-6 bg-gray-700 rounded w-48 mb-4"></div>
-          <div className="space-y-3">
-            <div className="h-20 bg-gray-800 rounded"></div>
-            <div className="h-20 bg-gray-800 rounded"></div>
-          </div>
-        </div>
-      </div>
+      <section className="mt-12">
+        <SectionHeading label="Desktop app" />
+        <p className="text-sm text-slate-500">Loading downloads…</p>
+      </section>
     )
   }
 
   if (error || !data?.downloads?.length) {
     return (
-      <div className="mt-8 bg-card border border-card rounded-md p-6">
-        <div className="flex items-center mb-4">
-          <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          <h3 className="text-lg font-medium text-white">Desktop App</h3>
-        </div>
-        <p className="text-gray-400 text-sm">
-          {error ? 'Failed to load downloads. Please try again later.' : 'No downloads available yet.'}
+      <section className="mt-12">
+        <SectionHeading label="Desktop app" />
+        <p className="text-sm text-slate-500">
+          {error ? "Couldn't load downloads right now." : 'No downloads available yet.'}
         </p>
-      </div>
+      </section>
     )
   }
 
@@ -496,49 +437,37 @@ function DesktopAppDownloads() {
   })
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-md p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center">
-          <svg className="w-6 h-6 text-indigo-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          <h3 className="text-lg font-medium text-white">Sara Desktop Companion</h3>
-        </div>
-        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded">v{data.version}</span>
-      </div>
+    <section className="mt-12">
+      <SectionHeading
+        label="Desktop app"
+        action={<span className="text-xs text-slate-500">v{data.version}</span>}
+      />
 
-      <p className="text-gray-400 text-sm mb-6">
-        A floating desktop companion. Click to open chat, with support for text and voice input, notes overlay, and timer displays.
-      </p>
-
-      <div className="space-y-4">
+      <div className="space-y-6">
         {Object.entries(byPlatform).map(([platform, downloads]) => (
-          <div key={platform} className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="text-gray-300">{getPlatformIcon(platform)}</div>
-              <h4 className="text-white font-medium">{platform}</h4>
+          <div key={platform}>
+            <div className="mb-1 flex items-center gap-2 px-2 text-sm text-slate-300">
+              <span className="text-slate-500">{getPlatformIcon(platform)}</span>
+              {platform}
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1">
               {downloads.map((download) => (
                 <div
                   key={download.filename}
-                  className="flex items-center justify-between bg-gray-900/50 rounded-lg px-4 py-3"
+                  className="flex items-center justify-between rounded-lg px-2 py-2 transition-colors hover:bg-white/[0.04]"
                 >
-                  <div className="flex-1">
-                    <div className="text-sm text-white font-medium">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[15px] text-slate-200">
                       {getArchLabel(download.arch)}
                     </div>
-                    <div className="text-xs text-gray-500">
+                    <div className="text-xs text-slate-500">
                       {download.filename} ({download.size_mb} MB)
                     </div>
                   </div>
                   <button
                     onClick={() => handleDownload(download.filename)}
-                    className="ml-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                    className={`ml-4 flex-shrink-0 ${btnSecondary}`}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
                     Download
                   </button>
                 </div>
@@ -550,105 +479,93 @@ function DesktopAppDownloads() {
 
       {/* Linux Headless Agent Section */}
       {headlessDownloads.length > 0 && (
-        <div className="mt-6 pt-6 border-t border-gray-700">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="text-green-400">
-              <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139z" />
-              </svg>
-            </div>
-            <div>
-              <h4 className="text-white font-medium">Linux Headless Agent</h4>
-              <p className="text-xs text-gray-400">For servers without a GUI - runs as a systemd service</p>
-            </div>
-          </div>
+        <div className="mt-6">
+          <div className="mb-1 px-2 text-sm text-slate-300">Linux headless agent</div>
+          <p className="px-2 text-xs text-slate-500">
+            For servers without a GUI — runs as a systemd service with system metrics, remote commands, and auto-start.
+          </p>
 
-          {headlessDownloads.map((download) => (
-            <div
-              key={download.filename}
-              className="flex items-center justify-between bg-gray-900/50 rounded-lg px-4 py-3"
-            >
-              <div className="flex-1">
-                <div className="text-sm text-white font-medium">
-                  Headless Agent (x64)
-                </div>
-                <div className="text-xs text-gray-500">
-                  {download.filename} ({download.size_mb} MB)
-                </div>
-                <div className="text-xs text-green-400/80 mt-1">
-                  Includes: System metrics, remote commands, auto-start
-                </div>
-              </div>
-              <button
-                onClick={() => handleDownload(download.filename)}
-                className="ml-4 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+          <div className="mt-1 space-y-1">
+            {headlessDownloads.map((download) => (
+              <div
+                key={download.filename}
+                className="flex items-center justify-between rounded-lg px-2 py-2 transition-colors hover:bg-white/[0.04]"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download
-              </button>
-            </div>
-          ))}
-
-          <div className="mt-3 p-3 bg-green-900/20 border border-green-500/20 rounded-lg">
-            <div className="text-xs text-green-300">
-              <p className="font-medium">Quick Install:</p>
-              <code className="block mt-2 bg-black/30 px-2 py-1.5 rounded text-green-100 font-mono text-[10px] break-all">
-                curl -L {APP_CONFIG.apiUrl}/api/downloads/sara-agent-linux.tar.gz | tar xz && cd sara-agent && sudo ./install.sh
-              </code>
-            </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[15px] text-slate-200">
+                    Headless Agent (x64)
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {download.filename} ({download.size_mb} MB)
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleDownload(download.filename)}
+                  className={`ml-4 flex-shrink-0 ${btnSecondary}`}
+                >
+                  Download
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      <div className="mt-4 p-3 bg-blue-900/20 border border-blue-500/20 rounded-lg">
-        <div className="flex items-start gap-2">
-          <svg className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-          </svg>
-          <div className="text-xs text-blue-300">
-            <p className="font-medium">Desktop App Installation:</p>
-            <ul className="mt-1 space-y-1 text-blue-300/80">
-              <li><strong>Windows:</strong> Extract the archive and run Sara.exe</li>
-              <li><strong>macOS:</strong> Extract the zip and move Sara.app to Applications</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-
-      {/* Activity Monitoring Setup */}
-      <div className="mt-4 p-4 bg-amber-900/20 border border-amber-500/20 rounded-lg">
-        <div className="flex items-start gap-2">
-          <svg className="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-          </svg>
-          <div className="text-xs text-amber-200">
-            <p className="font-medium text-amber-300">Activity Monitoring Setup (Optional)</p>
-            <p className="mt-1 text-amber-200/80">
-              For activity tracking and screenshot features, install Python 3 and run:
-            </p>
-            <div className="mt-2 space-y-2">
-              <div>
-                <p className="text-amber-300/80 font-medium">Windows (PowerShell):</p>
-                <code className="block mt-1 bg-black/30 px-2 py-1 rounded text-amber-100 font-mono text-[10px] break-all">
-                  pip install pynput mss Pillow websockets httpx numpy
-                </code>
-              </div>
-              <div>
-                <p className="text-amber-300/80 font-medium">macOS (Terminal):</p>
-                <code className="block mt-1 bg-black/30 px-2 py-1 rounded text-amber-100 font-mono text-[10px] break-all">
-                  pip3 install pynput mss Pillow websockets httpx numpy
-                </code>
-              </div>
+      {/* Install notes (demoted behind an expander) */}
+      <div className="mt-4 px-2">
+        <button
+          type="button"
+          onClick={() => setShowInstallNotes((v) => !v)}
+          className="text-xs text-slate-500 transition-colors hover:text-slate-300"
+        >
+          {showInstallNotes ? '▴ hide install notes' : '▾ install notes'}
+        </button>
+        {showInstallNotes && (
+          <div className="mt-3 space-y-4 border-l border-white/10 pl-4 text-xs text-slate-400">
+            <div>
+              <p className="font-medium text-slate-300">Desktop app installation</p>
+              <ul className="mt-1 space-y-1">
+                <li><strong className="text-slate-300">Windows:</strong> Extract the archive and run Sara.exe</li>
+                <li><strong className="text-slate-300">macOS:</strong> Extract the zip and move Sara.app to Applications</li>
+              </ul>
             </div>
-            <p className="mt-2 text-amber-200/60">
-              Download Python from <a href="https://python.org/downloads" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-100">python.org</a>
-            </p>
+
+            {headlessDownloads.length > 0 && (
+              <div>
+                <p className="font-medium text-slate-300">Headless agent quick install</p>
+                <code className="mt-1 block break-all rounded bg-white/[0.04] px-2 py-1.5 font-mono text-[10px] text-slate-300">
+                  curl -L {APP_CONFIG.apiUrl}/api/downloads/sara-agent-linux.tar.gz | tar xz && cd sara-agent && sudo ./install.sh
+                </code>
+              </div>
+            )}
+
+            <div>
+              <p className="font-medium text-slate-300">Activity monitoring setup (optional)</p>
+              <p className="mt-1">
+                For activity tracking and screenshot features, install Python 3 and run:
+              </p>
+              <div className="mt-2 space-y-2">
+                <div>
+                  <p className="text-slate-300">Windows (PowerShell):</p>
+                  <code className="mt-1 block break-all rounded bg-white/[0.04] px-2 py-1 font-mono text-[10px] text-slate-300">
+                    pip install pynput mss Pillow websockets httpx numpy
+                  </code>
+                </div>
+                <div>
+                  <p className="text-slate-300">macOS (Terminal):</p>
+                  <code className="mt-1 block break-all rounded bg-white/[0.04] px-2 py-1 font-mono text-[10px] text-slate-300">
+                    pip3 install pynput mss Pillow websockets httpx numpy
+                  </code>
+                </div>
+              </div>
+              <p className="mt-2">
+                Download Python from <a href="https://python.org/downloads" target="_blank" rel="noopener noreferrer" className="underline transition-colors hover:text-teal-300">python.org</a>
+              </p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -722,53 +639,47 @@ function SaraBriefArchive() {
   }
 
   return (
-    <div className="mt-8 bg-card border border-card rounded-md p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-lg font-medium text-white">Sara Brief Archive</h3>
-          <p className="text-gray-400 text-sm mt-1">View full briefs Sara generated about your day and context.</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => refetchBriefs()}
-          className="px-3 py-1.5 text-xs text-teal-300 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 transition"
-        >
-          Refresh
-        </button>
-      </div>
+    <section className="mt-12">
+      <SectionHeading
+        label="Brief archive"
+        action={
+          <button type="button" onClick={() => refetchBriefs()} className={quietLinkCls}>
+            Refresh
+          </button>
+        }
+      />
 
       {briefsLoading ? (
-        <p className="text-sm text-gray-500 py-8 text-center">Loading brief archive...</p>
+        <p className="text-sm text-slate-500">Loading brief archive…</p>
       ) : briefsError ? (
-        <p className="text-sm text-red-300 py-8 text-center">Unable to load briefs right now.</p>
+        <p className="text-sm text-slate-500">Unable to load briefs right now.</p>
       ) : briefs.length === 0 ? (
-        <p className="text-sm text-gray-500 py-8 text-center">No briefs generated yet.</p>
+        <p className="text-sm text-slate-500">No briefs generated yet.</p>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-1 border border-gray-700 rounded-lg bg-gray-800/40 overflow-hidden">
-            <div className="px-3 py-2 text-xs uppercase tracking-wider text-gray-400 border-b border-gray-700">
-              Recent Briefs
-            </div>
-            <div className="max-h-72 overflow-y-auto divide-y divide-gray-700/70">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <div className="lg:col-span-1">
+            <div className="max-h-72 space-y-0.5 overflow-y-auto pr-1">
               {briefs.map((brief) => (
                 <button
                   key={brief.id}
                   type="button"
                   onClick={() => setSelectedBriefDate(brief.brief_date)}
-                  className={`w-full px-3 py-2 text-left transition ${
-                    selectedBriefDate === brief.brief_date ? 'bg-gray-700/50' : 'hover:bg-gray-700/30'
+                  className={`w-full rounded-lg px-2 py-2 text-left transition-colors ${
+                    selectedBriefDate === brief.brief_date ? 'bg-white/[0.06]' : 'hover:bg-white/[0.04]'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-white">{formatDate(brief.brief_date)}</span>
+                    <span className={`text-sm ${selectedBriefDate === brief.brief_date ? 'text-white' : 'text-slate-300'}`}>
+                      {formatDate(brief.brief_date)}
+                    </span>
                     {brief.has_audio && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/30 text-blue-300 border border-blue-700/40">
+                      <span className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-slate-400">
                         Audio
                       </span>
                     )}
                   </div>
                   {brief.generated_at && (
-                    <p className="mt-1 text-xs text-gray-400">
+                    <p className="mt-0.5 text-xs text-slate-500">
                       {new Date(brief.generated_at).toLocaleTimeString('en-US', {
                         hour: 'numeric',
                         minute: '2-digit',
@@ -780,34 +691,34 @@ function SaraBriefArchive() {
             </div>
           </div>
 
-          <div className="lg:col-span-2 border border-gray-700 rounded-lg bg-gray-800/30 p-4">
+          <div className="lg:col-span-2 lg:border-l lg:border-white/10 lg:pl-6">
             {briefDetailLoading ? (
-              <p className="text-sm text-gray-500 py-8 text-center">Loading brief...</p>
+              <p className="text-sm text-slate-500">Loading brief…</p>
             ) : briefDetailError ? (
-              <p className="text-sm text-red-300 py-8 text-center">Unable to load this brief.</p>
+              <p className="text-sm text-slate-500">Unable to load this brief.</p>
             ) : selectedBrief ? (
               <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-white font-medium">{formatDate(selectedBrief.brief_date)} Brief</h4>
+                <div className="mb-3 flex items-baseline justify-between gap-3">
+                  <h4 className="text-[15px] text-slate-200">{formatDate(selectedBrief.brief_date)} brief</h4>
                   {selectedBrief.generated_at && (
-                    <span className="text-xs text-gray-400">
+                    <span className="text-xs text-slate-500">
                       Generated {new Date(selectedBrief.generated_at).toLocaleString('en-US')}
                     </span>
                   )}
                 </div>
                 <div className="max-h-80 overflow-y-auto pr-2">
-                  <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap break-words">
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-300">
                     {selectedBrief.full_text || 'No full brief text was saved for this entry.'}
                   </p>
                 </div>
               </div>
             ) : (
-              <p className="text-sm text-gray-500 py-8 text-center">Select a brief to view details.</p>
+              <p className="text-sm text-slate-500">Select a brief to view details.</p>
             )}
           </div>
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
@@ -1216,43 +1127,11 @@ export default function Settings() {
         autonomyFlags.autonomy_policy_candidates_enabled,
       ].filter(Boolean).length
     : 0
-  const settingsHeroStats = [
-    {
-      label: 'AI Provider',
-      value: providerLabels[aiProvider] || 'Unassigned',
-      detail: codexOAuthStatus?.connected ? 'ChatGPT connection is live' : 'Primary model path for Sara',
-      Icon: CpuChipIcon,
-      accentClass: 'bg-cyan-400/10 text-cyan-200',
-    },
-    {
-      label: 'Alerts Enabled',
-      value: notifPrefsLoading ? '...' : String(enabledNotificationCount),
-      detail: 'Notification categories Sara may proactively use',
-      Icon: BellAlertIcon,
-      accentClass: 'bg-teal-400/10 text-teal-200',
-    },
-    {
-      label: 'Autonomy Gates',
-      value: autonomyFlagsLoading ? '...' : String(autonomyEnabledCount),
-      detail: autonomyFlags?.automation_admin_configured ? 'Admin gate configured' : 'Admin gate still needs setup',
-      Icon: ShieldCheckIcon,
-      accentClass: 'bg-emerald-400/10 text-emerald-200',
-    },
-    {
-      label: 'Workspace Mode',
-      value: getCalmMode() ? 'Calm' : 'Standard',
-      detail: getEnhancedVisuals() ? 'Enhanced visuals enabled' : 'Balanced visual load',
-      Icon: Cog6ToothIcon,
-      accentClass: 'bg-indigo-400/10 text-indigo-200',
-    },
-  ]
-
   if (isLoading) {
     return (
       <div className="flex-1 px-4 py-8 sm:px-6 lg:px-8">
-        <div className="assistant-panel mx-auto max-w-2xl rounded-md p-8 text-center">
-          <div className="mx-auto h-12 w-12 animate-spin rounded-full border-b-2 border-cyan-400"></div>
-          <p className="mt-4 text-sm text-[var(--assistant-text-soft)]">Loading settings...</p>
+        <div className="mx-auto max-w-5xl">
+          <p className="text-sm text-slate-500">Loading settings…</p>
         </div>
       </div>
     )
@@ -1260,60 +1139,39 @@ export default function Settings() {
 
   return (
     <div className="flex-1 px-4 pb-12 pt-4 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-6xl space-y-8">
-        <section className="assistant-panel-soft rounded-md px-4 py-3.5 sm:px-5">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-            <div className="min-w-0 max-w-2xl">
-              <div className="assistant-kicker mb-2">Assistant Runtime</div>
-              <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-3">
-                <h1 className="font-display text-2xl font-semibold text-white">Settings</h1>
-                <p className="max-w-xl text-sm leading-6 text-[var(--assistant-text-soft)]">
-                  Control the models, guardrails, devices, and background behaviors that shape how Sara runs.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              {settingsHeroStats.map(({ label, value }) => (
-                <div key={label} className="assistant-panel flex min-w-[148px] items-center justify-between gap-3 rounded-md px-3 py-2.5">
-                  <span className="assistant-kicker">{label}</span>
-                  <span className="text-sm font-medium text-white">{value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section>
-          <div className="assistant-kicker mb-3">Operations</div>
-          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
-            Keep schedules, tunables, and rollout guardrails aligned before you change deeper runtime behavior.
-          </p>
-        </section>
+      <div className="mx-auto max-w-5xl">
+        {/* Header — one slim row */}
+        <div className="flex h-12 items-center gap-3">
+          <h1 className="font-display text-xl font-semibold text-white">Settings</h1>
+          <span className="text-sm text-slate-500">· {providerLabels[aiProvider] || 'Unassigned'}</span>
+        </div>
 
         {/* Scheduled Jobs (DB-backed Celery beat) */}
-        <SchedulesSection />
+        <section className="mt-8">
+          <SchedulesSection />
+        </section>
 
         {/* Behavior Tunables (cooldowns, deliberation thresholds, brief tone) */}
-        <TunablesSection />
+        <section className="mt-12">
+          <TunablesSection />
+        </section>
 
         {/* Autonomy Feature Flag Status */}
-        <div className="assistant-panel rounded-md p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="assistant-kicker mb-3">Autonomy Health</div>
-              <h2 className="font-display text-2xl font-semibold text-white">Autonomy Flag Status</h2>
-              <p className="mt-2 text-sm text-[var(--assistant-text-soft)]">
-                Read-only visibility into runtime autonomy rollout flags and admin gate setup.
-              </p>
-            </div>
-          </div>
+        <section className="mt-12">
+          <SectionHeading
+            label="Autonomy gates"
+            action={
+              !autonomyFlagsLoading && autonomyFlags ? (
+                <span className="text-xs text-slate-500">{autonomyEnabledCount} of 6 on</span>
+              ) : undefined
+            }
+          />
           {autonomyFlagsLoading ? (
-            <p className="mt-4 text-sm text-gray-500">Loading autonomy status...</p>
+            <p className="text-sm text-slate-500">Loading autonomy status…</p>
           ) : autonomyFlagsError || !autonomyFlags ? (
-            <p className="mt-4 text-sm text-red-300">Autonomy status unavailable right now.</p>
+            <p className="text-sm text-slate-500">Autonomy status unavailable right now.</p>
           ) : (
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-x-8 gap-y-1 md:grid-cols-2">
               {[
                 ['Traces', autonomyFlags.autonomy_traces_enabled],
                 ['Structured Plan', autonomyFlags.autonomy_structured_plan],
@@ -1324,55 +1182,43 @@ export default function Settings() {
               ].map(([label, enabled]) => (
                 <div
                   key={label as string}
-                  className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2"
+                  className="flex items-baseline justify-between rounded px-2 py-1.5"
                 >
-                  <span className="text-sm text-gray-200">{label as string}</span>
-                  <span
-                    className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                      enabled
-                        ? 'bg-green-900/40 text-green-300 border border-green-700/50'
-                        : 'bg-gray-700/60 text-gray-300 border border-gray-600/60'
-                    }`}
-                  >
-                    {enabled ? 'ON' : 'OFF'}
+                  <span className="text-[15px] text-slate-200">{label as string}</span>
+                  <span className={`text-xs ${enabled ? 'text-slate-300' : 'text-slate-500'}`}>
+                    {enabled ? 'On' : 'Off'}
                   </span>
                 </div>
               ))}
-              <div className="md:col-span-2 flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2">
-                <span className="text-sm text-gray-200">Automation Admin Access</span>
+              <div
+                className={`md:col-span-2 flex items-baseline justify-between px-2 py-1.5 ${
+                  autonomyFlags.automation_admin_configured ? '' : 'border-l-2 border-rose-400/70'
+                }`}
+              >
+                <span className="text-[15px] text-slate-200">Automation Admin Access</span>
                 <span
-                  className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                    autonomyFlags.automation_admin_configured
-                      ? 'bg-green-900/40 text-green-300 border border-green-700/50'
-                      : 'bg-red-900/30 text-red-300 border border-red-700/50'
+                  className={`text-xs ${
+                    autonomyFlags.automation_admin_configured ? 'text-slate-300' : 'text-rose-300'
                   }`}
                 >
                   {autonomyFlags.automation_admin_configured
                     ? `Configured (roles: ${autonomyFlags.automation_admin_role_count}, allowlist: ${autonomyFlags.automation_admin_email_count})`
-                    : 'Not Configured'}
+                    : 'Not configured'}
                 </span>
               </div>
             </div>
           )}
-        </div>
+        </section>
 
-        <div className="assistant-panel rounded-md p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="assistant-kicker mb-3">Autonomy Health</div>
-              <h2 className="font-display text-2xl font-semibold text-white">Autonomy Rollout Health (24h)</h2>
-              <p className="mt-2 text-sm text-[var(--assistant-text-soft)]">
-                Live rates vs configured thresholds for rollout and rollback decisions.
-              </p>
-            </div>
-          </div>
+        <section className="mt-12">
+          <SectionHeading label="Rollout health · last 24h" />
           {rolloutSummaryLoading ? (
-            <p className="mt-4 text-sm text-gray-500">Loading rollout health...</p>
+            <p className="text-sm text-slate-500">Loading rollout health…</p>
           ) : rolloutSummaryError || !rolloutSummary ? (
-            <p className="mt-4 text-sm text-red-300">Rollout health data unavailable right now.</p>
+            <p className="text-sm text-slate-500">Rollout health data unavailable right now.</p>
           ) : (
-            <div className="mt-4 space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 gap-x-8 gap-y-1 md:grid-cols-2">
                 {[
                   ['Agent runs', `${rolloutSummary.run_log.total_runs}`],
                   ['Plan fallback rate', `${pct(rolloutSummary.rates.fallback_rate)} (max ${pct(rolloutSummary.thresholds.max_fallback_rate)})`],
@@ -1383,45 +1229,47 @@ export default function Settings() {
                 ].map(([label, value]) => (
                   <div
                     key={label as string}
-                    className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2"
+                    className="flex items-baseline justify-between gap-3 px-2 py-1.5"
                   >
-                    <span className="text-sm text-gray-200">{label as string}</span>
-                    <span className="text-sm text-gray-300">{value as string}</span>
+                    <span className="text-[15px] text-slate-200">{label as string}</span>
+                    <span className="text-xs tabular-nums text-slate-400">{value as string}</span>
                   </div>
                 ))}
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-x-8 gap-y-1 md:grid-cols-2">
                 {Object.entries(rolloutSummary.evaluations).map(([flag, evaluation]) => (
                   <div
                     key={flag}
-                    className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-3"
+                    className={`px-2 py-1.5 ${
+                      evaluation.status === 'unhealthy' ? 'border-l-2 border-rose-400/70' : ''
+                    }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-gray-200">{flag}</span>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-[15px] text-slate-200">{flag}</span>
                       <span
-                        className={`text-xs font-semibold px-2 py-0.5 rounded border ${
+                        className={`text-xs ${
                           evaluation.status === 'healthy'
-                            ? 'bg-green-900/40 text-green-300 border-green-700/50'
+                            ? 'text-slate-400'
                             : evaluation.status === 'unhealthy'
-                            ? 'bg-red-900/30 text-red-300 border-red-700/50'
-                            : 'bg-gray-700/60 text-gray-300 border-gray-600/60'
+                            ? 'text-rose-300'
+                            : 'text-slate-500'
                         }`}
                       >
                         {evaluation.status}
                       </span>
                     </div>
                     {evaluation.reasons.length > 0 && (
-                      <p className="text-xs text-gray-400 mt-2 break-words">{evaluation.reasons.join(' · ')}</p>
+                      <p className="mt-1 break-words text-xs text-slate-500">{evaluation.reasons.join(' · ')}</p>
                     )}
                   </div>
                 ))}
               </div>
 
               {rolloutSummary.rollback_recommendations.length > 0 && (
-                <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-3">
-                  <p className="text-sm font-medium text-red-300 mb-1">Rollback Recommended</p>
-                  <div className="text-xs text-red-200 space-y-1">
+                <div className="border-l-2 border-rose-400/70 px-3 py-1">
+                  <p className="text-sm font-medium text-rose-300">Rollback recommended</p>
+                  <div className="mt-1 space-y-1 text-xs text-slate-400">
                     {rolloutSummary.rollback_recommendations.map((item) => (
                       <p key={item.flag}>
                         {item.flag}: {item.reasons.join(' | ')}
@@ -1432,67 +1280,36 @@ export default function Settings() {
               )}
             </div>
           )}
-        </div>
+        </section>
 
         {/* Test Result Alert */}
         {testResult && (
-          <div className={`assistant-panel rounded-md p-4 ${
-            testResult.success 
-              ? 'bg-green-900/20 border border-green-500/30 text-green-400' 
-              : 'bg-red-900/20 border border-red-500/30 text-red-400'
-          }`}>
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                {testResult.success ? (
-                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                ) : (
-                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                  </svg>
-                )}
-              </div>
-              <div className="ml-3">
-                <p className="text-sm font-medium">{testResult.message}</p>
-              </div>
-            </div>
+          <div
+            className={`mt-8 rounded-lg border-l-2 bg-white/[0.03] px-4 py-3 ${
+              testResult.success ? 'border-emerald-400/70' : 'border-rose-400/70'
+            }`}
+          >
+            <p className={`text-sm ${testResult.success ? 'text-slate-200' : 'text-rose-200'}`}>
+              {testResult.message}
+            </p>
           </div>
         )}
 
         {/* Settings Form */}
-        <section>
-          <div className="assistant-kicker mb-3">Core Runtime Configuration</div>
-          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
-            This is the main control surface for model routing, embeddings, background jobs, devices, and
-            notification behavior.
-          </p>
-        </section>
-
-        <div className="assistant-panel rounded-md">
-          <form onSubmit={handleSubmit} className="p-6 space-y-6">
-            <div className="border-b border-white/10 pb-6">
-              <div className="assistant-kicker mb-3">Configuration Surface</div>
-              <h2 className="font-display text-2xl font-semibold text-white">How Sara should think and run</h2>
-              <p className="mt-3 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
-                Update the core provider, memory, sandbox, and notification behavior here. Changes apply to the
-                live assistant runtime, not just this browser.
-              </p>
-            </div>
-
+        <form onSubmit={handleSubmit}>
             {/* AI Provider Selection */}
-            <div className="border-b border-gray-700 pb-6">
-              <h3 className="text-lg font-medium text-white mb-4">AI Provider Selection</h3>
+            <section className="mt-12">
+              <SectionHeading label="AI provider" />
               <div className="space-y-4">
                 <div>
-                  <label htmlFor="ai_provider" className="block text-sm font-medium text-gray-300 mb-2">
-                    Select Provider
+                  <label htmlFor="ai_provider" className={labelCls}>
+                    Provider
                   </label>
                   <select
                     id="ai_provider"
                     value={aiProvider}
                     onChange={(e) => handleProviderChange(e.target.value as ProviderType)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white"
+                    className={inputCls}
                   >
                     <option value="local">Local (Ollama/LM Studio)</option>
                     <option value="gemini">Google Gemini</option>
@@ -1501,14 +1318,14 @@ export default function Settings() {
                     <option value="claude">Anthropic Claude</option>
                     <option value="custom">Custom Configuration</option>
                   </select>
-                  <p className="mt-1 text-xs text-gray-400">
-                    Choose a provider to auto-configure URLs and models, or select Custom for manual setup
+                  <p className={hintCls}>
+                    Presets fill the URLs and models below; Custom keeps your values
                   </p>
                 </div>
 
                 {(aiProvider === 'gemini' || aiProvider === 'openai' || aiProvider === 'claude') && (
                   <div>
-                    <label htmlFor="openai_api_key" className="block text-sm font-medium text-gray-300 mb-2">
+                    <label htmlFor="openai_api_key" className={labelCls}>
                       API Key
                     </label>
                     <input
@@ -1516,14 +1333,14 @@ export default function Settings() {
                       id="openai_api_key"
                       value={formData.openai_api_key || ''}
                       onChange={(e) => handleInputChange('openai_api_key', e.target.value)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                      className={inputCls}
                       placeholder={
                         aiProvider === 'gemini' ? 'Enter Gemini API key' :
                         aiProvider === 'claude' ? 'Enter Claude API key (sk-ant-...)' :
                         'Enter OpenAI API key'
                       }
                     />
-                    <p className="mt-1 text-xs text-gray-400">
+                    <p className={hintCls}>
                       {aiProvider === 'gemini'
                         ? 'Get your API key from https://aistudio.google.com/apikey'
                         : aiProvider === 'claude'
@@ -1534,21 +1351,21 @@ export default function Settings() {
                 )}
 
                 {aiProvider === 'codex' && (
-                  <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-4">
+                  <div>
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
-                        <p className="text-sm font-medium text-gray-200">
-                          ChatGPT OAuth Connection
+                        <p className="text-[15px] text-slate-200">
+                          ChatGPT OAuth connection
                         </p>
-                        <p className="text-xs text-gray-400 mt-1">
+                        <p className="mt-1 text-xs text-slate-500">
                           {codexOAuthLoading
-                            ? 'Checking connection status...'
+                            ? 'Checking connection status…'
                             : codexOAuthStatus?.connected
                             ? `Connected${codexOAuthStatus.email ? ` as ${codexOAuthStatus.email}` : ''}`
                             : 'Not connected'}
                         </p>
                         {codexOAuthStatus?.expires_at && codexOAuthStatus.connected && (
-                          <p className="text-xs text-gray-500 mt-1">
+                          <p className="mt-1 text-xs text-slate-500">
                             Token expiry: {new Date(codexOAuthStatus.expires_at).toLocaleString('en-US')}
                           </p>
                         )}
@@ -1558,32 +1375,32 @@ export default function Settings() {
                           type="button"
                           onClick={handleRefreshCodexOAuthStatus}
                           disabled={codexOAuthLoading || codexOAuthFetching}
-                          className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                          className={btnSecondary}
                         >
-                          {(codexOAuthLoading || codexOAuthFetching) ? 'Refreshing...' : 'Refresh Status'}
+                          {(codexOAuthLoading || codexOAuthFetching) ? 'Refreshing…' : 'Refresh Status'}
                         </button>
                         {!codexOAuthStatus?.connected ? (
                           <button
                             type="button"
                             onClick={handleConnectCodexOAuth}
                             disabled={startCodexOAuthMutation.isPending}
-                            className="px-3 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-sm disabled:opacity-60"
+                            className={btnSecondary}
                           >
-                            {startCodexOAuthMutation.isPending ? 'Starting...' : 'Connect ChatGPT'}
+                            {startCodexOAuthMutation.isPending ? 'Starting…' : 'Connect ChatGPT'}
                           </button>
                         ) : (
                           <button
                             type="button"
                             onClick={handleDisconnectCodexOAuth}
                             disabled={disconnectCodexOAuthMutation.isPending}
-                            className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                            className={btnSecondary}
                           >
-                            {disconnectCodexOAuthMutation.isPending ? 'Disconnecting...' : 'Disconnect'}
+                            {disconnectCodexOAuthMutation.isPending ? 'Disconnecting…' : 'Disconnect'}
                           </button>
                         )}
                       </div>
                     </div>
-                    <p className="mt-3 text-xs text-gray-400">
+                    <p className="mt-2 text-xs text-slate-500">
                       Uses your ChatGPT subscription via OAuth. No API key required. If prompted, paste the localhost callback URL back here to complete.
                     </p>
                   </div>
@@ -1591,33 +1408,33 @@ export default function Settings() {
 
                 {aiProvider === 'claude' && (
                   <div>
-                    <label htmlFor="claude_model" className="block text-sm font-medium text-gray-300 mb-2">
+                    <label htmlFor="claude_model" className={labelCls}>
                       Claude Model
                     </label>
                     <select
                       id="claude_model"
                       value={formData.openai_model || 'claude-sonnet-4-6'}
                       onChange={(e) => handleInputChange('openai_model', e.target.value)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white"
+                      className={inputCls}
                     >
                       {CLAUDE_MODELS.map((model) => (
                         <option key={model.value} value={model.value}>{model.label}</option>
                       ))}
                     </select>
-                    <p className="mt-1 text-xs text-gray-400">
-                      Select the Claude model to use. Opus is most capable, Haiku is fastest.
+                    <p className={hintCls}>
+                      Opus is most capable, Haiku is fastest
                     </p>
                   </div>
                 )}
               </div>
-            </div>
+            </section>
 
             {/* AI Model Settings */}
-            <div>
-              <h3 className="text-lg font-medium text-white mb-4">AI Model Configuration</h3>
+            <section className="mt-12">
+              <SectionHeading label="Models" />
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                 <div>
-                  <label htmlFor="openai_base_url" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="openai_base_url" className={labelCls}>
                     AI Base URL
                   </label>
                   <input
@@ -1625,14 +1442,14 @@ export default function Settings() {
                     id="openai_base_url"
                     value={formData.openai_base_url || ''}
                     onChange={(e) => handleInputChange('openai_base_url', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.openai_base_url || 'http://100.104.68.115:11434/v1'}
                   />
-                  <p className="mt-1 text-xs text-gray-400">OpenAI-compatible API endpoint</p>
+                  <p className={hintCls}>OpenAI-compatible API endpoint</p>
                 </div>
 
                 <div>
-                  <label htmlFor="openai_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="openai_model" className={labelCls}>
                     Main AI Model
                   </label>
                   <input
@@ -1640,14 +1457,14 @@ export default function Settings() {
                     id="openai_model"
                     value={formData.openai_model || ''}
                     onChange={(e) => handleInputChange('openai_model', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.openai_model || 'gpt-oss:20b'}
                   />
-                  <p className="mt-1 text-xs text-gray-400">Model name to use for chat and reasoning</p>
+                  <p className={hintCls}>Model name to use for chat and reasoning</p>
                 </div>
 
                 <div>
-                  <label htmlFor="openai_notification_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="openai_notification_model" className={labelCls}>
                     Notification Model
                   </label>
                   <input
@@ -1655,20 +1472,20 @@ export default function Settings() {
                     id="openai_notification_model"
                     value={formData.openai_notification_model || ''}
                     onChange={(e) => handleInputChange('openai_notification_model', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.openai_notification_model || 'gpt-oss:20b'}
                   />
-                  <p className="mt-1 text-xs text-gray-400">Faster model for generating push notifications</p>
+                  <p className={hintCls}>Faster model for generating push notifications</p>
                 </div>
               </div>
-            </div>
+            </section>
 
             {/* Embedding Settings */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Embedding Configuration</h3>
+            <section className="mt-12">
+              <SectionHeading label="Embeddings" />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <label htmlFor="embedding_base_url" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="embedding_base_url" className={labelCls}>
                     Embedding Base URL
                   </label>
                   <input
@@ -1676,14 +1493,14 @@ export default function Settings() {
                     id="embedding_base_url"
                     value={formData.embedding_base_url || ''}
                     onChange={(e) => handleInputChange('embedding_base_url', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.embedding_base_url || 'http://100.104.68.115:11434'}
                   />
-                  <p className="mt-1 text-xs text-gray-400">Embedding service endpoint</p>
+                  <p className={hintCls}>Embedding service endpoint</p>
                 </div>
 
                 <div>
-                  <label htmlFor="embedding_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="embedding_model" className={labelCls}>
                     Embedding Model
                   </label>
                   <input
@@ -1691,14 +1508,14 @@ export default function Settings() {
                     id="embedding_model"
                     value={formData.embedding_model || ''}
                     onChange={(e) => handleInputChange('embedding_model', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.embedding_model || 'bge-m3'}
                   />
-                  <p className="mt-1 text-xs text-gray-400">Model for generating embeddings</p>
+                  <p className={hintCls}>Model for generating embeddings</p>
                 </div>
 
                 <div>
-                  <label htmlFor="embedding_dimension" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="embedding_dimension" className={labelCls}>
                     Embedding Dimension
                   </label>
                   <input
@@ -1706,26 +1523,25 @@ export default function Settings() {
                     id="embedding_dimension"
                     value={formData.embedding_dimension || ''}
                     onChange={(e) => handleInputChange('embedding_dimension', parseInt(e.target.value))}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder={settings?.embedding_dimension?.toString() || '1024'}
                     min="1"
                     max="4096"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Vector dimension for embeddings</p>
+                  <p className={hintCls}>Vector dimension for embeddings</p>
                 </div>
               </div>
-            </div>
+            </section>
 
             {/* Background Processing Settings */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Background Processing</h3>
-              <p className="text-gray-400 text-sm mb-4">
-                Configure the models used for dreaming, memory consolidation, and other automated background tasks.
-                These settings are separate from your chat model selection.
-              </p>
+            <section className="mt-12">
+              <SectionHeading
+                label="Background processing"
+                action={<span className="text-xs text-slate-500">dreaming, consolidation, automated tasks</span>}
+              />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <label htmlFor="bg_llm_primary_url" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="bg_llm_primary_url" className={labelCls}>
                     Primary URL
                   </label>
                   <input
@@ -1733,14 +1549,14 @@ export default function Settings() {
                     id="bg_llm_primary_url"
                     value={formData.bg_llm_primary_url || ''}
                     onChange={(e) => handleInputChange('bg_llm_primary_url', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="http://100.104.68.115:11434/v1"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Main endpoint for background tasks</p>
+                  <p className={hintCls}>Main endpoint for background tasks</p>
                 </div>
 
                 <div>
-                  <label htmlFor="bg_llm_primary_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="bg_llm_primary_model" className={labelCls}>
                     Primary Model
                   </label>
                   <input
@@ -1748,14 +1564,14 @@ export default function Settings() {
                     id="bg_llm_primary_model"
                     value={formData.bg_llm_primary_model || ''}
                     onChange={(e) => handleInputChange('bg_llm_primary_model', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="gpt-oss:20b"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Model for deep analysis tasks</p>
+                  <p className={hintCls}>Model for deep analysis tasks</p>
                 </div>
 
                 <div>
-                  <label htmlFor="bg_llm_fallback_url" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="bg_llm_fallback_url" className={labelCls}>
                     Fallback URL
                   </label>
                   <input
@@ -1763,14 +1579,14 @@ export default function Settings() {
                     id="bg_llm_fallback_url"
                     value={formData.bg_llm_fallback_url || ''}
                     onChange={(e) => handleInputChange('bg_llm_fallback_url', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="http://100.104.68.115:11434/v1"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Backup endpoint if primary fails</p>
+                  <p className={hintCls}>Backup endpoint if primary fails</p>
                 </div>
 
                 <div>
-                  <label htmlFor="bg_llm_fallback_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="bg_llm_fallback_model" className={labelCls}>
                     Fallback Model
                   </label>
                   <input
@@ -1778,23 +1594,23 @@ export default function Settings() {
                     id="bg_llm_fallback_model"
                     value={formData.bg_llm_fallback_model || ''}
                     onChange={(e) => handleInputChange('bg_llm_fallback_model', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="gpt-oss:20b"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Faster model for quick background tasks</p>
+                  <p className={hintCls}>Faster model for quick background tasks</p>
                 </div>
               </div>
-            </div>
+            </section>
 
             {/* Sandbox VM Settings */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Sandbox VM</h3>
-              <p className="text-gray-400 text-sm mb-4">
-                Configure the remote VM where Sara dispatches Claude Code agents to run tasks autonomously.
-              </p>
+            <section className="mt-12">
+              <SectionHeading
+                label="Sandbox VM"
+                action={<span className="text-xs text-slate-500">where Sara dispatches coding agents</span>}
+              />
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div>
-                  <label htmlFor="vm_sandbox_host" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="vm_sandbox_host" className={labelCls}>
                     VM Host
                   </label>
                   <input
@@ -1802,14 +1618,14 @@ export default function Settings() {
                     id="vm_sandbox_host"
                     value={formData.vm_sandbox_host || ''}
                     onChange={(e) => handleInputChange('vm_sandbox_host', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="10.185.1.176"
                   />
-                  <p className="mt-1 text-xs text-gray-400">IP address or hostname of the sandbox VM</p>
+                  <p className={hintCls}>IP address or hostname of the sandbox VM</p>
                 </div>
 
                 <div>
-                  <label htmlFor="vm_sandbox_username" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="vm_sandbox_username" className={labelCls}>
                     SSH Username
                   </label>
                   <input
@@ -1817,14 +1633,14 @@ export default function Settings() {
                     id="vm_sandbox_username"
                     value={formData.vm_sandbox_username || ''}
                     onChange={(e) => handleInputChange('vm_sandbox_username', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="sara"
                   />
-                  <p className="mt-1 text-xs text-gray-400">SSH user on the VM</p>
+                  <p className={hintCls}>SSH user on the VM</p>
                 </div>
 
                 <div>
-                  <label htmlFor="vm_sandbox_ssh_key_path" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="vm_sandbox_ssh_key_path" className={labelCls}>
                     SSH Key Path
                   </label>
                   <input
@@ -1832,10 +1648,10 @@ export default function Settings() {
                     id="vm_sandbox_ssh_key_path"
                     value={formData.vm_sandbox_ssh_key_path || ''}
                     onChange={(e) => handleInputChange('vm_sandbox_ssh_key_path', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="~/.ssh/sara_agent"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Path to SSH private key on the server</p>
+                  <p className={hintCls}>Path to SSH private key on the server</p>
                 </div>
               </div>
 
@@ -1855,57 +1671,54 @@ export default function Settings() {
                     }
                   }}
                   disabled={vmTestLoading}
-                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm disabled:opacity-60"
+                  className={btnSecondary}
                 >
-                  {vmTestLoading ? 'Testing...' : 'Test Connection'}
+                  {vmTestLoading ? 'Testing…' : 'Test Connection'}
                 </button>
                 {vmTestResult && (
-                  <span className={`text-sm ${vmTestResult.status === 'connected' ? 'text-green-400' : 'text-red-400'}`}>
+                  <span className={`text-xs ${vmTestResult.status === 'connected' ? 'text-slate-300' : 'text-rose-300'}`}>
                     {vmTestResult.status === 'connected'
                       ? `Connected to ${vmTestResult.host}`
                       : `Connection failed: ${vmTestResult.status}`}
                   </span>
                 )}
               </div>
-            </div>
+            </section>
 
             {/* Desktop Agent Settings */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Desktop Agent & Vision</h3>
-              <p className="text-gray-400 text-sm mb-4">
-                Configure the desktop agent's vision model for screenshot analysis and cross-device features.
-              </p>
+            <section className="mt-12">
+              <SectionHeading label="Desktop agent & vision" />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <label htmlFor="vision_model" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="vision_model" className={labelCls}>
                     Vision Model
                   </label>
                   <input
                     type="text"
                     id="vision_model"
                     defaultValue="qwen3-vl:latest"
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="qwen3-vl:latest"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Ollama vision model for screenshot analysis</p>
+                  <p className={hintCls}>Ollama vision model for screenshot analysis</p>
                 </div>
 
                 <div>
-                  <label htmlFor="vision_endpoint" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="vision_endpoint" className={labelCls}>
                     Vision Endpoint
                   </label>
                   <input
                     type="url"
                     id="vision_endpoint"
                     defaultValue="http://10.185.1.8:11434"
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                     placeholder="http://10.185.1.8:11434"
                   />
-                  <p className="mt-1 text-xs text-gray-400">Ollama server for vision model</p>
+                  <p className={hintCls}>Ollama server for vision model</p>
                 </div>
 
                 <div>
-                  <label htmlFor="screenshot_interval" className="block text-sm font-medium text-gray-300 mb-2">
+                  <label htmlFor="screenshot_interval" className={labelCls}>
                     Screenshot Interval (seconds)
                   </label>
                   <input
@@ -1914,15 +1727,15 @@ export default function Settings() {
                     defaultValue={30}
                     min={10}
                     max={300}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-white placeholder-gray-400"
+                    className={inputCls}
                   />
-                  <p className="mt-1 text-xs text-gray-400">How often the desktop agent captures screenshots</p>
+                  <p className={hintCls}>How often the desktop agent captures screenshots</p>
                 </div>
 
-                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div className="flex items-center justify-between rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.04]">
                   <div>
-                    <div className="text-sm font-medium text-white">Screenshot Capture</div>
-                    <div className="text-xs text-gray-400">Enable periodic screenshot capture</div>
+                    <div className="text-[15px] text-slate-200">Screenshot Capture</div>
+                    <div className="text-xs text-slate-500">Enable periodic screenshot capture</div>
                   </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
@@ -1930,16 +1743,16 @@ export default function Settings() {
                       className="sr-only peer"
                       defaultChecked={true}
                     />
-                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                    <span className="w-10 h-6 bg-white/10 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-500/70">
                       <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 peer-checked:translate-x-4"></span>
                     </span>
                   </label>
                 </div>
 
-                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div className="flex items-center justify-between rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.04]">
                   <div>
-                    <div className="text-sm font-medium text-white">Cross-Device Commands</div>
-                    <div className="text-xs text-gray-400">Route commands to active device</div>
+                    <div className="text-[15px] text-slate-200">Cross-Device Commands</div>
+                    <div className="text-xs text-slate-500">Route commands to active device</div>
                   </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
@@ -1947,25 +1760,28 @@ export default function Settings() {
                       className="sr-only peer"
                       defaultChecked={true}
                     />
-                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                    <span className="w-10 h-6 bg-white/10 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-500/70">
                       <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 peer-checked:translate-x-4"></span>
                     </span>
                   </label>
                 </div>
               </div>
-            </div>
+            </section>
 
             {/* Notification Preferences */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Notification Preferences</h3>
-              <p className="text-gray-400 text-sm mb-4">
-                Control which categories of proactive notifications Sara can send you.
-                Disabled categories are blocked at the notification pipeline level.
-              </p>
+            <section className="mt-12">
+              <SectionHeading
+                label="Notifications"
+                action={
+                  !notifPrefsLoading ? (
+                    <span className="text-xs text-slate-500">{enabledNotificationCount} enabled</span>
+                  ) : undefined
+                }
+              />
               {notifPrefsLoading ? (
-                <p className="text-sm text-gray-500">Loading preferences...</p>
+                <p className="text-sm text-slate-500">Loading preferences…</p>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-1">
                   {(notifPrefsData?.preferences || []).map((pref) => {
                     const categoryLabels: Record<string, { label: string; desc: string }> = {
                       health: { label: 'Health', desc: 'HRV, heart rate, blood pressure, body temperature, SpO2, etc.' },
@@ -1981,11 +1797,11 @@ export default function Settings() {
                     return (
                       <div
                         key={pref.category}
-                        className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4"
+                        className="flex items-center justify-between rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.04]"
                       >
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-white">{info.label}</div>
-                          <div className="text-xs text-gray-400 mt-0.5">{info.desc}</div>
+                          <div className="text-[15px] text-slate-200">{info.label}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">{info.desc}</div>
                         </div>
                         <label className="inline-flex items-center cursor-pointer ml-4 flex-shrink-0">
                           <input
@@ -2001,7 +1817,7 @@ export default function Settings() {
                               updateNotifPrefsMutation.mutate(updated)
                             }}
                           />
-                          <span className={`w-10 h-6 rounded-full p-1 transition-colors duration-200 ${pref.enabled ? 'bg-teal-600' : 'bg-gray-600'}`}>
+                          <span className={`w-10 h-6 rounded-full p-1 transition-colors duration-200 ${pref.enabled ? 'bg-teal-500/70' : 'bg-white/10'}`}>
                             <span className={`block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 ${pref.enabled ? 'translate-x-4' : 'translate-x-0'}`}></span>
                           </span>
                         </label>
@@ -2010,22 +1826,22 @@ export default function Settings() {
                   })}
                 </div>
               )}
-            </div>
+            </section>
 
             {/* Token Usage Statistics */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Token Usage Statistics</h3>
+            <section className="mt-12">
+              <SectionHeading label="Token usage" />
               <TokenUsageStats />
-            </div>
+            </section>
 
             {/* Appearance */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Appearance</h3>
+            <section className="mt-12">
+              <SectionHeading label="Appearance" />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div className="flex items-center justify-between rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.04]">
                   <div>
-                    <div className="text-sm font-medium text-white">Calm Mode</div>
-                    <div className="text-xs text-gray-400">Reduces visual intensity and tempo.</div>
+                    <div className="text-[15px] text-slate-200">Calm Mode</div>
+                    <div className="text-xs text-slate-500">Reduces visual intensity and tempo.</div>
                   </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
@@ -2041,16 +1857,16 @@ export default function Settings() {
                         }
                       }}
                     />
-                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                    <span className="w-10 h-6 bg-white/10 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-500/70">
                       <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 translate-x-0 peer-checked:translate-x-4"></span>
                     </span>
                   </label>
                 </div>
 
-                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div className="flex items-center justify-between rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.04]">
                   <div>
-                    <div className="text-sm font-medium text-white">Enhanced Visuals</div>
-                    <div className="text-xs text-gray-400">Enable richer particle effects on capable devices.</div>
+                    <div className="text-[15px] text-slate-200">Enhanced Visuals</div>
+                    <div className="text-xs text-slate-500">Enable richer particle effects on capable devices.</div>
                   </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
@@ -2059,38 +1875,30 @@ export default function Settings() {
                       defaultChecked={getEnhancedVisuals()}
                       onChange={(e) => setEnhancedVisuals(e.target.checked)}
                     />
-                    <span className="w-10 h-6 bg-gray-600 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-600">
+                    <span className="w-10 h-6 bg-white/10 rounded-full p-1 transition-colors duration-200 peer-checked:bg-teal-500/70">
                       <span className="block w-4 h-4 bg-white rounded-full transform transition-transform duration-200 translate-x-0 peer-checked:translate-x-4"></span>
                     </span>
                   </label>
                 </div>
               </div>
-              <p className="mt-2 text-xs text-gray-400">Visual preference changes take effect immediately. Calm Mode reduces animation intensity and tempo.</p>
-            </div>
+            </section>
 
             {/* Actions */}
-            <div className="border-t border-gray-700 pt-6 flex flex-col sm:flex-row sm:justify-between sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
-              <div className="flex flex-wrap gap-3">
+            <div className="mt-12 flex flex-col border-t border-white/10 pt-6 sm:flex-row sm:justify-between sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={handleTestConnection}
                   disabled={testSettingsMutation.isPending}
-                  className="px-4 py-2 text-sm font-medium text-teal-400 bg-teal-900/20 border border-teal-500/30 rounded-lg hover:bg-teal-900/30 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 tap-target"
+                  className={`${btnSecondary} tap-target`}
                 >
-                  {testSettingsMutation.isPending ? (
-                    <div className="flex items-center space-x-2">
-                      <div className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin"></div>
-                      <span>Testing...</span>
-                    </div>
-                  ) : (
-                    'Test Connection'
-                  )}
+                  {testSettingsMutation.isPending ? 'Testing…' : 'Test Connection'}
                 </button>
 
                 <button
                   type="button"
                   onClick={handleReset}
-                  className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors duration-200 tap-target"
+                  className={`${btnSecondary} tap-target`}
                 >
                   Reset
                 </button>
@@ -2098,6 +1906,7 @@ export default function Settings() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (!confirm('Clear all saved URLs and reset to defaults?')) return
                     // Clear all saved URLs and reset to defaults
                     setAIBaseUrl('')
                     setAIModel('')
@@ -2119,7 +1928,7 @@ export default function Settings() {
                     setTestResult({ success: true, message: 'Saved URLs cleared - reset to defaults' })
                     setTimeout(() => setTestResult(null), 3000)
                   }}
-                  className="px-4 py-2 text-sm font-medium text-orange-400 bg-orange-900/20 border border-orange-500/30 rounded-lg hover:bg-orange-900/30 focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition-colors duration-200 tap-target"
+                  className="text-xs text-slate-500 transition-colors hover:text-rose-300 tap-target"
                 >
                   Clear Saved URLs
                 </button>
@@ -2128,27 +1937,12 @@ export default function Settings() {
               <button
                 type="submit"
                 disabled={updateSettingsMutation.isPending}
-                className="px-6 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 tap-target"
+                className={`${btnPrimary} tap-target`}
               >
-                {updateSettingsMutation.isPending ? (
-                  <div className="flex items-center space-x-2">
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span>Saving...</span>
-                  </div>
-                ) : (
-                  'Save Settings'
-                )}
+                {updateSettingsMutation.isPending ? 'Saving…' : 'Save Settings'}
               </button>
             </div>
           </form>
-        </div>
-
-        <section>
-          <div className="assistant-kicker mb-3">Devices, Cognition, and History</div>
-          <p className="mb-5 max-w-3xl text-sm text-[var(--assistant-text-soft)]">
-            Deeper assistant workspaces live here: desktop runtime setup, connected devices, and brief history.
-          </p>
-        </section>
 
         {/* Desktop App Downloads */}
         <DesktopAppDownloads />
@@ -2160,76 +1954,42 @@ export default function Settings() {
         <SaraBriefArchive />
 
         {/* Developer Tools */}
-        <div className="assistant-panel rounded-md p-6">
-          <div className="flex items-center mb-4">
-            <svg className="w-6 h-6 text-purple-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-            </svg>
+        <section className="mt-12">
+          <SectionHeading label="Developer tools" />
+          <div className="flex items-center justify-between rounded-lg px-2 py-2.5 transition-colors hover:bg-white/[0.04]">
             <div>
-              <div className="assistant-kicker mb-2">Developer Surface</div>
-              <h3 className="font-display text-2xl font-semibold text-white">Developer Tools</h3>
-            </div>
-          </div>
-
-          <p className="text-sm text-[var(--assistant-text-soft)] mb-4">
-            Experimental features for testing and development.
-          </p>
-
-          <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-lg">🧪</span>
-                  <h4 className="text-white font-medium">Orchestrator Lab</h4>
-                </div>
-                <p className="text-xs text-gray-400 mt-1">
-                  Test multi-agent task orchestration with live visualization
-                </p>
-                <div className="flex gap-4 mt-2 text-xs text-gray-500">
-                  <span>Orchestrator: <span className="text-teal-400">qwen3-vl:30b</span></span>
-                  <span>Workers: <span className="text-purple-400">ministral-3</span></span>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  // Navigate to orchestrator lab - this will be handled by parent
-                  const event = new CustomEvent('navigate', { detail: { view: 'orchestrator-lab' } })
-                  window.dispatchEvent(event)
-                }}
-                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm font-medium flex items-center gap-2"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                Open Lab
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Information */}
-        <div className="mt-8 bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
-          <div className="flex">
-            <div className="flex-shrink-0">
-              <svg className="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-              </svg>
-            </div>
-            <div className="ml-3">
-              <h3 className="text-sm font-medium text-blue-400">Information</h3>
-              <div className="mt-1 text-sm text-blue-300">
-                <p>Changes to these settings will affect how Sara processes your requests, generates responses, and creates push notifications. The notification model should be smaller/faster for quick message generation. Make sure your AI and embedding services are accessible before saving.</p>
-                <p className="mt-2"><strong>Auto-Save:</strong> URL and model settings are automatically saved to your browser's local storage as you type, so you don't need to re-enter them on each visit.</p>
+              <div className="text-[15px] text-slate-200">Orchestrator Lab</div>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Test multi-agent task orchestration with live visualization
+              </p>
+              <div className="mt-1 flex gap-4 text-xs text-slate-500">
+                <span>Orchestrator: qwen3-vl:30b</span>
+                <span>Workers: ministral-3</span>
               </div>
             </div>
+            <button
+              onClick={() => {
+                // Navigate to orchestrator lab - this will be handled by parent
+                const event = new CustomEvent('navigate', { detail: { view: 'orchestrator-lab' } })
+                window.dispatchEvent(event)
+              }}
+              className={`ml-4 flex-shrink-0 ${btnSecondary}`}
+            >
+              Open Lab
+            </button>
+          </div>
+        </section>
 
-            {/* Memory Maintenance */}
-            <div className="border-t border-gray-700 pt-6">
-              <h3 className="text-lg font-medium text-white mb-4">Memory Maintenance</h3>
-              <p className="text-gray-400 text-sm mb-4">Run nightly consolidation on demand for yesterday’s traces.</p>
-              <button
-                onClick={async () => {
+        {/* Memory Maintenance */}
+        <section className="mt-12">
+          <SectionHeading label="Memory maintenance" />
+          <div className="flex items-center justify-between rounded-lg px-2 py-2.5 transition-colors hover:bg-white/[0.04]">
+            <div>
+              <div className="text-[15px] text-slate-200">Nightly consolidation</div>
+              <p className="mt-0.5 text-xs text-slate-500">Run on demand for yesterday's traces</p>
+            </div>
+            <button
+              onClick={async () => {
                   try {
                     const yesterday = new Date(Date.now() - 24*60*60*1000)
                     const day = yesterday.toISOString().slice(0,10)
@@ -2251,13 +2011,12 @@ export default function Settings() {
                     setTimeout(() => setTestResult(null), 5000)
                   }
                 }}
-                className="px-4 py-2 bg-indigo-600/20 text-indigo-300 rounded-lg hover:bg-indigo-600/30 text-sm"
-              >
-                Run Consolidation (Yesterday)
-              </button>
-            </div>
+              className={`ml-4 flex-shrink-0 ${btnSecondary}`}
+            >
+              Run Consolidation (Yesterday)
+            </button>
           </div>
-        </div>
+        </section>
       </div>
     </div>
   )

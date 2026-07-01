@@ -26,10 +26,10 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(h / 24)}d`
 }
 
-const SOURCE_BADGE: Record<string, string> = {
-  reflection: 'bg-violet-500/15 text-violet-200 border-violet-500/30',
-  external_event: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30',
-  manual: 'bg-amber-500/15 text-amber-200 border-amber-500/30',
+const SOURCE_TEXT: Record<string, string> = {
+  reflection: 'text-violet-300/80',
+  external_event: 'text-slate-500',
+  manual: 'text-amber-300/80',
 }
 
 export default function InterestsPanel() {
@@ -62,7 +62,7 @@ export default function InterestsPanel() {
   }, [fetchInterests])
 
   const remove = async (id: string) => {
-    if (!confirm('Remove this interest? Sara will stop seeding it.')) return
+    if (!confirm('Remove this interest? Note: her reflections can re-add it later. Use Block to veto a topic for good.')) return
     try {
       const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/interests/${id}`, {
         method: 'DELETE',
@@ -75,65 +75,86 @@ export default function InterestsPanel() {
     }
   }
 
+  const block = async (id: string) => {
+    if (!confirm('Block this topic? Sara will drop it permanently — re-adds and rephrasings are rejected.')) return
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/interests/${id}/block`, {
+        method: 'POST',
+        credentials: 'include',
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await fetchInterests()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to block')
+    }
+  }
+
   const maxWeight = Math.max(1, ...interests.map((i) => i.weight))
 
   return (
-    <div className="bg-gray-800/50 rounded-lg border border-gray-700 p-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h3 className="text-sm font-semibold text-zinc-200">Interests</h3>
-        <span className="text-xs text-zinc-500">{interests.length} tracked</span>
+    <section className="pt-6">
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Interests</h2>
+        <span className="text-xs text-slate-500">{interests.length} tracked</span>
       </div>
 
-      {loading && <div className="text-zinc-500 text-sm italic">Loading…</div>}
-      {error && <div className="text-red-400 text-sm">{error}</div>}
+      {loading && <p className="text-sm text-slate-500">Loading…</p>}
+      {error && <p className="text-sm text-rose-400">{error}</p>}
 
       {!loading && interests.length === 0 && !error && (
-        <div className="text-zinc-500 text-sm italic">
-          nothing tracked yet — she'll seed these from her reflections
-        </div>
+        <p className="text-sm text-slate-500">Nothing tracked yet — she'll seed these from her reflections.</p>
       )}
 
       {interests.length > 0 && (
-        <ul className="space-y-2">
+        <ul className="space-y-1">
           {interests.map((i) => {
             const pct = Math.round((i.weight / maxWeight) * 100)
             return (
-              <li key={i.id} className="bg-gray-900/40 rounded p-2.5 border border-gray-800">
-                <div className="flex items-start gap-2">
-                  <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border font-medium shrink-0 mt-0.5 ${SOURCE_BADGE[i.source] || SOURCE_BADGE.reflection}`}>
-                    {i.source.replace('_', ' ')}
-                  </span>
-                  <div className="flex-1 min-w-0">
+              <li key={i.id} className="group rounded-md px-2 py-2 transition-colors hover:bg-white/[0.04]">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
-                      <span className="text-sm text-zinc-100 truncate">{i.display_name}</span>
-                      <span className="text-[10px] text-zinc-500 ml-auto shrink-0">
-                        weight {i.weight.toFixed(2)}
+                      <span className="truncate text-[15px] text-slate-200">{i.display_name}</span>
+                      <span className={`shrink-0 font-mono text-[10px] uppercase tracking-wide ${SOURCE_TEXT[i.source] || SOURCE_TEXT.reflection}`}>
+                        {i.source.replace('_', ' ')}
+                      </span>
+                      <span className="ml-auto shrink-0 font-mono text-xs text-slate-500">
+                        {i.weight.toFixed(2)}
                       </span>
                     </div>
-                    <div className="h-1 bg-gray-800 rounded mt-1 overflow-hidden">
-                      <div className="h-full bg-violet-500/60" style={{ width: `${pct}%` }} />
+                    <div className="mt-1.5 h-px overflow-hidden rounded bg-white/10">
+                      <div className="h-full bg-slate-400/60" style={{ width: `${pct}%` }} />
                     </div>
                     {i.why && (
-                      <div className="text-xs text-zinc-400 mt-1 italic line-clamp-2">{i.why}</div>
+                      <div className="mt-1.5 line-clamp-2 text-xs text-slate-500">{i.why}</div>
                     )}
-                    <div className="text-[10px] text-zinc-600 mt-1 flex gap-3">
+                    <div className="mt-1 flex gap-3 text-xs text-slate-500">
                       <span>last touched {timeAgo(i.last_acted_at)}</span>
                       <span>updated {timeAgo(i.last_updated_at)} ago</span>
                     </div>
                   </div>
-                  <button
-                    onClick={() => remove(i.id)}
-                    className="text-[10px] text-zinc-600 hover:text-red-400 shrink-0 mt-0.5"
-                    title="Remove"
-                  >
-                    ✕
-                  </button>
+                  <div className="mt-0.5 flex shrink-0 flex-col items-end gap-1.5">
+                    <button
+                      onClick={() => remove(i.id)}
+                      className="text-xs text-slate-600 opacity-0 transition-all hover:text-rose-400 group-hover:opacity-100"
+                      title="Remove (her reflections can re-add it)"
+                    >
+                      ✕
+                    </button>
+                    <button
+                      onClick={() => block(i.id)}
+                      className="text-[10px] uppercase tracking-wide text-slate-600 opacity-0 transition-all hover:text-rose-400 group-hover:opacity-100"
+                      title="Veto this topic permanently — re-adds are rejected"
+                    >
+                      block
+                    </button>
+                  </div>
                 </div>
               </li>
             )
           })}
         </ul>
       )}
-    </div>
+    </section>
   )
 }

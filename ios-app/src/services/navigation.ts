@@ -142,19 +142,68 @@ export function navigateToNoteEditor(noteId: string | number, params?: { onSave?
 }
 
 /**
- * Navigate to a narrator System AI broadcast detail. `prefill` lets the
- * push tap show the body immediately while the API call refreshes the
- * full trigger context.
+ * Sara ui_command handler — chat-driven navigation ("open my inbox",
+ * "bring up my note about the server build"). The backend emits a
+ * `ui_command` SSE event; overlay kinds (webapp surfaces) and screen
+ * targets both map to native screens here.
  */
-export function navigateToSystemEvent(eventId: string, prefill?: {
-  title?: string;
-  body?: string;
-  subtitle?: string | null;
-  severity?: string;
-  trigger_name?: string;
-  trigger_context?: Record<string, any>;
-}) {
-  navigateToStackScreen('SystemEventDetail', { eventId, prefill });
+export interface SaraUiCommand {
+  action: string;
+  overlay?: string;
+  screen?: string;
+  payload?: Record<string, any>;
+}
+
+const OVERLAY_TO_SCREEN: Record<string, () => void> = {
+  brief: () => navigateToStackScreen('Briefings'),
+  nutrition: () => navigateToTab('Fitness'),
+  calendar: () => navigateToStackScreen('Calendar'),
+  tasks: () => navigateToStackScreen('AgentTasks'),
+};
+
+const SCREEN_TARGETS: Record<string, () => void> = {
+  inbox: () => navigateToInbox(),
+  notifications: () => navigateToNotifications(),
+  email: () => navigateToStackScreen('Email'),
+  documents: () => navigateToStackScreen('Documents'),
+  recipes: () => navigateToStackScreen('Recipes'),
+  settings: () => navigateToStackScreen('Settings'),
+  health: () => navigateToStackScreen('Health'),
+  learning: () => navigateToStackScreen('Learning'),
+  projects: () => navigateToStackScreen('Projects'),
+  automations: () => navigateToStackScreen('Automations'),
+  knowledge: () => navigateToStackScreen('Knowledge'),
+  fitness: () => navigateToTab('Fitness'),
+  notes: () => navigateToStackScreen('Notes'),
+  chat: () => navigateToChat(),
+};
+
+export function handleSaraUiCommand(cmd: SaraUiCommand): boolean {
+  try {
+    if (cmd?.action === 'open_overlay' && cmd.overlay) {
+      if (cmd.overlay === 'note' && cmd.payload?.note_id) {
+        navigateToNoteEditor(cmd.payload.note_id);
+        return true;
+      }
+      const open = OVERLAY_TO_SCREEN[cmd.overlay];
+      if (open) {
+        open();
+        return true;
+      }
+      return false;
+    }
+    if (cmd?.action === 'navigate' && cmd.screen) {
+      const open = SCREEN_TARGETS[cmd.screen];
+      if (open) {
+        open();
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error('[Navigation] Failed to handle ui_command:', error);
+    return false;
+  }
 }
 
 /**

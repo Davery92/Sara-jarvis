@@ -31,6 +31,7 @@ export interface ChatOptions {
   onContentCard?: (card: any) => void;  // Content card callback
   onToolStatus?: (status: { tool: string; status: string }) => void;  // Tool execution status
   onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
+  onUiCommand?: (command: any) => void;  // Jarvis-style navigation/overlay command ("open my inbox")
 }
 
 export interface CodexOAuthStatus {
@@ -387,6 +388,8 @@ class ApiClient {
                   options.onToolStatus({ tool: parsed.data?.tool, status: 'completed' });
                 } else if (parsed.type === 'suggested_actions' && options?.onSuggestedActions) {
                   options.onSuggestedActions(parsed.data?.actions || []);
+                } else if (parsed.type === 'ui_command' && options?.onUiCommand) {
+                  options.onUiCommand(parsed.data);
                 } else if (parsed.content) {
                   // Fallback for other formats
                   const fallbackChunk = String(parsed.content);
@@ -745,6 +748,22 @@ class ApiClient {
       // Don't throw - presence logging is best-effort
       console.warn('[API] Failed to log presence:', error);
     }
+  }
+
+  // ==================== UNIFIED ASSISTANT INBOX ====================
+
+  async getUnifiedInbox(): Promise<{
+    needs_you: any[];
+    fyi: any[];
+    counts: { needs_you: number; fyi_unread: number; badge: number };
+  }> {
+    const response = await this.client.get('/api/assistant-inbox/unified');
+    return response.data as any;
+  }
+
+  async getInboxBadge(): Promise<number> {
+    const response = await this.client.get('/api/assistant-inbox/badge');
+    return (response.data as any)?.badge || 0;
   }
 
   // ==================== AUTONOMY (Cortana Evolution) ====================

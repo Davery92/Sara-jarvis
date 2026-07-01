@@ -28,6 +28,12 @@ class AppState:
         self.ai_provider: str = os.getenv("AI_PROVIDER", "local")
         self.openai_base_url: str = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
         self.openai_model: str = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
+        # Default model for the interactive chat selector, decoupled from the
+        # shared `openai_model` above (which many background/utility services
+        # reuse). Kept separate so the chat can default to a reasoning-only
+        # Claude model (Sonnet 5) without forcing every utility LLM call — most
+        # of which send `temperature` — onto a model that would 400 on it.
+        self.chat_default_model: str = os.getenv("CHAT_DEFAULT_MODEL", "claude-sonnet-5")
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "dummy")
         self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         self.google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
@@ -91,8 +97,8 @@ class AppState:
         self.available_models: List[Dict[str, str]] = [
             {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "provider": "codex"},
             {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark", "provider": "codex"},
-            {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "provider": "anthropic"},
-            {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "provider": "anthropic"},
+            {"id": "claude-opus-4-8", "name": "Claude Opus 4.8", "provider": "anthropic"},
+            {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "provider": "anthropic"},
             {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "provider": "anthropic"},
             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
             {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},

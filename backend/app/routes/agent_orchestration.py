@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.db.session import get_db, SessionLocal
 from app.core.deps import get_current_user
 from app.core.auth import verify_token
 from app.models.user import User
@@ -74,7 +74,8 @@ async def dispatch_task(
         task_description=req.task_description,
         mode=req.mode,
         working_directory=req.working_directory,
-        timeout=req.timeout,
+        # NOTE: `timeout` is accepted in the request for client compat but the
+        # dispatch service no longer takes it — the loop is round-capped.
     )
     return result
 
@@ -179,21 +180,30 @@ async def stream_task_execution(
     task_id: str,
     request: Request,
     token: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
 ):
     """SSE stream of real-time task execution events.
     Accepts auth via cookie, Authorization header, or ?token= query param.
     """
+    # Authenticate with a SHORT-LIVED session that is released before the
+    # long-lived stream begins. A request-scoped session (Depends(get_db)) would
+    # stay open for the whole stream — minutes of idleness — and Postgres kills
+    # it with "terminating connection due to idle-in-transaction timeout", which
+    # crashes the stream teardown and forces the client into a reconnect loop
+    # (the "no live logs" bug). The stream itself needs only Redis, not the DB.
     user = None
+    auth_db = SessionLocal()
     try:
-        user = await get_current_user(request, request.cookies.get("access_token"), db)
-    except Exception:
-        pass
+        try:
+            user = await get_current_user(request, request.cookies.get("access_token"), auth_db)
+        except Exception:
+            pass
 
-    if not user and token:
-        payload = verify_token(token)
-        if payload and payload.get("sub"):
-            user = db.query(User).filter(User.id == payload["sub"]).first()
+        if not user and token:
+            payload = verify_token(token)
+            if payload and payload.get("sub"):
+                user = auth_db.query(User).filter(User.id == payload["sub"]).first()
+    finally:
+        auth_db.close()
 
     if not user:
         raise HTTPException(401, "Could not validate credentials")

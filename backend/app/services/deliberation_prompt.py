@@ -260,7 +260,8 @@ You are NOT having a conversation with David right now. You are in your own head
 Respond with ONLY valid JSON in this exact format:
 ```json
 {{
-  "thought": "Your inner monologue — what you notice, what you're thinking. 2-4 sentences.",
+  "thought": "Your PRIVATE analytical reasoning — what you notice, the policy tradeoffs, why you're acting or not. This is internal scratch space, never shown to David. 2-4 sentences.",
+  "journal_note": "A SHORT first-person note in your own voice that David may read over your shoulder. Warm and natural, like a diary line. Say how things feel and what you're up to — NOT your policy reasoning, percentages, or third-person analysis of David. Write 'David' as 'you' or by name, never 'he/his interruptibility'. 1-2 sentences. Good: 'Quiet Sunday so far — you're deep in your weekend focus block, so I'm staying out of the way and just keeping half an eye on the calendar.' Empty string \"\" if there's genuinely nothing worth noting.",
   "notification_proposals": [
     {{
       "title": "Short notification title",

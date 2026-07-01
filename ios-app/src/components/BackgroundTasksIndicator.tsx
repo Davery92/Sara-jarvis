@@ -72,7 +72,7 @@ export default function BackgroundTasksIndicator({
       case 'pending': return colors.warning;
       case 'completed': return colors.success;
       case 'failed': return colors.error;
-      case 'needs_clarification': return '#f97316'; // orange
+      case 'needs_clarification': return colors.hues.orange;
       default: return colors.textMuted;
     }
   };

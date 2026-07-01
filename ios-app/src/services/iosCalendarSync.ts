@@ -127,7 +127,7 @@ class IOSCalendarSyncService {
       return calendars.map((cal: any) => ({
         id: cal.id,
         title: cal.title,
-        color: cal.color || '#0d7ff2',
+        color: cal.color || '#14b8a6',
         source: {
           id: cal.source?.id || '',
           name: cal.source?.name || 'Unknown',

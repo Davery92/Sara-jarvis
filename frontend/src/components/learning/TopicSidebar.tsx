@@ -23,6 +23,19 @@ export default function TopicSidebar({
   const [newTopicDescription, setNewTopicDescription] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [autoResearch, setAutoResearch] = useState(true)
+  const [collapsedTopics, setCollapsedTopics] = useState<Set<string>>(new Set())
+
+  const toggleCollapse = (topicId: string) => {
+    setCollapsedTopics(prev => {
+      const next = new Set(prev)
+      if (next.has(topicId)) {
+        next.delete(topicId)
+      } else {
+        next.add(topicId)
+      }
+      return next
+    })
+  }
 
   const handleCreateTopic = (e: React.FormEvent) => {
     e.preventDefault()
@@ -77,6 +90,8 @@ export default function TopicSidebar({
 
   const renderTopicNode = (topic: LearningTopic, depth: number = 0): React.ReactNode => {
     const children = childrenByParent.get(topic.id) || []
+    const hasChildren = children.length > 0
+    const isCollapsed = collapsedTopics.has(topic.id)
     return (
       <React.Fragment key={topic.id}>
         <button
@@ -88,7 +103,23 @@ export default function TopicSidebar({
           }`}
           style={{ paddingLeft: `${16 + Math.min(depth, 6) * 14}px` }}
         >
-          <div className="flex items-start gap-3 group">
+          <div className="flex items-start gap-2 group">
+            {hasChildren ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  toggleCollapse(topic.id)
+                }}
+                className="text-gray-500 hover:text-gray-200 transition-colors flex-shrink-0 -ml-1"
+                title={isCollapsed ? 'Expand subtopics' : 'Collapse subtopics'}
+              >
+                <span className="material-icons text-base leading-5">
+                  {isCollapsed ? 'chevron_right' : 'expand_more'}
+                </span>
+              </button>
+            ) : (
+              <span className="w-4 flex-shrink-0" />
+            )}
             <div className={`w-2 h-2 rounded-full mt-2 ${getStatusColor(topic.status)}`} />
             <div className="flex-1 min-w-0">
               <p className={`font-medium truncate ${
@@ -126,7 +157,7 @@ export default function TopicSidebar({
             )}
           </div>
         </button>
-        {children.map((child) => renderTopicNode(child, depth + 1))}
+        {!isCollapsed && children.map((child) => renderTopicNode(child, depth + 1))}
       </React.Fragment>
     )
   }

@@ -7,11 +7,10 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Platform, AppState, AppStateStatus } from 'react-native';
+import { Platform, AppState, AppStateStatus, DeviceEventEmitter } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import TimerOverlayContainer from './TimerOverlayContainer';
 import FloatingAssistant from './sara/FloatingAssistant';
-import SystemEventOverlay, { SystemEventOverlayPayload } from './SystemEventOverlay';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
@@ -24,7 +23,6 @@ import { refreshWidgetData } from '../services/widgetBridge';
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
   const [pushToken, setPushToken] = useState<string | null>(null);
-  const [systemEvent, setSystemEvent] = useState<SystemEventOverlayPayload | null>(null);
   const hasInitialized = useRef(false);
 
   // Initialize services that require authentication
@@ -92,14 +90,6 @@ export const AuthenticatedOverlays: React.FC = () => {
           pushNotificationService.setOnTaskChatInject((taskId, conversationId, noteId) => {
             console.log('[AuthenticatedOverlays] Task chat inject, reloading conversation:', taskId);
             navigateToChat({ taskInject: { taskId, conversationId, noteId } });
-          });
-
-          // Set up narrator (System AI) tap handler — pops the overlay modal
-          // so the full body is always readable, regardless of how aggressively
-          // iOS truncated the push banner.
-          pushNotificationService.setOnSystemEventTapped((payload) => {
-            console.log('[AuthenticatedOverlays] System event tapped:', payload.event_id);
-            setSystemEvent(payload);
           });
 
           // Mark callbacks as ready - this will process any pending notification that launched the app
@@ -175,6 +165,18 @@ export const AuthenticatedOverlays: React.FC = () => {
     sendHeartbeat();
     const heartbeatInterval = setInterval(sendHeartbeat, 30_000);
 
+    // Sync the icon badge to the server's unread notification count, so the
+    // number on the icon always matches the Notifications screen (and clears
+    // once everything is read) instead of being wiped on every app open.
+    const syncBadge = async () => {
+      try {
+        const data = await apiClient.get<{ unread: number }>('/api/notifications/unread-count');
+        await pushNotificationService.setBadgeCount(data?.unread ?? 0);
+      } catch {
+        // Offline or endpoint unavailable — leave the badge as-is.
+      }
+    };
+
     // Check backend health on startup
     const checkHealth = async () => {
       try {
@@ -205,19 +207,24 @@ export const AuthenticatedOverlays: React.FC = () => {
         refreshWidgetData();
         // The App Intent foregrounds the app via openAppWhenRun → pick up the prompt.
         consumeSiriPrompt();
-        // Clear badge count when app comes to foreground
-        pushNotificationService.setBadgeCount(0);
+        // Sync badge to real unread count when app comes to foreground
+        syncBadge();
       }
     });
 
-    // Clear badge on initial open too
-    pushNotificationService.setBadgeCount(0);
+    // Sync badge on initial open too
+    syncBadge();
+
+    // Re-sync when notifications get marked read in-app (Notifications screen
+    // and inbox emit this after read/mark-all-read).
+    const badgeRefreshSub = DeviceEventEmitter.addListener('assistantInboxBadgeRefresh', syncBadge);
 
     // Cleanup on unmount
     return () => {
       pushNotificationService.cleanup();
       appStateSubscription.remove();
       clearInterval(heartbeatInterval);
+      badgeRefreshSub.remove();
     };
   }, [isAuthenticated]);
 
@@ -230,23 +237,6 @@ export const AuthenticatedOverlays: React.FC = () => {
     <>
       <TimerOverlayContainer />
       <FloatingAssistant />
-      <SystemEventOverlay
-        payload={systemEvent}
-        onClose={() => setSystemEvent(null)}
-        onDiscussInChat={(payload) => {
-          setSystemEvent(null);
-          // Pop into chat with the broadcast as conversation context.
-          navigateToChat({
-            notification: {
-              id: payload.event_id,
-              title: payload.title,
-              message: payload.body,
-              category: 'system_event',
-              item_type: 'narrator',
-            },
-          });
-        }}
-      />
     </>
   );
 };

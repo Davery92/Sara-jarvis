@@ -43,7 +43,7 @@ const STATE_CONFIG: Record<string, { color: string; icon: string; label: string 
   pending: { color: colors.textMuted, icon: '...', label: 'Pending' },
   running: { color: colors.info, icon: '', label: 'Running' },
   awaiting_confirm: { color: colors.warning, icon: '?', label: 'Awaiting Confirm' },
-  needs_clarification: { color: '#f97316', icon: '!', label: 'Needs Input' },
+  needs_clarification: { color: colors.hues.orange, icon: '!', label: 'Needs Input' },
   done: { color: colors.success, icon: '', label: 'Completed' },
   failed: { color: colors.error, icon: 'X', label: 'Failed' },
   cancelled: { color: colors.textMuted, icon: '-', label: 'Cancelled' },
@@ -602,7 +602,7 @@ const styles = StyleSheet.create({
     borderColor: colors.info + '40',
   },
   missionCardClarification: {
-    borderColor: '#f97316' + '40',
+    borderColor: colors.hues.orange + '40',
   },
   missionHeader: {
     flexDirection: 'row',
@@ -695,16 +695,16 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   clarifyContainer: {
-    backgroundColor: '#f97316' + '15',
+    backgroundColor: colors.hues.orange + '15',
     borderRadius: borderRadius.md,
     padding: spacing.md,
     marginBottom: spacing.sm,
     borderWidth: 1,
-    borderColor: '#f97316' + '30',
+    borderColor: colors.hues.orange + '30',
   },
   clarifyLabel: {
     fontSize: fontSizes.sm,
-    color: '#f97316',
+    color: colors.hues.orange,
     fontWeight: '600',
     marginBottom: spacing.sm,
   },
@@ -724,7 +724,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   clarifyButton: {
-    backgroundColor: '#f97316',
+    backgroundColor: colors.hues.orange,
     borderRadius: borderRadius.md,
     paddingHorizontal: spacing.md,
     justifyContent: 'center',

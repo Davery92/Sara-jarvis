@@ -22,6 +22,7 @@ const loadMorningBrief = () => import('../MorningBrief')
 const loadOrchestratorLab = () => import('../OrchestratorLab')
 const loadSystemStatus = () => import('../../pages/SystemStatus')
 const loadACSPage = () => import('../../pages/ACSPage')
+const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadSensoryMonitor = () => import('../SensoryMonitor')
 const loadEmailPage = () => import('../EmailPage')
 const loadPersonalKnowledge = () => import('../PersonalKnowledge')
@@ -40,6 +41,7 @@ const PrivacyDashboard = lazy(loadPrivacyDashboard)
 const MorningBrief = lazy(loadMorningBrief)
 const OrchestratorLab = lazy(loadOrchestratorLab)
 const SystemStatus = lazy(loadSystemStatus)
+const SystemDashboard = lazy(loadSystemDashboard)
 const ACSPage = lazy(loadACSPage)
 const SensoryMonitor = lazy(loadSensoryMonitor)
 const EmailPage = lazy(loadEmailPage)
@@ -129,6 +131,8 @@ interface ShellWorkspaceContentProps {
   onSelectInboxTab: React.Dispatch<React.SetStateAction<'attention' | 'content'>>
   onOpenContentChat: (inboxItemId: string, title: string) => void
   onOpenAttentionChat: (prompt: string) => void
+  onAskSara: (prompt: string) => void
+  chatAutoSendToken?: number
   onChatAboutNote: (title: string, content: string) => void
   onNavigateToWorkspace?: (noteId: string) => void
 }
@@ -204,6 +208,8 @@ export default function ShellWorkspaceContent({
   onSelectInboxTab,
   onOpenContentChat,
   onOpenAttentionChat,
+  onAskSara,
+  chatAutoSendToken,
   onChatAboutNote,
   onNavigateToWorkspace,
 }: ShellWorkspaceContentProps) {
@@ -248,6 +254,7 @@ export default function ShellWorkspaceContent({
         connectedDevices={connectedDevices}
         standingOrders={standingOrders}
         formatRelativeTime={formatRelativeTime}
+        onAskSara={onAskSara}
       />
     )
   }
@@ -266,6 +273,7 @@ export default function ShellWorkspaceContent({
               message={message}
               setMessage={setMessage}
               abortControllerRef={abortControllerRef}
+              autoSendToken={chatAutoSendToken}
               quickActionContext={{
                 inboxUnreadCount,
                 attentionUnreadCount,
@@ -339,6 +347,14 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
         {renderDeferredView('Loading fitness…', <FitnessSection />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'system') {
+    return (
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {renderDeferredView('Loading the system…', <SystemDashboard />)}
       </div>
     )
   }

@@ -50,6 +50,11 @@ export interface RecoveryLog {
   notes?: string;
   created_at?: string;
   updated_at?: string;
+  // Server-computed readiness (single source of truth — see utils/recovery.ts).
+  readiness_score?: number;   // 0-100
+  readiness_label?: string;   // Excellent / Good / Low / Poor
+  readiness_status?: string;  // human sentence
+  readiness_color?: 'success' | 'primary' | 'warning' | 'error';
 }
 
 export interface HabitLog {
@@ -72,6 +77,21 @@ export interface HabitStreak {
 export interface CreateFoodLogParams {
   meal_type: string;
   food_items: Array<{ name: string; quantity: number; unit: string }>;
+  // Rich per-item snapshot (food_id, per-item macros, serving) so the Recent
+  // tab can one-tap re-log with correct macros. Optional for backward compat.
+  detailed_items?: Array<{
+    food_id?: string;
+    name: string;
+    quantity: number;
+    serving_unit: string;
+    serving_description?: string;
+    calories?: number;
+    protein?: number;
+    carbs?: number;
+    fats?: number;
+    source?: string;
+    is_custom?: boolean;
+  }>;
   calories?: number;
   protein?: number;
   carbs?: number;
@@ -159,6 +179,22 @@ export interface Program {
 export interface ActiveProgramResponse {
   program: Program | null;
   phases: Phase[];
+}
+
+// --- Nutrition guide ("The Forge") ---
+export interface GuideMacro { label: string; training: string; rest: string }
+export interface GuideRule { title: string; body: string }
+export interface GuideCarbTiming { days?: string; pre?: string; post?: string; note?: string }
+export interface GuideStaples { carbs?: string; protein?: string; watch_out?: string }
+export interface NutritionGuideData {
+  goal?: string;
+  how_it_works?: string;
+  weekly_average?: string;
+  macros?: GuideMacro[];
+  rules?: GuideRule[];
+  carb_timing?: GuideCarbTiming | null;
+  staples?: GuideStaples | null;
+  self_check?: string[];
 }
 
 /**
@@ -281,6 +317,16 @@ export interface WorkoutSession {
   session_date?: string;
   created_at: string;
   exercises: WorkoutSet[];
+  // Melded from the Apple Watch workout that overlapped this session.
+  heart_rate?: {
+    activity?: string;
+    avg_heart_rate?: number;
+    max_heart_rate?: number;
+    min_heart_rate?: number;
+    calories?: number;
+    distance_m?: number | null;
+    duration_min?: number | null;
+  } | null;
 }
 
 export interface CreateWorkoutSetParams {
@@ -317,6 +363,30 @@ export interface FoodItem {
   source: string;
 }
 
+// One predefined serving option for a food (from FatSecret / custom DB). Each
+// carries its OWN macros, so switching servings just swaps numbers — no fragile
+// unit conversion. This is how MyFitnessPal / Lose It model servings.
+export interface FoodServing {
+  serving_id?: string;
+  serving_description: string;   // "1/2 cup", "1 oz", "100 g"
+  metric_serving_amount?: number;
+  metric_serving_unit?: string;
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+}
+
+export interface FoodDetail {
+  id: string;
+  name: string;
+  brand?: string;
+  food_type?: string;
+  servings: FoodServing[];
+  is_custom?: boolean;
+  source?: string;
+}
+
 export interface CreateCustomFoodParams {
   name: string;
   brand?: string;
@@ -334,11 +404,16 @@ export interface CreateCustomFoodParams {
 // Active Workout Session Types (Real-time Sara Coaching)
 export interface ActiveWorkoutExercise {
   name: string;
+  variant?: string | null;  // actual machine/variation used (e.g. "Hack Squat" for a "Squat" slot)
   sets: number;
   reps: string;  // e.g., "6-8" or "10"
   rpe_target?: number;
   suggested_weight?: number;
   progression_note?: string;
+  notes?: string;              // coaching cue from the template
+  is_per_side?: boolean;       // log each side (unilateral)
+  superset_group?: string | number | null;
+  set_technique?: string;      // e.g. "dropset", "rest-pause"
   last_session?: {
     weights: number[];
     reps: number[];
@@ -348,8 +423,12 @@ export interface ActiveWorkoutExercise {
 }
 
 export interface ActiveWorkoutSnapshot {
+  name?: string;
   template_name: string;
   exercises: ActiveWorkoutExercise[];
+  is_deload?: boolean;
+  deload_week?: number | null;
+  week_of_phase?: number | null;
 }
 
 export interface ActiveWorkoutSession {
@@ -589,6 +668,13 @@ class FitnessService {
     return await apiClient.get<ActiveProgramResponse>('/api/fitness/programs/active');
   }
 
+  // Structured recomp nutrition guide stored on the active program (set by the
+  // Plan Importer). Returns { guide: null } when nothing has been imported —
+  // the client falls back to its built-in default.
+  async getNutritionGuide(): Promise<{ guide: NutritionGuideData | null }> {
+    return await apiClient.get<{ guide: NutritionGuideData | null }>('/api/fitness/nutrition-guide');
+  }
+
   async createPhase(params: CreatePhaseParams): Promise<{ success: boolean; phase_id: string; message: string }> {
     return await apiClient.post('/api/fitness/phases', params);
   }
@@ -699,6 +785,17 @@ class FitnessService {
     return await apiClient.get(`/api/fitness/foods/search?${params}`);
   }
 
+  // Full serving list for a food (FatSecret 'fs-<id>' or a custom-food id).
+  // Returns null if unavailable so callers can fall back gracefully.
+  async getFoodDetails(foodId: string): Promise<FoodDetail | null> {
+    try {
+      return await apiClient.get<FoodDetail>(`/api/fitness/foods/${encodeURIComponent(foodId)}/details`);
+    } catch (error) {
+      console.warn('Failed to fetch food details (servings):', error);
+      return null;
+    }
+  }
+
   async createCustomFood(params: CreateCustomFoodParams): Promise<FoodItem> {
     return await apiClient.post<FoodItem>('/api/fitness/foods', params);
   }
@@ -791,6 +888,7 @@ class FitnessService {
     success: boolean;
     logged?: { exercise: string; set_number: number; weight: number; reps: number };
     coaching_feedback?: string;
+    pr?: { is_pr: boolean; estimated_1rm?: number; previous_best?: number | null } | null;
     next_set?: {
       exercise?: string;
       set_number?: number;
@@ -798,6 +896,8 @@ class FitnessService {
       workout_complete?: boolean;
       exercise_complete?: boolean;
       next_exercise?: string;
+      rest_seconds?: number;
+      weight_adjustment?: number | null;
     };
     total_sets_completed?: number;
     total_volume?: number;
@@ -812,8 +912,39 @@ class FitnessService {
     success: boolean;
     skipped_exercise?: string;
     next_exercise?: string;
+    workout_complete?: boolean;
   }> {
     return apiClient.post('/api/fitness/workout-session/skip');
+  }
+
+  /**
+   * Jump to a specific exercise (do exercises in any order / come back later)
+   */
+  async selectExercise(exerciseIndex: number): Promise<{
+    success: boolean;
+    current_exercise_index: number;
+    current_set_index: number;
+    exercise?: string;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/select-exercise', {
+      exercise_index: exerciseIndex,
+    });
+  }
+
+  /**
+   * Record the machine/variation used for an exercise (scopes weight history so a
+   * hack-squat doesn't get logged against your barbell squat). Pass null to revert.
+   */
+  async setExerciseVariant(exerciseIndex: number, variant: string | null): Promise<{
+    success: boolean;
+    variant: string | null;
+    effective_name: string;
+    suggested_weight?: number;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/set-variant', {
+      exercise_index: exerciseIndex,
+      variant,
+    });
   }
 
   /**

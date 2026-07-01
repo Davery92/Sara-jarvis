@@ -27,6 +27,7 @@ import { assistantAnalytics } from '../../services/assistantAnalytics';
 import { chatService } from '../../services/chat';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
+import { DocumentAttachment } from '../../services/documentPicker';
 import notesService from '../../services/notes';
 import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
@@ -36,7 +37,7 @@ import SuggestedActions from '../../components/chat/SuggestedActions';
 import ToolStatusIndicator from '../../components/chat/ToolStatusIndicator';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
-import { navigateToNoteEditor } from '../../services/navigation';
+import { navigateToNoteEditor, handleSaraUiCommand } from '../../services/navigation';
 
 type Props = {
   isEmbedded?: boolean;
@@ -101,8 +102,16 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [continuousVoiceMode, setContinuousVoiceMode] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
+  // Start true: the mount history loader (which fully replaces `messages`) is
+  // async, so it doesn't flip this flag until after its first `await`. If we
+  // started at false, the "process pending contexts" effect would inject a seed
+  // (heartbeat / "Reply to Sara" prompt / tapped-notification message) before
+  // history finished, and the history load would then clobber it. Starting true
+  // holds the seed behind the gate; the loader's `finally` flips it false, which
+  // re-runs the seed effect and appends the seed AFTER history is in place.
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  // Empty = no override; adopted from the server's default once models load.
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [isEphemeral, setIsEphemeral] = useState(false);
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
   const [showConversationControls, setShowConversationControls] = useState(false);
@@ -421,52 +430,61 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       try {
         setIsLoadingHistory(true);
 
-        let savedConversationId: string | null = null;
+        const candidateIds: string[] = [];
 
         // First, check for a cross-device active session (e.g. started on desktop)
         try {
           const sessionData = await chatService.getActiveSession();
-          if (sessionData.active && sessionData.session?.conversation_id) {
-            savedConversationId = sessionData.session.conversation_id;
-            console.log('[Chat] Resuming cross-device session:', savedConversationId, 'from', sessionData.session.last_device);
+          const sessionConvId = sessionData.session?.conversation_id;
+          if (sessionData.active && sessionConvId && sessionConvId !== 'unknown') {
+            candidateIds.push(sessionConvId);
+            console.log('[Chat] Resuming cross-device session:', sessionConvId, 'from', sessionData.session?.last_device);
           }
         } catch {
           // Non-critical — fall through to conversations/active
         }
 
-        // Fall back to the per-device active conversation
-        if (!savedConversationId) {
+        // Also try the per-device active conversation, in case the session id is stale
+        try {
           const activeResponse = await apiClient.get('/api/conversations/active');
-          savedConversationId = (activeResponse as any)?.conversation_id || null;
+          const activeConvId = (activeResponse as any)?.conversation_id || null;
+          if (activeConvId && !candidateIds.includes(activeConvId)) {
+            candidateIds.push(activeConvId);
+          }
+        } catch {
+          // Non-critical
         }
 
-        if (!savedConversationId) {
+        if (candidateIds.length === 0) {
           console.log('[Chat] No active conversation found');
           return;
         }
 
-        console.log('[Chat] Loading conversation history for:', savedConversationId);
+        for (const savedConversationId of candidateIds) {
+          console.log('[Chat] Loading conversation history for:', savedConversationId);
 
-        // Load conversation messages
-        const messagesResponse = await apiClient.get(
-          `/api/conversations/${savedConversationId}/messages?limit=100`
-        );
+          const messagesResponse = await apiClient.get(
+            `/api/conversations/${savedConversationId}/messages?limit=100`
+          );
 
-        const messagesData = messagesResponse as any;
+          const messagesData = messagesResponse as any;
 
-        if (messagesData && messagesData.length > 0) {
-          // Convert Episode format to Message format
-          const loadedMessages: Message[] = messagesData.map((ep: any) => ({
-            id: ep.id,
-            role: ep.role,
-            content: ep.content,
-            created_at: ep.created_at,
-            episode_id: ep.id,  // Map episode ID for rating
-          }));
+          if (messagesData && messagesData.length > 0) {
+            // Convert Episode format to Message format
+            const loadedMessages: Message[] = messagesData.map((ep: any) => ({
+              id: ep.id,
+              role: ep.role,
+              content: ep.content,
+              created_at: ep.created_at,
+              episode_id: ep.id,  // Map episode ID for rating
+            }));
 
-          setMessages(loadedMessages);
-          setConversationId(savedConversationId);
-          console.log(`[Chat] Loaded ${loadedMessages.length} messages from conversation ${savedConversationId}`);
+            setMessages(loadedMessages);
+            setConversationId(savedConversationId);
+            console.log(`[Chat] Loaded ${loadedMessages.length} messages from conversation ${savedConversationId}`);
+            return;
+          }
+          console.log('[Chat] Conversation had no messages, trying next candidate:', savedConversationId);
         }
       } catch (error) {
         console.error('[Chat] Error loading conversation history:', error);
@@ -484,7 +502,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       try {
         const models = await apiClient.getChatModels();
         setAvailableModels(models);
-        if (models.default && selectedModel === 'gpt-oss:120b') {
+        if (models.default && !selectedModel) {
           setSelectedModel(models.default);
         }
       } catch (error) {
@@ -662,6 +680,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const handleSendMessage = async (
     messageText: string,
     images?: ImageAttachment[],
+    documents?: DocumentAttachment[],
     inboxItemId?: string,
     noteId?: string,
   ) => {
@@ -698,6 +717,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     assistantAnalytics.track('assistant.message_sent', {
       input_mode: 'text',
       has_images: Boolean(images?.length),
+      has_documents: Boolean(documents?.length),
       has_context: Boolean(activeConversationContext),
       context_kind: activeConversationContext?.kind || pendingMessageSource?.contextKind || null,
       entry_point: pendingMessageSource?.entryPoint || 'composer',
@@ -724,6 +744,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         messages: conversationMessages,  // Send full history, not just new message
         conversationId,
         images,  // Pass images to the service
+        documents,  // Pass document attachments (PDF/Word/text) to the service
         model: selectedModel,  // Pass selected model
         ephemeral: isEphemeral,  // Pass ephemeral mode
         inboxItemId: resolvedInboxItemId,  // Pass inbox item for discussion context
@@ -738,6 +759,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         onSuggestedActions: (actions: SuggestedAction[]) => {
           setSuggestedActions(actions);
         },
+        onUiCommand: handleSaraUiCommand,
       },
       // onChunk - called for each piece of streaming text
       (chunk: string) => {
@@ -1026,6 +1048,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           conversationId,
           model: selectedModel,  // Pass selected model
           ephemeral: isEphemeral,  // Pass ephemeral mode
+          source: 'ios',
+          onUiCommand: handleSaraUiCommand,
         },
         // onChunk
         (chunk: string) => {
@@ -1278,6 +1302,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     handleSendMessage(
       conversationContext.primaryPrompt,
       undefined,
+      undefined,
       conversationContext.inboxItemId,
       conversationContext.noteId,
     );
@@ -1378,7 +1403,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
                     value={isEphemeral}
                     onValueChange={setIsEphemeral}
                     trackColor={{ false: colors.surfaceLight, true: 'rgba(139, 92, 246, 0.45)' }}
-                    thumbColor={isEphemeral ? colors.secondary : '#f4f4f5'}
+                    thumbColor={isEphemeral ? colors.secondary : colors.text}
                   />
                 </View>
 

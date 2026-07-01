@@ -111,15 +111,73 @@ def _journal_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, _normalize_journal_text(a), _normalize_journal_text(b)).ratio()
 
 
+_COMPLETION_ANNOUNCEMENT_RE = re.compile(
+    r"\b(research|report|task|investigation|agents?|background (?:work|job))\b"
+    r".{0,60}\b(is ready|ready for you|complete[d]?|finished|done|wrapped up)\b"
+)
+
+
+# ── Measured un-gag (THE SYSTEM, Phase 4) ──────────────────────────────────
+# The blanket category/phrase ban above was a band-aid for Sara's fitness bias.
+# Un-gag PER DOMAIN via tunable flags `system.ungag.<domain>` (default OFF), or a
+# master `system.ungag.all`. When a domain is un-gagged, the learned attention
+# policy + anomaly override govern instead of the hard ban. Cached 60s.
+import time as _time
+
+_UNGAG_DOMAIN = {"health": "health", "fitness": "health", "wellness": "health"}
+_ungag_cache = {"at": 0.0, "flags": {}}
+
+
+def _ungag_flags() -> dict:
+    now = _time.time()
+    if now - _ungag_cache["at"] < 60:
+        return _ungag_cache["flags"]
+    flags = {}
+    try:
+        from sqlalchemy import text as _text
+        from app.db.base import SessionLocal
+        db = SessionLocal()
+        try:
+            rows = db.execute(_text("SELECT key, value FROM tunable_setting WHERE key LIKE 'system.ungag.%'")).fetchall()
+            for k, v in rows:
+                dom = k.rsplit(".", 1)[-1]
+                s = str(v).strip().strip('"').lower()
+                flags[dom] = s in ("1", "true", "yes", "on")
+        finally:
+            db.close()
+    except Exception:
+        pass
+    _ungag_cache["at"] = now
+    _ungag_cache["flags"] = flags
+    return flags
+
+
+def _is_ungagged(category: Optional[str]) -> bool:
+    flags = _ungag_flags()
+    if flags.get("all"):
+        return True
+    dom = _UNGAG_DOMAIN.get((category or "").lower(), (category or "").lower())
+    return bool(flags.get(dom, False))
+
+
 def _is_banned_notification(proposal: NotificationProposal) -> Optional[str]:
     """Check if a notification proposal violates hard bans. Returns ban reason or None."""
-    # Category-level ban
-    if hasattr(proposal, "category") and proposal.category and proposal.category.lower() in _BANNED_CATEGORIES:
-        return f"Hard ban: category '{proposal.category}' is banned"
+    cat = proposal.category if hasattr(proposal, "category") else None
+    ungagged = _is_ungagged(cat)
+    # Category-level ban (skipped if this domain has been un-gagged)
+    if cat and cat.lower() in _BANNED_CATEGORIES and not ungagged:
+        return f"Hard ban: category '{cat}' is banned"
     text = f"{proposal.title} {proposal.message}".lower()
-    for phrase in _BANNED_PHRASES:
-        if phrase in text:
-            return f"Hard ban: contains '{phrase}'"
+    if not ungagged:
+        for phrase in _BANNED_PHRASES:
+            if phrase in text:
+                return f"Hard ban: contains '{phrase}'"
+    # Deliberation must not announce background-work completions. The delivery
+    # service already tells David exactly once at completion time; a completed
+    # task lingering in deliberation context kept getting re-announced for days
+    # with fresh phrasing that slipped past the content-hash dedup.
+    if _COMPLETION_ANNOUNCEMENT_RE.search(text):
+        return "Hard ban: completed-work announcements are owned by task_result_delivery"
     return None
 
 
@@ -134,12 +192,13 @@ def is_notification_banned(
 
     Returns a ban reason string if the notification should be blocked, or None if allowed.
     """
-    # Category-level ban
-    if category and category.lower() in _BANNED_CATEGORIES:
+    ungagged = _is_ungagged(category)
+    # Category-level ban (skipped if this domain has been un-gagged)
+    if category and category.lower() in _BANNED_CATEGORIES and not ungagged:
         return f"Banned category: {category}"
     # Phrase-level ban
     text = f"{title} {message}".lower()
-    all_phrases = list(_BANNED_PHRASES)
+    all_phrases = [] if ungagged else list(_BANNED_PHRASES)
     if custom_ban_phrases:
         all_phrases.extend(p.lower().strip() for p in custom_ban_phrases if p and p.strip())
     for phrase in all_phrases:
@@ -314,6 +373,20 @@ async def _process_task_proposals(
             continue
 
         if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= 0.6:
+            # Research auto-dispatch is gated: it must respect the daily research
+            # cap AND must not re-dispatch a topic already attempted recently.
+            # Without this, a research task that can't succeed (the agent hangs
+            # and auto-expires after 4h) gets re-proposed and re-dispatched every
+            # deliberation cycle — looping forever on the same subject.
+            if proposal.category == "research":
+                skip_reason = await _research_should_skip(user_id, proposal)
+                if skip_reason:
+                    summary["tasks_skipped"] = summary.get("tasks_skipped", 0) + 1
+                    logger.info(
+                        f"[DeliberationGate] Research auto-dispatch skipped "
+                        f"({skip_reason}): {proposal.description[:80]}"
+                    )
+                    continue
             # Auto-execute: dispatch directly, notify after completion
             try:
                 await _dispatch_from_deliberation(user_id, proposal)
@@ -353,6 +426,62 @@ async def _check_daily_research_cap(user_id: str) -> bool:
     except Exception as e:
         logger.warning(f"[DeliberationGate] Daily research cap check failed: {e}")
         return False  # Allow if we can't check
+
+
+async def _research_should_skip(user_id: str, proposal):
+    """Guard the auto-research path so it can't loop.
+
+    Returns a short reason string if this research proposal should NOT be
+    auto-dispatched, else None:
+      - "daily_cap": an auto-research already went out today. This counts the
+        deliberation_task auto-dispatch path too — the original cap only looked
+        at the deliberation_research / consolidation_research sources, which is
+        exactly why this path looped past the "max 1/day" limit.
+      - "duplicate": a closely-matching research task was already attempted in
+        the last 3 days (any status), so re-dispatching would just repeat it.
+    """
+    import difflib
+    from sqlalchemy import text as sa_text
+    from app.db.session import get_async_session_factory
+
+    try:
+        AsyncSession = get_async_session_factory()
+        async with AsyncSession() as db:
+            today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            row = await db.execute(sa_text("""
+                SELECT COUNT(*)::int AS cnt
+                FROM agent_run_log
+                WHERE user_id = :uid AND run_at >= :since
+                  AND (
+                    source IN ('deliberation_research', 'consolidation_research')
+                    OR (source = 'deliberation_task'
+                        AND actions_taken->>'category' = 'research'
+                        AND actions_taken->>'action' = 'auto_dispatched')
+                  )
+            """), {"uid": user_id, "since": today_start})
+            if (row.scalar() or 0) >= 1:
+                return "daily_cap"
+
+            topic = (proposal.description or "").strip().lower()
+            if not topic:
+                return None
+            rows = await db.execute(sa_text("""
+                SELECT original_query
+                FROM background_task
+                WHERE user_id = :uid
+                  AND created_at >= NOW() - INTERVAL '3 days'
+                ORDER BY created_at DESC
+                LIMIT 40
+            """), {"uid": user_id})
+            for r in rows.all():
+                prior = (r[0] or "").strip().lower()
+                if prior and difflib.SequenceMatcher(None, topic, prior).ratio() >= 0.6:
+                    return "duplicate"
+    except Exception as e:
+        # Fail open — a check failure shouldn't permanently mute autonomy.
+        logger.warning(f"[DeliberationGate] research skip-check failed (allowing): {e}")
+        return None
+    return None
 
 
 async def _process_research_proposals(
@@ -652,16 +781,27 @@ async def _write_journal(user_id: str, result: DeliberationResult) -> None:
     from sqlalchemy import text
     from app.db.session import get_async_session_factory
 
-    content = result.thought
+    # Sara's journal is David-facing: use her first-person journal_note, NOT the
+    # analytical `thought` (that stays internal, in agent_run_log). Append only
+    # factual action lines. If there's no note and no actions, skip entirely —
+    # never dump raw third-person reasoning as a "journal" entry.
+    content_parts = []
+    if result.journal_note and result.journal_note.strip():
+        content_parts.append(result.journal_note.strip())
     if result.notification_proposals:
         titles = [np.title for np in result.notification_proposals]
-        content += f"\n\nNotified David about: {', '.join(titles)}"
+        content_parts.append(f"Notified you about: {', '.join(titles)}")
     if result.home_actions:
         actions = [f"{a.action}({a.entity_id})" for a in result.home_actions]
-        content += f"\n\nHome actions: {', '.join(actions)}"
+        content_parts.append(f"Home actions: {', '.join(actions)}")
     if result.task_proposals:
         tasks = [f"{tp.category}: {tp.description[:80]}" for tp in result.task_proposals]
-        content += f"\n\nTask proposals: {', '.join(tasks)}"
+        content_parts.append(f"Task proposals: {', '.join(tasks)}")
+
+    if not content_parts:
+        return
+
+    content = "\n\n".join(content_parts)
 
     actions_str = ""
     if result.notification_proposals or result.home_actions or result.task_proposals:

@@ -436,12 +436,12 @@ const styles = StyleSheet.create({
   },
   planButtonText: {
     fontSize: 13,
-    color: '#818cf8',
+    color: colors.hues.indigo,
     fontWeight: '600',
   },
   planChevron: {
     fontSize: 18,
-    color: '#818cf8',
+    color: colors.hues.indigo,
   },
   expandedSection: {
     marginTop: spacing.md,
