@@ -103,7 +103,8 @@ async def _promote_async() -> dict:
                 SELECT i.id, i.display_name, i.why, i.weight,
                        i.last_acted_at, i.created_at
                 FROM sara_interest i
-                WHERE i.weight >= :min_weight
+                WHERE NOT i.blocked
+                  AND i.weight >= :min_weight
                   AND (i.last_acted_at IS NULL
                        OR i.last_acted_at < NOW() - make_interval(hours => :stale_hours))
                   AND NOT EXISTS (

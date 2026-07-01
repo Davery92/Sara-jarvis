@@ -255,6 +255,26 @@ class BackendClient:
         body = r.json() or {}
         return body.get("interests") or []
 
+    # ── goals (ambient read) ──
+    async def list_goals(self, *, status: str = "open") -> list[dict]:
+        """Read her open goals for ambient context — the persistent intent
+        that survives across thinks and restarts. Fetched on every think so
+        idle cognition always sees what it committed to."""
+        try:
+            r = await self._client.post(
+                "/api/acs/v2/tools/list_goals",
+                json={"status": status},
+            )
+        except httpx.HTTPError as e:
+            logger.warning("list_goals network error: %s", e)
+            return []
+        if r.status_code >= 400:
+            logger.warning("list_goals rejected: %s %s",
+                           r.status_code, r.text[:200])
+            return []
+        body = r.json() or {}
+        return body.get("goals") or []
+
     # ── notify ──
     async def notify_david(
         self, *, title: str, body: str, priority: str = "normal",

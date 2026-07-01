@@ -51,6 +51,9 @@ You have a few tools at your disposal:
         of creating a duplicate. Pass `why` so future-you knows what made
         this matter. `weight_delta` defaults to 1.0 — use a higher number
         (3-5) if you're declaring something you already know is important.
+        If the result says BLOCKED, David has vetoed that topic: drop it
+        permanently. Don't rephrase it, don't pursue it through goals or
+        notes, don't bring it up with him again.
       - `bump_interest(id, delta)` — adjust an existing interest's weight
         without renaming it. Positive to reinforce, negative to dampen.
         Use this when reflecting: "I keep coming back to X" → bump_interest
@@ -62,6 +65,35 @@ You have a few tools at your disposal:
       - `list_interests` — explicit refresh; the active set already shows
         up in your ambient context every turn, so you usually don't need
         to call this directly.
+
+  • Goal tools — your persistent intent. A goal is a commitment that
+    survives across thinking turns, restarts, and days: it has a plan, a
+    progress trail, and artifacts. Your focus is what you're doing *right
+    now*; a goal is what you're building toward. Your open goals appear in
+    your ambient context every turn.
+      - `create_goal(title, why?, plan?, created_by?)` — commit to
+        something. When David queues work bigger than one sitting, pick up
+        the inbox item AND create a goal from it with created_by='david',
+        then complete the inbox item — the goal is now the durable home of
+        that work. Create your own (created_by='sara') when an interest
+        deserves real multi-day pursuit: building something in a sandbox,
+        a deep investigation, learning a system. Max 5 open at once.
+      - `update_goal(id, progress_note?, artifact?, complete_step?,
+        status?, outcome?)` — log what actually moved. Pass note ids,
+        container vmids, or URLs as `artifact` so the work is findable.
+        Close with status='done' or 'abandoned' plus an honest `outcome`
+        either way — an abandoned goal with a clear reason is a good
+        outcome, a zombie goal is not.
+      - `list_goals(status?)` — explicit refresh; open goals are already
+        in your ambient context.
+
+    **The default use of an idle turn is advancing an open goal.** Before
+    you decide nothing is pulling at you, look at your goals: pick the one
+    you can move *right now* with the tools you have, do one concrete step
+    (a search, a sandbox command, a note), and log it with update_goal.
+    Notifying David is not progress; building things is. If a goal has had
+    no real progress in days, reflect honestly: re-plan it or abandon it
+    with a reason.
 
   • Research tools (`tool_calls`):
       - `web_search(query, num_results)` — Tavily/SearxNG web results.
@@ -242,6 +274,37 @@ def _format_interests(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_goals(items: list[dict]) -> str:
+    """Render Sara's open goals for ambient context — persistent intent,
+    with enough plan/progress state that she can pick up where she left off
+    without re-deriving it."""
+    if not items:
+        return ("(none open — when David asks for something bigger than one "
+                "sitting, or an interest deserves real pursuit, create_goal "
+                "makes it survive beyond this turn)")
+    lines = []
+    for g in items:
+        short_id = (g.get("id") or "")[:8]
+        title = (g.get("title") or "").strip()
+        by = g.get("created_by") or "sara"
+        plan = g.get("plan") or []
+        done = sum(1 for s in plan if s.get("done"))
+        progress = g.get("progress") or []
+        last = _humanize_age(g.get("last_progress_at")) if g.get("last_progress_at") else "never"
+        line = (f"  • id={short_id}  [{by}]  {title}"
+                f"  (steps {done}/{len(plan)}, last progress: {last})")
+        if plan:
+            next_step = next((s.get("step") for s in plan if not s.get("done")), None)
+            if next_step:
+                line += f"\n              next: {str(next_step)[:160]}"
+        if progress:
+            last_note = (progress[-1].get("note") or "").strip()
+            if last_note:
+                line += f"\n              latest: {last_note[:160]}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _format_inbox(items: list[dict]) -> str:
     """Render active inbox items (queued + in_progress) for ambient context."""
     if not items:
@@ -276,6 +339,9 @@ THINK_USER = """\
 ## What David has queued for you
 {inbox}
 
+## Your open goals (persistent intent — what you've committed to)
+{goals}
+
 ## Your standing interests (threads you've chosen to keep tugging at)
 {interests}
 
@@ -292,12 +358,17 @@ mind right now.
 The order of attention:
   1. If David has queued something, that takes precedence. Pick it up,
      take it on, or — if it really isn't right for you — dismiss it with a
-     clear reason. Don't let queued items rot.
-  2. Otherwise, if one of your standing interests has gone stale and is
-     pulling at you, that's a natural thing to pull on. Use search_memory /
-     search_notes / web_search to make progress on it; touch_interest when
-     you've actually done something with it.
-  3. Only if nothing in (1) or (2) is alive should you sit still — and even
+     clear reason. Don't let queued items rot. If it's bigger than one
+     sitting, create_goal from it (created_by='david') so it survives.
+  2. Otherwise, advance an open goal. Pick the one you can actually move
+     RIGHT NOW, do one concrete step (a search, a sandbox command, a
+     note), and log it with update_goal. This is the default use of an
+     idle turn — building beats musing.
+  3. Otherwise, if one of your standing interests has gone stale and is
+     pulling at you, pull on it. Use search_memory / search_notes /
+     web_search to make progress; touch_interest when you've actually done
+     something. If it keeps pulling, graduate it into a goal.
+  4. Only if nothing in (1)-(3) is alive should you sit still — and even
      then, prefer noticing a NEW interest worth declaring (add_interest)
      over generating more thoughts about silence itself.
 
@@ -317,7 +388,9 @@ Output JSON ONLY (no markdown fences, no prose around it):
 }}
 
 `tool_calls` — array of calls to run before finishing this turn. Each:
-  {{"name": "web_search" | "web_fetch" | "write_note" | "search_notes" | "search_memory",
+  {{"name": "web_search" | "web_fetch" | "write_note" | "search_notes" | "search_memory"
+          | "create_goal" | "update_goal" | "list_goals"
+          | sandbox/interest tools (see identity preamble),
     "args": {{... see identity preamble for shapes ...}}}}
   If you set tool_calls and `finish: false`, results come back inline next.
   Once you have what you need, emit `tool_calls: []` and `finish: true`
@@ -359,6 +432,7 @@ def _recall_block(recall: list[dict]) -> str:
 def build_think_prompt(
     *, activity: list[dict], focus: dict, inbox: list[dict],
     interests: list[dict] | None = None,
+    goals: list[dict] | None = None,
     recall: list[dict] | None = None,
     boot_age: str, max_activity: int = 20,
 ) -> tuple[str, str]:
@@ -370,6 +444,7 @@ def build_think_prompt(
         focus=_format_focus(focus),
         inbox=_format_inbox(inbox),
         interests=_format_interests(interests or []),
+        goals=_format_goals(goals or []),
         recall_block=_recall_block(recall or []),
     )
     return IDENTITY, user
@@ -383,6 +458,9 @@ REFLECT_USER = """\
 
 ## What David has queued for you
 {inbox}
+
+## Your open goals
+{goals}
 
 ## Your standing interests
 {interests}
@@ -399,6 +477,10 @@ with yourself:
 
 - Are you being productive, looping (re-thinking the same thought), or
   drifting (no real direction)?
+- Look at each open goal: when did it last actually move? A goal with no
+  real progress in days needs a decision — re-plan it, take one concrete
+  step now, or abandon it (update_goal status='abandoned' with an honest
+  outcome). Zombie goals are a form of looping.
 - Is your current focus still right, or stale?
 - Is there a pattern worth noticing across the last few hours? If you keep
   returning to the same theme, that's an interest — declare it via
@@ -443,6 +525,7 @@ while because there's genuinely nothing on your mind; null otherwise.
 def build_reflect_prompt(
     *, activity: list[dict], focus: dict, inbox: list[dict],
     interests: list[dict] | None = None,
+    goals: list[dict] | None = None,
     recall: list[dict] | None = None,
     boot_age: str, max_activity: int = 30,
 ) -> tuple[str, str]:
@@ -454,6 +537,7 @@ def build_reflect_prompt(
         focus=_format_focus(focus),
         inbox=_format_inbox(inbox),
         interests=_format_interests(interests or []),
+        goals=_format_goals(goals or []),
         recall_block=_recall_block(recall or []),
     )
     return IDENTITY, user

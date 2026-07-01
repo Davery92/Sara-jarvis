@@ -493,15 +493,14 @@ async def notify_david(payload: NotifyIn) -> NotifyOut:
     Hard-banned phrases (legal/category bans) still apply — that's not gating
     her, that's protecting David from regulated content categories.
     """
+    import difflib
     import uuid as _uuid
+    from sqlalchemy import text as _text
     from app.services.unified_notification import send_notification
 
     user_id = getattr(settings, "acs_owner_user_id", "") or ""
     if not user_id:
         raise HTTPException(status_code=503, detail="acs_owner_user_id not configured")
-
-    # Unique topic per call → dedup never matches anything she sends.
-    topic = f"sara_notify:{_uuid.uuid4().hex[:12]}"
 
     extra_data: dict[str, Any] = {}
     if payload.note_id:
@@ -509,6 +508,35 @@ async def notify_david(payload: NotifyIn) -> NotifyOut:
 
     async_session = get_async_session_factory()
     async with async_session() as db:
+        # Fact-anchored notifications are one-shot: a given note gets announced
+        # once, ever. Her activity tail scrolls past old notify entries, so
+        # "she'll see she already pinged David" stops being true after a day —
+        # this is the durable memory her context window doesn't have. Novel
+        # content (no note_id) still flows freely with a unique topic.
+        if payload.note_id:
+            topic = f"sara_note:{payload.note_id}"
+            cooldown = 24.0 * 14
+        else:
+            topic = f"sara_notify:{_uuid.uuid4().hex[:12]}"
+            cooldown = 0.0
+
+            # Repeat-guard for un-anchored notifies: if she sent a near-identical
+            # title in the past 7 days, suppress and TELL HER (the reason lands in
+            # her activity log, so the honest-feedback loop still works).
+            rows = (await db.execute(_text("""
+                SELECT title FROM notification_log
+                WHERE user_id = :uid AND source = 'acs_daemon' AND sent = true
+                  AND sent_at > NOW() - INTERVAL '7 days'
+                ORDER BY sent_at DESC LIMIT 50
+            """), {"uid": user_id})).fetchall()
+            norm = payload.title.strip().lower()
+            for (old_title,) in rows:
+                if difflib.SequenceMatcher(None, norm, (old_title or "").strip().lower()).ratio() >= 0.82:
+                    return NotifyOut(
+                        delivered=False,
+                        reason=f"already_told_david_recently (matches: {old_title[:80]!r}) — don't re-send; move on",
+                    )
+
         result = await send_notification(
             user_id=user_id,
             title=payload.title,
@@ -517,7 +545,7 @@ async def notify_david(payload: NotifyIn) -> NotifyOut:
             topic=topic,
             category="general",
             source="acs_daemon",
-            cooldown_hours=0,           # she doesn't need cooldowns
+            cooldown_hours=cooldown,
             db=db,
             _bypass_attention=True,     # don't route through attention queue
             _bypass_ban=False,          # legal/regulated bans still apply

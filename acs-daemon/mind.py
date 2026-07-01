@@ -37,6 +37,8 @@ ALLOWED_TOOLS = {
     "destroy_container", "node_status",
     # standing interests — threads she chooses to keep tugging at
     "list_interests", "add_interest", "bump_interest", "touch_interest",
+    # goals — persistent intent; the thing idle thinks are for
+    "list_goals", "create_goal", "update_goal",
 }
 
 
@@ -53,15 +55,16 @@ class Mind:
         focus = await self.backend.get_focus()
         inbox = await self.backend.list_inbox(limit=20)
         interests = await self.backend.list_interests(limit=8)
+        goals = await self.backend.list_goals(status="open")
         recall = await self._gather_recall(focus, inbox)
         boot_age = humanize_duration((datetime.now(timezone.utc) - self.started_at).total_seconds())
 
         system, user = build_think_prompt(
             activity=activity, focus=focus, inbox=inbox, interests=interests,
-            recall=recall, boot_age=boot_age,
+            goals=goals, recall=recall, boot_age=boot_age,
         )
-        logger.debug("think prompt assembled (%d activity, %d inbox, %d interests, %d recall)",
-                     len(activity), len(inbox), len(interests), len(recall))
+        logger.debug("think prompt assembled (%d activity, %d inbox, %d interests, %d goals, %d recall)",
+                     len(activity), len(inbox), len(interests), len(goals), len(recall))
 
         parsed = await self._run_chained_turn(
             system=system, user=user, turn="think",
@@ -95,15 +98,16 @@ class Mind:
         focus = await self.backend.get_focus()
         inbox = await self.backend.list_inbox(limit=20)
         interests = await self.backend.list_interests(limit=8)
+        goals = await self.backend.list_goals(status="open")
         recall = await self._gather_recall(focus, inbox)
         boot_age = humanize_duration((datetime.now(timezone.utc) - self.started_at).total_seconds())
 
         system, user = build_reflect_prompt(
             activity=activity, focus=focus, inbox=inbox, interests=interests,
-            recall=recall, boot_age=boot_age,
+            goals=goals, recall=recall, boot_age=boot_age,
         )
-        logger.debug("reflect prompt assembled (%d activity, %d inbox, %d interests, %d recall)",
-                     len(activity), len(inbox), len(interests), len(recall))
+        logger.debug("reflect prompt assembled (%d activity, %d inbox, %d interests, %d goals, %d recall)",
+                     len(activity), len(inbox), len(interests), len(goals), len(recall))
 
         parsed = await self._run_chained_turn(
             system=system, user=user, turn="reflect",
@@ -262,8 +266,18 @@ class Mind:
             return f"vmid={args.get('vmid')}, cmd={cmd!r}"[:120]
         if name == "destroy_container":
             return f"vmid={args.get('vmid')}"
-        if name in {"list_containers", "node_status", "list_interests"}:
+        if name in {"list_containers", "node_status", "list_interests", "list_goals"}:
             return ""
+        if name == "create_goal":
+            return f"title={args.get('title', '')!r}"[:120]
+        if name == "update_goal":
+            short = (args.get("id") or "")[:8]
+            bits = [f"id={short}"]
+            if args.get("status"):
+                bits.append(f"status={args['status']}")
+            if args.get("progress_note"):
+                bits.append(f"note={args['progress_note']!r}")
+            return ", ".join(bits)[:120]
         if name == "add_interest":
             return f"name={args.get('display_name', '')!r}"[:120]
         if name in {"bump_interest", "touch_interest"}:
@@ -308,6 +322,9 @@ class Mind:
         if name == "list_interests":
             return f"{result.get('count', 0)} interests"
         if name == "add_interest":
+            if result.get("blocked"):
+                return (f"REJECTED — David has blocked {result.get('display_name', '')!r}. "
+                        "Drop this thread for good; do not rephrase or re-add it.")[:160]
             verb = "merged into" if result.get("merged") else "added"
             return f"{verb} {result.get('display_name', '')!r} (weight={result.get('weight'):.1f})"[:160]
         if name in {"bump_interest", "touch_interest"}:

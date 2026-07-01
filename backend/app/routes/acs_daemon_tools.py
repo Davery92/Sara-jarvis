@@ -789,7 +789,7 @@ class ListInterestsOut(BaseModel):
 @router.post("/list_interests", response_model=ListInterestsOut,
              dependencies=[Depends(verify_daemon_token)])
 async def list_interests_tool(payload: ListInterestsIn) -> ListInterestsOut:
-    where = ["weight >= :min_weight"]
+    where = ["weight >= :min_weight", "NOT blocked"]
     params: dict[str, Any] = {"limit": payload.limit, "min_weight": payload.min_weight}
     if payload.stale_hours is not None:
         where.append(
@@ -838,6 +838,9 @@ class AddInterestOut(BaseModel):
     weight: float
     merged: bool
     why: Optional[str]
+    # True when the topic matched one David has blocked — nothing was saved,
+    # and Sara should drop the thread rather than rephrase it.
+    blocked: bool = False
 
 
 @router.post("/add_interest", response_model=AddInterestOut,
@@ -859,6 +862,7 @@ async def add_interest_tool(payload: AddInterestIn) -> AddInterestOut:
         weight=out.interest.weight,
         merged=out.merged,
         why=out.interest.why,
+        blocked=out.blocked,
     )
 
 
@@ -929,3 +933,189 @@ async def touch_interest_tool(payload: InterestIdIn) -> InterestRow:
         last_acted_at=row["last_acted_at"],
         created_at=row["created_at"],
     )
+
+
+# ── Goals — persistent intent (the unit of her autonomy) ─────────────────────
+#
+# Focus is what she's doing right now; a goal survives across thinks, restarts,
+# and days. David's "go do X" becomes a goal she decomposes and advances on her
+# own; her interests can graduate into self-created goals. Idle thinks are
+# prompted to advance an open goal instead of pinging David.
+
+
+class GoalRow(BaseModel):
+    id: str
+    title: str
+    why: Optional[str] = None
+    created_by: str
+    status: str
+    plan: list[dict] = []
+    progress: list[dict] = []
+    artifacts: list[dict] = []
+    outcome: Optional[str] = None
+    created_at: Optional[datetime] = None
+    last_progress_at: Optional[datetime] = None
+
+
+def _goal_row(row) -> GoalRow:
+    return GoalRow(
+        id=str(row["id"]),
+        title=row["title"],
+        why=row["why"],
+        created_by=row["created_by"],
+        status=row["status"],
+        plan=row["plan"] or [],
+        progress=row["progress"] or [],
+        artifacts=row["artifacts"] or [],
+        outcome=row["outcome"],
+        created_at=row["created_at"],
+        last_progress_at=row["last_progress_at"],
+    )
+
+
+_GOAL_COLS = """id, title, why, created_by, status, plan, progress, artifacts,
+                outcome, created_at, last_progress_at"""
+
+
+class ListGoalsIn(BaseModel):
+    status: str = Field("open", pattern="^(open|done|abandoned|all)$")
+
+
+class ListGoalsOut(BaseModel):
+    goals: list[GoalRow]
+
+
+@router.post("/list_goals", response_model=ListGoalsOut,
+             dependencies=[Depends(verify_daemon_token)])
+async def list_goals_tool(payload: ListGoalsIn) -> ListGoalsOut:
+    """Her open goals, freshest progress first."""
+    where = "" if payload.status == "all" else "WHERE status = :status"
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        rows = (await db.execute(
+            text(f"""
+                SELECT {_GOAL_COLS} FROM sara_goal {where}
+                ORDER BY last_progress_at DESC NULLS LAST, created_at DESC
+                LIMIT 25
+            """),
+            {} if payload.status == "all" else {"status": payload.status},
+        )).mappings().all()
+    return ListGoalsOut(goals=[_goal_row(r) for r in rows])
+
+
+class CreateGoalIn(BaseModel):
+    title: str = Field(..., min_length=4, max_length=300)
+    why: Optional[str] = Field(None, max_length=1000)
+    plan: list[str] = Field(default_factory=list, max_length=12,
+                            description="Ordered steps; each becomes {step, done: false}")
+    created_by: str = Field("sara", pattern="^(sara|david)$")
+
+
+@router.post("/create_goal", response_model=GoalRow,
+             dependencies=[Depends(verify_daemon_token)])
+async def create_goal_tool(payload: CreateGoalIn) -> GoalRow:
+    """Commit to a goal. Use when David asks for something bigger than one
+    sitting, or when an interest deserves real multi-day pursuit. Cap: 5 open
+    goals — finish or abandon something first."""
+    import json as _json
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        open_count = (await db.execute(
+            text("SELECT COUNT(*) FROM sara_goal WHERE status = 'open'")
+        )).scalar() or 0
+        if open_count >= 5:
+            raise HTTPException(
+                status_code=409,
+                detail="5 goals already open — complete or abandon one before adding more",
+            )
+        plan = [{"step": s[:300], "done": False} for s in payload.plan if s.strip()]
+        row = (await db.execute(
+            text(f"""
+                INSERT INTO sara_goal (title, why, created_by, plan, last_progress_at)
+                VALUES (:title, :why, :created_by, CAST(:plan AS jsonb), NOW())
+                RETURNING {_GOAL_COLS}
+            """),
+            {
+                "title": payload.title,
+                "why": payload.why,
+                "created_by": payload.created_by,
+                "plan": _json.dumps(plan),
+            },
+        )).mappings().first()
+        await db.commit()
+    return _goal_row(row)
+
+
+class UpdateGoalIn(BaseModel):
+    id: str = Field(..., min_length=8, max_length=64)
+    progress_note: Optional[str] = Field(None, max_length=1000,
+                                         description="What actually moved — appended to the progress trail")
+    artifact: Optional[str] = Field(None, max_length=300,
+                                    description="note id / container vmid / URL produced by this step")
+    complete_step: Optional[int] = Field(None, ge=0, le=11,
+                                         description="Index into plan to mark done")
+    status: Optional[str] = Field(None, pattern="^(done|abandoned)$")
+    outcome: Optional[str] = Field(None, max_length=1000,
+                                   description="Required when closing: what came of it")
+
+
+@router.post("/update_goal", response_model=GoalRow,
+             dependencies=[Depends(verify_daemon_token)])
+async def update_goal_tool(payload: UpdateGoalIn) -> GoalRow:
+    """Advance a goal: log progress, attach artifacts, tick plan steps, or
+    close it out (done/abandoned, with an honest outcome either way)."""
+    import json as _json
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text(f"SELECT {_GOAL_COLS} FROM sara_goal WHERE id = :id"),
+            {"id": payload.id},
+        )).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"goal {payload.id} not found")
+        if row["status"] != "open" and payload.status is None:
+            raise HTTPException(status_code=409, detail=f"goal is already {row['status']}")
+
+        progress = list(row["progress"] or [])
+        if payload.progress_note:
+            progress.append({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "note": payload.progress_note,
+                **({"artifact": payload.artifact} if payload.artifact else {}),
+            })
+        artifacts = list(row["artifacts"] or [])
+        if payload.artifact:
+            artifacts.append({"ref": payload.artifact,
+                              "at": datetime.now(timezone.utc).isoformat()})
+        plan = list(row["plan"] or [])
+        if payload.complete_step is not None and payload.complete_step < len(plan):
+            plan[payload.complete_step] = {**plan[payload.complete_step], "done": True}
+
+        if payload.status and not (payload.outcome or row["outcome"]):
+            raise HTTPException(status_code=422,
+                                detail="closing a goal requires an outcome — say what came of it")
+
+        updated = (await db.execute(
+            text(f"""
+                UPDATE sara_goal
+                SET progress = CAST(:progress AS jsonb),
+                    artifacts = CAST(:artifacts AS jsonb),
+                    plan = CAST(:plan AS jsonb),
+                    status = COALESCE(:status, status),
+                    outcome = COALESCE(:outcome, outcome),
+                    last_progress_at = NOW(),
+                    completed_at = CASE WHEN :status IS NOT NULL THEN NOW() ELSE completed_at END
+                WHERE id = :id
+                RETURNING {_GOAL_COLS}
+            """),
+            {
+                "id": payload.id,
+                "progress": _json.dumps(progress),
+                "artifacts": _json.dumps(artifacts),
+                "plan": _json.dumps(plan),
+                "status": payload.status,
+                "outcome": payload.outcome,
+            },
+        )).mappings().first()
+        await db.commit()
+    return _goal_row(updated)
