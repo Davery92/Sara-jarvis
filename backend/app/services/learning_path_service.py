@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from datetime import datetime, timedelta, timezone
+import asyncio
 import logging
 
 from app.models.learning import (
@@ -292,7 +293,30 @@ Output ONLY valid JSON:
 }}"""
 
             messages = [{"role": "user", "content": prompt}]
-            result = await llm_client.chat_completion(messages=messages, max_tokens=2000, temperature=0.5, timeout=60.0)
+
+            # enable_thinking=False — without it qwen3.6 burns the whole token/time
+            # budget "thinking" and the request ReadTimeouts before emitting JSON.
+            # Retry once to absorb the occasional transient drop from the .115 server.
+            result = None
+            last_err = None
+            for attempt in range(2):
+                try:
+                    result = await llm_client.chat_completion(
+                        messages=messages,
+                        max_tokens=2000,
+                        temperature=0.5,
+                        timeout=60.0,
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"LLM topic path attempt {attempt + 1}/2 failed: {e!r}")
+                    if attempt < 1:
+                        await asyncio.sleep(1.5)
+            if result is None:
+                raise last_err or RuntimeError("LLM call returned no result")
+
             response = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             json_match = _re.search(r'\{[\s\S]*\}', response)
@@ -344,7 +368,7 @@ Output ONLY valid JSON:
                 }
 
         except Exception as e:
-            logger.warning(f"LLM topic path generation failed, falling back: {e}")
+            logger.warning(f"LLM topic path generation failed after retries, falling back: {e!r}")
 
         # Fallback if LLM fails
         return {

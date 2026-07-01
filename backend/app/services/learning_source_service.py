@@ -230,72 +230,148 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
             db.commit()
             return {"status": "failed", "error": str(e)}
 
+    # Below this many chars we assume the cheap fetch got a JS shell / blocked
+    # page and escalate to a real browser.
+    MIN_USABLE_CONTENT = 200
+
     async def _fetch_web_page(self, url: str) -> Tuple[Optional[str], Optional[str], Dict]:
         """
         Fetch and extract content from a web page.
 
+        Tries a cheap httpx fetch first, then escalates to a real headless
+        browser (Playwright/Chromium) when the page comes back empty, too
+        short (JS-rendered SPA), or blocked (403 / bot detection).
+
         Returns:
             Tuple of (content, title, metadata)
         """
+        content, title, meta = await self._fetch_via_httpx(url)
+
+        httpx_len = len((content or "").strip())
+        if httpx_len < self.MIN_USABLE_CONTENT:
+            logger.info(
+                f"httpx fetch thin for {url} ({httpx_len} chars) — escalating to Playwright"
+            )
+            b_content, b_title, b_meta = await self._fetch_via_browser(url)
+            b_len = len((b_content or "").strip())
+            # Only prefer the browser result if it actually got more than httpx.
+            if b_content and b_len > httpx_len:
+                b_meta["fetch_method"] = "playwright"
+                return b_content, b_title or title, b_meta
+
+        return content, title, meta
+
+    async def _fetch_via_httpx(self, url: str) -> Tuple[Optional[str], Optional[str], Dict]:
+        """Cheap fetch: plain HTTP GET + HTML extraction (no JS execution)."""
         try:
             response = await self.http_client.get(url)
             response.raise_for_status()
-
-            html = response.text
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Remove script, style, nav, footer elements
-            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
-                element.decompose()
-
-            # Extract title
-            title = None
-            if soup.title:
-                title = soup.title.string
-            elif soup.find("h1"):
-                title = soup.find("h1").get_text(strip=True)
-
-            # Extract main content
-            content = ""
-
-            # Try to find main content area
-            main_content = (
-                soup.find("main") or
-                soup.find("article") or
-                soup.find(class_=re.compile(r"content|article|post|entry", re.I)) or
-                soup.find(id=re.compile(r"content|article|post|entry", re.I)) or
-                soup.body
+            content, title, meta = self._html_to_content(
+                response.text, url, response.headers.get("content-type", "")
             )
-
-            if main_content:
-                # Get text with preserved structure
-                content = self._extract_structured_text(main_content)
-
-            # Clean up content
-            content = self._clean_text(content)
-
-            # Extract metadata
-            meta = {
-                "url": url,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-                "content_type": response.headers.get("content-type", ""),
-            }
-
-            # Try to get author
-            author_meta = soup.find("meta", attrs={"name": "author"})
-            if author_meta and author_meta.get("content"):
-                meta["author"] = author_meta["content"]
-
-            # Try to get description
-            desc_meta = soup.find("meta", attrs={"name": "description"})
-            if desc_meta and desc_meta.get("content"):
-                meta["description"] = desc_meta["content"]
-
+            meta["fetch_method"] = "httpx"
             return content, title, meta
+        except Exception as e:
+            logger.warning(f"httpx fetch failed for {url}: {e}")
+            return None, None, {"error": str(e)}
+
+    async def _fetch_via_browser(self, url: str) -> Tuple[Optional[str], Optional[str], Dict]:
+        """Render the page in headless Chromium (Playwright) and extract text.
+
+        Fallback for JS-heavy pages and bot-blocked sites that httpx can't read.
+        Degrades gracefully (returns an error tuple) if Playwright isn't installed.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("Playwright not installed — cannot escalate browser fetch")
+            return None, None, {"error": "playwright not available"}
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                try:
+                    page = await browser.new_page(
+                        viewport={"width": 1280, "height": 900},
+                        user_agent=(
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        ),
+                    )
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    # Let client-side rendering settle; best-effort.
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    html = await page.content()
+                finally:
+                    await browser.close()
+
+            return self._html_to_content(html, url, "text/html")
 
         except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
+            logger.error(f"Playwright fetch failed for {url}: {e}")
             return None, None, {"error": str(e)}
+
+    def _html_to_content(
+        self, html: str, url: str, content_type: str = ""
+    ) -> Tuple[Optional[str], Optional[str], Dict]:
+        """Extract title, structured text, and metadata from raw HTML.
+
+        Shared by both the httpx and Playwright fetch paths so extraction is
+        identical regardless of how the HTML was obtained.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Remove script, style, nav, footer elements
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
+            element.decompose()
+
+        # Extract title
+        title = None
+        if soup.title:
+            title = soup.title.string
+        elif soup.find("h1"):
+            title = soup.find("h1").get_text(strip=True)
+
+        # Try to find main content area
+        main_content = (
+            soup.find("main") or
+            soup.find("article") or
+            soup.find(class_=re.compile(r"content|article|post|entry", re.I)) or
+            soup.find(id=re.compile(r"content|article|post|entry", re.I)) or
+            soup.body
+        )
+
+        content = ""
+        if main_content:
+            content = self._extract_structured_text(main_content)
+        content = self._clean_text(content)
+
+        # Extract metadata
+        meta = {
+            "url": url,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "content_type": content_type,
+        }
+
+        author_meta = soup.find("meta", attrs={"name": "author"})
+        if author_meta and author_meta.get("content"):
+            meta["author"] = author_meta["content"]
+
+        desc_meta = soup.find("meta", attrs={"name": "description"})
+        if desc_meta and desc_meta.get("content"):
+            meta["description"] = desc_meta["content"]
+
+        return content, title, meta
 
     async def _fetch_pdf(self, url: str) -> Tuple[Optional[str], Optional[str], Dict, List[Dict[str, Any]], Any]:
         """

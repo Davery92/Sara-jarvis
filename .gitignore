@@ -70,3 +70,13 @@ data/
 
 # Celery Beat runtime state (generated)
 backend/celerybeat-schedule*
+
+# Local verification/screenshot tooling (not committed — see reference_webapp_screenshot)
+.browser-shots/
+.browser-venv/
+
+# Sample/example assets not part of the app
+photo_examples/
+
+# User-uploaded documents (should live in MinIO, not git)
+backend/uploads/

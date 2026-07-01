@@ -3,7 +3,7 @@ from app.tools.base import BaseTool, ToolResult
 from app.tools.memory import MemorySearchTool
 from app.tools.notes import (
     NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool,
-    NotesFindSimilarTool, NotesMergeTool,
+    NotesFindSimilarTool, NotesMergeTool, NotesListFoldersTool, NotesCreateFolderTool,
 )
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
 from app.tools.daily_tasks import DailyTaskCreateTool, DailyTaskListTool, DailyTaskCompleteTool
@@ -108,6 +108,8 @@ from app.tools.projects import PROJECT_TOOLS
 from app.tools.home import HOME_TOOLS
 from app.tools.agents import GetBackgroundTasksTool
 from app.tools.research_plan import CreateResearchPlanTool, ResearchPlanStatusTool
+from app.tools.meeting import MeetingPrepTool
+from app.tools.lists import LIST_TOOLS
 from app.tools.health import HEALTH_TOOLS
 from app.tools.canvas import (
     CanvasOpenTool,
@@ -129,6 +131,8 @@ from app.tools.personal_knowledge import PKG_TOOLS
 from app.tools.standing_orders import STANDING_ORDER_TOOLS
 from app.tools.content_inbox import CONTENT_INBOX_TOOLS
 from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
+from app.tools.sara_queue import QueueForSaraTool
+from app.tools.notifications import NOTIFICATION_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 import logging
@@ -155,13 +159,15 @@ class ToolRegistry:
             ]
         },
         'notes': {
-            'description': 'Create, edit, search, list, and delete notes in the knowledge garden',
+            'description': 'Create, edit, search, list, and delete notes and folders in the knowledge garden',
             'tools': [
                 'notes_create',
                 'notes_search',
                 'notes_edit',
                 'notes_delete',
-                'notes_list'
+                'notes_list',
+                'notes_list_folders',
+                'notes_create_folder'
             ]
         },
         'time': {
@@ -177,7 +183,17 @@ class ToolRegistry:
                 'timers_status',
                 'timers_cancel',
                 'calendar_list',
-                'calendar_create'
+                'calendar_create',
+                'meeting_prep'
+            ]
+        },
+        'lists': {
+            'description': 'Personal lists — grocery, packing, gift ideas, etc.',
+            'tools': [
+                'list_add',
+                'list_view',
+                'list_check',
+                'list_remove'
             ]
         },
         'web': {
@@ -338,6 +354,10 @@ class ToolRegistry:
             'description': "Search and read items from David's content inbox — saved URLs, Reddit posts, PDFs, articles, and text snippets.",
             'tools': ['inbox_search', 'inbox_read']
         },
+        'notifications': {
+            'description': "Read the notifications Sara has sent David — what's unread, what the app icon badge refers to, recent notification history. Use when David asks \"what's the notification?\" or \"did I miss anything?\"",
+            'tools': ['get_recent_notifications']
+        },
         'vm_agents': {
             'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
             'tools': [
@@ -378,6 +398,8 @@ class ToolRegistry:
             NotesListTool(),
             NotesFindSimilarTool(),
             NotesMergeTool(),
+            NotesListFoldersTool(),
+            NotesCreateFolderTool(),
             
             # Reminders
             RemindersCreateTool(),
@@ -568,12 +590,21 @@ class ToolRegistry:
             # Shell Tools (local command execution, file I/O)
             *SHELL_TOOLS,
 
-            # (Phase 6: legacy ACS chat tools removed; chat-side queueing into
-            # the new v2 inbox will be added separately.)
+            # Hand-off to the autonomous mind (ACS daemon inbox → goals)
+            QueueForSaraTool(),
+
+            # Notification history ("what's the notification?" / badge explainer)
+            *NOTIFICATION_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),
             ResearchPlanStatusTool(),
+
+            # Meeting prep ("who am I meeting with / prep me for my 2pm")
+            MeetingPrepTool(),
+
+            # Personal lists (grocery by default) — plain DB, not Home Assistant
+            *LIST_TOOLS,
 
             # Recipe Tools (structured cooking recipes — not notes)
             *RECIPE_TOOLS,

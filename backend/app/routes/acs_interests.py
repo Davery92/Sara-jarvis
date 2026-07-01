@@ -51,6 +51,7 @@ class InterestOut(BaseModel):
     last_updated_at: datetime
     source: str
     created_at: datetime
+    blocked: bool = False
 
 
 class InterestUpsertIn(BaseModel):
@@ -63,6 +64,9 @@ class InterestUpsertIn(BaseModel):
 class InterestUpsertOut(BaseModel):
     interest: InterestOut
     merged: bool
+    # True when the upsert matched a topic David has blocked: nothing was
+    # written, and the caller should treat the topic as off-limits.
+    blocked: bool = False
 
 
 class DecayOut(BaseModel):
@@ -87,6 +91,7 @@ def _row_to_interest(row: dict) -> InterestOut:
         last_updated_at=row["last_updated_at"],
         source=row["source"],
         created_at=row["created_at"],
+        blocked=bool(row.get("blocked", False)),
     )
 
 
@@ -107,12 +112,19 @@ async def list_interests(
         None, ge=0, le=24 * 90,
         description="If set, only return rows with last_acted_at older than this (or NULL)",
     ),
+    include_blocked: bool = Query(
+        False,
+        description="Include topics David has blocked (UI curation only — "
+                    "never set for daemon context).",
+    ),
     x_daemon_token: Optional[str] = Header(None),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ) -> list[InterestOut]:
     _check_auth(x_daemon_token, current_user)
 
     where = ["weight >= :min_weight"]
+    if not include_blocked:
+        where.append("NOT blocked")
     params: dict[str, Any] = {"limit": limit, "min_weight": min_weight}
     if stale_hours is not None:
         where.append(
@@ -127,7 +139,7 @@ async def list_interests(
             text(
                 f"""
                 SELECT id, topic, display_name, why, weight, last_acted_at,
-                       last_updated_at, source, created_at
+                       last_updated_at, source, created_at, blocked
                 FROM sara_interest
                 WHERE {' AND '.join(where)}
                 ORDER BY weight DESC, last_updated_at DESC
@@ -163,7 +175,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
             text(
                 """
                 SELECT id, topic, display_name, why, weight, last_acted_at,
-                       last_updated_at, source, created_at
+                       last_updated_at, source, created_at, blocked
                 FROM sara_interest WHERE topic = :topic
                 """
             ),
@@ -175,7 +187,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                 text(
                     """
                     SELECT id, topic, display_name, why, weight, last_acted_at,
-                           last_updated_at, source, created_at,
+                           last_updated_at, source, created_at, blocked,
                            1 - (embedding <=> CAST(:vec AS vector)) AS similarity
                     FROM sara_interest
                     WHERE embedding IS NOT NULL
@@ -187,6 +199,19 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
             )).mappings().first()
             if row and float(row.get("similarity") or 0.0) >= DEDUP_SIMILARITY:
                 existing = row
+
+        if existing and existing.get("blocked"):
+            # David blocked this topic. The row stays as a semantic tombstone
+            # so rephrasings land here too — nothing is bumped or appended.
+            logger.info(
+                "interest upsert rejected (blocked topic): %r matched %r",
+                payload.display_name, existing["display_name"],
+            )
+            return InterestUpsertOut(
+                interest=_row_to_interest(dict(existing)),
+                merged=True,
+                blocked=True,
+            )
 
         if existing:
             new_why = existing["why"]
@@ -204,7 +229,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                         embedding = COALESCE(CAST(:vec AS vector), embedding)
                     WHERE id = :id
                     RETURNING id, topic, display_name, why, weight, last_acted_at,
-                              last_updated_at, source, created_at
+                              last_updated_at, source, created_at, blocked
                     """
                 ),
                 {
@@ -225,7 +250,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                 VALUES
                     (:topic, :display_name, :why, :weight, :source, CAST(:vec AS vector))
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at
+                          last_updated_at, source, created_at, blocked
                 """
             ),
             {
@@ -257,7 +282,7 @@ async def bump_interest(
                     last_updated_at = NOW()
                 WHERE id = :id
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at
+                          last_updated_at, source, created_at, blocked
                 """
             ),
             {"delta": delta, "id": interest_id},
@@ -282,7 +307,7 @@ async def touch_interest(interest_id: str) -> InterestOut:
                 SET last_acted_at = NOW(), last_updated_at = NOW()
                 WHERE id = :id
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at
+                          last_updated_at, source, created_at, blocked
                 """
             ),
             {"id": interest_id},
@@ -310,12 +335,45 @@ async def decay_interests(
     return DecayOut(factor=factor, rows_affected=result.rowcount or 0)
 
 
+@router.post("/{interest_id}/block", response_model=InterestOut)
+async def block_interest(
+    interest_id: str,
+    blocked: bool = Query(True, description="False to lift the block."),
+    current_user: User = Depends(get_current_user),
+) -> InterestOut:
+    """David vetoes a topic for good. Unlike delete, the row survives as a
+    semantic tombstone: reflection re-adds merge into it via embedding dedup
+    and get rejected, so the topic stays dead instead of resurrecting."""
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text(
+                """
+                UPDATE sara_interest
+                SET blocked = :blocked,
+                    weight = CASE WHEN :blocked THEN 0.0 ELSE weight END,
+                    last_updated_at = NOW()
+                WHERE id = :id
+                RETURNING id, topic, display_name, why, weight, last_acted_at,
+                          last_updated_at, source, created_at, blocked
+                """
+            ),
+            {"id": interest_id, "blocked": blocked},
+        )).mappings().first()
+        await db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="interest not found")
+    return _row_to_interest(dict(row))
+
+
 @router.delete("/{interest_id}")
 async def delete_interest(
     interest_id: str,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """David prunes interests he doesn't want her pursuing."""
+    """David prunes interests he doesn't want her pursuing. NOTE: reflection
+    can re-create a deleted topic from scratch — for a veto that sticks, use
+    POST /{interest_id}/block instead."""
     async_session = get_async_session_factory()
     async with async_session() as db:
         result = await db.execute(
