@@ -74,6 +74,7 @@ celery_app = Celery(
         "app.tasks.subconscious_tier0",
         "app.tasks.morning_proactive",
         "app.tasks.dispatch_watchdog",
+        "app.tasks.learning_digest",
     ]
 )
 

@@ -321,6 +321,79 @@ async def undo_action_endpoint(
     return result
 
 
+@router.get("/digest/latest")
+async def get_latest_digest(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Most recent weekly learning digest (Phase 6) — note + structured theta
+    moves so a UI can render per-line 'keep telling me' / 'good call' actions."""
+    row = db.execute(text("""
+        SELECT id, content, context, created_at FROM sara_journal
+        WHERE user_id = :uid AND entry_type = 'weekly_digest'
+        ORDER BY created_at DESC LIMIT 1
+    """), {"uid": user_id}).fetchone()
+    if not row:
+        return {"digest": None}
+    context = row[2] if isinstance(row[2], dict) else (json.loads(row[2]) if row[2] else {})
+    return {
+        "digest": {
+            "id": row[0], "content": row[1], "at": row[3].isoformat() if row[3] else None,
+            "moves": context.get("moves", []),
+            "promo_stats": context.get("promo_stats", []),
+            "pattern_stats": context.get("pattern_stats", {}),
+        }
+    }
+
+
+class DigestCorrectionIn(BaseModel):
+    domain: str
+    context: str
+    action: str  # "keep_telling_me" | "good_call"
+
+
+@router.post("/digest/correct")
+async def correct_digest_line(
+    payload: DigestCorrectionIn,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Per-line correction on a digest theta move — the highest-quality label
+    the learner will ever get. keep_telling_me = David wants MORE of this
+    surfaced (nudges theta down); good_call = he agrees with backing off
+    (nudges theta down further, i.e. surface even less)."""
+    from app.services.attention_learning import apply_engagement
+    outcome = "engaged" if payload.action == "keep_telling_me" else "ignored"
+    if payload.action not in ("keep_telling_me", "good_call"):
+        return {"applied": False, "reason": "unknown action"}
+    result = apply_engagement(db, user_id, payload.domain, payload.context, outcome)
+    return {"applied": True, "result": result}
+
+
+@router.get("/theta-history")
+async def get_theta_history(
+    weeks: int = Query(12, ge=1, le=52),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Theta sparkline data per (domain, context) cell from the weekly
+    digest's snapshots (Phase 6) — makes the learning felt over time."""
+    rows = db.execute(text("""
+        SELECT domain, context, threshold, captured_at FROM attention_policy_snapshot
+        WHERE user_id = :uid AND captured_at > now() - (:weeks || ' weeks')::interval
+        ORDER BY domain, context, captured_at ASC
+    """), {"uid": user_id, "weeks": weeks}).fetchall()
+    cells: dict = {}
+    for domain, context, threshold, captured_at in rows:
+        key = f"{domain}.{context}"
+        cells.setdefault(key, {"domain": domain, "context": context, "points": []})
+        cells[key]["points"].append({
+            "at": captured_at.isoformat() if captured_at else None,
+            "threshold": round(float(threshold), 3),
+        })
+    return {"cells": list(cells.values())}
+
+
 @router.get("/overview")
 async def get_overview(
     user_id: str = Depends(get_current_user_id),

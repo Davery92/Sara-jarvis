@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users, Undo2 } from 'lucide-react'
+import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users, Undo2, BookOpen, ThumbsUp, MessageCircle } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -38,6 +38,7 @@ const Stat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, valu
 
 const SystemDashboard: React.FC = () => {
   const [data, setData] = useState<any>(null)
+  const [digest, setDigest] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
@@ -45,9 +46,13 @@ const SystemDashboard: React.FC = () => {
   const load = useCallback(async () => {
     try {
       setRefreshing(true)
-      const r = await fetch(`${APP_CONFIG.apiUrl}/api/system/overview`, { credentials: 'include' })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      setData(await r.json())
+      const [overviewRes, digestRes] = await Promise.all([
+        fetch(`${APP_CONFIG.apiUrl}/api/system/overview`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/system/digest/latest`, { credentials: 'include' }),
+      ])
+      if (!overviewRes.ok) throw new Error(`HTTP ${overviewRes.status}`)
+      setData(await overviewRes.json())
+      if (digestRes.ok) setDigest((await digestRes.json()).digest)
       setErr(null)
     } catch (e: any) {
       setErr(e.message || 'failed to load')
@@ -74,6 +79,20 @@ const SystemDashboard: React.FC = () => {
       load()
     } catch (e) {
       // best-effort; the next poll will reconcile state either way
+    }
+  }, [load])
+
+  const correctDigestLine = useCallback(async (domain: string, context: string, action: string) => {
+    try {
+      await fetch(`${APP_CONFIG.apiUrl}/api/system/digest/correct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ domain, context, action }),
+      })
+      load()
+    } catch (e) {
+      // best-effort
     }
   }, [load])
 
@@ -258,6 +277,33 @@ const SystemDashboard: React.FC = () => {
             What actually reached you, by life-domain. The goal is balance — no single domain dominating — not equal volume.
           </p>
         </div>
+
+        {/* LEARNING — weekly digest + per-line corrections (Phase 6) */}
+        {digest && (
+          <div className="assistant-panel rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3"><BookOpen className="w-4 h-4 text-teal-300" /><Eyebrow>What I've Learned</Eyebrow></div>
+            <p className="text-sm text-slate-200 mb-3">{digest.content}</p>
+            {Array.isArray(digest.moves) && digest.moves.length > 0 && (
+              <div className="space-y-2">
+                {digest.moves.map((m: any, i: number) => (
+                  <div key={i} className="flex items-center justify-between gap-3 text-xs bg-white/5 rounded-lg px-3 py-2">
+                    <span className="text-slate-300 capitalize">{m.domain} · {m.context} — {m.direction} ({m.delta > 0 ? '+' : ''}{m.delta})</span>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button onClick={() => correctDigestLine(m.domain, m.context, 'keep_telling_me')}
+                        className="flex items-center gap-1 text-teal-300 hover:text-teal-200">
+                        <MessageCircle className="w-3 h-3" /> Keep telling me
+                      </button>
+                      <button onClick={() => correctDigestLine(m.domain, m.context, 'good_call')}
+                        className="flex items-center gap-1 text-slate-400 hover:text-slate-300">
+                        <ThumbsUp className="w-3 h-3" /> Good call
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ACTIONS — what Sara actually did, autonomously (Phase 4) */}
         {actions.length > 0 && (
