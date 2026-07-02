@@ -432,29 +432,46 @@ function App() {
     }
   }
 
+  // Primary nav: 6 flagship surfaces (PHENOMENAL_ASSISTANT_PLAN.md Phase 8 —
+  // 24 views collapsed to 6 + a More drawer; nothing deleted, only demoted,
+  // and the command palette still reaches everything). 'notes' carries the
+  // Knowledge label since NotesKnowledgeGarden already covers notes + graph
+  // + connections; the raw PKG facts/people browser ('knowledge' view) moves
+  // to More to avoid a two-items-named-"Knowledge" collision.
   const primaryNavItems: ShellNavItem[] = [
     { view: 'dashboard', label: 'Home', icon: 'home' },
     { view: 'chat', label: 'Chat', icon: 'chat' },
     { view: 'inbox', label: 'Today', icon: 'inbox' },
-    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
-    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'notes', label: 'Knowledge', icon: 'edit_note' },
     { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
     { view: 'system', label: 'System', icon: 'hub' },
-    { view: 'acs', label: 'ACS', icon: 'smart_toy' },
+  ]
+
+  // "More" tier first, then the more specialized/introspective "Advanced"
+  // tier, then Settings last — same flat array renders both the desktop
+  // rail's More popover and the mobile menu's More section, so the order
+  // here is the only grouping signal (no nested collapse UI this pass).
+  const secondaryNavItems: ShellNavItem[] = [
+    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
+    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'documents', label: 'Documents', icon: 'description' },
+    { view: 'tasks', label: 'Tasks', icon: 'check_circle' },
+    { view: 'projects', label: 'Projects', icon: 'work' },
+    { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
+    { view: 'learn', label: 'Learn', icon: 'school' },
+    { view: 'briefings', label: 'Briefings', icon: 'wb_sunny' },
+    { view: 'workspace', label: 'Canvas', icon: 'grid_view' },
     { view: 'automations', label: 'Agent Tasks', icon: 'bolt' },
-    { view: 'notes', label: 'Notes', icon: 'edit_note' },
+    { view: 'knowledge', label: 'Facts & People', icon: 'psychology' },
+    { view: 'acs', label: 'ACS', icon: 'smart_toy' },
+    { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
+    { view: 'orchestrator-lab', label: 'Orchestrator Lab', icon: 'science' },
+    { view: 'system-status', label: 'System Status', icon: 'monitoring' },
+    { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
     { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
 
-  const secondaryNavItems: ShellNavItem[] = []
-
-  const mobileBottomNavItems: ShellNavItem[] = [
-    { view: 'dashboard', label: 'Home', icon: 'home' },
-    { view: 'chat', label: 'Chat', icon: 'chat' },
-    { view: 'inbox', label: 'Today', icon: 'inbox' },
-    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
-    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
-  ]
+  const mobileBottomNavItems: ShellNavItem[] = primaryNavItems
 
   if (!isAuthenticated) {
     return (

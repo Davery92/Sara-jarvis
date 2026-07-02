@@ -45,10 +45,17 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
     briefings: 'Daily brief',
     fitness: 'Training and recovery',
     acs: 'Sara’s mind',
-    knowledge: 'Facts and context',
+    notes: 'Notes, graph, connections',
+    knowledge: 'Facts and people',
     'sensory-monitor': 'Sensors and presence',
     automations: 'Background work',
     settings: 'System controls',
+    system: 'The god view',
+    'system-status': 'Health and metrics',
+    'orchestrator-lab': 'Automation lab',
+    'privacy-dashboard': 'Privacy and security',
+    workspace: 'Canvas workbench',
+    tasks: 'Daily checklist',
   }
 
   const renderBadge = (count: number) =>
@@ -153,7 +160,7 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
 
       {isMobileMenuOpen && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/72 backdrop-blur-sm md:hidden"
+          className="fixed inset-0 z-50 bg-slate-950/72 backdrop-blur-sm"
           onClick={() => onSetMobileMenuOpen(false)}
         >
           <div
@@ -229,7 +236,17 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
         </button>
 
         <nav className="mt-6 flex flex-1 flex-col items-center gap-1">
-          {[...primaryNavItems, ...secondaryNavItems].map((item) => renderRailButton(item))}
+          {primaryNavItems.map((item) => renderRailButton(item))}
+
+          {secondaryNavItems.length > 0 && (
+            <button
+              onClick={() => onSetMobileMenuOpen(true)}
+              className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-white/[0.05] hover:text-slate-200"
+              aria-label="More"
+            >
+              <span className="material-icons text-[20px]">more_horiz</span>
+            </button>
+          )}
         </nav>
 
         <button
