@@ -379,6 +379,8 @@ async def sync_ios_calendar_events(
                 CalendarEvent.start_time == start_time
             ).first()
 
+            attendees_list = [a.dict() for a in (event_data.attendees or [])]
+
             if existing_event:
                 existing_event.title = event_data.title
                 existing_event.description = event_data.description or ""
@@ -387,8 +389,11 @@ async def sync_ios_calendar_events(
                 existing_event.all_day = event_data.all_day
                 existing_event.ios_calendar_id = event_data.ios_calendar_id
                 existing_event.ios_calendar_name = event_data.ios_calendar_name
+                existing_event.attendees = attendees_list
+                existing_event.organizer = event_data.organizer
                 existing_event.updated_at = datetime.now()
                 db.flush()
+                event_for_linkage = existing_event
             else:
                 new_event = CalendarEvent(
                     id=str(uuid.uuid4()),
@@ -403,12 +408,22 @@ async def sync_ios_calendar_events(
                     ios_event_id=event_data.ios_event_id,
                     ios_calendar_id=event_data.ios_calendar_id,
                     ios_calendar_name=event_data.ios_calendar_name,
+                    attendees=attendees_list,
+                    organizer=event_data.organizer,
                     read_only=True,
                     is_completed=False
                 )
                 db.add(new_event)
                 db.flush()
                 _supersede_email_duplicates(db, current_user.id, new_event)
+                event_for_linkage = new_event
+
+            if attendees_list:
+                try:
+                    from app.services.person_service_sync import link_attendees_to_people
+                    link_attendees_to_people(db, current_user.id, attendees_list, event_for_linkage.start_time)
+                except Exception as e:
+                    logger.warning(f"Attendee person-linkage failed for event {event_data.ios_event_id}: {e}")
 
             synced += 1
         except Exception as e:

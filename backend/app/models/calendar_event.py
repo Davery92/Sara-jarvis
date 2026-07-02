@@ -1,5 +1,6 @@
 """Calendar event model (main_simple.py table schema)."""
 from sqlalchemy import Column, String, Text, DateTime, Integer, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from app.db.base import Base
 import uuid
@@ -26,5 +27,9 @@ class CalendarEvent(Base):
     ios_calendar_id = Column(String, nullable=True)
     ios_calendar_name = Column(String, nullable=True)
     read_only = Column(Boolean, default=False)
+    # Attendees/organizer (Phase 5 of PHENOMENAL_ASSISTANT_PLAN.md) — populated
+    # by iOS EventKit sync going forward. attendees: [{name, email, status}]
+    attendees = Column(JSONB, nullable=False, default=list)
+    organizer = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())

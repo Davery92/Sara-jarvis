@@ -54,6 +54,12 @@ class CalendarEventResponse(BaseModel):
 
 
 # iOS Calendar Sync models
+class IOSEventAttendee(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    status: Optional[str] = None  # accepted|declined|tentative|pending
+
+
 class IOSCalendarEventSync(BaseModel):
     ios_event_id: str
     ios_calendar_id: str
@@ -64,6 +70,8 @@ class IOSCalendarEventSync(BaseModel):
     end_time: str
     location: Optional[str] = None
     all_day: bool = False
+    attendees: Optional[List[IOSEventAttendee]] = None
+    organizer: Optional[str] = None
 
 
 class IOSCalendarSyncRequest(BaseModel):

@@ -15,6 +15,51 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
+async def _attendee_history_lines(user_id: str, attendees: list) -> list:
+    """One line per named attendee with a real person row: last interaction +
+    the nearest open follow-up thread mentioning them (best-effort text match —
+    followup_thread has no person_id FK, so this is a name-in-topic match, not
+    a hard link)."""
+    from app.db.session import get_async_session_factory
+
+    lines = []
+    if not attendees:
+        return lines
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        for attendee in attendees[:5]:
+            name = attendee.get("name") or attendee.get("email")
+            email = attendee.get("email")
+            if not name:
+                continue
+            row = None
+            if email:
+                row = (await db.execute(text("""
+                    SELECT canonical_name, last_interaction_at, last_interaction_kind FROM person
+                    WHERE user_id=:u AND emails @> CAST(:email_json AS jsonb) LIMIT 1
+                """), {"u": user_id, "email_json": f'["{email}"]'})).fetchone()
+            if not row:
+                row = (await db.execute(text("""
+                    SELECT canonical_name, last_interaction_at, last_interaction_kind FROM person
+                    WHERE user_id=:u AND canonical_name=:name LIMIT 1
+                """), {"u": user_id, "name": name})).fetchone()
+            if not row or not row[1]:
+                continue
+
+            days_ago = (datetime.now(timezone.utc) - row[1]).days
+            line = f"{row[0]} — last {row[2] or 'contact'} {days_ago}d ago"
+
+            thread = (await db.execute(text("""
+                SELECT topic FROM followup_thread
+                WHERE user_id=:u AND status='open' AND topic ILIKE :pat
+                ORDER BY priority DESC LIMIT 1
+            """), {"u": user_id, "pat": f"%{name}%"})).fetchone()
+            if thread:
+                line += f"; open thread: {thread[0]}"
+            lines.append(line)
+    return lines
+
+
 async def check_and_send_preps(user_id: str):
     """Send prep notifications ~45 min before an event (with research, if any)."""
     from app.db.session import get_async_session_factory
@@ -35,7 +80,7 @@ async def check_and_send_preps(user_id: str):
     async with async_session() as db:
         # Find upcoming events
         result = await db.execute(text("""
-            SELECT id, title, start_time, location, description, ios_calendar_name
+            SELECT id, title, start_time, location, description, ios_calendar_name, attendees
             FROM calendar_event
             WHERE user_id = :uid
               AND start_time BETWEEN :start AND :end
@@ -48,16 +93,16 @@ async def check_and_send_preps(user_id: str):
         return
 
     for event in events:
-        event_id, title, start_time, location, description, calendar_name = event
+        event_id, title, start_time, location, description, calendar_name, attendees = event
         await _prep_for_event(
-            user_id, str(event_id), title, start_time, location, description, None,
+            user_id, str(event_id), title, start_time, location, description, attendees,
             calendar_name=calendar_name,
         )
 
 
 async def _prep_for_event(
     user_id: str, event_id: str, title: str, start_time,
-    location: Optional[str], description: Optional[str], attendees: Optional[str],
+    location: Optional[str], description: Optional[str], attendees: Optional[list],
     calendar_name: Optional[str] = None,
 ):
     """Build and send prep context for a single event."""
@@ -69,17 +114,28 @@ async def _prep_for_event(
     topic = f"cal_prep:{event_id}"
 
     ownership = classify_event(title, calendar_name)
+    attendee_names = [a.get("name") or a.get("email") for a in (attendees or []) if a.get("name") or a.get("email")]
+    attendees_str = ", ".join(n for n in attendee_names if n) or None
 
     # Build context from memory and notes — only for David's own events;
     # pulling his memories for someone else's appointment produces nonsense.
     context_parts = []
     if ownership.is_self:
+        # Person history for named attendees (Phase 5.4) — real relationship
+        # context beats a generic PKG search: "Mike — last emailed 6/24;
+        # open thread: waiting on his pricing sheet."
+        try:
+            person_lines = await _attendee_history_lines(user_id, attendees or [])
+            context_parts.extend(person_lines)
+        except Exception as e:
+            logger.debug(f"Calendar prep attendee history failed: {e}")
+
         # Search episodic memory for related context
         try:
             from app.services.memory_service import search_episodes
             search_query = title
-            if attendees:
-                search_query += f" {attendees}"
+            if attendees_str:
+                search_query += f" {attendees_str}"
             episodes = await search_episodes(user_id, search_query, limit=3)
             if episodes:
                 memories = [f"- {ep.get('content', '')[:150]}" for ep in episodes[:2]]
