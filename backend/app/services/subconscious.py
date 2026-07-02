@@ -273,6 +273,33 @@ async def run_subconscious_tick(user_id: str = None, db: Session = None) -> dict
         except Exception as e:
             logger.warning(f"[tier0] home gather failed: {e}")
 
+        # COMMS (starved domain) — email is already synced *and analyzed*
+        # (importance_score/action_required/summary via app.tasks.email_sync) —
+        # this just looks. Three signals: backlog, staleness, and volume anomaly.
+        try:
+            row = db.execute(text("""
+                SELECT count(*),
+                       COALESCE(EXTRACT(EPOCH FROM (now() - MIN(received_at))) / 3600.0, 0)
+                FROM email
+                WHERE user_id=:u AND is_read=false
+                  AND (action_required = true OR importance_score >= 0.7)
+                  AND received_at < now() - interval '4 hours'
+            """), {"u": user_id}).fetchone()
+            unhandled_n = int(row[0] or 0)
+            oldest_h = float(row[1] or 0)
+            signals.append(("comms", "unhandled_important", float(unhandled_n),
+                            f"{unhandled_n} unhandled important email(s)", "email:unhandled_important"))
+            signals.append(("comms", "oldest_action_age_h", oldest_h,
+                            f"Oldest unhandled action-required email is {oldest_h:.0f}h old", "email:oldest_action_age_h"))
+
+            inbound_n = db.execute(text(
+                "SELECT count(*) FROM email WHERE user_id=:u AND received_at > now() - interval '24 hours'"
+            ), {"u": user_id}).scalar()
+            signals.append(("comms", "inbound_24h", float(inbound_n or 0),
+                            f"{int(inbound_n or 0)} emails received in last 24h", "email:inbound_24h"))
+        except Exception as e:
+            logger.warning(f"[tier0] comms gather failed: {e}")
+
         # PEOPLE — no live source yet (relationship_state is 0 rows; calendar_event has
         # no attendee data). Deliberately not faked with a proxy that would always read
         # 0 — that adds noise without information. Captured once a real signal exists

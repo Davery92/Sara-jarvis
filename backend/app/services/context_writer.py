@@ -175,9 +175,10 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        # ── Last chat time ──
+        # ── Last chat time ── (episode.created_at is naive-UTC; AT TIME ZONE 'UTC'
+        # reattaches tzinfo so the subtraction below doesn't raise on an aware `now`)
         last_chat = db.execute(text("""
-            SELECT created_at FROM episode
+            SELECT created_at AT TIME ZONE 'UTC' AS created_at FROM episode
             WHERE user_id = :uid AND role = 'user'
             ORDER BY created_at DESC LIMIT 1
         """), {"uid": user_id}).fetchone()
@@ -239,6 +240,26 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         snapshot.notifications_sent_today = notif_count or 0
 
         # ── Learning reviews — disabled ──
+
+        # ── Comms (top unhandled important emails) ──
+        try:
+            rows = db.execute(text("""
+                SELECT sender_name, sender_email, subject, received_at
+                FROM email
+                WHERE user_id=:uid AND is_read=false
+                  AND (action_required = true OR importance_score >= 0.7)
+                ORDER BY received_at ASC LIMIT 2
+            """), {"uid": user_id}).fetchall()
+            snapshot.comms_unhandled_count = len(rows)
+            if rows:
+                parts = []
+                for r in rows:
+                    who = r.sender_name or r.sender_email
+                    age_h = (now - r.received_at).total_seconds() / 3600 if r.received_at else 0
+                    parts.append(f"{who} — '{r.subject}' ({age_h:.0f}h ago)")
+                snapshot.comms_unhandled_top = "; ".join(parts)
+        except Exception as e:
+            logger.warning(f"[ContextWriter] comms gather failed: {e}")
 
         # ── Active projects ──
         try:

@@ -165,6 +165,14 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot) -> str:
         if memory.ripe_thread_topics:
             lines.append(f"Ripe topics: {', '.join(memory.ripe_thread_topics)}")
 
+    # Comms — unhandled important email (backlog, not a full inbox dump)
+    comms_n = getattr(memory, 'comms_unhandled_count', 0)
+    if comms_n:
+        lines.append(f"\n## Unhandled Important Email: {comms_n}")
+        top = getattr(memory, 'comms_unhandled_top', None)
+        if top:
+            lines.append(top)
+
     # Knowledge gaps — topics David discusses that Sara doesn't have PKG nodes for
     pkg_gaps = getattr(memory, 'pkg_knowledge_gaps', None)
     if pkg_gaps:

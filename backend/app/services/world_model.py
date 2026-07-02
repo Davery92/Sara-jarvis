@@ -61,15 +61,19 @@ async def assemble_world_state(user_id: str, db: Session) -> dict:
         logger.warning(f"[world_model] working memory read failed: {e}")
 
     # ── Next calendar event (domain: calendar) ──
+    # calendar_event.start_time is naive local (ET) — compare/subtract against a
+    # naive ET `now`, not the aware UTC `now` used elsewhere in this function.
     fg["next_event"] = None
     try:
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
         row = db.execute(text("""
             SELECT title, start_time FROM calendar_event
-            WHERE user_id = :uid AND start_time > now() AND COALESCE(is_completed, false) = false
+            WHERE user_id = :uid AND start_time > :now_et AND COALESCE(is_completed, false) = false
             ORDER BY start_time ASC LIMIT 1
-        """), {"uid": user_id}).fetchone()
+        """), {"uid": user_id, "now_et": now_et}).fetchone()
         if row:
-            mins = int((row[1] - now).total_seconds() // 60) if row[1] else None
+            mins = int((row[1] - now_et).total_seconds() // 60) if row[1] else None
             fg["next_event"] = {"title": row[0], "at": row[1].isoformat() if row[1] else None,
                                 "in_minutes": mins}
     except Exception as e:
@@ -91,6 +95,23 @@ async def assemble_world_state(user_id: str, db: Session) -> dict:
         } for r in rows]
     except Exception as e:
         logger.warning(f"[world_model] git_commit query failed: {e}")
+
+    # ── FOREGROUND: unhandled important email (domain: comms) ──
+    fg["comms_unhandled"] = []
+    try:
+        rows = db.execute(text("""
+            SELECT sender_name, sender_email, subject, received_at
+            FROM email
+            WHERE user_id=:uid AND is_read=false
+              AND (action_required = true OR importance_score >= 0.7)
+            ORDER BY received_at ASC LIMIT 5
+        """), {"uid": user_id}).fetchall()
+        fg["comms_unhandled"] = [{
+            "sender": r[0] or r[1], "subject": r[2],
+            "age_hours": int((now - r[3]).total_seconds() // 3600) if r[3] else None,
+        } for r in rows]
+    except Exception as e:
+        logger.warning(f"[world_model] comms query failed: {e}")
 
     # ── BACKGROUND: home ambient (domain: home) ──
     bg["home"] = {"events_24h": 0, "top": []}
@@ -132,7 +153,7 @@ async def assemble_world_state(user_id: str, db: Session) -> dict:
     if fg.get("next_event"): domains_present.append("calendar")
     if bg.get("home", {}).get("events_24h"): domains_present.append("home")
     if bg.get("health", {}).get("metrics_24h"): domains_present.append("health")
-    if fg.get("open_thread_count"): domains_present.append("comms")
+    if fg.get("open_thread_count") or fg.get("comms_unhandled"): domains_present.append("comms")
 
     return {
         "as_of": now.isoformat(),

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles } from 'lucide-react'
+import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -73,6 +73,7 @@ const SystemDashboard: React.FC = () => {
   const bg = world.background || {}
   const activeWork = world.foreground?.active_work || []
   const nextEvent = world.foreground?.next_event
+  const commsUnhandled = world.foreground?.comms_unhandled || []
   const balance = data?.balance || {}
   const stream = data?.stream?.items || []
   const promotions = data?.promotions?.items || []
@@ -144,6 +145,21 @@ const SystemDashboard: React.FC = () => {
                 <div key={i} className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-slate-200 truncate">{w.summary}</span>
                   <span className="text-xs text-slate-500 flex-shrink-0">{w.branch || ''} · {timeAgo(w.at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* UNHANDLED IMPORTANT EMAIL (foreground, domain: comms) */}
+        {commsUnhandled.length > 0 && (
+          <div className="assistant-panel rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3"><Mail className="w-4 h-4 text-cyan-300" /><Eyebrow>Unhandled Important Email</Eyebrow></div>
+            <div className="space-y-1.5">
+              {commsUnhandled.map((e: any, i: number) => (
+                <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-slate-200 truncate">{e.sender} — {e.subject}</span>
+                  <span className="text-xs text-slate-500 flex-shrink-0">{e.age_hours != null ? `${e.age_hours}h ago` : ''}</span>
                 </div>
               ))}
             </div>

@@ -77,6 +77,10 @@ class UnifiedContextSnapshot:
     open_thread_count: int = 0
     ripe_thread_topics: Optional[List[str]] = None
 
+    # ── Comms (email as a sense) ──
+    comms_unhandled_count: int = 0
+    comms_unhandled_top: Optional[str] = None  # "Jane Doe — 'Re: Contract' (18h ago); ..."
+
     # ── Conversation ──
     active_conversation_id: Optional[str] = None
     active_conversation_device: Optional[str] = None
