@@ -300,11 +300,34 @@ async def run_subconscious_tick(user_id: str = None, db: Session = None) -> dict
         except Exception as e:
             logger.warning(f"[tier0] comms gather failed: {e}")
 
-        # PEOPLE — no live source yet (relationship_state is 0 rows; calendar_event has
-        # no attendee data). Deliberately not faked with a proxy that would always read
-        # 0 — that adds noise without information. Captured once a real signal exists
-        # (see THE_SYSTEM_ACTIVATION_PLAN.md Phase D3: PKG people mentions, calendar
-        # attendees going forward).
+        # PEOPLE (starved domain) — fed by the `person` table (email senders +
+        # chat mentions, see app/services/person_service.py). Three signals:
+        # novelty, social density, and overdue reconnects (per-person cadence
+        # EWMA via signal_baseline, keyed people:cadence.<person_id>).
+        try:
+            n = db.execute(text(
+                "SELECT count(*) FROM person WHERE user_id=:u AND first_seen_at > now() - interval '7 days'"
+            ), {"u": user_id}).scalar()
+            signals.append(("people", "new_person_7d", float(n or 0),
+                            f"{int(n or 0)} new person(s) this week", "person:new_7d"))
+
+            n = db.execute(text(
+                "SELECT count(*) FROM person WHERE user_id=:u AND last_interaction_at > now() - interval '24 hours' AND last_interaction_kind='mention'"
+            ), {"u": user_id}).scalar()
+            signals.append(("people", "mentions_24h", float(n or 0),
+                            f"{int(n or 0)} people mentioned in chat in last 24h", "person:mentions_24h"))
+
+            overdue = db.execute(text("""
+                SELECT count(*) FROM person p
+                JOIN signal_baseline sb ON sb.user_id = p.user_id
+                    AND sb.domain = 'people' AND sb.signal_key = 'cadence.' || p.id
+                WHERE p.user_id=:u AND p.muted = false AND sb.sample_count >= 2
+                  AND EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 3600.0 > 2 * sb.ewma
+            """), {"u": user_id}).scalar()
+            signals.append(("people", "reconnect_overdue", float(overdue or 0),
+                            f"{int(overdue or 0)} person(s) overdue for reconnect (2x their usual cadence)", "person:reconnect_overdue"))
+        except Exception as e:
+            logger.warning(f"[tier0] people gather failed: {e}")
 
         results = [evaluate_signal(db, user_id, dom, context, key, val, desc, ref)
                    for (dom, key, val, desc, ref) in signals]

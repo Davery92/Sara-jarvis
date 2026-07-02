@@ -113,6 +113,35 @@ async def assemble_world_state(user_id: str, db: Session) -> dict:
     except Exception as e:
         logger.warning(f"[world_model] comms query failed: {e}")
 
+    # ── FOREGROUND: people (domain: people) — recent + overdue ──
+    fg["people_recent"] = []
+    fg["people_overdue"] = []
+    try:
+        rows = db.execute(text("""
+            SELECT canonical_name, last_interaction_at, last_interaction_kind
+            FROM person WHERE user_id=:uid AND muted = false AND last_interaction_at IS NOT NULL
+            ORDER BY last_interaction_at DESC LIMIT 5
+        """), {"uid": user_id}).fetchall()
+        fg["people_recent"] = [{
+            "name": r[0], "kind": r[2],
+            "age_hours": int((now - r[1]).total_seconds() // 3600) if r[1] else None,
+        } for r in rows]
+
+        rows = db.execute(text("""
+            SELECT p.canonical_name, p.last_interaction_at,
+                   EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 86400.0 AS days_since
+            FROM person p
+            JOIN signal_baseline sb ON sb.user_id = p.user_id
+                AND sb.domain = 'people' AND sb.signal_key = 'cadence.' || p.id
+            WHERE p.user_id=:uid AND p.muted = false AND sb.sample_count >= 2
+              AND EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 3600.0 > 2 * sb.ewma
+            ORDER BY days_since DESC LIMIT 5
+        """), {"uid": user_id}).fetchall()
+        fg["people_overdue"] = [{"name": r[0], "days_since": round(float(r[2]), 1) if r[2] is not None else None}
+                                for r in rows]
+    except Exception as e:
+        logger.warning(f"[world_model] people query failed: {e}")
+
     # ── BACKGROUND: home ambient (domain: home) ──
     bg["home"] = {"events_24h": 0, "top": []}
     try:
@@ -154,6 +183,7 @@ async def assemble_world_state(user_id: str, db: Session) -> dict:
     if bg.get("home", {}).get("events_24h"): domains_present.append("home")
     if bg.get("health", {}).get("metrics_24h"): domains_present.append("health")
     if fg.get("open_thread_count") or fg.get("comms_unhandled"): domains_present.append("comms")
+    if fg.get("people_recent") or fg.get("people_overdue"): domains_present.append("people")
 
     return {
         "as_of": now.isoformat(),

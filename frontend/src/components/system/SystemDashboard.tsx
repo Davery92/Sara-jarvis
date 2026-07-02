@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail } from 'lucide-react'
+import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -74,6 +74,8 @@ const SystemDashboard: React.FC = () => {
   const activeWork = world.foreground?.active_work || []
   const nextEvent = world.foreground?.next_event
   const commsUnhandled = world.foreground?.comms_unhandled || []
+  const peopleRecent = world.foreground?.people_recent || []
+  const peopleOverdue = world.foreground?.people_overdue || []
   const balance = data?.balance || {}
   const stream = data?.stream?.items || []
   const promotions = data?.promotions?.items || []
@@ -163,6 +165,39 @@ const SystemDashboard: React.FC = () => {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* PEOPLE (foreground, domain: people) */}
+        {(peopleRecent.length > 0 || peopleOverdue.length > 0) && (
+          <div className="assistant-panel rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3"><Users className="w-4 h-4 text-pink-300" /><Eyebrow>People</Eyebrow></div>
+            {peopleOverdue.length > 0 && (
+              <div className="mb-3">
+                <div className="text-xs text-slate-500 mb-1.5">Overdue for reconnect</div>
+                <div className="space-y-1.5">
+                  {peopleOverdue.map((p: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-slate-200 truncate">{p.name}</span>
+                      <span className="text-xs text-amber-300 flex-shrink-0">{p.days_since}d</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {peopleRecent.length > 0 && (
+              <div>
+                <div className="text-xs text-slate-500 mb-1.5">Recent</div>
+                <div className="space-y-1.5">
+                  {peopleRecent.map((p: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-slate-200 truncate">{p.name}</span>
+                      <span className="text-xs text-slate-500 flex-shrink-0">{p.kind} · {p.age_hours != null ? `${p.age_hours}h ago` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

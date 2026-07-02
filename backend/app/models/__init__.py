@@ -53,3 +53,4 @@ from .external_workout import ExternalWorkout
 from .code_session import CodeSession
 from .managed_host import ManagedHost
 from .progress_photo import ProgressPhoto
+from .person import Person

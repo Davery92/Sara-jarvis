@@ -135,6 +135,7 @@ from app.tools.sara_queue import QueueForSaraTool
 from app.tools.notifications import NOTIFICATION_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
+from app.tools.people import ListPeopleTool
 import logging
 
 logger = logging.getLogger(__name__)
@@ -608,6 +609,9 @@ class ToolRegistry:
 
             # Recipe Tools (structured cooking recipes — not notes)
             *RECIPE_TOOLS,
+
+            # People ("who am I overdue with?") — person table, Phase 2
+            ListPeopleTool(),
         ]
 
         for tool in tools:

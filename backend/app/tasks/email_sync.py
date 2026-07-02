@@ -449,6 +449,16 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     email.analyzed_at = local_now()
                     email.has_meeting = analysis.get("has_meeting", False)
 
+                    # People layer: upsert the sender going forward (Phase 2).
+                    try:
+                        from app.services.person_service import upsert_person_from_email
+                        await upsert_person_from_email(
+                            db, user_id, email.sender_email, email.sender_name,
+                            category=analysis["category"],
+                        )
+                    except Exception as e:
+                        logger.warning(f"[email_sync] person upsert failed for {email.id}: {e}")
+
                     # Notify ONLY when the mail genuinely needs David: it must
                     # BOTH be high-importance AND require an action/response from
                     # him. Everything else — FYI mail, newsletters, automated

@@ -106,6 +106,21 @@ class PKGExtractor:
         if self.llm_client is None:
             self.llm_client = get_background_llm_client()
 
+    async def _bump_person_mention(self, user_id: str, properties: dict, pkg_id: str) -> None:
+        """Person facts extracted from chat also bump the `person` table (Phase 2 people layer)."""
+        name = (properties or {}).get("name")
+        if not name:
+            return
+        try:
+            from app.db.session import get_async_session_factory
+            from app.services.person_service import bump_person_mention
+            session_factory = get_async_session_factory()
+            async with session_factory() as db:
+                await bump_person_mention(db, user_id, name, pkg_person_ref=pkg_id)
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"PKG Extractor: person mention bump failed for {name!r}: {e}")
+
     async def deep_extract(
         self,
         conversation_text: str,
@@ -202,6 +217,8 @@ class PKGExtractor:
                         "source_quote": fact.get("source_quote", ""),
                         "is_update": is_update
                     })
+                    if fact_type == "Person":
+                        await self._bump_person_mention(user_id, properties, pkg_id)
 
             stats = {
                 "total": len(results),
@@ -299,6 +316,8 @@ class PKGExtractor:
                         "type": fact_type,
                         "confidence": confidence
                     })
+                    if fact_type == "Person":
+                        await self._bump_person_mention(user_id, properties, pkg_id)
 
             logger.info(f"PKG Extractor: Lightweight extraction found {len(results)} facts")
 
