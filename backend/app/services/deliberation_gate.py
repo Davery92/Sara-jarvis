@@ -98,6 +98,15 @@ AUTO_EXECUTE_CATEGORIES = {"research", "pkg_update", "note_organization", "home_
 PROPOSE_FIRST_CATEGORIES = {"calendar_change", "user_facing"}
 HARD_BLOCK_CATEGORIES = {"email_send", "purchase", "external_message"}
 
+# Dedicated narrow handlers (PHENOMENAL_ASSISTANT_PLAN.md Phase 4) — deliberately
+# NOT in AUTO_EXECUTE_CATEGORIES, which routes through agent_dispatch_service's
+# broad-tool-access sandbox agent. email_draft must be provably send-proof: its
+# handler only calls the LLM for text generation and writes to the notification
+# inbox — no Graph/SMTP send call anywhere in the path. commitment_nudge is a
+# routing category, not a new channel — it reuses thread_manager's existing
+# anti-nag mention caps instead of the generic task-proposal notification path.
+SPECIAL_TASK_HANDLERS = {"email_draft", "commitment_nudge"}
+
 
 def _normalize_journal_text(content: str) -> str:
     text = (content or "").lower()
@@ -372,6 +381,25 @@ async def _process_task_proposals(
             summary["tasks_blocked"] += 1
             continue
 
+        if proposal.category in SPECIAL_TASK_HANDLERS:
+            try:
+                if proposal.category == "email_draft":
+                    did_something = await _generate_email_draft(user_id)
+                else:  # commitment_nudge
+                    did_something = await _nudge_commitment(user_id)
+                if did_something:
+                    summary["tasks_dispatched"] += 1
+                    await _write_task_dispatch_log(
+                        user_id=user_id, task_id=proposal.category, proposal=proposal, auto_executed=True,
+                    )
+                    logger.info(f"[DeliberationGate] {proposal.category} executed")
+                else:
+                    summary["tasks_skipped"] = summary.get("tasks_skipped", 0) + 1
+                    logger.info(f"[DeliberationGate] {proposal.category} skipped (nothing to act on)")
+            except Exception as e:
+                logger.error(f"[DeliberationGate] {proposal.category} failed: {e}")
+            continue
+
         if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= 0.6:
             # Research auto-dispatch is gated: it must respect the daily research
             # cap AND must not re-dispatch a topic already attempted recently.
@@ -614,6 +642,140 @@ async def _write_research_journal(
         logger.error(f"[DeliberationGate] Research journal write failed: {e}")
 
 
+async def _write_action_ledger(user_id: str, action_type: str, description: str,
+                               confidence: Optional[float] = None, source_ref: Optional[str] = None,
+                               undo_available: bool = False, undo_config: Optional[dict] = None) -> None:
+    """Log an autonomous action to the shared action_ledger (Phase 4 of
+    PHENOMENAL_ASSISTANT_PLAN.md — generalizes standing_order_service's 5-min
+    undo ledger so deliberation-driven actions show up in the same god-view
+    Actions panel). standing_order_id stays NULL for non-standing-order sources.
+    undo_config, when undo_available, must carry whatever
+    standing_order_service.undo_action needs to reverse this action_type —
+    don't set undo_available without it, or the ledger promises an undo that
+    can't actually happen."""
+    try:
+        from sqlalchemy import text
+        from app.db.session import get_async_session_factory
+        session_factory = get_async_session_factory()
+        config = dict(undo_config or {})
+        config.update({"description": description, "confidence": confidence, "source_ref": source_ref})
+        async with session_factory() as db:
+            await db.execute(text("""
+                INSERT INTO action_ledger
+                (user_id, standing_order_id, action_type, action_config, trigger_context,
+                 success, executed_at, source, undo_available, undo_expires_at)
+                VALUES
+                (:user_id, NULL, :action_type, CAST(:config AS jsonb), '{}'::jsonb,
+                 true, NOW(), 'deliberation',
+                 :undo_available, CASE WHEN :undo_available THEN NOW() + INTERVAL '5 minutes' ELSE NULL END)
+            """), {
+                "user_id": user_id, "action_type": action_type,
+                "config": json.dumps(config), "undo_available": undo_available,
+            })
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[DeliberationGate] action_ledger write failed ({action_type}): {e}")
+
+
+async def _generate_email_draft(user_id: str) -> bool:
+    """Draft a reply for the top unhandled important email. NEVER sends — the
+    draft lands in the attention inbox via a normal notification for David to
+    copy/edit/discard. No Graph/SMTP send call anywhere in this path — the
+    only external call is the LLM completion used to generate the text."""
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        row = (await db.execute(text("""
+            SELECT id, sender_name, sender_email, subject, body_text, body_preview, summary
+            FROM email
+            WHERE user_id=:u AND is_read=false
+              AND (action_required = true OR importance_score >= 0.7)
+            ORDER BY received_at ASC LIMIT 1
+        """), {"u": user_id})).mappings().first()
+        if not row:
+            return False
+
+        topic = f"email_draft:{row['id']}"
+        # Dedup against action_ledger, not notification_log — normal-priority
+        # sends route to attention_item only (gotcha_attention_queue_priority_push),
+        # so notification_log would never show a match and we'd redraft the
+        # same email every deliberation cycle.
+        already = (await db.execute(text("""
+            SELECT 1 FROM action_ledger
+            WHERE user_id=:u AND action_type='email_draft'
+              AND action_config->>'source_ref' = :ref LIMIT 1
+        """), {"u": user_id, "ref": str(row["id"])})).fetchone()
+        if already:
+            return False
+
+    from app.core.llm import get_background_llm_client
+    body_excerpt = (row["body_text"] or row["body_preview"] or "")[:2000]
+    prompt = (
+        f"Draft a brief, direct reply from David to this email. No fluff, no \"Dear X\" "
+        f"boilerplate unless natural, no subject line — just the reply body.\n\n"
+        f"From: {row['sender_name'] or row['sender_email']}\n"
+        f"Subject: {row['subject']}\n"
+        f"Summary: {row['summary'] or '(no summary)'}\n"
+        f"Body: {body_excerpt}"
+    )
+    try:
+        llm = get_background_llm_client()
+        response = await llm.chat_completion(
+            messages=[
+                {"role": "system", "content": "You draft email replies in David's voice: concise, direct, no corporate fluff."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4, max_tokens=400,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        draft = response["choices"][0]["message"].get("content", "").strip()
+    except Exception as e:
+        logger.warning(f"[DeliberationGate] email_draft LLM call failed: {e}")
+        return False
+    if not draft:
+        return False
+
+    from app.services.unified_notification import send_notification
+    await send_notification(
+        user_id=user_id,
+        title=f"Draft reply: {row['subject'][:60]}",
+        message=f"To: {row['sender_name'] or row['sender_email']}\n\n{draft}\n\n— draft only, not sent. Copy/edit/discard.",
+        topic=topic, priority="normal", source="deliberation",
+    )
+    await _write_action_ledger(user_id, "email_draft", f"Drafted a reply to '{row['subject']}'", source_ref=str(row["id"]))
+    return True
+
+
+async def _nudge_commitment(user_id: str) -> bool:
+    """Route a commitment_nudge task proposal through the EXISTING anti-nag
+    follow-up machinery (thread_manager) instead of the generic task-proposal
+    notification path — Phase 3's mention caps apply automatically. Returns
+    True if a commitment was actually surfaced."""
+    from app.db.session import get_async_session_factory
+    from app.services.thread_manager import get_open_threads, record_mention
+    from app.services.unified_notification import send_notification
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        threads = await get_open_threads(user_id, db)
+        commitments = [t for t in threads if t.get("source") == "commitment"]
+        if not commitments:
+            return False
+        thread = commitments[0]
+        message = thread.get("suggested_followup") or f"You mentioned: {thread['topic']}"
+        await send_notification(
+            user_id=user_id, title="Following up on a commitment", message=message,
+            topic=f"commitment_nudge:{thread['id']}", priority="normal", source="deliberation",
+        )
+        await record_mention(thread["id"], db)
+        await db.commit()
+
+    await _write_action_ledger(user_id, "commitment_nudge", f"Followed up: {thread['topic']}", source_ref=thread["id"])
+    return True
+
+
 async def _dispatch_from_deliberation(user_id: str, proposal: TaskProposal) -> None:
     """Dispatch a task from deliberation via agent_dispatch_service."""
     from app.services.agent_dispatch import agent_dispatch_service
@@ -642,6 +804,10 @@ async def _dispatch_from_deliberation(user_id: str, proposal: TaskProposal) -> N
             task_id=result.get("task_id", "unknown"),
             proposal=proposal,
             auto_executed=True,
+        )
+        await _write_action_ledger(
+            user_id, proposal.category, proposal.description,
+            confidence=proposal.confidence, source_ref=result.get("task_id"),
         )
     finally:
         if db:
@@ -774,6 +940,10 @@ async def _execute_home_action(user_id: str, action: HomeActionProposal) -> None
             await ha_control.turn_on_switch(action.entity_id)
 
     logger.info(f"[DeliberationGate] Executed: {action.action} {action.entity_id} → {action.state} ({action.reason})")
+    await _write_action_ledger(
+        user_id, action.action, f"{action.entity_id} → {action.state} ({action.reason})",
+        undo_available=True, undo_config={"entity_id": action.entity_id, "state": action.state},
+    )
 
 
 async def _write_journal(user_id: str, result: DeliberationResult) -> None:

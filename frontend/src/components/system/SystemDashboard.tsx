@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users } from 'lucide-react'
+import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users, Undo2 } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -63,6 +63,20 @@ const SystemDashboard: React.FC = () => {
     return () => clearInterval(id)
   }, [load])
 
+  const undoAction = useCallback(async (ledgerId: number) => {
+    try {
+      await fetch(`${APP_CONFIG.apiUrl}/api/system/actions/undo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ ledger_id: ledgerId }),
+      })
+      load()
+    } catch (e) {
+      // best-effort; the next poll will reconcile state either way
+    }
+  }, [load])
+
   if (loading) {
     return <div className="flex items-center justify-center h-64 text-slate-400">
       <RefreshCw className="w-6 h-6 animate-spin text-teal-300" /></div>
@@ -79,6 +93,7 @@ const SystemDashboard: React.FC = () => {
   const balance = data?.balance || {}
   const stream = data?.stream?.items || []
   const promotions = data?.promotions?.items || []
+  const actions = data?.actions?.items || []
   const dist = (balance.distribution || []).filter((d: any) => d.count > 0)
   const maxPct = Math.max(1, ...dist.map((d: any) => d.pct))
 
@@ -243,6 +258,31 @@ const SystemDashboard: React.FC = () => {
             What actually reached you, by life-domain. The goal is balance — no single domain dominating — not equal volume.
           </p>
         </div>
+
+        {/* ACTIONS — what Sara actually did, autonomously (Phase 4) */}
+        {actions.length > 0 && (
+          <div className="assistant-panel rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3"><Sparkles className="w-4 h-4 text-teal-300" /><Eyebrow>Actions</Eyebrow></div>
+            <div className="space-y-1.5">
+              {actions.slice(0, 10).map((a: any, i: number) => (
+                <div key={a.id ?? i} className="flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <span className="text-slate-200 truncate">{a.description}</span>
+                    <span className="text-xs text-slate-500 ml-2">{a.action_type} · {timeAgo(a.at)}</span>
+                  </div>
+                  {a.undone ? (
+                    <span className="text-xs text-slate-500 flex-shrink-0">undone</span>
+                  ) : a.can_undo ? (
+                    <button onClick={() => undoAction(a.id)}
+                      className="flex items-center gap-1 text-xs text-teal-300 hover:text-teal-200 flex-shrink-0">
+                      <Undo2 className="w-3 h-3" /> Undo
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* PROMOTED TO ATTENTION (Tier 0 output) */}
         {promotions.length > 0 && (

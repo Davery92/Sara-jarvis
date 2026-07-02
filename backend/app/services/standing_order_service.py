@@ -560,6 +560,21 @@ class StandingOrderService:
                 domain, act = reverse.split(".", 1)
                 await ha_control.call_service(domain, act, entity_id)
 
+            elif action.action_type in ("light_control", "lock_control", "switch_control"):
+                # Deliberation-driven home actions (PHENOMENAL_ASSISTANT_PLAN.md Phase 4)
+                # share this ledger but a plainer config shape: {entity_id, state}.
+                from app.services.ha_control_service import ha_control
+                entity_id = config.get("entity_id")
+                state = config.get("state")
+                if not entity_id:
+                    return {"success": False, "reason": "no_reverse_action"}
+                if action.action_type == "light_control":
+                    await (ha_control.turn_off_light(entity_id) if state != "off" else ha_control.turn_on_light(entity_id))
+                elif action.action_type == "lock_control":
+                    await (ha_control.unlock(entity_id) if state == "on" else ha_control.lock(entity_id))
+                else:
+                    await (ha_control.turn_off_switch(entity_id) if state != "off" else ha_control.turn_on_switch(entity_id))
+
             elif action.action_type == "lock_all":
                 from app.services.ha_control_service import ha_control
                 states = await ha_control.get_states()

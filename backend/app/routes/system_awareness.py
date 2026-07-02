@@ -12,14 +12,17 @@ Phase 0 (this file, read-only over existing data):
 Phase 1 adds the assembled world_state (see app/services/world_model.py) under /world.
 Nothing here mutates state.
 """
+import json
 import logging
 import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.timezone import now as local_now
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -268,6 +271,56 @@ async def get_promotions(
     return {"items": items, "count": len(items)}
 
 
+@router.get("/actions")
+async def get_actions(
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Recent autonomous actions (Phase 4 of PHENOMENAL_ASSISTANT_PLAN.md) —
+    what Sara did, why, and whether it can still be undone. Shared table with
+    standing_order_service's original 5-min undo (source distinguishes them)."""
+    items = []
+    try:
+        now = local_now()
+        rows = db.execute(text("""
+            SELECT id, action_type, source, action_config, success, executed_at,
+                   undo_available, undo_expires_at, undone, undone_at
+            FROM action_ledger
+            WHERE user_id = :uid
+            ORDER BY executed_at DESC LIMIT :lim
+        """), {"uid": user_id, "lim": limit}).fetchall()
+        for r in rows:
+            config = r[3] if isinstance(r[3], dict) else (json.loads(r[3]) if r[3] else {})
+            can_undo = bool(r[6]) and not r[8] and (r[7] is None or r[7] > now)
+            items.append({
+                "id": r[0], "action_type": r[1], "source": r[2],
+                "description": config.get("description") or config.get("entity_id") or r[1],
+                "confidence": config.get("confidence"),
+                "success": r[4], "at": r[5].isoformat() if r[5] else None,
+                "can_undo": can_undo, "undone": bool(r[8]),
+                "undone_at": r[9].isoformat() if r[9] else None,
+            })
+    except Exception as e:
+        logger.warning(f"[system/actions] query failed: {e}")
+    return {"items": items, "count": len(items)}
+
+
+class UndoActionIn(BaseModel):
+    ledger_id: int
+
+
+@router.post("/actions/undo")
+async def undo_action_endpoint(
+    payload: UndoActionIn,
+    db: Session = Depends(get_db),
+):
+    """God-view one-tap undo — same underlying undo_action as the chat tool."""
+    from app.services.standing_order_service import standing_order_service
+    result = await standing_order_service.undo_action(db, payload.ledger_id)
+    return result
+
+
 @router.get("/overview")
 async def get_overview(
     user_id: str = Depends(get_current_user_id),
@@ -278,4 +331,5 @@ async def get_overview(
     balance = await get_balance(168, user_id, db)
     stream = await get_stream(25, user_id, db)
     promotions = await get_promotions(20, user_id, db)
-    return {"world": world, "balance": balance, "stream": stream, "promotions": promotions}
+    actions = await get_actions(20, user_id, db)
+    return {"world": world, "balance": balance, "stream": stream, "promotions": promotions, "actions": actions}

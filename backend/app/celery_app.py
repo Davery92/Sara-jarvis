@@ -73,6 +73,7 @@ celery_app = Celery(
         "app.tasks.sara_self_queue",
         "app.tasks.subconscious_tier0",
         "app.tasks.morning_proactive",
+        "app.tasks.dispatch_watchdog",
     ]
 )
 
