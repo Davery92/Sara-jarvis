@@ -136,6 +136,7 @@ from app.tools.notifications import NOTIFICATION_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
+from app.tools.goals import ManageGoalTool
 import logging
 
 logger = logging.getLogger(__name__)
@@ -612,6 +613,9 @@ class ToolRegistry:
 
             # People ("who am I overdue with?") — person table, Phase 2
             ListPeopleTool(),
+
+            # Goals ("let's make X a goal") — sara_goal, Phase 3
+            ManageGoalTool(),
         ]
 
         for tool in tools:

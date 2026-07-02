@@ -81,6 +81,9 @@ class UnifiedContextSnapshot:
     comms_unhandled_count: int = 0
     comms_unhandled_top: Optional[str] = None  # "Jane Doe — 'Re: Contract' (18h ago); ..."
 
+    # ── Goals (open loops with intent) ──
+    open_goals_top: Optional[str] = None  # "Document my agentic architecture (18d since progress); ..."
+
     # ── Conversation ──
     active_conversation_id: Optional[str] = None
     active_conversation_device: Optional[str] = None

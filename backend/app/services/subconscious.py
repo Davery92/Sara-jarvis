@@ -246,10 +246,25 @@ async def run_subconscious_tick(user_id: str = None, db: Session = None) -> dict
         except Exception as e:
             logger.warning(f"[tier0] work (background_task) gather failed: {e}")
 
-        # GOALS (starved domain) — count of open goals.
+        # GOALS (starved domain) — a bare open-goal count doesn't mean anything;
+        # what's actually significant is a goal that's stalled or a commitment
+        # coming due (Phase 3 of PHENOMENAL_ASSISTANT_PLAN.md).
         try:
-            n = db.execute(text("SELECT count(*) FROM sara_goal WHERE COALESCE(status,'open') NOT IN ('done','abandoned','archived','completed')")).scalar()
-            signals.append(("goals", "open_goals", float(n or 0), f"{int(n or 0)} open goals", "sara_goal"))
+            n = db.execute(text("""
+                SELECT count(*) FROM sara_goal
+                WHERE COALESCE(status,'open') NOT IN ('done','abandoned','archived','completed')
+                  AND (last_progress_at IS NULL OR last_progress_at < now() - interval '7 days')
+            """)).scalar()
+            signals.append(("goals", "stalled", float(n or 0),
+                            f"{int(n or 0)} goal(s) stalled (no progress in 7+ days)", "sara_goal:stalled"))
+
+            n = db.execute(text("""
+                SELECT count(*) FROM followup_thread
+                WHERE user_id=:u AND status='open' AND source='commitment'
+                  AND follow_up_before IS NOT NULL AND now() BETWEEN follow_up_after AND follow_up_before
+            """), {"u": user_id}).scalar()
+            signals.append(("goals", "commitments_due", float(n or 0),
+                            f"{int(n or 0)} commitment(s) due", "followup_thread:commitments_due"))
         except Exception as e:
             logger.warning(f"[tier0] goals gather failed: {e}")
 

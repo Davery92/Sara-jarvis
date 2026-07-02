@@ -173,6 +173,12 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot) -> str:
         if top:
             lines.append(top)
 
+    # Goals — open loops with intent (title + days since progress)
+    goals_top = getattr(memory, 'open_goals_top', None)
+    if goals_top:
+        lines.append(f"\n## Open Goals")
+        lines.append(goals_top)
+
     # Knowledge gaps — topics David discusses that Sara doesn't have PKG nodes for
     pkg_gaps = getattr(memory, 'pkg_knowledge_gaps', None)
     if pkg_gaps:

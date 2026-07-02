@@ -261,6 +261,22 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         except Exception as e:
             logger.warning(f"[ContextWriter] comms gather failed: {e}")
 
+        # ── Open goals (title + days since progress) ──
+        try:
+            rows = db.execute(text("""
+                SELECT title, last_progress_at FROM sara_goal
+                WHERE COALESCE(status,'open') NOT IN ('done','abandoned','archived','completed')
+                ORDER BY last_progress_at ASC NULLS FIRST LIMIT 5
+            """)).fetchall()
+            if rows:
+                parts = []
+                for r in rows:
+                    days = int((now - r.last_progress_at).total_seconds() // 86400) if r.last_progress_at else None
+                    parts.append(f"{r.title} ({days}d since progress)" if days is not None else f"{r.title} (no progress logged)")
+                snapshot.open_goals_top = "; ".join(parts)
+        except Exception as e:
+            logger.warning(f"[ContextWriter] goals gather failed: {e}")
+
         # ── Active projects ──
         try:
             projects = db.execute(text("""

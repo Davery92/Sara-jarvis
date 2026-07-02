@@ -34,41 +34,56 @@ CATEGORY_TIMING = {
     "health": {"after_hours": 4, "before_hours": 24, "max_mentions": 1},
     "planning": {"after_hours": 24, "before_hours": 72, "max_mentions": 2},
     "learning": {"after_hours": 24, "before_hours": 168, "max_mentions": 3},
+    "commitment": {"after_hours": 4, "before_hours": 72, "max_mentions": 3},
 }
 DEFAULT_TIMING = {"after_hours": 4, "before_hours": 48, "max_mentions": 2}
 
 EXTRACTION_PROMPT = """You are analyzing a conversation between David (user) and Sara (assistant).
 
-Identify any ACTIONABLE things David mentioned he is going to DO, is currently doing, or plans to do. These should be specific activities, NOT abstract discussion topics.
+Identify two kinds of things:
 
-Good examples:
-- "making chuck roast in the ninja foodi" → cooking
-- "setting up the new monitor" → project
-- "going to the gym later" → health
-- "need to call the dentist" → errand
-- "working on the API migration" → project
+1. ACTIONABLE things David mentioned he is going to DO, is currently doing, or plans to do.
+   These should be specific activities, NOT abstract discussion topics.
 
-Bad examples (too abstract, don't extract):
-- "thinking about life"
-- "wondering about politics"
-- General small talk
-- Questions about factual information
+   Good examples:
+   - "making chuck roast in the ninja foodi" → cooking
+   - "setting up the new monitor" → project
+   - "going to the gym later" → health
+   - "need to call the dentist" → errand
+   - "working on the API migration" → project
+
+   Bad examples (too abstract, don't extract):
+   - "thinking about life"
+   - "wondering about politics"
+   - General small talk
+   - Questions about factual information
+
+2. COMMITMENTS David explicitly states about himself — a promise or personal-accountability
+   statement, not just an activity. Phrases like "I'll X", "I need to Y by Friday", "I should
+   call/email/finish X", "let me get back to you on Z". Use category "commitment" for these.
+   If David gave any timeframe (explicit day/date, or relative like "by Friday", "tomorrow",
+   "this week"), estimate hours from now until that deadline in "due_hours" (a number). If no
+   timeframe was stated, omit "due_hours" (or set it null) — do NOT guess a fake deadline.
+   Skip anything that was already turned into a system reminder or timer in this conversation
+   (i.e., Sara actually called a reminder/timer tool for it) — that's handled elsewhere and
+   extracting it here would double-track it.
 
 For each thread found, output JSON:
 {
   "threads": [
     {
-      "topic": "short description of what David is doing/planning",
-      "category": "cooking|project|errand|social|health|planning|learning",
+      "topic": "short description of what David is doing/planning/committed to",
+      "category": "cooking|project|errand|social|health|planning|learning|commitment",
       "suggested_followup": "A natural Sara-voice follow-up question",
       "priority": 0.0-1.0,
-      "context_snippet": "the key sentence from the conversation"
+      "context_snippet": "the key sentence from the conversation",
+      "due_hours": null
     }
   ],
   "resolved_topics": ["topic text that matches an existing open thread that this conversation resolves"]
 }
 
-If nothing actionable was mentioned, return {"threads": [], "resolved_topics": []}.
+If nothing actionable or committed was mentioned, return {"threads": [], "resolved_topics": []}.
 
 Output ONLY valid JSON, no explanation."""
 
@@ -151,17 +166,32 @@ class ThreadExtractor:
                 timing = CATEGORY_TIMING.get(category, DEFAULT_TIMING)
                 now_dt = datetime.now(timezone.utc)
 
+                # Commitments ("I'll call the plumber by Thursday") get source='commitment'
+                # and, when David gave a timeframe, a due-date-anchored window instead of the
+                # generic category heuristic — surfaces near the actual deadline, not on a
+                # fixed offset from when he said it.
+                source = "chat"
+                follow_up_after = now_dt + timedelta(hours=timing["after_hours"])
+                follow_up_before = now_dt + timedelta(hours=timing["before_hours"])
+                if category == "commitment":
+                    source = "commitment"
+                    due_hours = thread_data.get("due_hours")
+                    if isinstance(due_hours, (int, float)) and due_hours > 0:
+                        follow_up_after = now_dt + timedelta(hours=max(0, due_hours - 6))
+                        follow_up_before = now_dt + timedelta(hours=due_hours + 6)
+
                 thread_id = await create_thread(
                     user_id=user_id,
                     topic=topic,
                     category=category,
-                    follow_up_after=now_dt + timedelta(hours=timing["after_hours"]),
-                    follow_up_before=now_dt + timedelta(hours=timing["before_hours"]),
+                    follow_up_after=follow_up_after,
+                    follow_up_before=follow_up_before,
                     max_mentions=timing["max_mentions"],
                     original_context=thread_data.get("context_snippet", "")[:500],
                     suggested_followup=thread_data.get("suggested_followup", "")[:300],
                     priority=min(1.0, max(0.0, thread_data.get("priority", 0.5))),
                     db=db,
+                    source=source,
                 )
                 if thread_id:
                     created_ids.append(thread_id)
