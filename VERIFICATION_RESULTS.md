@@ -60,4 +60,19 @@ Deltas from plan: meeting prep reuses the existing `calendar_prep.check_and_send
 
 Deltas from plan: C-S4 (structured output) is intentionally incomplete — see reasoning above. Everything else in C.1-C.5 is implemented and, where testable without a multi-day wait, proven live.
 
+## Phase T.1-T.2 — One voice, kill the monologue leaks — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| T-S1 | **PASS — proven live** | New `notification_composer.compose_notification_text()` wired as the mandatory phrasing stage in `unified_notification._send_notification_impl`, applied to every category except `timer`/`timer_complete`/`reminder`. Behind tunable `notify.compose_all` (default True) for an instant kill-switch. Live test: `compose_notification_text(title="New Internal Email", message="From: Dave Brink / RE: Signed Ops Doc", category="email")` → `{"title": "Dave signed the ops doc", "message": "Dave Brink just sent over the signed Ops Doc, so I wanted to let you know right away."}` — the exact R14 example from the plan, verified live, not simulated. |
+| T-S2 | **PASS — proven live** | New `task_result_delivery._summarize_for_delivery()`, called unconditionally before `_compose_chat_message`. Live test with the plan's own R15 example text ("Now I have enough research to build the comprehensive document. Let me create it:...") → rewritten to *"David, I've put together the comprehensive 5-section report on research assistant capabilities for you. Please take a look when you have a moment."* Falls back to a safe generic line (never raw text) if the LLM call fails, with a monologue pre-filter as the last line of defense. |
+| T-S3 (layer collapse) | Not done | The 5-layer suppression collapse (inline priority-adjuster, notification_tuner, category_limits → θ priors) is a bigger, riskier refactor — deferred, not attempted this session |
+| T-S4 (triad: do it / not now / stop these) | Not done | `_default_attention_actions` still has per-category actions (reply/snooze/mark-done) but no universal "stop these" — deferred |
+| T-S5 (artifact_ref) | Not done | Schema + producer wiring for `artifact_ref` deferred — bigger cross-cutting change touching drafts/research/preps |
+
+Deltas from plan: avoided a double-compose bug where `route_through_attention_queue`'s internal recursive `send_notification()` calls would have re-run the phrasing stage on already-composed text (2 LLM calls per push) — added an internal `_skip_phrasing` flag threaded only through those 3 recursive call sites, not exposed to real callers.
+
+Not yet done in Phase T: T.3 (layer collapse), T.4 (response-loop triad), T.5 (artifact refs). These are real, substantial remaining work, not silently skipped — flagged here for the next session.
+
+
 

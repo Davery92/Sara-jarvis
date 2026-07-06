@@ -71,6 +71,18 @@ def get_tunable_str(key: str, default: str) -> str:
     return str(v) if v is not None else default
 
 
+def get_tunable_bool(key: str, default: bool) -> bool:
+    v = get_tunable(key, default)
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().strip('"').lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def invalidate_cache() -> None:
     """Force the next get_tunable() call to refresh from DB. Called by the API on PATCH."""
     global _CACHE_LOADED_AT

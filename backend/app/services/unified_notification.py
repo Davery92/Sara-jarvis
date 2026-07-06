@@ -194,6 +194,7 @@ async def send_notification(
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
     overlay: Optional[Dict[str, Any]] = None,
+    _skip_phrasing: bool = False,
 ) -> Dict[str, Any]:
     """
     Send a notification through the unified pipeline with topic-based dedup.
@@ -257,6 +258,7 @@ async def send_notification(
             _bypass_ban=_bypass_ban,
             _bypass_desktop=_bypass_desktop,
             _attention_item_id=_attention_item_id,
+            _skip_phrasing=_skip_phrasing,
             extra_push_data=extra_push_data,
             overlay=overlay,
         )
@@ -296,6 +298,7 @@ async def _send_notification_impl(
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
     overlay: Optional[Dict[str, Any]] = None,
+    _skip_phrasing: bool = False,
 ) -> Dict[str, Any]:
     # ── Engagement-based priority adjustment ──
     # If David consistently ignores a category, lower priority; if he engages, boost
@@ -345,6 +348,21 @@ async def _send_notification_impl(
                 0, sent=False, dedup_blocked=True,
             )
         return {"sent": False, "reason": "banned_topic", "ban_reason": ban_reason}
+
+    # Phrasing stage (SARA_UNLEASHED Phase T.1): one voice, everywhere, before
+    # anything is dedup-checked or delivered. Exempt categories (raw
+    # timer/reminder fires) and any composer failure fall back to the
+    # original text unchanged — see notification_composer.compose_notification_text.
+    # _skip_phrasing is set only by route_through_attention_queue's internal
+    # recursive calls, which already received composed text from this same
+    # pass — without it every attention-routed push would compose twice.
+    if not _skip_phrasing:
+        try:
+            from app.services.notification_composer import compose_notification_text
+            composed = await compose_notification_text(title, message, category, source)
+            title, message = composed["title"], composed["message"]
+        except Exception as e:
+            logger.debug(f"Phrasing stage skipped: {e}")
 
     # Route through attention queue when enabled (Phase 2 — Cortana Evolution)
     if not _bypass_attention and db:
@@ -896,11 +914,13 @@ async def route_through_attention_queue(
     priority = _normalize_priority(priority)
 
     if not attention_enabled or not db:
-        # Feature off — send directly (bypass attention to avoid recursion)
+        # Feature off — send directly (bypass attention to avoid recursion).
+        # title/message already passed through the phrasing stage in the
+        # caller (_send_notification_impl) — don't compose twice.
         return await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
-            _bypass_attention=True,
+            _bypass_attention=True, _skip_phrasing=True,
         )
 
     # Time-based cooldown against recycled attention items. The DB unique
@@ -961,7 +981,7 @@ async def route_through_attention_queue(
         return await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
-            _bypass_attention=True,
+            _bypass_attention=True, _skip_phrasing=True,
         )
 
     # High priority and above always pushes. Normal/low pushes too, iff the
@@ -975,7 +995,7 @@ async def route_through_attention_queue(
         result = await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
-            _bypass_attention=True,
+            _bypass_attention=True, _skip_phrasing=True,
             _attention_item_id=item_id,
         )
         result["attention_item_id"] = item_id

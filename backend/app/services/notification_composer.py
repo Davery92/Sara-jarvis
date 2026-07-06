@@ -154,6 +154,77 @@ async def compose_followup(
     return None
 
 
+GENERIC_REPHRASE_PROMPT = """You are Sara, David's personal AI assistant. Rewrite this notification so it \
+sounds like you said it out loud to a friend — never like a system log line or an email client's raw fields.
+
+Original title: {title}
+Original message: {message}
+Category: {category}
+
+Rules:
+- Keep every concrete fact from the original: names, subjects, numbers, times — never invent, drop, or soften them
+- One sentence for the message, warm and direct, in first person where natural
+- Title: 2-6 words, conversational
+- NEVER use ALL CAPS, raw field labels ("From:", "RE:", "New Internal Email"), or ticket-speak
+- If the original is already natural, warm, and one sentence, return it unchanged
+
+Output ONLY JSON: {{"title": "...", "message": "..."}}"""
+
+# Categories exempted from the phrasing stage: raw timer/reminder fires are
+# meant to read as plain system fact ("Timer done"), not a composed line —
+# SARA_UNLEASHED Phase T.1's invariant 6 exemption.
+_PHRASING_EXEMPT_CATEGORIES = {"timer", "timer_complete", "reminder"}
+
+
+async def compose_notification_text(
+    title: str,
+    message: str,
+    category: str,
+    source: str = "",
+) -> Dict[str, str]:
+    """Generic phrasing-stage pass (SARA_UNLEASHED Phase T.1): the mandatory
+    final stage before any notification is sent, for every category except
+    raw timer/reminder fires. Everything David reads from Sara passes
+    through here so email alerts, deliberation proposals, and task
+    completions all sound like the same voice instead of three different
+    registers (Sara-voice composer, raw system alert, leaked agent
+    monologue).
+
+    Always falls back to the original (title, message) on any failure —
+    a phrasing hiccup must never block or blank out a real notification,
+    especially a security alert."""
+    if category in _PHRASING_EXEMPT_CATEGORIES:
+        return {"title": title, "message": message}
+
+    try:
+        from app.services.tunables import get_tunable_bool
+        if not get_tunable_bool("notify.compose_all", True):
+            return {"title": title, "message": message}
+    except Exception:
+        pass
+
+    fallback = {"title": title, "message": message}
+    try:
+        llm = get_background_llm_client()
+        prompt = GENERIC_REPHRASE_PROMPT.format(
+            title=title, message=message, category=category or "general",
+        )
+        response = await llm.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=150,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content = response["choices"][0]["message"].get("content", "")
+        parsed = _parse_json(content)
+        if parsed and parsed.get("title") and parsed.get("message"):
+            return {"title": str(parsed["title"])[:200], "message": str(parsed["message"])[:1000]}
+    except Exception as e:
+        logger.debug(f"Notification phrasing stage failed (using original text): {e}")
+
+    return fallback
+
+
 def _parse_json(content: str) -> Optional[Dict]:
     """Parse JSON from LLM response."""
     import json

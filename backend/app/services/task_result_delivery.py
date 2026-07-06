@@ -45,6 +45,15 @@ async def deliver_task_result(
     # than ever repeat one — repeats are the failure mode that erodes trust.
     _record_delivered(user_id, task_id, task_query, db)
 
+    # SARA_UNLEASHED Phase T.2: never push raw agent output. Dispatch results
+    # sometimes ARE the agent's literal last turn ("Now I have enough
+    # research to build the comprehensive document. Let me create it:") —
+    # chain-of-thought as a notification body. Every delivery gets a
+    # summarize pass first: what was produced, where it lives, the next
+    # action. Falls back to a safe generic line (never the raw text) on
+    # any failure — a leak is worse than a generic line.
+    result_summary = await _summarize_for_delivery(task_query, result_summary, result_note_title)
+
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
 
     # --- Path 0: Active desktop (Desktop Jarvis Overhaul D) — HUD toast
@@ -199,6 +208,65 @@ def _record_delivered(user_id: str, task_id: str, task_query: str, db: Session) 
             db.rollback()
         except Exception:
             pass
+
+
+_LEAK_PATTERNS = (
+    "let me create", "let me write", "now i have enough", "i'll create",
+    "i'll now", "let's do this", "here's my plan", "i need to",
+    "next, i will", "i'm going to",
+)
+
+
+def _looks_like_monologue(text: str) -> bool:
+    """Cheap pre-filter: does this read like agent chain-of-thought rather
+    than a finished deliverable? Used only to decide whether the summarize
+    pass is worth the LLM call — the pass itself is authoritative."""
+    head = (text or "")[:200].lower()
+    return any(p in head for p in _LEAK_PATTERNS)
+
+
+async def _summarize_for_delivery(task_query: str, raw_summary: str, note_title: Optional[str]) -> str:
+    """Rewrite the agent's raw output into a short, David-facing summary:
+    what was produced, where it lives, the one next action. Never returns
+    the raw text on failure — falls back to a generic, unmistakably-safe
+    line instead, because a leak is worse than a generic line."""
+    safe_fallback = (
+        f"Finished: {task_query[:100]}."
+        + (f" Saved to '{note_title}'." if note_title else "")
+    )
+    if not raw_summary or not raw_summary.strip():
+        return safe_fallback
+
+    try:
+        from app.core.llm import get_background_llm_client
+        llm = get_background_llm_client()
+        prompt = (
+            "A background task just finished. Rewrite its raw output as a short, "
+            "warm, David-facing summary in Sara's voice: what was produced, and (if "
+            "relevant) the one next action. Never include planning language, "
+            "first-person process narration (\"let me...\", \"I'll now...\", \"here's my "
+            "plan\"), or meta-commentary about the task itself — only the substance. "
+            "2-3 sentences max.\n\n"
+            f"Task: {task_query[:200]}\n\n"
+            f"Raw output:\n{raw_summary[:3000]}"
+        )
+        response = await llm.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=300,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content = response["choices"][0]["message"].get("content", "").strip()
+        if content:
+            return content
+    except Exception as e:
+        logger.warning(f"Task result summarize pass failed (using safe fallback): {e}")
+
+    # If the pre-filter thinks this is monologue and the LLM pass failed,
+    # never fall through to the raw text — the generic line is the floor.
+    if _looks_like_monologue(raw_summary):
+        return safe_fallback
+    return raw_summary
 
 
 def _compose_chat_message(query: str, summary: str, note_title: Optional[str]) -> str:
