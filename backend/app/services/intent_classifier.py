@@ -385,6 +385,20 @@ class ToolIntentClassifier:
         'RECIPES': [
             'recipe', 'recipes',
         ],
+        # LOCATION must precede NOTES ('save this' collides) and TIME
+        # ('remind'/'reminder' collides with "remind me ... when I get home") —
+        # SARA_UNLEASHED Phase U.8: these tools existed and data was flowing
+        # (location_event, known_place) but were unreachable from chat because
+        # no intent ever routed to them.
+        'LOCATION': [
+            'save this location', 'save my location', 'save this place',
+            'save my current location', 'remember this place', 'remember where',
+            'known place', 'known places', 'saved places', 'saved place', 'my places',
+            'forget this place', 'forget that place', 'delete this place',
+            'add this as a known place', 'add this as a place',
+            'when i get home', 'when i leave', 'when i arrive', 'when i get to',
+            'leave here', 'get home', 'location reminder', 'geofence', 'where am i',
+        ],
         'FITNESS': [
             'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
             'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
@@ -551,6 +565,7 @@ class ToolIntentClassifier:
     INTENT_TO_TOOL_CATEGORIES = {
         'CONVERSATIONAL': [],  # Will inherit from conversation context
         'RECIPES': ['recipes'],  # Structured recipe storage (recipes_create, not notes)
+        'LOCATION': ['location', 'time'],  # 'time' too — location_reminder is reminder-adjacent
         'FITNESS': ['fitness'],
         'NOTES': ['notes'],
         'TIME': ['time'],
@@ -576,7 +591,7 @@ class ToolIntentClassifier:
         'STANDING_ORDERS': ['standing_orders', 'home'],
         'BEHAVIOR_CONFIG': ['behavior', 'soul'],
         'KNOWLEDGE_GRAPH': ['knowledge_graph', 'notes'],
-        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home'],  # Expanded fallback
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home', 'location'],  # Expanded fallback
     }
 
     # How many recent turns to preserve context from

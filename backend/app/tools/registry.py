@@ -384,6 +384,13 @@ class ToolRegistry:
                 'recipes_log_made'
             ]
         },
+        'location': {
+            'description': "Save named places (home, work, gym, client sites) and set location-triggered reminders that fire when David arrives at or leaves a place — 'remind me to X when I get home/leave here'.",
+            'tools': [
+                'places_save', 'places_list', 'places_delete',
+                'location_reminder_create', 'location_reminder_list', 'location_reminder_cancel',
+            ]
+        },
     }
 
     def __init__(self):
