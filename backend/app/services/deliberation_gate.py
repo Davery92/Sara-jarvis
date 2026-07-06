@@ -360,9 +360,13 @@ async def process_deliberation_result(
             _GATE_TRACKER.note(f"home_action:{type(e).__name__}")
             logger.error(f"[DeliberationGate] Home action failed: {e}")
 
-    # 3. Process task proposals
+    # 3. Process task proposals — deep runs (Phase C.3) get a higher cap (4
+    # vs 2), matching the wider observation window they were given.
     if result.task_proposals:
-        await _process_task_proposals(user_id, result.task_proposals, summary)
+        await _process_task_proposals(
+            user_id, result.task_proposals, summary,
+            cap=4 if getattr(result, "is_deep", False) else 2,
+        )
 
     # 3b. Process research proposals
     if result.research_proposals:
@@ -440,9 +444,10 @@ async def _process_task_proposals(
     user_id: str,
     proposals: list,
     summary: dict,
+    cap: int = 2,
 ) -> None:
     """Validate and route task proposals through autonomy tiers."""
-    for proposal in proposals[:2]:  # cap at 2 per deliberation
+    for proposal in proposals[:cap]:
         if proposal.category in HARD_BLOCK_CATEGORIES:
             logger.info(f"[DeliberationGate] Task blocked (hard ban): {proposal.category} — {proposal.description[:80]}")
             summary["tasks_blocked"] += 1

@@ -1502,6 +1502,48 @@ def proactive_checkin_sweep(self):
 
 
 @celery_app.task(
+    name="app.tasks.autonomy.deep_deliberation",
+    bind=True,
+    queue="cognitive",
+    max_retries=1,
+)
+def deep_deliberation(self):
+    """SARA_UNLEASHED Phase C.3: 2x/day deep deliberation on the strong model
+    (post-consolidation, 2 PM / 9 PM ET). Sees a 50-observation window (vs 15
+    hourly) and may propose up to 4 tasks (vs 2) — meant to catch backlog the
+    hourly qwen pass missed, not to replace it."""
+    try:
+        return _run_async(_deep_deliberation_async(DEFAULT_USER_ID))
+    except Exception as e:
+        logger.error(f"Deep deliberation failed: {e}")
+        return {"error": str(e)}
+
+
+async def _deep_deliberation_async(user_id: str):
+    from app.services.autonomy.coordination import get_coordinator
+    from app.services.deliberation import deliberation_engine
+    from app.services.deliberation_gate import process_deliberation_result
+
+    coordinator = get_coordinator()
+    if not await coordinator.acquire_exclusive("deep-deliberation", "heavy_llm"):
+        return {"skipped": "exclusive_group_busy"}
+
+    try:
+        result = await deliberation_engine.run(user_id, deep=True)
+        summary = await process_deliberation_result(result, user_id)
+        return {
+            "status": "completed",
+            "deep": True,
+            "notifications": summary["notifications_sent"],
+            "tasks_dispatched": summary["tasks_dispatched"],
+            "tasks_proposed": summary["tasks_proposed"],
+            "duration": result.duration_seconds,
+        }
+    finally:
+        await coordinator.release_exclusive("heavy_llm", "deep-deliberation")
+
+
+@celery_app.task(
     name="app.tasks.autonomy.scan_ended_meetings",
     bind=True,
     queue="cognitive",

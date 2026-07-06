@@ -270,12 +270,18 @@ def build_deliberation_prompt(
     observations: List[Observation],
     recent_handoff: Optional[str] = None,
     off_rhythm_flags: Optional[List[dict]] = None,
+    deep: bool = False,
 ) -> Tuple[str, str]:
     """
     Build the system and user messages for deliberation.
     Returns (system_message, user_message).
+
+    `deep=True` (SARA_UNLEASHED Phase C.3) is for the 2x/day strong-model
+    runs: a wider observation window has already been gathered by the
+    caller, and this widens the task-proposal cap from 2 to 4 to match.
     """
     heartbeat_rules = _read_heartbeat_rules()
+    task_cap = 4 if deep else 2
 
     system_msg = f"""You are Sara, David's personal AI partner. You are performing a deliberation cycle — reviewing what's happening and deciding whether to act.
 
@@ -360,7 +366,7 @@ Respond with ONLY valid JSON in this exact format:
 - A cycle with an unhandled important email, a stalled goal, or a due commitment and zero
   task_proposals is a FAILURE unless a matching proposal was already made recently — check
   before assuming "most deliberations produce 0" is the safe default.
-- Max 2 proposals per deliberation
+- Max {task_cap} proposals per deliberation
 - Categories determine autonomy level:
   - research, pkg_update, note_organization, home_control, maintenance → auto-executed silently
   - calendar_change, user_facing → proposed to David first

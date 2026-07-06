@@ -47,3 +47,17 @@ Deltas from plan: the LLM (qwen background model) classified the test commitment
 
 Deltas from plan: meeting prep reuses the existing `calendar_prep.check_and_send_preps` (already deterministic, already scheduled, already attendee-aware) rather than duplicating that logic inside the new sweep — only the missing `action_ledger` write was added there. `assistant_verbs_sweep` itself covers email drafts + commitment nudges.
 
+## Phase C.2-C.5 — Deliberation spine + tiering — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| C-S2 | PASS | Passivity mantra ("Empty array [] ... MOST COMMON case", "doing nothing is usually the right call") replaced with failure-framing + act/hold examples in `deliberation_prompt.py` (done as part of Phase A commit, same file) |
+| C-S3 (deep model + tiering) | **PASS — proven live** | `deliberation.py`: `run(user_id, deep=False)` param; deep path calls `_deep_llm_call` (direct Anthropic Messages API, model from tunable `deliberation.deep_model` default `claude-sonnet-5`, no `temperature` sent — `claude_rejects_sampling_params` guard, matching `gotcha_claude_model_sampling_params`). New `app.tasks.autonomy.deep_deliberation` Celery task, scheduled 14:15 & 21:15 ET (migration 090, 15 min after the existing 14:00/21:00 consolidation jobs). **Manually fired the task against the restarted celery-worker: real Anthropic call, 12.1s, real coherent Sonnet reasoning in the journal** ("David gave me a concrete commitment today: call the plumber by Thursday... billing emails are ancient... email engagement is 0% — not worth flagging again"). |
+| C-S4 (structured output) | PARTIAL — deliberate deviation | Did NOT delete the 3-stage brace-hunting fallback in `_parse_response`. Attempting Ollama's `format`/vLLM's `guided_json` structured-output param against the live background endpoint without being able to fully verify which serving stack (Ollama vs vLLM) is authoritative in this session was judged too risky to gamble deliberation going fully dark over — deleting the safety net blind could turn "sometimes misparses" into "silently stops proposing anything," which is the exact failure this whole plan exists to fix. Left as a flagged follow-up rather than faking completion. |
+| C-R1/C-R3/C-R4 | See Phase C.1 above (already proven live) | |
+| C-R5 (proposal rate) | **PASS — proven live** | `GET /debug/notification-funnel` now returns `proposal_rate_7d: {"runs": 112, "runs_with_a_proposal": 7, "rate": 0.062}` — the exact R5 finding (near-zero proposal rate) is now a first-class, always-visible metric instead of requiring a manual DB audit. Also fixed a latent bug in the same endpoint: the attention-queue block queried a non-existent `attention_item` table (real table is `autonomy_attention_item`) and silently returned `{"error": ...}` every time; now returns real counts. |
+| C-R6/C-R7 | Not yet verified | Needs a `hourly-vs-deep model` breakdown query and a `Parse failed` log sample over 24h — not run this session |
+
+Deltas from plan: C-S4 (structured output) is intentionally incomplete — see reasoning above. Everything else in C.1-C.5 is implemented and, where testable without a multi-day wait, proven live.
+
+

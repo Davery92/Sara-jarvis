@@ -226,7 +226,7 @@ async def notification_funnel(
             SELECT
                 status,
                 COUNT(*) as count
-            FROM attention_item
+            FROM autonomy_attention_item
             WHERE user_id = :user_id
               AND created_at >= :since
             GROUP BY status
@@ -238,7 +238,34 @@ async def notification_funnel(
     except Exception as e:
         funnel["attention_queue"] = {"error": str(e)}
 
-    # 5. Build the funnel summary
+    # 5. Proposal rate over trailing 7 days (SARA_UNLEASHED Phase C.5) — this
+    # metric alone would have caught R5 (0 proposals across 36h despite a
+    # 31-email backlog) automatically instead of requiring a manual DB audit.
+    try:
+        since_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        rate_row = db.execute(text("""
+            SELECT
+                COUNT(*) AS runs,
+                COUNT(*) FILTER (
+                    WHERE COALESCE((actions_taken->>'notifications_sent')::int, 0) > 0
+                       OR COALESCE((actions_taken->>'notifications_blocked')::int, 0) > 0
+                       OR COALESCE((actions_taken->>'tasks_dispatched')::int, 0) > 0
+                       OR COALESCE((actions_taken->>'tasks_proposed')::int, 0) > 0
+                ) AS runs_with_proposal
+            FROM agent_run_log
+            WHERE source = 'deliberation' AND run_at >= :since
+        """), {"since": since_7d}).fetchone()
+        runs = rate_row.runs or 0
+        with_proposal = rate_row.runs_with_proposal or 0
+        funnel["proposal_rate_7d"] = {
+            "runs": runs,
+            "runs_with_a_proposal": with_proposal,
+            "rate": round(with_proposal / runs, 3) if runs else None,
+        }
+    except Exception as e:
+        funnel["proposal_rate_7d"] = {"error": str(e)}
+
+    # 6. Build the funnel summary
     obs_count = funnel.get("observations", {}).get("pending_count", 0)
     delib_count = funnel.get("deliberations", {}).get("count", 0)
     proposed = funnel.get("deliberations", {}).get("total_notifications_proposed", 0)

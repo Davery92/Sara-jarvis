@@ -65,6 +65,68 @@ class DeliberationResult:
     raw_response: str = ""
     tokens_used: int = 0
     duration_seconds: float = 0.0
+    is_deep: bool = False
+
+
+async def _deep_llm_call(messages: List[Dict[str, str]], max_tokens: int = 3000) -> Dict[str, Any]:
+    """One-off Anthropic call for deep deliberation (SARA_UNLEASHED Phase C.3).
+
+    Deliberately NOT routed through LLMClientWithFailover/BackgroundLLMClient —
+    those are built for a persistent local-model client with health-check
+    loops and local/local failover, neither of which fits two calls a day
+    against Anthropic. Reuses the same request-shaping rules as
+    core.llm._anthropic_chat_completion (temperature omitted for models that
+    reject sampling params — gotcha_claude_model_sampling_params) without
+    paying for that class's background health-check task.
+    """
+    import httpx
+    from app.core.config import settings
+    from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
+    from app.services.tunables import get_tunable_str
+
+    model = get_tunable_str("deliberation.deep_model", "claude-sonnet-5")
+
+    system_content = None
+    filtered = []
+    for m in messages:
+        if m.get("role") == "system":
+            system_content = m.get("content", "")
+        else:
+            filtered.append(m)
+
+    payload: Dict[str, Any] = {"model": model, "messages": filtered, "max_tokens": max_tokens}
+    if claude_rejects_sampling_params(model):
+        if not claude_thinking_always_on(model):
+            payload["thinking"] = {"type": "disabled"}
+    else:
+        payload["temperature"] = 0.4
+    if system_content:
+        payload["system"] = system_content
+
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            json=payload,
+            headers={
+                "x-api-key": settings.anthropic_api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        anthropic_result = response.json()
+
+    content_blocks = anthropic_result.get("content", [])
+    text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+    usage = anthropic_result.get("usage", {})
+    return {
+        "choices": [{"message": {"content": text}}],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        },
+    }
 
 
 class DeliberationEngine:
@@ -82,7 +144,7 @@ class DeliberationEngine:
             self._llm_client = get_background_llm_client()
         return self._llm_client
 
-    async def run(self, user_id: str = DEFAULT_USER_ID) -> DeliberationResult:
+    async def run(self, user_id: str = DEFAULT_USER_ID, deep: bool = False) -> DeliberationResult:
         """
         Run a deliberation cycle.
         1. Read working memory
@@ -90,15 +152,23 @@ class DeliberationEngine:
         3. Build prompt
         4. Single LLM call for structured JSON
         5. Parse and return result
+
+        SARA_UNLEASHED Phase C.3: `deep=True` runs on the strong model
+        (tunable `deliberation.deep_model`, default claude-sonnet-5) with a
+        wider observation window and a higher task-proposal cap, instead of
+        the hourly qwen pass. Intended for 2x/day scheduled runs, not the
+        salience-triggered hourly path.
         """
         start_time = datetime.now(timezone.utc)
-        result = DeliberationResult()
+        result = DeliberationResult(is_deep=deep)
 
         # 1. Read working memory
         memory = await read_memory(user_id)
 
-        # 2. Get pending observations
-        observations = await get_pending_observations(user_id, min_salience=0.0, limit=15)
+        # 2. Get pending observations — deep runs see a much wider window
+        # (50 vs 15) since they run only 2x/day and are meant to catch
+        # backlog the hourly pass missed, not just the freshest signals.
+        observations = await get_pending_observations(user_id, min_salience=0.0, limit=50 if deep else 15)
 
         # 2b. Off-rhythm deviations — salience input only, never pushed directly.
         off_rhythm_flags: List[Dict[str, str]] = []
@@ -116,20 +186,31 @@ class DeliberationEngine:
             observations=observations,
             recent_handoff=memory.last_heartbeat_handoff,
             off_rhythm_flags=off_rhythm_flags,
+            deep=deep,
         )
 
-        # 4. LLM call
+        # 4. LLM call — deep runs use the strong model (Anthropic), hourly
+        # runs stay on the local BackgroundLLMClient (qwen).
         try:
-            client = self._get_llm_client()
-            response = await client.chat_completion(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0.4,
-                max_tokens=1500,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-            )
+            if deep:
+                response = await _deep_llm_call(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    max_tokens=3000,
+                )
+            else:
+                client = self._get_llm_client()
+                response = await client.chat_completion(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.4,
+                    max_tokens=1500,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                )
 
             # Extract content from OpenAI-compatible response
             raw = ""
@@ -143,7 +224,7 @@ class DeliberationEngine:
             result.raw_response = raw
 
         except Exception as e:
-            logger.error(f"[Deliberation] LLM call failed: {e}")
+            logger.error(f"[Deliberation] LLM call failed (deep={deep}): {e}")
             result.thought = f"Deliberation failed: {e}"
             result.duration_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
             return result
