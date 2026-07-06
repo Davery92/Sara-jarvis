@@ -143,6 +143,21 @@ Implementation: new `app/services/recipe_nutrition.py` reuses `FoodSearchAndLogT
 
 All test data (2 recipes, 1 food_log row) created during verification was deleted after confirming — did not leave synthetic rows in the DB. The 3 backfilled recipes are real, pre-existing data and were left with their new computed values.
 
+## Phase U.7 — Exercise identity (variants, history, picker) — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| U7-1 (library seeded) | **PASS — proven live** | 45 rows created (one per distinct `workout_log.exercise_id`, was 0). `SELECT count(*) FROM exercise_library` = 45, matching `count(DISTINCT exercise_id) FROM workout_log` = 45. |
+| U7-2 (movement grouping) | PASS, with caveat | Keyword classifier groups sanely (`horizontal_press`: 8, `horizontal_pull`: 6, `hinge`: 5, `squat`: 4, `vertical_pull`: 4, ...). Not a perfect taxonomy — e.g. bicep curls and tricep pushdowns both land in one `arm_isolation` bucket, and compound "X or Y" names (the plan's own example) get equipment joined as `"barbell/machine"` rather than a single guess. Good enough to group variants for the picker; not claimed as clinically precise. |
+| U7-3 (FK migration) | **PASS — proven live**, deliberate deviation | Added `workout_log.exercise_library_id` as a NEW nullable FK column (migration 093) rather than converting `exercise_id` in place — that column is read as free text by `progressive_overload.py`, `workout_mode.py`, `health.py`, `training_schedule.py`, none of which were fully mapped this session; retyping it blind risked breaking all of them. 217 rows linked, orphan check: `0`. |
+| U7-4 (variant API) | **PASS — proven live** | `GET /api/fitness/exercises?movement=horizontal_press` returns every bench/fly variant with real last-performed dates, weight×reps, and PRs. Also added `for_exercise_name` (not in the plan's literal spec) so the iOS caller doesn't need to know the movement taxonomy — resolves via exact match or the same classifier used at seed time. Verified both paths live. |
+| U7-5 (custom add) | **PASS — proven live** | `POST /api/fitness/exercises` created "Larsen Press"; **caught and fixed a real bug**: the first version of the GET endpoint only listed exercises with existing logged history (inner join from `workout_log`), which would have made a just-added custom exercise invisible in the picker until its first set. Fixed to LEFT JOIN from `exercise_library`; re-verified "Larsen Press" appears immediately with `total_sets: 0`. Deleted after confirming. |
+| U7-6 (per-variant progression) | **PASS — already correct, no change needed** | `progressive_overload.py` was already scoping strictly by exact `exercise_id` string match (`LOWER(exercise_id) = LOWER(:name)`) — dumbbell and barbell variants were never actually being conflated. The R28 concern didn't apply to this file; nothing changed here. |
+| U7-7 (iOS picker) | **Implemented, cannot verify — flagged, not silently claimed working** | New `ios-app/src/components/fitness/ExercisePickerModal.tsx` wired into `WorkoutPanel.tsx` (replaces the free-text-only variant input with a "browse variants" button opening a history-backed list + inline "Add exercise…"), plus two new `fitnessService` methods. Best available verification without a device: `npx tsc --noEmit` on the full iOS project — **zero type errors in any file I touched**; the 44 pre-existing errors are all in `src/types/tools.generated.ts`, last touched in a commit predating this session (confirmed via `git log`/`git diff`, zero relation to this change). This is NOT the same as confirming it renders/works — that needs your phone, per the plan's own 👤 marking on this exact check. |
+
+Deltas from plan: U7-3 uses an additive shadow column instead of converting `exercise_id` in place (documented above). U7-4 gained a `for_exercise_name` param beyond the plan's literal `?movement=` spec — needed so the iOS picker doesn't have to know the movement-pattern taxonomy itself.
+
+
 
 
 

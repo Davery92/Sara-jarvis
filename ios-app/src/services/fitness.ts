@@ -948,6 +948,50 @@ class FitnessService {
   }
 
   /**
+   * Every variant ever logged for the same movement as `exerciseName` (e.g. every
+   * bench variant for "Flat DB Bench"), each with last-performed date, last
+   * weight x reps, and PR — backs the Workout Mode variant picker (SARA_UNLEASHED
+   * Phase U.7 layer 3).
+   */
+  async getExerciseVariants(exerciseName: string): Promise<{
+    movement: string | null;
+    variants: Array<{
+      exercise_id: string;
+      name: string;
+      movement_pattern: string;
+      equipment: string[];
+      last_performed: string | null;
+      last_weight: number | null;
+      last_reps: number | null;
+      pr_weight: number | null;
+      pr_reps: number | null;
+      total_sets: number;
+    }>;
+  }> {
+    return apiClient.get(
+      `/api/fitness/exercises?for_exercise_name=${encodeURIComponent(exerciseName)}`
+    );
+  }
+
+  /**
+   * Create a new exercise_library row inline — backs the picker's "Add exercise..."
+   * action. movementPattern should come from the variant list this was opened from
+   * (movement is inherited from the slot, not re-derived from the new name).
+   */
+  async createExerciseVariant(name: string, movementPattern: string, equipment?: string): Promise<{
+    exercise_id: string;
+    name: string;
+    movement_pattern?: string;
+    created: boolean;
+  }> {
+    return apiClient.post('/api/fitness/exercises', {
+      name,
+      movement_pattern: movementPattern,
+      equipment,
+    });
+  }
+
+  /**
    * Start or stop the rest timer
    */
   async manageRestTimer(action: 'start' | 'stop', duration?: number): Promise<{

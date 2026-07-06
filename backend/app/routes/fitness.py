@@ -1084,6 +1084,134 @@ def _attach_watch_heart_rate(db: Session, user_id: str, workouts_dict: dict, wor
             }
 
 
+@router.get("/exercises")
+async def get_exercise_variants(
+    movement: Optional[str] = None,
+    for_exercise_name: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Variant-history API — SARA_UNLEASHED Phase U.7 layer 2.
+
+    Every variant David has ever logged for a movement pattern (e.g.
+    horizontal_press: Flat DB Bench, ISO bench press, Barbell or Machine
+    Chest Press, ...), each with last-performed date, last weight x reps,
+    and PR — answered from workout_log at read time via the
+    exercise_library link (migration 093). Omit `movement` to list every
+    variant across all patterns.
+
+    `for_exercise_name` is an alternative to `movement` for callers (the
+    iOS Workout Mode picker) that only know the exercise/slot name, not the
+    movement-pattern taxonomy: resolves it to a movement_pattern via an
+    exact exercise_library match, falling back to the same keyword
+    classifier used at seed time.
+    """
+    if for_exercise_name and not movement:
+        row = db.execute(
+            text("SELECT movement_pattern FROM exercise_library WHERE lower(name) = lower(:name)"),
+            {"name": for_exercise_name.strip()},
+        ).fetchone()
+        if row:
+            movement = row[0]
+        else:
+            from app.services.exercise_library_seed import classify
+            movement, _equipment = classify(for_exercise_name)
+
+    # LEFT JOIN from exercise_library, not workout_log: a variant just added
+    # via "Add exercise..." (POST /exercises) has zero logged sets yet and
+    # must still appear in the picker — an inner join from workout_log would
+    # make a brand-new custom exercise invisible until its first set.
+    query = """
+        SELECT el.id as exercise_id, el.name, el.movement_pattern, el.equipment_required,
+               wl.weight, wl.reps, wl.session_date, wl.created_at
+        FROM exercise_library el
+        LEFT JOIN workout_log wl ON wl.exercise_library_id = el.id AND wl.user_id = :uid
+        WHERE 1=1
+    """
+    params: Dict[str, Any] = {"uid": user_id}
+    if movement:
+        query += " AND el.movement_pattern = :movement"
+        params["movement"] = movement
+    query += " ORDER BY el.id, COALESCE(wl.session_date, wl.created_at::date) DESC NULLS LAST, wl.created_at DESC NULLS LAST"
+
+    rows = db.execute(text(query), params).fetchall()
+
+    variants: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        vid = r.exercise_id
+        if vid not in variants:
+            equipment = r.equipment_required
+            if isinstance(equipment, str):
+                try:
+                    equipment = json.loads(equipment)
+                except (TypeError, ValueError):
+                    equipment = []
+            variants[vid] = {
+                "exercise_id": vid,
+                "name": r.name,
+                "movement_pattern": r.movement_pattern,
+                "equipment": equipment or [],
+                "last_performed": None,
+                "last_weight": None,
+                "last_reps": None,
+                "pr_weight": None,
+                "pr_reps": None,
+                "total_sets": 0,
+            }
+        v = variants[vid]
+        if r.weight is None and r.reps is None and r.session_date is None and r.created_at is None and v["total_sets"] == 0:
+            continue  # the LEFT JOIN's all-NULL row for a never-logged exercise
+        v["total_sets"] += 1
+        session_day = r.session_date or (r.created_at.date() if r.created_at else None)
+        if v["last_performed"] is None:
+            # First row for this variant in the DESC-ordered result = most recent.
+            v["last_performed"] = session_day.isoformat() if session_day else None
+            v["last_weight"] = r.weight
+            v["last_reps"] = r.reps
+        if r.weight is not None and (v["pr_weight"] is None or r.weight > v["pr_weight"]):
+            v["pr_weight"] = r.weight
+            v["pr_reps"] = r.reps
+
+    result = sorted(variants.values(), key=lambda v: v["last_performed"] or "", reverse=True)
+    return {"movement": movement, "variants": result}
+
+
+@router.post("/exercises")
+async def create_exercise_variant(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Create a new exercise_library row inline — backs the Workout Mode
+    picker's 'Add exercise...' action (U.7 layer 3). Movement is inherited
+    from the slot the picker was opened from, not re-derived."""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    movement_pattern = (body.get("movement_pattern") or "").strip()
+    equipment = body.get("equipment")
+    if not name or not movement_pattern:
+        raise HTTPException(status_code=400, detail="name and movement_pattern are required")
+
+    existing = db.execute(
+        text("SELECT id FROM exercise_library WHERE lower(name) = lower(:name)"),
+        {"name": name},
+    ).fetchone()
+    if existing:
+        return {"exercise_id": existing[0], "name": name, "created": False}
+
+    new_id = str(uuid.uuid4())
+    equipment_list = [equipment] if isinstance(equipment, str) and equipment else (equipment or [])
+    db.execute(text("""
+        INSERT INTO exercise_library (id, name, movement_pattern, equipment_required, created_at, updated_at)
+        VALUES (:id, :name, :movement, CAST(:equipment AS json), NOW(), NOW())
+    """), {
+        "id": new_id, "name": name, "movement": movement_pattern,
+        "equipment": json.dumps(equipment_list),
+    })
+    db.commit()
+    return {"exercise_id": new_id, "name": name, "movement_pattern": movement_pattern, "created": True}
+
+
 @router.get("/workouts")
 async def list_workouts(
     status: str = "all",

@@ -14,6 +14,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
+import ExercisePickerModal from './ExercisePickerModal';
 
 interface WorkoutPanelProps {
   onCollapse?: () => void;
@@ -54,6 +55,7 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
   const [customReps, setCustomReps] = useState<string>('');
   const [feeling, setFeeling] = useState<Feeling>('moderate');
   const [variantInput, setVariantInput] = useState<string>('');
+  const [showVariantPicker, setShowVariantPicker] = useState(false);
 
   // Reset inputs when the exercise (or its scoped suggestion, e.g. after setting a
   // machine variant) changes.
@@ -73,6 +75,14 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     const current = currentExercise?.variant || '';
     if (trimmed === current) return;
     setVariant(session?.current_exercise_index ?? 0, trimmed || null);
+  };
+
+  // Picking from the variant-history list (or adding a new one) commits
+  // immediately — don't rely on variantInput's state, which won't have
+  // updated yet inside this same handler.
+  const handlePickVariant = (name: string) => {
+    setVariantInput(name);
+    setVariant(session?.current_exercise_index ?? 0, name || null);
   };
 
   // Vibrate when rest timer ends
@@ -260,22 +270,38 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
                 (e.g. hack squat vs barbell squat) is tracked separately. */}
             <View style={styles.variantBox}>
               <Text style={styles.variantLabel}>MACHINE / VARIATION</Text>
-              <TextInput
-                style={styles.variantInput}
-                value={variantInput}
-                onChangeText={setVariantInput}
-                onEndEditing={commitVariant}
-                onSubmitEditing={() => { commitVariant(); Keyboard.dismiss(); }}
-                placeholder={currentExercise.name}
-                placeholderTextColor={colors.textMuted}
-                returnKeyType="done"
-              />
+              <View style={styles.variantRow}>
+                <TextInput
+                  style={[styles.variantInput, { flex: 1 }]}
+                  value={variantInput}
+                  onChangeText={setVariantInput}
+                  onEndEditing={commitVariant}
+                  onSubmitEditing={() => { commitVariant(); Keyboard.dismiss(); }}
+                  placeholder={currentExercise.name}
+                  placeholderTextColor={colors.textMuted}
+                  returnKeyType="done"
+                />
+                <TouchableOpacity
+                  style={styles.variantBrowseButton}
+                  onPress={() => setShowVariantPicker(true)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="list-outline" size={20} color={colors.accent} />
+                </TouchableOpacity>
+              </View>
               <Text style={styles.variantHint}>
                 {currentExercise.variant
                   ? `Logging as “${currentExercise.variant}” — separate from ${currentExercise.name}.`
-                  : `Using ${currentExercise.name}. Change this if you used a different machine.`}
+                  : `Using ${currentExercise.name}. Tap the list icon to see past variants or change this.`}
               </Text>
             </View>
+
+            <ExercisePickerModal
+              visible={showVariantPicker}
+              onClose={() => setShowVariantPicker(false)}
+              exerciseName={currentExercise.variant || currentExercise.name}
+              onSelectVariant={handlePickVariant}
+            />
 
             {/* Weight stepper */}
             <Stepper
@@ -691,6 +717,14 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+  },
+  variantRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  variantBrowseButton: {
+    padding: spacing.xs,
   },
   variantHint: {
     color: colors.textMuted,
