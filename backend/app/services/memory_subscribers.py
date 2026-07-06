@@ -443,38 +443,12 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
         except Exception as e:
             logger.warning(f"[DerivedRefresh] Last meal failed: {e}")
 
-        # 5. Habit status
-        try:
-            async with async_session() as db:
-                now = datetime.now(USER_TZ)
-                # Strip timezone for comparison with naive DB columns
-                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-
-                result = await db.execute(text("""
-                    SELECT h.title, h.id,
-                           (SELECT COUNT(*) FROM habit_logs hl
-                            WHERE hl.habit_id = h.id AND hl.ts >= :today) as done
-                    FROM habits h
-                    WHERE h.user_id = :uid AND (h.paused IS NULL OR h.paused = 0)
-                    ORDER BY h.title
-                """), {"uid": user_id, "today": today_start})
-                rows = result.fetchall()
-                if rows:
-                    total = len(rows)
-                    completed = sum(1 for r in rows if r.done > 0)
-                    pending = [r.title for r in rows if r.done == 0]
-                    pending_str = ", ".join(pending[:4])
-                    status = f"{completed}/{total} done"
-                    if pending_str:
-                        status += f", pending: {pending_str}"
-                    await update_memory(
-                        user_id,
-                        source="derived_refresh",
-                        today_habit_status=status,
-                    )
-                    updated["habits"] = status
-        except Exception as e:
-            logger.warning(f"[DerivedRefresh] Habits failed: {e}")
+        # 5. Habit status — removed (SARA_UNLEASHED Phase U.3). The `habits`
+        # vertical (6 tables, 5 UI components) was dead: zero live rows,
+        # unreachable from any nav/palette entry. Habits are now modeled as
+        # recurring commitment threads instead of a separate behavior system.
+        # `today_habit_status` stays in working memory as a harmless unset
+        # field — downstream readers already guard on it being falsy.
 
         # 6. Learning reviews due — disabled (not actively used)
         # Kept the field in working memory but no longer counted/surfaced.

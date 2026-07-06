@@ -74,5 +74,21 @@ Deltas from plan: avoided a double-compose bug where `route_through_attention_qu
 
 Not yet done in Phase T: T.3 (layer collapse), T.4 (response-loop triad), T.5 (artifact refs). These are real, substantial remaining work, not silently skipped — flagged here for the next session.
 
+## Phase U.3 — Habits: fold, don't revive — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| U3-1 | **PASS — proven live** | `SELECT to_regclass('habits'), ... , to_regclass('habit_streaks')` → all NULL after migration 091. All 6 tables dropped in one revertible migration (downgrade recreates the exact schema, captured live via `\d` before dropping). |
+| U3-2 | PASS | `git rm` on all 5 orphaned components (`HabitToday/Streak/Create/Progress/Insights.tsx`) + `habitsStore.ts`. Verified before deleting: **zero importers anywhere** in `frontend/src` or `ios-app/src` — already fully unreachable dead code, no nav/palette entry existed to remove. |
+| U3-3 (recurring commitment) | Deferred | The plan's replacement path — a `recurrence` option on commitment threads (weekly/daily windows + streak counting) — was not built this session. Habits are deleted; the "modeled as recurring commitments" half of U.3 is not yet implemented. |
+
+Deltas from plan / corrections made during implementation:
+- The plan states the habit tables have "zero rows ever." Audited before dropping: **not quite true** — `habit_logs` (2 rows), `habit_instances` (3 rows), `habit_streaks` (1 row) held one abandoned test habit from 2025-08-21/22, no activity since. Judged genuinely dead (11-month-old single test run, not live David data) and proceeded, but flagging the discrepancy rather than silently trusting the plan's stated baseline.
+- Found and removed a live consumer the plan didn't mention: `memory_subscribers.py`'s derived-signal refresh (runs every 5 min) queried the empty `habits`/`habit_logs` tables on every cycle for a `today_habit_status` working-memory field that could therefore never populate. Removed the dead query block; left the `today_habit_status` field itself in working memory (harmless None, several downstream readers already guard on it being falsy) rather than doing a wider field-removal refactor across `deliberation_prompt.py`/`consolidation.py`/`deliberation_gate.py`/`autonomy_traces.py`.
+- Found and deliberately left alone a **separate, unrelated** habits sub-feature inside `ios-app/src/screens/fitness/FitnessScreen.tsx` (its own `HabitStreak` type, a `habits` view-mode tab) — its own service code says "No habits endpoint in backend yet," so it's already inert, but it's iOS app code outside this session's scope and not the vertical R18/U.3 describe.
+
+Verified live: migration applied cleanly, backend/celery restarted with no tracebacks, and `refresh_derived_signals()` runs clean post-restart with no `habits` key and no errors.
+
+
 
 
