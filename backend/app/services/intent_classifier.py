@@ -399,6 +399,24 @@ class ToolIntentClassifier:
             'when i get home', 'when i leave', 'when i arrive', 'when i get to',
             'leave here', 'get home', 'location reminder', 'geofence', 'where am i',
         ],
+        # PEOPLE must precede MEMORY ('have i'/'have we' collides with "who
+        # have i been talking to") — SARA_UNLEASHED U.8 registry sweep found
+        # list_people (Phase D's people-graph tool, real data, zero routing).
+        'PEOPLE': [
+            'who am i overdue with', 'overdue with', "who's new this week",
+            'who is new this week', "haven't talked to", 'have not talked to',
+            'catch up with', 'who have i been talking to', "who've i been talking to",
+            'people i talk to', 'reconnect with', 'who am i overdue to',
+        ],
+        # GOALS must precede PERSONAL_KNOWLEDGE ('my goals' is already one of
+        # its keywords) — SARA_UNLEASHED U.8 found manage_goal (Phase E's
+        # persistent-goal tool, same table the ACS daemon reads) with zero
+        # routing. A tracked goal is a better answer than a generic fact.
+        'GOALS': [
+            'a goal', 'track progress on', 'mark that goal', 'mark this goal',
+            'goal done', 'complete that goal', 'complete this goal', 'my goals',
+            'persistent goal', 'goal progress', 'stalled goal',
+        ],
         'FITNESS': [
             'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
             'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
@@ -566,6 +584,8 @@ class ToolIntentClassifier:
         'CONVERSATIONAL': [],  # Will inherit from conversation context
         'RECIPES': ['recipes'],  # Structured recipe storage (recipes_create, not notes)
         'LOCATION': ['location', 'time'],  # 'time' too — location_reminder is reminder-adjacent
+        'PEOPLE': ['people'],
+        'GOALS': ['goals'],
         'FITNESS': ['fitness'],
         'NOTES': ['notes'],
         'TIME': ['time'],
@@ -591,7 +611,7 @@ class ToolIntentClassifier:
         'STANDING_ORDERS': ['standing_orders', 'home'],
         'BEHAVIOR_CONFIG': ['behavior', 'soul'],
         'KNOWLEDGE_GRAPH': ['knowledge_graph', 'notes'],
-        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home', 'location'],  # Expanded fallback
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home', 'location', 'people', 'goals'],  # Expanded fallback
     }
 
     # How many recent turns to preserve context from

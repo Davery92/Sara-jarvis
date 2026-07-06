@@ -173,7 +173,9 @@ class ToolRegistry:
                 'notes_delete',
                 'notes_list',
                 'notes_list_folders',
-                'notes_create_folder'
+                'notes_create_folder',
+                'find_similar_notes',
+                'merge_notes',
             ]
         },
         'time': {
@@ -190,6 +192,7 @@ class ToolRegistry:
                 'timers_cancel',
                 'calendar_list',
                 'calendar_create',
+                'calendar_set_recurring',
                 'meeting_prep'
             ]
         },
@@ -223,7 +226,8 @@ class ToolRegistry:
                 'program_list', 'program_get', 'program_create', 'program_update', 'program_activate', 'program_delete',
                 'phase_list', 'phase_get', 'phase_create', 'phase_update', 'phase_activate', 'phase_delete',
                 'training_schedule',
-                'workout_suggest'
+                'workout_suggest',
+                'start_workout', 'end_workout', 'workout_mode_log', 'workout_history',
             ]
         },
         'chess': {
@@ -271,9 +275,11 @@ class ToolRegistry:
             ]
         },
         'agents': {
-            'description': 'Inspect background worker agents and tasks',
+            'description': 'Inspect background worker agents and tasks, hand off multi-day work to the autonomous daemon, and create/check structured research plans',
             'tools': [
-                'get_background_tasks'
+                'get_background_tasks',
+                'queue_for_sara',
+                'create_research_plan', 'research_plan_status',
             ]
         },
         'health': {
@@ -301,7 +307,8 @@ class ToolRegistry:
             'tools': [
                 'device_list', 'device_send_notification', 'device_open_url',
                 'device_show_note', 'device_take_screenshot', 'device_open_workspace',
-                'device_write_clipboard', 'device_focus_window', 'device_type_into_window'
+                'device_write_clipboard', 'device_focus_window', 'device_type_into_window',
+                'device_open_overlay', 'device_record_voice_note',
             ]
         },
         'workspace': {
@@ -369,7 +376,7 @@ class ToolRegistry:
             'tools': [
                 'dispatch_agent_task', 'dispatch_and_monitor',
                 'get_agent_status', 'resume_agent_session',
-                'submit_candidate_skill'
+                'submit_candidate_skill', 'cancel_agent_task',
             ]
         },
         'shell': {
@@ -390,6 +397,14 @@ class ToolRegistry:
                 'places_save', 'places_list', 'places_delete',
                 'location_reminder_create', 'location_reminder_list', 'location_reminder_cancel',
             ]
+        },
+        'people': {
+            'description': "Answer questions about who David has been interacting with — who he's overdue to reconnect with, who's new, recent contacts — from the real person table (built from email + chat mentions).",
+            'tools': ['list_people']
+        },
+        'goals': {
+            'description': "Create, advance, or complete a persistent goal that survives across days (not just this conversation) — 'let's make X a goal', tracking progress, marking a goal done.",
+            'tools': ['manage_goal']
         },
     }
 

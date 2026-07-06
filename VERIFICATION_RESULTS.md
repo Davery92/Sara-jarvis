@@ -89,6 +89,47 @@ Deltas from plan / corrections made during implementation:
 
 Verified live: migration applied cleanly, backend/celery restarted with no tracebacks, and `refresh_derived_signals()` runs clean post-restart with no `habits` key and no errors.
 
+## Phase U.8 — Location tools reachable from chat — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| U8-1 | PASS | `location` category added to `TOOL_CATEGORIES` with all 6 tools |
+| U8-2 | PASS | `LOCATION` intent added, placed before `NOTES`/`TIME` (keyword-collision precedence, same pattern as existing `RECIPES` placement); maps to `['location', 'time']`; `location` added to `GENERAL` fallback |
+| U8-3 (round-trip 1: save) | **PASS — proven live** | Real chat message "save my current location as the test spot" → model called `places_save` → real `known_place` row created with real coordinates. Deleted after verifying. |
+| U8-4 (round-trip 2: trigger) | PARTIAL | `location_reminder_create` tool logic verified directly (real armed `location_trigger` row created, deleted after). The chat round-trip itself hit a **pre-existing, unrelated bug**: `InternalToolAgent.__init__()` doesn't accept the `db` kwarg that `task_planner.py`/`agent_dispatch.py` pass it — `internal_tool_agent.py` last touched in a commit predating this session, confirmed via `git log`. Not caused by, or fixed as part of, this phase. |
+| U8-5 (orphan sweep) | **PASS — proven live** | `ToolRegistry()` diffed instantiated tools vs. categorized tools → `[]` (zero orphans) after also fixing the 15 additional orphans found below. |
+
+## Phase U.8+ — Registry-wide orphan sweep (found during U.8, fixed same session)
+
+The U8-5 sweep surfaced 15 more instantiated-but-uncategorized tools beyond location — same failure class as R4/R29. Split into two groups and fixed:
+
+**Group 1 — added to their existing (already-reachable) category:**
+
+| Tool(s) | Category |
+|---|---|
+| `find_similar_notes`, `merge_notes` | `notes` |
+| `calendar_set_recurring` | `time` |
+| `cancel_agent_task` | `vm_agents` (always core-loaded regardless of intent) |
+| `device_open_overlay`, `device_record_voice_note` | `devices` (always core-loaded) |
+| `start_workout`, `end_workout`, `workout_mode_log`, `workout_history` | `fitness` |
+| `queue_for_sara`, `create_research_plan`, `research_plan_status` | `agents` |
+
+**Group 2 — no category existed at all; created new categories + intents:**
+
+| Tool | New category | New intent | Notable |
+|---|---|---|---|
+| `list_people` | `people` | `PEOPLE` (placed before `MEMORY` — `'have i'` keyword collision) | This is Phase D's people-graph tool |
+| `manage_goal` | `goals` | `GOALS` (placed before `PERSONAL_KNOWLEDGE` — `'my goals'` was already its keyword; goal-tracking answers now win over generic fact storage) | This is Phase E's goals tool |
+
+**Verified live:**
+- Full registry sweep: `219` instantiated tools, `0` uncategorized, `0` categorized-but-nonexistent (no typos).
+- `list_people`: real chat message *"who am I overdue to reconnect with?"* → model called `list_people` → real named people with real interaction gaps ("Laura Weippert – ~4 days ago", "Matthew Albano – ~3 days ago") → a genuinely nuanced answer distinguishing actually-overdue from high-frequency-contacts. **`person` table had never been reachable from chat before this.**
+- `manage_goal`: intent routing confirmed correct via logs (`Intent=GOALS ... Loaded 49 tools from categories: ['goals', ...]`); the live chat round-trip ran past a 150s test window without the model calling the tool (LLM latency/judgment, not a wiring bug) — verified the tool's own logic directly instead: created a real `sara_goal` row, deleted after confirming.
+- Keyword-collision fixes made during testing: "let's make finishing the deck a goal" initially fell through to `GENERAL` (my keywords required an exact "make it/this/that a goal" phrase) — widened to the substring `"a goal"` and re-verified against a battery of phrasings including a deliberate near-miss ("did I mention Jim yesterday" — correctly stays `MEMORY`).
+
+Not fixed: the pre-existing `InternalToolAgent` multi-step bug (flagged, not part of this phase's scope).
+
+
 
 
 
