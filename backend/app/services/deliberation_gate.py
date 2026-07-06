@@ -759,6 +759,7 @@ async def _generate_email_draft(user_id: str) -> bool:
             FROM email
             WHERE user_id=:u AND is_read=false
               AND (action_required = true OR importance_score >= 0.7)
+              AND received_at < NOW() - INTERVAL '4 hours'
             ORDER BY received_at ASC LIMIT 1
         """), {"u": user_id})).mappings().first()
         if not row:

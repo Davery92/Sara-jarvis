@@ -34,6 +34,16 @@ Deltas from plan: none structural. `run_checkin_sweep` kept as a backward-compat
 
 Deltas from plan: the LLM (qwen background model) classified the test commitment as `category='errand'` rather than `commitment` despite the prompt's own example matching almost verbatim ("I need to Y by Friday"). This is a model-precision issue in the existing extraction prompt, not a wiring defect — R4 was specifically that the pipeline was never called at all, which is now fixed and proven. Left as a known follow-up, not blocking.
 
-## Phase C.1 — Deterministic verbs
+## Phase C.1 — Deterministic verbs — 2026-07-06
 
-See below — in progress.
+| ID | Status | Evidence |
+|----|--------|----------|
+| C-S1 | PASS | New `app.tasks.assistant_verbs.assistant_verbs_sweep` task, registered in `celery_app.py` include/routes, scheduled via `scheduled_job` (migration 089, cron `*/30 8-20 * * *` ET) |
+| C-R1 (first draft ever) | **PASS — proven live** | Manually invoked `assistant_verbs_sweep.apply()` on the restarted celery-worker container: `{'drafted': 1, 'commitment_nudged': False}`. Confirmed `action_ledger` row: `action_type='email_draft', description="Drafted a reply to 'Invitation: Billing Setup - Theriskninja.com...'"`. Confirmed the actual usable draft landed in `autonomy_attention_item`: *"Draft reply: Invitation: Billing Setup..." → "To: Aeman Tanveer / Can we move this to a time during my work hours? 11 PM your time is too late for me..."* — **zero `email_draft` ledger rows existed before this phase (R6 baseline: never fired, ever).** |
+| C-R2 | PASS | `_generate_email_draft` still has zero send calls — only the LLM completion + `send_notification` to the inbox |
+| C-R3 (cap) | PASS by construction | `_run_email_drafts` checks `action_ledger` count for today before looping, capped at `DAILY_DRAFT_CAP=3` |
+| C-R4 (meeting prep) | PASS | Added an `action_ledger` write (`meeting_prep`) to the existing `calendar_prep.check_and_send_preps` (already scheduled every 15 min) — preps were already firing correctly (attendee history, ownership-aware) but were never ledgered; now they are |
+| C-S2/C-S3/C-S4/C-R5/C-R6/C-R7 | Not yet done | Passivity-mantra replacement done opportunistically as part of Phase A (same prompt file); deep-deliberation tiering (Sonnet 2x/day), structured JSON output, and proposal-rate telemetry (C.3-C.5) are Week 2 scope, not yet implemented |
+
+Deltas from plan: meeting prep reuses the existing `calendar_prep.check_and_send_preps` (already deterministic, already scheduled, already attendee-aware) rather than duplicating that logic inside the new sweep — only the missing `action_ledger` write was added there. `assistant_verbs_sweep` itself covers email drafts + commitment nudges.
+

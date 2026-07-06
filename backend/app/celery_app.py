@@ -81,6 +81,7 @@ celery_app = Celery(
         "app.tasks.notification_tuner",
         "app.tasks.system_wiring_check",
         "app.tasks.ml",
+        "app.tasks.assistant_verbs",
     ]
 )
 
@@ -144,6 +145,7 @@ celery_app.conf.task_routes = {
     "app.tasks.health_baselines.*": {"queue": "health"},
     "app.tasks.sara_self_queue.*": {"queue": "cognitive"},
     "app.tasks.ml.*": {"queue": "cognitive"},
+    "app.tasks.assistant_verbs.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities

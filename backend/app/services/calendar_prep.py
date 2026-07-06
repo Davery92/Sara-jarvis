@@ -215,3 +215,14 @@ async def _prep_for_event(
         source="calendar_prep",
     )
     logger.info(f"Calendar prep sent for '{display_title}' ({time_str})")
+
+    # SARA_UNLEASHED Phase C.1: meeting preps are an autonomous action like any
+    # other and belong in the same auditable ledger (Z-4 invariant).
+    try:
+        from app.services.deliberation_gate import _write_action_ledger
+        await _write_action_ledger(
+            user_id, "meeting_prep", f"Prepped for '{display_title}' ({time_str})",
+            source_ref=event_id,
+        )
+    except Exception as e:
+        logger.debug(f"Calendar prep action_ledger write skipped: {e}")
