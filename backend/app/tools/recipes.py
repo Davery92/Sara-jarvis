@@ -5,6 +5,7 @@ name, ingredients (structured list), instructions (text), category, meal_type,
 cuisine, tags, plus tracking (starred, last_made_at, times_made).
 """
 from typing import Any, Dict, List, Optional
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.recipe import Recipe
 from app.services.embeddings import get_embedding
+from app.services.recipe_nutrition import estimate_recipe_nutrition, macros_missing
 from app.tools.base import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,7 @@ def _summary(r: Recipe) -> Dict[str, Any]:
         "times_made": r.times_made or 0,
         "last_made_at": r.last_made_at.isoformat() if r.last_made_at else None,
         "calories_per_serving": float(r.calories) if r.calories is not None else None,
+        "macros_estimated": bool(r.macros_estimated),
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 
@@ -230,6 +233,19 @@ class RecipeCreateTool(BaseTool):
         except Exception as e:
             logger.warning(f"Recipe embedding failed (continuing): {e}")
 
+        servings = kwargs.get("servings") or 1
+        calories, protein, carbs, fats = kwargs.get("calories"), kwargs.get("protein"), kwargs.get("carbs"), kwargs.get("fats")
+        macros_estimated = False
+        if macros_missing(calories, protein, carbs, fats):
+            try:
+                estimate = await estimate_recipe_nutrition(ingredients, servings)
+            except Exception as e:
+                logger.warning(f"Recipe nutrition estimation failed (continuing without): {e}")
+                estimate = None
+            if estimate:
+                calories, protein, carbs, fats = estimate["calories"], estimate["protein"], estimate["carbs"], estimate["fats"]
+                macros_estimated = True
+
         db: Session = next(get_db())
         try:
             r = Recipe(
@@ -242,17 +258,18 @@ class RecipeCreateTool(BaseTool):
                 instructions=instructions,
                 prep_time_minutes=kwargs.get("prep_time_minutes"),
                 cook_time_minutes=kwargs.get("cook_time_minutes"),
-                servings=kwargs.get("servings") or 1,
+                servings=servings,
                 meal_type=kwargs.get("meal_type"),
                 cuisine=kwargs.get("cuisine"),
                 tags=tags,
                 source_url=kwargs.get("source_url"),
                 source_name=kwargs.get("source_name"),
                 recipe_notes=kwargs.get("recipe_notes") or "",
-                calories=kwargs.get("calories"),
-                protein=kwargs.get("protein"),
-                carbs=kwargs.get("carbs"),
-                fats=kwargs.get("fats"),
+                calories=calories,
+                protein=protein,
+                carbs=carbs,
+                fats=fats,
+                macros_estimated=macros_estimated,
                 embedding=embedding,
             )
             db.add(r)
@@ -514,6 +531,10 @@ class RecipeEditTool(BaseTool):
                 return ToolResult(success=False, message="Recipe not found")
 
             content_changed = False
+            recompute_relevant_changed = False
+            explicit_macros_given = any(
+                kwargs.get(k) is not None for k in ("calories", "protein", "carbs", "fats")
+            )
 
             # Handle steps → instructions conversion
             if "steps" in kwargs and kwargs["steps"] is not None:
@@ -528,8 +549,24 @@ class RecipeEditTool(BaseTool):
                     v = _norm_ingredients(v)
                 if k in ("name", "description", "ingredients", "instructions", "tags"):
                     content_changed = True
+                if k in ("ingredients", "servings"):
+                    recompute_relevant_changed = True
                 if hasattr(r, k):
                     setattr(r, k, v)
+
+            if explicit_macros_given:
+                # David gave real values by hand — never let the estimator
+                # overwrite them (R27's whole point).
+                r.macros_estimated = False
+            elif recompute_relevant_changed and macros_missing(r.calories, r.protein, r.carbs, r.fats):
+                try:
+                    estimate = await estimate_recipe_nutrition(list(r.ingredients or []), r.servings)
+                except Exception as e:
+                    logger.warning(f"recipes_edit nutrition estimation failed (continuing): {e}")
+                    estimate = None
+                if estimate:
+                    r.calories, r.protein, r.carbs, r.fats = estimate["calories"], estimate["protein"], estimate["carbs"], estimate["fats"]
+                    r.macros_estimated = True
 
             if content_changed:
                 try:
@@ -597,13 +634,27 @@ class RecipeLogMadeTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Record that David made this recipe. Bumps times_made and updates last_made_at."
+        return (
+            "Record that David made and/or ate this recipe. Bumps times_made and updates "
+            "last_made_at. If the recipe has per-serving macros (computed or hand-entered), "
+            "also logs it to food_log using those macros directly — no FatSecret round-trip. "
+            "Use this — not food_search_and_log — when David says he ate something that's "
+            "already saved as a recipe (e.g. 'I had the unstuffed peppers for dinner')."
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"recipe_id": {"type": "string"}},
+            "properties": {
+                "recipe_id": {"type": "string"},
+                "meal_type": {
+                    "type": "string",
+                    "enum": ["breakfast", "lunch", "dinner", "snack"],
+                    "description": "Only relevant if also logging to food_log — defaults to the recipe's own meal_type, or 'meal' if unset.",
+                },
+                "servings_eaten": {"type": "number", "description": "How many servings David ate (default 1)"},
+            },
             "required": ["recipe_id"],
         }
 
@@ -611,6 +662,8 @@ class RecipeLogMadeTool(BaseTool):
         recipe_id = kwargs.get("recipe_id")
         if not recipe_id:
             return ToolResult(success=False, message="recipe_id is required")
+        servings_eaten = float(kwargs.get("servings_eaten") or 1)
+
         db: Session = next(get_db())
         try:
             r = db.query(Recipe).filter(Recipe.id == recipe_id, Recipe.user_id == user_id).first()
@@ -618,12 +671,43 @@ class RecipeLogMadeTool(BaseTool):
                 return ToolResult(success=False, message="Recipe not found")
             r.last_made_at = datetime.now(timezone.utc)
             r.times_made = (r.times_made or 0) + 1
+
+            food_log_id = None
+            if not macros_missing(r.calories, r.protein, r.carbs, r.fats):
+                food_log_id = str(uuid.uuid4())
+                meal_type = kwargs.get("meal_type") or r.meal_type or "meal"
+                db.execute(text("""
+                    INSERT INTO food_log (
+                        id, user_id, meal_type, food_items, detailed_items,
+                        calories, protein, carbs, fats, notes, logged_at
+                    ) VALUES (
+                        :id, :user_id, :meal_type,
+                        CAST(:food_items AS jsonb), CAST(:detailed_items AS jsonb),
+                        :calories, :protein, :carbs, :fats, :notes, :logged_at
+                    )
+                """), {
+                    "id": food_log_id,
+                    "user_id": user_id,
+                    "meal_type": meal_type,
+                    "food_items": json.dumps([{"name": r.name, "quantity": servings_eaten, "unit": "serving"}]),
+                    "detailed_items": json.dumps([{"name": r.name, "recipe_id": r.id, "source": "recipe"}]),
+                    "calories": round(float(r.calories) * servings_eaten, 1),
+                    "protein": round(float(r.protein) * servings_eaten, 1),
+                    "carbs": round(float(r.carbs) * servings_eaten, 1),
+                    "fats": round(float(r.fats) * servings_eaten, 1),
+                    "notes": f"Logged from recipe: {r.name}",
+                    "logged_at": datetime.now(),
+                })
+
             db.commit()
             db.refresh(r)
+            msg = f"Logged: made {r.name} (total: {r.times_made}x)"
+            if food_log_id:
+                msg += f" — also logged to food diary ({round(float(r.calories) * servings_eaten)} cal)"
             return ToolResult(
                 success=True,
-                data=_summary(r),
-                message=f"Logged: made {r.name} (total: {r.times_made}x)",
+                data={**_summary(r), "food_log_id": food_log_id},
+                message=msg,
             )
         except Exception as e:
             db.rollback()

@@ -34,6 +34,11 @@ class Recipe(Base):
     protein = Column(Numeric(8, 2), nullable=True)
     carbs = Column(Numeric(8, 2), nullable=True)
     fats = Column(Numeric(8, 2), nullable=True)
+    # SARA_UNLEASHED Phase U.6: True when calories/protein/carbs/fats were
+    # computed from ingredients (FatSecret lookup), False when David gave
+    # them explicitly. Hand-entered values are never overwritten by the
+    # estimator.
+    macros_estimated = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     # --- columns added by add_recipe_table.py ---
     cook_time_minutes = Column(Integer, nullable=True)

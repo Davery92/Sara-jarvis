@@ -129,6 +129,21 @@ The U8-5 sweep surfaced 15 more instantiated-but-uncategorized tools beyond loca
 
 Not fixed: the pre-existing `InternalToolAgent` multi-step bug (flagged, not part of this phase's scope).
 
+## Phase U.6 — Recipes get their macros — 2026-07-06
+
+| ID | Status | Evidence |
+|----|--------|----------|
+| U6-1 (backfill) | **PASS — proven live** | 3 recipes had NULL/all-zero macros (not the plan's cited "2" — audited before touching): `Chicken Bacon Ranch Macaroni Salad`, `Cowboy Butter Ranch Dipping Sauce`, `Basic Crepes`. All backfilled with real computed values, flagged `macros_estimated=true`. `SELECT count(*) FROM recipe WHERE calories IS NULL OR calories = 0` → 0. |
+| U6-2 (macaroni-salad test) | **PASS — proven live** | Real per-serving values from a genuinely messy 16-ingredient free-text list (e.g. "8 slices bacon, cooked crispy and crumbled", "¾ cup mayo" with a unicode fraction glyph the parser can't read as a quantity): 312.6 cal / 24.7g protein / 14.9g carbs / 16.7g fats per serving (10 servings). Plausible for a protein-heavy pasta salad — not fabricated, and not silently perfect either: unicode-fraction ingredients likely resolved poorly against FatSecret, which the aggregate estimate absorbs without failing outright. |
+| U6-3 (new saves compute) | **PASS — proven live** | Created a real recipe (chicken breast + rice, no macros given) via `RecipeCreateTool` → `calories_per_serving=267.8`, `macros_estimated=true`. |
+| U6-4 (hand values respected) | **PASS — proven live** | Created a real recipe with explicit `calories=450` → stored exactly `450.0`, `macros_estimated=false` — estimator did not run. |
+| U6-5 (recipe→food_log bridge) | **PASS — proven live** | `recipes_log_made` now also writes a `food_log` row using the recipe's stored per-serving macros — verified: `dinner | 267.8 cal | 27.2g protein | 22g carbs | 6.8g fats | "Logged from recipe: ..."`. No FatSecret call at log time — instant, using already-computed values. |
+
+Implementation: new `app/services/recipe_nutrition.py` reuses `FoodSearchAndLogTool`'s existing FatSecret lookup + serving-scaling machinery (`_search_food`, `_resolve_nutrition`) rather than re-deriving unit conversion — that logic already had a fixed over-counting bug (oz→gram scaling) worth not duplicating. `macros_missing()` treats an all-zero row as missing, not real data (the exact R27 bug — `recipes_create` accepted `calories` as optional and a naive INSERT with no value produced flat 0.00, not NULL). Migration 092 adds `recipe.macros_estimated`. Wired into both `RecipeCreateTool` (compute when absent/zero) and `RecipeEditTool` (recompute when ingredients/servings change and macros are still missing; hand-given values in an edit flip the flag back to `false` and are never overwritten).
+
+All test data (2 recipes, 1 food_log row) created during verification was deleted after confirming — did not leave synthetic rows in the DB. The 3 backfilled recipes are real, pre-existing data and were left with their new computed values.
+
+
 
 
 
