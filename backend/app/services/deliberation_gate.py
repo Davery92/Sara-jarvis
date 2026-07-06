@@ -216,6 +216,56 @@ def is_notification_banned(
     return None
 
 
+# ── Payload lint (SARA_UNLEASHED Phase A.5 / invariant 5) ──────────────────
+# "Every unprompted utterance carries a payload" — a name, a subject, an
+# event, a number. Content-free check-ins ("How's the afternoon going?") are
+# banned output regardless of how the LLM phrases them, no matter which
+# category proposed them.
+_PAYLOAD_STOP_CAPS = {
+    "Sara", "David", "How", "What", "Why", "When", "Where", "The", "This",
+    "That", "These", "Those", "Hey", "Hi", "Morning", "Afternoon", "Evening",
+    "Just", "You", "Your", "I", "It", "Its", "Wanted", "Checking", "Check",
+}
+
+
+def _memory_entity_tokens(memory) -> set:
+    """Pull a loose bag of 'known concrete things' out of working memory so
+    the payload lint can recognize a proposal that legitimately references
+    them even without a proper-noun capital or a digit."""
+    tokens: set = set()
+    for attr in (
+        "ripe_thread_topics", "last_chat_topic", "next_event_title",
+        "comms_unhandled_top", "open_goals_top", "sara_curiosities",
+        "today_habit_status", "recent_notes_summary",
+    ):
+        val = getattr(memory, attr, None)
+        if not val:
+            continue
+        if isinstance(val, (list, tuple)):
+            val = " ".join(str(v) for v in val)
+        tokens |= set(re.findall(r"[a-z']{4,}", str(val).lower()))
+    return tokens
+
+
+def _lacks_payload(title: str, message: str, memory_tokens: Optional[set] = None) -> bool:
+    """Return True if this notification names nothing concrete — no digit, no
+    proper-noun-looking subject, and no overlap with known working-memory
+    entities. Deliberately generous: anything that looks like it might be
+    concrete is allowed through: this only catches the genuinely templated,
+    content-free case."""
+    text = f"{title} {message}"
+    if re.search(r"\d", text):
+        return False
+    for word in re.findall(r"[A-Za-z']+", message):
+        if word[0].isupper() and word not in _PAYLOAD_STOP_CAPS and len(word) > 2:
+            return False
+    if memory_tokens:
+        lowered = set(re.findall(r"[a-z']{4,}", message.lower()))
+        if memory_tokens & lowered:
+            return False
+    return True
+
+
 def _is_banned_action(action: HomeActionProposal) -> Optional[str]:
     """Check if a home action violates hard bans. Returns ban reason or None."""
     for banned in _BANNED_ENTITIES:
@@ -255,6 +305,15 @@ async def process_deliberation_result(
             f"[DeliberationGate] Notification cap: {total_proposed} proposed, "
             f"processing first 2"
         )
+
+    memory_tokens: set = set()
+    if capped_proposals:
+        try:
+            from app.services.working_memory import read_memory
+            memory_tokens = _memory_entity_tokens(await read_memory(user_id))
+        except Exception as e:
+            logger.debug(f"[DeliberationGate] payload-lint memory fetch skipped: {e}")
+
     for i, proposal in enumerate(capped_proposals):
         ban_reason = _is_banned_notification(proposal)
         if ban_reason:
@@ -262,6 +321,14 @@ async def process_deliberation_result(
                 f"[DeliberationGate] Notification [{i+1}/{len(capped_proposals)}] BLOCKED: "
                 f"category={proposal.category}, title='{proposal.title[:60]}', "
                 f"reason={ban_reason}"
+            )
+            summary["notifications_blocked"] += 1
+            continue
+
+        if _lacks_payload(proposal.title, proposal.message, memory_tokens):
+            logger.info(
+                f"[DeliberationGate] Notification [{i+1}/{len(capped_proposals)}] BLOCKED: "
+                f"category={proposal.category}, title='{proposal.title[:60]}', reason=no_payload"
             )
             summary["notifications_blocked"] += 1
             continue

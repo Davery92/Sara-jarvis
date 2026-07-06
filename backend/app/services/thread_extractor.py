@@ -312,3 +312,25 @@ class ThreadExtractor:
 
 # Module-level singleton
 thread_extractor = ThreadExtractor()
+
+
+async def extract_from_conversation_bg(messages: List, user_id: str) -> None:
+    """Fire-and-forget background entry point, called at end-of-stream from
+    ``/chat/stream`` (SARA_UNLEASHED Phase B). This used to be defined as
+    ``_extract_conversation_threads`` in main_simple.py, wired to a
+    ``_SyncAsAsyncDB`` wrapper around a sync ``SessionLocal`` — but nothing
+    ever called it (R4: commitment extraction was fully built and never
+    wired). Moved here with the real async session factory instead of the
+    sync-wrapped-as-async hack.
+
+    ``extract_threads`` internally rate-limits (EXTRACTION_COOLDOWN) and
+    requires >=3 user messages, so it's safe to call on every turn."""
+    try:
+        from app.db.session import get_async_session_factory
+        factory = get_async_session_factory()
+        async with factory() as db:
+            await thread_extractor.extract_threads(messages, user_id, db)
+            await thread_extractor.resolve_threads_from_conversation(messages, user_id, db)
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"Thread extraction background task failed (non-critical): {e}")

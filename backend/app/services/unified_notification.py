@@ -832,6 +832,42 @@ async def flush_notification_queue(
     }
 
 
+async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) -> bool:
+    """Learned buzz decision (SARA_UNLEASHED Phase A.3). Replaces the blanket
+    "normal/low priority never pushes, only high+ does" rule — that rule is
+    exactly why proactive_checkins force-floored priority to `high` to be
+    heard at all (R1-R3). The attention queue is now the single place "does
+    this actually buzz the phone?" gets decided, and it learns: push a
+    normal/low item iff this category's trailing 30-day engagement rate is
+    >= 40% AND David is currently interruptible (>= 0.5). A category with
+    fewer than 5 sends in the window has no track record yet and fails
+    closed (inbox-only) until it earns a push."""
+    try:
+        row = await _db_execute(db, text("""
+            SELECT count(*) FILTER (WHERE sent = true) AS sent,
+                   count(*) FILTER (WHERE engaged = true) AS engaged
+            FROM notification_log
+            WHERE user_id = :uid AND category = :cat
+              AND sent_at > NOW() - INTERVAL '30 days'
+        """), {"uid": user_id, "cat": category})
+        r = row.fetchone()
+        sent, engaged = (int(r[0] or 0), int(r[1] or 0)) if r else (0, 0)
+        if sent < 5 or (engaged / sent) < 0.4:
+            return False
+    except Exception as e:
+        logger.debug(f"[buzz] engagement lookup failed for {category}: {e}")
+        return False
+
+    try:
+        from app.services.activity_state_machine import activity_state_machine
+        from app.services.interruptibility import compute_interruptibility
+        score = compute_interruptibility(activity_state_machine.current).score
+        return score >= 0.5
+    except Exception as e:
+        logger.debug(f"[buzz] interruptibility lookup failed: {e}")
+        return False
+
+
 async def route_through_attention_queue(
     user_id: str,
     title: str,
@@ -928,8 +964,14 @@ async def route_through_attention_queue(
             _bypass_attention=True,
         )
 
-    # High priority and above: also send push (bypass attention to avoid recursion)
-    if priority in ("high", "urgent", "critical"):
+    # High priority and above always pushes. Normal/low pushes too, iff the
+    # learned buzz decision says this category has earned it right now
+    # (Phase A.3) — otherwise it's inbox-only, same as before.
+    should_push = priority in ("high", "urgent", "critical")
+    if not should_push:
+        should_push = await _learned_buzz_decision(db, user_id, category)
+
+    if should_push:
         result = await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
@@ -944,7 +986,7 @@ async def route_through_attention_queue(
         "sent": False,
         "attention_item_id": item_id,
         "routed_through_attention": True,
-        "reason": f"Low/normal priority routed to attention queue",
+        "reason": "Low/normal priority routed to attention queue (buzz decision: inbox-only)",
     }
 
 
@@ -1187,7 +1229,29 @@ async def _log_notification(
     dedup_blocked: bool,
     attention_item_id: Optional[str] = None,
 ) -> Optional[int]:
-    """Log a notification attempt to notification_log."""
+    """Log a notification attempt to notification_log.
+
+    Dedup-blocked attempts (Phase A.4) don't insert a fresh churn row — they
+    increment `blocked_count` on the most recent blocked row for this exact
+    topic instead. This is what killed the 106/week of pure log churn from
+    repeated dedup-blocked sends (SARA_UNLEASHED R3)."""
+    if dedup_blocked:
+        bumped = await _db_execute(db, text("""
+            UPDATE notification_log
+            SET blocked_count = COALESCE(blocked_count, 1) + 1
+            WHERE id = (
+                SELECT id FROM notification_log
+                WHERE user_id = :user_id AND topic = :topic AND dedup_blocked = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            )
+            RETURNING id
+        """), {"user_id": user_id, "topic": topic})
+        row = bumped.fetchone()
+        if row:
+            return row[0]
+        # First block for this topic since the last real send — fall through
+        # to insert a single row that future blocks will increment.
+
     result = await _db_execute(db, text("""
         INSERT INTO notification_log
         (user_id, topic, category, title, message, priority, source,

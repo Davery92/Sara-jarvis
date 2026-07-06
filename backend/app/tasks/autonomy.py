@@ -1486,14 +1486,18 @@ async def _deliberation_fallback_async():
 )
 def proactive_checkin_sweep(self):
     """
-    Occasional 'how's it going' pings + post-meeting follow-ups, gated by
-    interruptibility and anti-nag caps. Runs every ~15 min during waking hours.
+    Follow-up sweep: delivers the single ripest open thread (post-meeting
+    recap or commitment), gated by interruptibility and anti-nag caps. Runs
+    every ~15 min during waking hours. Template/ambient check-in pings were
+    removed in SARA_UNLEASHED Phase A — occasional contextual check-ins are
+    now proposed by the deliberation engine itself, subject to the same gate
+    and payload lint as every other proactive notification.
     """
     try:
-        from app.services.proactive_checkins import run_checkin_sweep
-        return _run_async(run_checkin_sweep(DEFAULT_USER_ID))
+        from app.services.proactive_checkins import run_followup_sweep
+        return _run_async(run_followup_sweep(DEFAULT_USER_ID))
     except Exception as e:
-        logger.error(f"Proactive check-in sweep failed: {e}")
+        logger.error(f"Follow-up sweep failed: {e}")
         return {"error": str(e)}
 
 

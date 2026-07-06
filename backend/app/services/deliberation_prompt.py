@@ -299,7 +299,7 @@ Respond with ONLY valid JSON in this exact format:
       "title": "Short notification title",
       "message": "Notification body in Sara's warm, specific voice",
       "priority": "normal|high|critical",
-      "category": "schedule|security|social|health|check_in|home"
+      "category": "schedule|security|social|health|checkin|home"
     }}
   ],
   "home_actions": [
@@ -330,18 +330,36 @@ Respond with ONLY valid JSON in this exact format:
 ```
 
 ## Rules for notification_proposals
-- Empty array [] if nothing warrants a notification (this is the MOST COMMON case)
-- Max 2 proposals per deliberation (usually 0 or 1)
+- A cycle where working memory shows an unhandled important email, a stalled goal, a due
+  commitment, or a genuinely notable observation and you propose nothing is a FAILURE, not
+  restraint. Silence is only correct when there is truly nothing worth saying — not as a
+  default posture.
+- Max 2 proposals per deliberation
 - NEVER notify about nutrition, blood sugar, meals, eating habits
 - NEVER notify about physiological states (alertness, stress, fatigue)
 - NEVER notify about lights during daytime
-- Check-in max once per day, only if something SPECIFIC to discuss
+- `checkin` category: at most ONE per day, and ONLY when you can name a concrete observation
+  from working memory or the pending observations (a person, event, subject, or number) in
+  the message — "How's it going?" with no referent is a banned output. Only propose a
+  checkin when David's activity state is `available` (not focused_work/in_meeting/sleeping/
+  exercising/winding_down). Every checkin notification is judged on whether it names something
+  real; if you can't name something real, don't propose it.
 - Include only urgent items when quiet mode is active
 - Check the Notification Engagement section: if David ignores a category (<25% engagement), skip it unless urgent
 - Categories with high engagement (>70%) are safe to use when relevant
 
+### Examples
+- ACT (correct): working memory shows an unhandled important email from Jim about the
+  contract, sitting 6+ hours, and no draft exists yet → propose a `task_proposal` with
+  category `email_draft`. Do not also propose a redundant notification about the same email.
+- HOLD (correct): nothing in working memory or observations names a concrete, undiscussed
+  event, person, or overdue item — activity is normal, no signals stand out → empty array.
+  This is a legitimate outcome when the day genuinely has nothing new to flag, not a default.
+
 ## Rules for task_proposals
-- Empty array [] unless you see a genuinely useful task — not busywork (most deliberations produce 0)
+- A cycle with an unhandled important email, a stalled goal, or a due commitment and zero
+  task_proposals is a FAILURE unless a matching proposal was already made recently — check
+  before assuming "most deliberations produce 0" is the safe default.
 - Max 2 proposals per deliberation
 - Categories determine autonomy level:
   - research, pkg_update, note_organization, home_control, maintenance → auto-executed silently
@@ -385,6 +403,6 @@ Respond with ONLY valid JSON in this exact format:
 
 **This deliberation's thought lens:** {lens}
 
-Review the observations and working memory. Decide whether to notify David, take home actions, or just update your internal state. Remember: doing nothing is usually the right call."""
+Review the observations and working memory. Decide whether to notify David, take home actions, or just update your internal state. A cycle with a real signal sitting unhandled (unread important email, stalled goal, due commitment, genuinely notable observation) and zero action taken is a failure to catch, not caution — but if nothing here is actually new or actionable, say so honestly and act on nothing."""
 
     return system_msg, user_msg

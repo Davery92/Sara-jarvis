@@ -148,13 +148,18 @@ async def record_mention(thread_id: str, db: AsyncSession) -> Dict:
     return {"success": False, "error": "Thread not found"}
 
 
-async def resolve_thread(thread_id: str, db: AsyncSession) -> bool:
-    """Mark a thread as resolved (David completed or addressed the thing)."""
+async def resolve_thread(thread_id: str, db: AsyncSession, david_response: str = "positive") -> bool:
+    """Mark a thread as resolved (David completed or addressed the thing).
+
+    Also records `david_response` (default 'positive' — resolving implicitly
+    means David did the thing or it's moot) so the pattern learner has a real
+    signal from commitment resolutions, not just an empty status flip."""
     result = await db.execute(text("""
         UPDATE followup_thread
-        SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+        SET status = 'resolved', resolved_at = NOW(), updated_at = NOW(),
+            david_response = :david_response
         WHERE id = :tid AND status = 'open'
-    """), {"tid": thread_id})
+    """), {"tid": thread_id, "david_response": david_response})
     return result.rowcount > 0
 
 

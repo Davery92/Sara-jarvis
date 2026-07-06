@@ -8121,43 +8121,9 @@ Guidelines:
         db.close()
 
 
-async def _extract_conversation_threads(messages, user_id: str):
-    """Background: extract open threads from conversation for follow-up."""
-    try:
-        from app.services.thread_extractor import thread_extractor
-        from app.db.base import SessionLocal as ThreadSessionLocal
-        from sqlalchemy.ext.asyncio import AsyncSession
-
-        # Use sync session wrapped for the thread extractor
-        # The thread extractor uses async DB via sqlalchemy text() queries
-        bg_db = ThreadSessionLocal()
-        try:
-            # Create a simple async-compatible wrapper
-            class _SyncAsAsyncDB:
-                """Minimal wrapper to let sync SessionLocal work with async code."""
-                def __init__(self, sync_db):
-                    self._db = sync_db
-                async def execute(self, stmt, params=None):
-                    return self._db.execute(stmt, params)
-                async def commit(self):
-                    self._db.commit()
-                async def rollback(self):
-                    self._db.rollback()
-                @property
-                def rowcount(self):
-                    return self._db
-
-            db_wrapper = _SyncAsAsyncDB(bg_db)
-            await thread_extractor.extract_threads(messages, user_id, db_wrapper)
-            await thread_extractor.resolve_threads_from_conversation(messages, user_id, db_wrapper)
-            await db_wrapper.commit()
-        finally:
-            bg_db.close()
-    except Exception as e:
-        logger.debug(f"Thread extraction failed (non-critical): {e}")
-
-
 # Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
+# (Commitment/thread extraction moved to app.services.thread_extractor.extract_from_conversation_bg
+# — SARA_UNLEASHED Phase B. The old _extract_conversation_threads here had zero callers.)
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -9429,6 +9395,19 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
                     await event_queue.put({"type": "done"})
                     logger.info("✅ done event queued")
+
+                    # Commitment/thread extraction (SARA_UNLEASHED Phase B): fire-and-forget
+                    # after every turn. extract_threads() internally rate-limits
+                    # (EXTRACTION_COOLDOWN) and requires >=3 user messages, so this is safe
+                    # to call unconditionally rather than re-deriving those gates here.
+                    try:
+                        from app.services.thread_extractor import extract_from_conversation_bg
+                        _full_messages = list(request.messages) + (
+                            [{"role": "assistant", "content": response_content}] if response_content else []
+                        )
+                        asyncio.ensure_future(extract_from_conversation_bg(_full_messages, str(current_user.id)))
+                    except Exception as e:
+                        logger.debug(f"Thread extraction kickoff skipped: {e}")
 
                     # Send push notification if requested (for background completion)
                     if request.notify_on_complete and response_content:

@@ -1,27 +1,37 @@
 """
-Proactive check-ins — occasional "how's it going" pings + post-meeting follow-ups.
+Follow-up sweep — post-meeting recaps + open-thread follow-ups.
+
+SARA_UNLEASHED Phase A: the old ``run_checkin_sweep`` also ran two template
+paths (a deterministic "checkin_builder" ping and an ambient "How's the
+afternoon going?" line after a long quiet stretch) with priority force-floored
+to ``high`` so they'd bypass the attention queue's normal/low silencing. That
+was a second proactivity brain fighting the deliberation engine, and it's why
+120 of 140 weekly notifications were empty check-ins (SARA_UNLEASHED_PLAN.md
+R1-R3). Both template paths are deleted. The only remaining entry point below
+delivers a *ripe thread* — a real payload (a meeting, a commitment, a chat
+thread) — never a content-free ping. Occasional contextual check-ins are now
+proposed by the deliberation engine itself (deliberation_prompt.py's `checkin`
+rule), which routes through the same gate and payload lint as everything else.
 
 Two entry points, both gated hard by interruptibility and anti-nag caps:
 
 - ``scan_ended_meetings()`` — when a real meeting just wrapped, opens a
   ``followup_thread`` ("How'd that meeting go?"). It does NOT notify directly;
   the sweep delivers it once David is interruptible.
-- ``run_checkin_sweep()`` — runs every ~15 min during waking hours. Delivers, in
-  priority order: a ripe thread follow-up (post-meeting included), a contextual
-  template check-in, or an occasional ambient ping after a long quiet stretch.
+- ``run_followup_sweep()`` — runs every ~15 min during waking hours. Delivers
+  the single ripest open thread (post-meeting recaps + commitments included),
+  if any, and does nothing otherwise.
 
 Everything is reused, not reinvented:
 - ``thread_manager``            → anti-harping (max_mentions, drop-on-ignore)
-- ``checkin_builder``           → deterministic check-in templates
-- ``unified_context``           → the context snapshot
 - ``activity_state_machine`` + ``interruptibility`` → never ping during a
   meeting, deep-focus work, exercise, wind-down, or sleep
-- ``unified_notification.send_notification`` → dedup, cooldown, push delivery
+- ``unified_notification.send_notification`` → dedup, cooldown, push delivery,
+  and (now) the learned buzz decision — priority is no longer floored here.
 
 Topics are namespaced so the existing per-category caps do the right thing:
-ambient pings use ``checkin:`` (capped to ~1 per 6h by the pipeline), while
-post-meeting follow-ups use ``followup:`` so a timely meeting recap is never
-swallowed by an earlier ambient ping.
+post-meeting/thread follow-ups use ``followup:`` so a timely meeting recap is
+never swallowed by an earlier item.
 """
 
 import logging
@@ -84,16 +94,13 @@ async def _checkins_sent_today(db, user_id: str) -> int:
 
 
 async def _send(user_id: str, *, title: str, message: str, category: str,
-                topic: str, priority: str = "high") -> dict:
+                topic: str, priority: str = "normal") -> dict:
     from app.services.unified_notification import send_notification
-    # Check-ins are interruptibility-gated upstream (waking hours + interruptibility
-    # + daily cap), so by the time we get here this is an intentional ping that must
-    # actually buzz the phone. route_through_attention_queue only pushes for
-    # high/urgent/critical — normal/low become SILENT inbox items (no push, no
-    # notification_log row). That's why proactive check-ins showed up in the inbox
-    # but never delivered a push. Floor to high so the item is created AND pushed.
-    if priority in ("low", "normal"):
-        priority = "high"
+    # No priority floor here (SARA_UNLEASHED Phase A.3): whether this actually
+    # buzzes the phone is decided once, centrally, by
+    # unified_notification.route_through_attention_queue's learned buzz
+    # decision (trailing engagement + interruptibility). A caller inflating
+    # priority to defeat that routing is exactly the bug this phase removes.
     return await send_notification(
         user_id=user_id,
         title=title,
@@ -106,17 +113,10 @@ async def _send(user_id: str, *, title: str, message: str, category: str,
     )
 
 
-def _ambient_line() -> str:
-    h = local_now().hour
-    if h < 12:
-        return "Morning — how's the day shaping up so far?"
-    if h < 17:
-        return "How's the afternoon going?"
-    return "How's your evening going?"
-
-
-async def run_checkin_sweep(user_id: str) -> dict:
-    """Deliver at most one check-in if the moment is right. Safe to call often."""
+async def run_followup_sweep(user_id: str) -> dict:
+    """Deliver the single ripest open thread (meeting recap or commitment), if
+    any. No template or ambient pings — those are gone (Phase A.1). Safe to
+    call often; a no-op most of the time by design."""
     if not _in_waking_hours():
         return {"skipped": "outside_hours"}
 
@@ -131,56 +131,33 @@ async def run_checkin_sweep(user_id: str) -> dict:
         if sent_today >= DAILY_CHECKIN_CAP:
             return {"skipped": "daily_cap", "sent_today": sent_today}
 
-        # 1) Ripe thread follow-up (post-meeting recaps + chat threads) — most personal.
+        # Ripe thread follow-up (post-meeting recaps + commitments) — the only
+        # remaining path. Always payload-carrying: a thread always names a
+        # concrete meeting, commitment, or topic.
         from app.services.thread_manager import get_open_threads, record_mention
         threads = await get_open_threads(user_id, db)
-        if threads:
-            t = threads[0]
-            message = (t.get("suggested_followup") or "").strip() or "Wanted to follow up on that."
-            res = await _send(
-                user_id,
-                title="Hey David",
-                message=message,
-                category="followup",
-                topic=f"followup:{t['id'][:12]}",
-                priority="normal",
-            )
-            if res.get("sent"):
-                await record_mention(t["id"], db)
-                await db.commit()
-            return {"sent": bool(res.get("sent")), "kind": "thread",
-                    "meeting": t.get("category") == "meeting", "reason": res.get("reason")}
+        if not threads:
+            return {"skipped": "nothing_to_say", "state": state}
 
-        # 2) Contextual check-in from deterministic templates.
-        from app.services.unified_context import read_snapshot
-        from app.services.checkin_builder import build_checkin
-        snap = await read_snapshot(user_id)
+        t = threads[0]
+        message = (t.get("suggested_followup") or "").strip() or f"Wanted to follow up on {t['topic']}."
+        res = await _send(
+            user_id,
+            title="Hey David",
+            message=message,
+            category="followup",
+            topic=f"followup:{t['id'][:12]}",
+            priority="normal",
+        )
+        if res.get("sent"):
+            await record_mention(t["id"], db)
+            await db.commit()
+        return {"sent": bool(res.get("sent")), "kind": "thread",
+                "meeting": t.get("category") == "meeting", "reason": res.get("reason")}
 
-        checkin = build_checkin(snap, changes=[], open_threads=None)
-        if checkin:
-            res = await _send(
-                user_id,
-                title=checkin.get("title", "Checking in"),
-                message=checkin["message"],
-                category="checkin",
-                topic="checkin",
-                priority=checkin.get("priority", "normal"),
-            )
-            return {"sent": bool(res.get("sent")), "kind": "contextual", "reason": res.get("reason")}
 
-        # 3) Occasional ambient ping — only after a genuinely long quiet stretch.
-        if (snap.hours_since_last_chat or 0) >= AMBIENT_GAP_HOURS:
-            res = await _send(
-                user_id,
-                title="Checking in",
-                message=_ambient_line(),
-                category="checkin",
-                topic="checkin",
-                priority="normal",
-            )
-            return {"sent": bool(res.get("sent")), "kind": "ambient", "reason": res.get("reason")}
-
-        return {"skipped": "nothing_to_say", "state": state}
+# Back-compat alias — anything importing the old name keeps working.
+run_checkin_sweep = run_followup_sweep
 
 
 async def scan_ended_meetings(user_id: str) -> dict:
