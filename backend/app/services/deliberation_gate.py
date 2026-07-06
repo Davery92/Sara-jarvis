@@ -247,6 +247,23 @@ def _memory_entity_tokens(memory) -> set:
     return tokens
 
 
+def _has_proper_noun(text: str) -> bool:
+    """Mid-sentence capitalized word not on the stop list — a real signal of
+    a name/subject. The SENTENCE-INITIAL word is deliberately excluded: every
+    English sentence starts with a capital letter regardless of content, so
+    "How's the afternoon going?" would otherwise register "How's" as if it
+    were a proper noun. Also strips contractions/possessives before checking
+    the stop list ("How's" -> "How", "Jim's" -> "Jim") — without that split,
+    every "How's"/"What's"/"That's" opener slipped the lint entirely, which
+    is exactly the banned phrase this lint exists to catch."""
+    words = re.findall(r"[A-Za-z']+", text)
+    for word in words[1:]:
+        base = word.split("'")[0]
+        if word[0].isupper() and base not in _PAYLOAD_STOP_CAPS and len(base) > 2:
+            return True
+    return False
+
+
 def _lacks_payload(title: str, message: str, memory_tokens: Optional[set] = None) -> bool:
     """Return True if this notification names nothing concrete — no digit, no
     proper-noun-looking subject, and no overlap with known working-memory
@@ -256,9 +273,8 @@ def _lacks_payload(title: str, message: str, memory_tokens: Optional[set] = None
     text = f"{title} {message}"
     if re.search(r"\d", text):
         return False
-    for word in re.findall(r"[A-Za-z']+", message):
-        if word[0].isupper() and word not in _PAYLOAD_STOP_CAPS and len(word) > 2:
-            return False
+    if _has_proper_noun(title) or _has_proper_noun(message):
+        return False
     if memory_tokens:
         lowered = set(re.findall(r"[a-z']{4,}", message.lower()))
         if memory_tokens & lowered:
