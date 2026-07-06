@@ -399,16 +399,128 @@ class WakeSensorService:
         )
         logger.info("simulated turn emitted: trace_id=%s", context.trace_id)
 
-    async def _live_audio_loop(self) -> None:
-        """
-        Placeholder for extracted live audio path.
+    def _resolve_mic_device(self, sd) -> Optional[int]:
+        needle = (self.config.mic_device or "").lower()
+        if not needle:
+            return None
+        try:
+            for idx, dev in enumerate(sd.query_devices()):
+                if dev.get("max_input_channels", 0) > 0 and needle in dev.get("name", "").lower():
+                    return idx
+        except Exception as exc:
+            logger.warning("mic device lookup failed: %s", exc)
+        return None
 
-        Planned wiring:
-        - mic capture frames
-        - openWakeWord infer
-        - VAD segmentation
-        - emit wake/utterance events with trace_id
+    async def _live_audio_loop(self) -> None:
+        """Real mic capture -> openWakeWord -> lightweight energy-based
+        utterance boundary detection -> wake/utterance events.
+
+        Deliberately doesn't pull in sara-voice's full VAD/STT stack — this
+        service's job is the wake-word "sensor" layer only; a detected
+        utterance's actual transcription/response still happens downstream
+        in sara-voice. Energy-based silence detection (silence_ms) is
+        sufficient here since we only need an utterance *boundary*, not a
+        clean isolated clip.
         """
-        logger.info("live audio mode selected; capture pipeline not yet wired")
-        while self._running:
-            await asyncio.sleep(5)
+        try:
+            import sounddevice as sd
+            import numpy as np
+            from openwakeword.model import Model
+            from pathlib import Path
+        except ImportError as exc:
+            logger.error("Live audio dependencies missing (%s); falling back to idle loop", exc)
+            while self._running:
+                await asyncio.sleep(5)
+            return
+
+        model_path = Path(self.config.model_path)
+        model = Model(wakeword_models=[str(model_path)], inference_framework="onnx") if model_path.exists() else Model(inference_framework="onnx")
+        logger.info("Live audio: openWakeWord model loaded from %s", model_path if model_path.exists() else "(bundled default)")
+
+        device = self._resolve_mic_device(sd)
+        loop = asyncio.get_event_loop()
+        audio_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+
+        def _callback(indata, frames, time_info, status):
+            if status:
+                logger.debug("mic stream status: %s", status)
+            mono = indata[:, 0].copy()
+            try:
+                loop.call_soon_threadsafe(audio_queue.put_nowait, mono)
+            except Exception:
+                pass  # queue full — drop frame rather than block the audio thread
+
+        stream = sd.InputStream(
+            samplerate=self.config.sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=self.config.chunk_size,
+            device=device,
+            callback=_callback,
+        )
+        stream.start()
+        logger.info("Live audio capture started (device=%s, sample_rate=%d)", device, self.config.sample_rate)
+
+        in_utterance = False
+        last_voice_at = 0.0
+        trace_id: Optional[str] = None
+        last_wake_at = 0.0
+        refractory_seconds = 2.0
+
+        try:
+            while self._running:
+                chunk = await audio_queue.get()
+                now = time.monotonic()
+                rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2) + 1e-10))
+
+                if not in_utterance:
+                    if now - last_wake_at < refractory_seconds:
+                        continue
+                    pcm16 = np.clip(chunk * 32767, -32768, 32767).astype(np.int16)
+                    prediction = model.predict(pcm16)
+                    for model_name, score in prediction.items():
+                        if score >= self._runtime_wake_threshold:
+                            last_wake_at = now
+                            trace_id = None
+                            context = TurnContext(speaker_id="david")
+                            trace_id = context.trace_id
+                            logger.info("Live wake word detected: %s=%.3f", model_name, score)
+                            await self.client.publish_event(VoiceEvent(
+                                event_type="wake.detected",
+                                source=self.config.internal_service,
+                                trace_id=trace_id,
+                                payload={
+                                    "keyword": self._runtime_keyword,
+                                    "model_version": self._active_wake_model_version,
+                                    "confidence": round(float(score), 3),
+                                    "threshold": self._runtime_wake_threshold,
+                                },
+                            ))
+                            await self.client.publish_event(VoiceEvent(
+                                event_type="utterance.started",
+                                source=self.config.internal_service,
+                                trace_id=trace_id,
+                                payload={"speaker_id": "david"},
+                            ))
+                            in_utterance = True
+                            last_voice_at = now
+                            utterance_started_at = now
+                            break
+                else:
+                    if rms > self.config.silence_rms_threshold:
+                        last_voice_at = now
+                    silence_ms = (now - last_voice_at) * 1000
+                    if silence_ms >= self.config.silence_ms:
+                        duration_ms = int((now - utterance_started_at) * 1000)
+                        await self.client.publish_event(VoiceEvent(
+                            event_type="utterance.ended",
+                            source=self.config.internal_service,
+                            trace_id=trace_id,
+                            payload={"duration_ms": duration_ms},
+                        ))
+                        logger.info("Live utterance ended: trace_id=%s duration_ms=%d", trace_id, duration_ms)
+                        in_utterance = False
+                        trace_id = None
+        finally:
+            stream.stop()
+            stream.close()

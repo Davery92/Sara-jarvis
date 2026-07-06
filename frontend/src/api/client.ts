@@ -761,27 +761,6 @@ class ApiClient {
     return response.data
   }
 
-  // Proactive Suggestions endpoints
-  async getProactiveSuggestions(): Promise<any[]> {
-    const response = await this.client.get('/api/suggestions')
-    return response.data
-  }
-
-  async updateSuggestionStatus(suggestionId: string, status: 'accepted' | 'dismissed'): Promise<any> {
-    const response = await this.client.patch(`/api/suggestions/${suggestionId}`, { status })
-    return response.data
-  }
-
-  // Detected Patterns endpoints
-  async getDetectedPatterns(): Promise<any[]> {
-    const response = await this.client.get('/api/detected-patterns')
-    return response.data
-  }
-
-  async getPattern(patternId: string): Promise<any> {
-    const response = await this.client.get(`/api/patterns/${patternId}`)
-    return response.data
-  }
 
   // Device Management endpoints
   async getDevices(): Promise<DeviceListResponse> {
@@ -912,6 +891,120 @@ class ApiClient {
     )
     return response.data
   }
+
+  // ── Settings → Location (places + location-triggered reminders) ──────
+  async listPlaces(): Promise<KnownPlace[]> {
+    const response = await this.client.get('/api/location/places')
+    return response.data.places
+  }
+
+  async listSuggestedPlaces(): Promise<KnownPlace[]> {
+    const response = await this.client.get('/api/location/places/suggestions')
+    return response.data.suggestions
+  }
+
+  async createPlace(data: PlaceCreate): Promise<KnownPlace> {
+    const response = await this.client.post('/api/location/places', data)
+    return response.data
+  }
+
+  async updatePlace(placeId: string, data: Partial<PlaceCreate>): Promise<KnownPlace> {
+    const response = await this.client.patch(`/api/location/places/${placeId}`, data)
+    return response.data
+  }
+
+  async deletePlace(placeId: string): Promise<void> {
+    await this.client.delete(`/api/location/places/${placeId}`)
+  }
+
+  async confirmSuggestedPlace(placeId: string, name: string, placeType: string): Promise<KnownPlace> {
+    const response = await this.client.post(`/api/location/places/${placeId}/confirm`, {
+      name,
+      place_type: placeType,
+    })
+    return response.data
+  }
+
+  async dismissSuggestedPlace(placeId: string): Promise<void> {
+    await this.client.post(`/api/location/places/${placeId}/dismiss`)
+  }
+
+  async geocodeAddress(address: string): Promise<{ latitude: number; longitude: number }> {
+    const response = await this.client.post('/api/location/geocode', { address })
+    return response.data
+  }
+
+  async listLocationTriggers(): Promise<LocationTrigger[]> {
+    const response = await this.client.get('/api/location/triggers')
+    return response.data.triggers
+  }
+
+  async cancelLocationTrigger(triggerId: string): Promise<void> {
+    await this.client.delete(`/api/location/triggers/${triggerId}`)
+  }
+
+  // ── Settings → Daily Rhythm (learned model of David's typical day) ────
+  async getRhythm(): Promise<RhythmResponse> {
+    const response = await this.client.get('/api/rhythm')
+    return response.data
+  }
+}
+
+export interface KnownPlace {
+  id: string
+  name: string
+  place_type: string
+  latitude: number
+  longitude: number
+  radius_m: number
+  source: string
+  status: 'active' | 'suggested' | 'dismissed'
+  visit_count: number
+  last_seen_at: string | null
+  is_active: boolean
+  created_at: string
+}
+
+export interface PlaceCreate {
+  name: string
+  place_type: string
+  latitude: number
+  longitude: number
+  radius_m?: number
+}
+
+export interface LocationTrigger {
+  id: string
+  trigger_on: 'enter' | 'exit'
+  place_id: string | null
+  label: string
+  reminder_title: string
+  reminder_description: string | null
+  recurring: boolean
+  cooldown_minutes: number
+  status: string
+  expires_at: string | null
+  last_fired_at: string | null
+  created_at: string
+}
+
+export interface RhythmRow {
+  rhythm_key: string
+  day_scope: string
+  window_start: string | null
+  window_end: string | null
+  median_time: string | null
+  confidence: number
+  sample_count: number
+  variance_minutes: number | null
+  computed_at: string | null
+  place_name?: string
+}
+
+export interface RhythmResponse {
+  summary: string | null
+  core: RhythmRow[]
+  places: RhythmRow[]
 }
 
 export interface TunableSetting {

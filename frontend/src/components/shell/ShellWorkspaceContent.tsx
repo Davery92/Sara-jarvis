@@ -129,7 +129,7 @@ interface ShellWorkspaceContentProps {
   onOrchestratorBack: () => void
   inboxTab: 'attention' | 'content'
   onSelectInboxTab: React.Dispatch<React.SetStateAction<'attention' | 'content'>>
-  onOpenContentChat: (inboxItemId: string, title: string) => void
+  onOpenContentChat: (inboxItemId: string, title: string, excerpt?: string) => void
   onOpenAttentionChat: (prompt: string) => void
   onAskSara: (prompt: string) => void
   chatAutoSendToken?: number

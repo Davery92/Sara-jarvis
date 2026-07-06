@@ -80,7 +80,7 @@ async def check_and_send_preps(user_id: str):
     async with async_session() as db:
         # Find upcoming events
         result = await db.execute(text("""
-            SELECT id, title, start_time, location, description, ios_calendar_name, attendees
+            SELECT id, title, start_time, location, description, ios_calendar_name, attendees, organizer
             FROM calendar_event
             WHERE user_id = :uid
               AND start_time BETWEEN :start AND :end
@@ -92,8 +92,22 @@ async def check_and_send_preps(user_id: str):
     if not events:
         return
 
+    from app.services.calendar_ownership import attendance_role
+
     for event in events:
-        event_id, title, start_time, location, description, calendar_name, attendees = event
+        event_id, title, start_time, location, description, calendar_name, attendees, organizer = event
+
+        # Skip prep entirely for events David declined, or broadcast invites
+        # he's not organizing — "is this David's meeting" reasoning so a
+        # 40-person all-hands doesn't get the same prep as a 1:1 he's running.
+        role = attendance_role(organizer, attendees)
+        if role.declined:
+            logger.info(f"Calendar prep skipped for '{title}': David declined")
+            continue
+        if role.is_broadcast:
+            logger.info(f"Calendar prep skipped for '{title}': broadcast invite ({role.attendee_count} attendees, not organizer)")
+            continue
+
         await _prep_for_event(
             user_id, str(event_id), title, start_time, location, description, attendees,
             calendar_name=calendar_name,

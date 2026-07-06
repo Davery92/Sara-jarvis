@@ -91,6 +91,12 @@ class EventType(str, Enum):
     ACTIVITY_STATE_CHANGED = "activity.state_changed"
     PRESENCE_ROOM_CHANGED = "presence.room_changed"
     INTERRUPTIBILITY_CHANGED = "interruptibility.changed"
+    # Unified "which device is David active on" resolver (device_presence.py, A7)
+    DEVICE_ACTIVE_CHANGED = "presence.device_active_changed"
+
+    # Location events (phone GPS / geofencing)
+    LOCATION_PLACE_ENTERED = "location.place_entered"
+    LOCATION_PLACE_EXITED = "location.place_exited"
 
     # Desktop activity events (from the Sara desktop agent's focus tracker)
     DESKTOP_FOCUS_SPAN = "desktop.focus_span"

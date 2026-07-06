@@ -35,6 +35,12 @@ _SURFACES = {
     "nutrition": ("nutrition", "daily nutrition", "macros", "food log", "food diary", "calories"),
     "calendar": ("calendar", "schedule", "agenda", "day", "events"),
     "tasks": ("tasks", "task list", "background tasks", "agent tasks", "missions"),
+    "report": ("report", "reports", "research brief", "intelligence report", "the report you just ran"),
+    "timers": ("timers", "my timers", "active timers"),
+    "inbox": ("inbox", "my inbox", "assistant inbox"),
+    "blank-note": ("blank note", "new note", "a new note", "quick note"),
+    "recipes": ("recipes", "recipe book", "my recipes"),
+    "patterns": ("patterns", "learned patterns", "model of me", "model of you", "what you've learned about me", "what you have learned about me"),
 }
 
 # Screen name → app screen (iOS navigation targets; only recognized when the
@@ -86,14 +92,16 @@ def parse_ui_intent(message: str, allow_screens: bool = False) -> Optional[Dict[
         return None
     target = m.group("target").strip().lower()
 
-    for kind, names in _SURFACES.items():
-        if target in names:
-            return {"overlay": kind, "query": None}
-
+    # iOS has native full screens for some names that the webapp only has as
+    # overlays (inbox, recipes) — prefer the richer native screen there.
     if allow_screens:
         for screen, names in _SCREENS.items():
             if target in names:
                 return {"screen": screen}
+
+    for kind, names in _SURFACES.items():
+        if target in names:
+            return {"overlay": kind, "query": None}
 
     nm = _NOTE_RE.match(target)
     if nm:
@@ -191,13 +199,47 @@ def resolve_ui_intent(db: Session, user_id: str, intent: Dict[str, Any]) -> Dict
             "ack": f"Bringing up **{best.title}**.",
         }
 
+    if kind == "blank-note":
+        return {
+            "command": {"action": "open_overlay", "overlay": "blank-note", "payload": {}},
+            "ack": "Here's a blank note.",
+        }
+
+    if kind == "report":
+        # "Freshly run reports" == most recent artifact of any type; the
+        # overlay route resolves the actual report when latest=true.
+        return {
+            "command": {"action": "open_overlay", "overlay": "report", "payload": {"latest": True}},
+            "ack": "Here's the report.",
+        }
+
     acks = {
         "brief": "Here's your morning brief.",
         "nutrition": "Here's today's nutrition.",
         "calendar": "Here's your schedule.",
         "tasks": "Here's what I'm working on.",
+        "timers": "Here are your timers.",
+        "inbox": "Here's your inbox.",
+        "recipes": "Here are your recipes.",
+        "patterns": "Here's what I've learned about you.",
     }
     return {
         "command": {"action": "open_overlay", "overlay": kind, "payload": {}},
         "ack": acks.get(kind, "Here you go."),
     }
+
+
+async def push_overlay_to_desktop(db: Session, user_id: str, command: Optional[Dict[str, Any]]) -> bool:
+    """Push an open_overlay ui_command to the active desktop over the device
+    WebSocket (command_router), for sessions that can't render the webapp's
+    own overlay host: iOS chat and voice (Jetson has no SSE UI at all).
+
+    No-op for navigate commands (no desktop equivalent) or when there's no
+    connected desktop — callers should not treat a False return as an error.
+    """
+    if not command or command.get("action") != "open_overlay":
+        return False
+    from app.services.command_router import command_router
+    return await command_router.open_overlay(
+        db, user_id, command["overlay"], command.get("payload"),
+    )

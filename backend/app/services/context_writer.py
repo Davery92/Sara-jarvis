@@ -38,6 +38,7 @@ NOTABLE_FIELDS = {
     "temperature_outside",
     "weather_condition",
     "in_flow_state",
+    "current_place",
 }
 
 
@@ -219,6 +220,13 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         """), {"uid": user_id, "s": today_start, "e": today_end}).scalar()
         snapshot.events_today_count = event_count or 0
 
+        # ── Daily rhythm summary ──
+        try:
+            from app.services.daily_rhythm import build_rhythm_summary
+            snapshot.rhythm_summary = build_rhythm_summary(db, user_id)
+        except Exception as e:
+            logger.warning(f"[ContextWriter] rhythm summary gather failed: {e}")
+
         # ── Agent memory (last heartbeat) ──
         last_hb = db.execute(text("""
             SELECT run_at, handoff_note, watching_for
@@ -310,6 +318,7 @@ def _describe_change(field_name: str, old_val: Any, new_val: Any, source: str) -
         "temperature_outside": lambda o, n: f"Outside temperature: {n}°F",
         "weather_condition": lambda o, n: f"Weather: {n}",
         "in_flow_state": lambda o, n: "Entered flow state" if n in ("1", "True", True) else "Exited flow state",
+        "current_place": lambda o, n: f"David arrived at {n}" if n and n != "unknown" else "David left" + (f" {o}" if o and o != "unknown" else ""),
     }
     formatter = descriptions.get(field_name)
     if formatter:

@@ -2916,6 +2916,7 @@ class AgentDispatchService:
                 topic=f"agent_task:{task_id}",
                 source="agent_dispatch",
                 priority="normal",
+                overlay={"kind": "report", "payload": {"latest": True}},
             )
         except Exception as e:
             logger.warning(f"[dispatch] Failed to send completion notification: {e}")

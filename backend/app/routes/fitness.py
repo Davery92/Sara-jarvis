@@ -156,8 +156,11 @@ class RecoveryLogResponse(BaseModel):
 
 class IngredientItem(BaseModel):
     name: str
-    quantity: float
-    unit: str  # g, oz, cup, tbsp, etc.
+    # Optional: Sara's chat-based recipe tool stores freeform ingredient lines
+    # she couldn't parse (e.g. "3/4 cup mayonnaise") as {name: <full line>,
+    # quantity: None, unit: None} rather than failing to save the recipe.
+    quantity: Optional[float] = None
+    unit: Optional[str] = None  # g, oz, cup, tbsp, etc.
     # Optional manual nutrition override (per total quantity)
     calories: Optional[float] = None
     protein: Optional[float] = None
@@ -4444,6 +4447,12 @@ def estimate_recipe_nutrition(ingredients: List[IngredientItem], servings: int =
             total_fats += ingredient.fats or 0
             continue
 
+        # Can't estimate from a quantity/unit-less freeform ingredient line
+        # (e.g. Sara couldn't parse "3/4 cup mayonnaise" into structured
+        # fields) — skip rather than crash on the None * float multiply below.
+        if ingredient.quantity is None or not ingredient.unit:
+            continue
+
         # Otherwise, estimate from database
         # Normalize ingredient name
         ing_name = ingredient.name.lower().strip()
@@ -4521,31 +4530,38 @@ async def list_recipes(
         recipes = []
         for row in results:
             row_dict = dict(row._mapping)
-            # Parse JSON ingredients
-            ingredients_data = row_dict['ingredients']
-            if isinstance(ingredients_data, str):
-                import json
-                ingredients_data = json.loads(ingredients_data)
+            try:
+                # Parse JSON ingredients
+                ingredients_data = row_dict['ingredients']
+                if isinstance(ingredients_data, str):
+                    import json
+                    ingredients_data = json.loads(ingredients_data)
 
-            ingredients = [IngredientItem(**ing) for ing in ingredients_data]
+                ingredients = [IngredientItem(**ing) for ing in ingredients_data]
 
-            recipes.append(RecipeResponse(
-                id=row_dict['id'],
-                user_id=row_dict['user_id'],
-                name=row_dict['name'],
-                description=row_dict['description'],
-                category=row_dict['category'],
-                ingredients=ingredients,
-                instructions=row_dict['instructions'],
-                prep_time_minutes=row_dict['prep_time_minutes'],
-                servings=row_dict['servings'],
-                calories=float(row_dict['calories']) if row_dict['calories'] else None,
-                protein=float(row_dict['protein']) if row_dict['protein'] else None,
-                carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
-                fats=float(row_dict['fats']) if row_dict['fats'] else None,
-                created_at=row_dict['created_at'].isoformat(),
-                updated_at=row_dict['updated_at'].isoformat()
-            ))
+                recipes.append(RecipeResponse(
+                    id=row_dict['id'],
+                    user_id=row_dict['user_id'],
+                    name=row_dict['name'],
+                    description=row_dict['description'],
+                    category=row_dict['category'],
+                    ingredients=ingredients,
+                    instructions=row_dict['instructions'],
+                    prep_time_minutes=row_dict['prep_time_minutes'],
+                    servings=row_dict['servings'],
+                    calories=float(row_dict['calories']) if row_dict['calories'] else None,
+                    protein=float(row_dict['protein']) if row_dict['protein'] else None,
+                    carbs=float(row_dict['carbs']) if row_dict['carbs'] else None,
+                    fats=float(row_dict['fats']) if row_dict['fats'] else None,
+                    created_at=row_dict['created_at'].isoformat(),
+                    updated_at=row_dict['updated_at'].isoformat()
+                ))
+            except Exception as row_err:
+                # One malformed recipe must never take the whole list down —
+                # this exact bug (a single bad row 500ing the entire endpoint)
+                # is why the iOS Recipes screen failed to load at all.
+                logger.error(f"Skipping unparseable recipe {row_dict.get('id')}: {row_err}")
+                continue
 
         return recipes
 

@@ -5,9 +5,80 @@
 # against a hand-rolled venv. Everything imported lazily inside command
 # handlers must be listed in hiddenimports because PyInstaller's static
 # analyzer can't see imports gated behind try/except inside method bodies.
+#
+# Run ON the target OS — PyInstaller does not cross-compile. A frozen
+# Windows sidecar must be built on Windows, a frozen macOS sidecar on macOS
+# (arm64 build on Apple Silicon, x64 on Intel; use --target-arch on macOS
+# for a universal2 binary if both are needed).
+
+import sys
 
 block_cipher = None
 
+hiddenimports = [
+    # Local sidecar modules — keep these explicit so a refactor that breaks
+    # static analysis doesn't silently miss them.
+    'config',
+    'activity_monitor',
+    'backend_client',
+    'electron_bridge',
+    'metrics',
+    'screenshot',
+    'focus_tracker',
+    'voice',
+    'voice.playback',
+    'voice.recorder',
+    'voice.jetson_client',
+    'media_state',
+    # Used at runtime by the desktop actuators (lazy imports in main.py).
+    'pyperclip',
+    'pygetwindow',
+    'pynput',
+    'pynput.keyboard',
+    'pynput.mouse',
+    # Activity, screenshots, metrics.
+    'mss',
+    'PIL',
+    'PIL.Image',
+    'psutil',
+    # Voice module: local TTS playback, mic capture (A3/A6).
+    'sounddevice',
+    'numpy',
+    # Network.
+    'httpx',
+    'websockets',
+    'websockets.server',
+    'websockets.client',
+    'websockets.legacy',
+    'websockets.legacy.server',
+    'websockets.legacy.client',
+]
+
+if sys.platform == 'win32':
+    hiddenimports += [
+        'pynput.keyboard._win32',
+        'pynput.mouse._win32',
+        'mss.windows',
+        'winsdk',
+    ]
+elif sys.platform == 'darwin':
+    hiddenimports += [
+        'pynput.keyboard._darwin',
+        'pynput.mouse._darwin',
+        'mss.darwin',
+        # macOS permission detection (A8).
+        'permissions_macos',
+        'Quartz',
+        'ApplicationServices',
+        'AVFoundation',
+        'objc',
+    ]
+else:
+    hiddenimports += [
+        'pynput.keyboard._xorg',
+        'pynput.mouse._xorg',
+        'mss.linux',
+    ]
 
 a = Analysis(
     ['main.py'],
@@ -19,50 +90,11 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[],
-    hiddenimports=[
-        # Local sidecar modules — keep these explicit so a refactor that breaks
-        # static analysis doesn't silently miss them.
-        'config',
-        'activity_monitor',
-        'backend_client',
-        'electron_bridge',
-        'metrics',
-        'screenshot',
-        # Used at runtime by the desktop actuators (lazy imports in main.py).
-        'pyperclip',
-        'pygetwindow',
-        'pynput',
-        'pynput.keyboard',
-        'pynput.keyboard._win32',
-        'pynput.mouse',
-        'pynput.mouse._win32',
-        # Activity, screenshots, metrics.
-        'mss',
-        'mss.windows',
-        'PIL',
-        'PIL.Image',
-        'psutil',
-        # Network.
-        'httpx',
-        'websockets',
-        'websockets.server',
-        'websockets.client',
-        'websockets.legacy',
-        'websockets.legacy.server',
-        'websockets.legacy.client',
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        # The voice/audio stack was removed in the Phase 0 burn-down. Make
-        # sure none of it sneaks back in via transitive imports.
-        'sounddevice',
-        'pulsectl',
-        'pycaw',
-        'comtypes',
-        'numpy',
-    ],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

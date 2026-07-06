@@ -19,80 +19,33 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [activeTool, setActiveTool] = useState<string | null>(null)
+  const [voiceState, setVoiceState] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Check for new timers and show floating windows
-  const checkForTimers = useCallback(async () => {
-    console.log('[MiniChat] checkForTimers called')
-    try {
-      const timers = await apiClient.getActiveTimers()
-      console.log('[MiniChat] Got timers:', timers.length)
-      timers.forEach(timer => {
-        console.log('[MiniChat] Showing timer:', timer.title, timer.remaining_seconds, 'seconds')
-        window.electronAPI?.showTimer({
-          id: timer.id,
-          name: timer.title,
-          remainingSeconds: timer.remaining_seconds
-        })
-      })
-    } catch (e) {
-      console.error('[MiniChat] Failed to check timers:', e)
-    }
+  // Live voice conversation turns from the Jetson (B4) — MiniChat shows a
+  // "🎤 listening…" indicator while a voice turn is in progress, then adds
+  // the completed exchange once the transcript arrives.
+  useEffect(() => {
+    window.electronAPI?.onVoiceState(setVoiceState)
+    window.electronAPI?.onJetsonTranscript(({ user, sara }) => {
+      setVoiceState(null)
+      if (!user && !sara) return
+      const now = new Date()
+      setMessages((prev) => [
+        ...prev,
+        ...(user ? [{ id: crypto.randomUUID(), role: 'user' as const, content: user, timestamp: now }] : []),
+        ...(sara ? [{ id: crypto.randomUUID(), role: 'assistant' as const, content: sara, timestamp: now }] : []),
+      ])
+    })
   }, [])
 
-  // Try to find and show a note from the response
-  const tryShowNote = useCallback(async (responseText: string) => {
-    console.log('[MiniChat] tryShowNote called')
-
-    // Extract the note title from response
-    const titlePatterns = [
-      /here's\s+(?:your\s+)?(?:the\s+)?(.+?)\s+note/i,
-      /^#\s+(.+)$/m,
-      /\*\*([^*]+)\*\*/,
-    ]
-
-    let noteTitle: string | null = null
-    for (const pattern of titlePatterns) {
-      const match = responseText.match(pattern)
-      if (match) {
-        noteTitle = match[1].trim()
-        console.log('[MiniChat] Extracted note title from response:', noteTitle)
-        break
-      }
-    }
-
-    try {
-      const allNotes = await apiClient.searchNotes('')
-      console.log('[MiniChat] Got', allNotes.length, 'notes')
-
-      if (allNotes.length === 0) {
-        console.log('[MiniChat] No notes found')
-        return
-      }
-
-      let noteToShow = allNotes[0]
-
-      if (noteTitle) {
-        const lowerTitle = noteTitle.toLowerCase()
-        const matched = allNotes.find(n =>
-          n.title.toLowerCase().includes(lowerTitle) ||
-          lowerTitle.includes(n.title.toLowerCase())
-        )
-        if (matched) {
-          noteToShow = matched
-          console.log('[MiniChat] Found matching note:', matched.title)
-        }
-      }
-
-      console.log('[MiniChat] Opening note popup:', noteToShow.title)
-      window.electronAPI?.showNote({
-        id: noteToShow.id,
-        title: noteToShow.title,
-        content: noteToShow.content
-      })
-    } catch (e) {
-      console.error('[MiniChat] Failed to show note:', e)
+  // Backend-driven overlay commands (e.g. "bring up my nutrition") arrive as
+  // a ui_command SSE event and open the real overlay window directly — no
+  // guessing a note title out of response text or polling for new timers.
+  const handleUiCommand = useCallback((command: { action: string; overlay?: string; payload?: any }) => {
+    if (command.action === 'open_overlay' && command.overlay) {
+      window.electronAPI?.openOverlay(command.overlay, command.payload || {})
     }
   }, [])
 
@@ -167,14 +120,10 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
       }
       setMessages(prev => [...prev, assistantMessage])
 
-      let fullResponse = ''
-      const usedTools = new Set<string>()
-
       await apiClient.streamChat(
         history,
         (chunk) => {
           setActiveTool(null)
-          fullResponse += chunk
           setMessages(prev => {
             const updated = [...prev]
             const lastMsg = updated[updated.length - 1]
@@ -184,38 +133,35 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
             return updated
           })
         },
-        async () => {
-          console.log('[MiniChat] Stream complete. Tools used:', Array.from(usedTools))
+        () => {
           setIsLoading(false)
           setActiveTool(null)
-
-          // Check for timers and notes after response
-          if (usedTools.has('start_timer') || usedTools.has('timers_start') || usedTools.has('timer_start')) {
-            await checkForTimers()
-          }
-          if (usedTools.has('create_note') || usedTools.has('search_notes') || usedTools.has('notes_search') || usedTools.has('note_search')) {
-            await tryShowNote(fullResponse)
-          }
         },
         (tool) => {
           console.log('[MiniChat] Tool activity detected:', tool)
           setActiveTool(tool)
-          usedTools.add(tool)
-        }
+        },
+        handleUiCommand
       )
     } catch (error) {
       console.error('Chat error:', error)
+      // Show the actual reason (network/auth/server) instead of a generic
+      // catch-all — a swallowed message here is exactly what made the
+      // previous version of this bug impossible to diagnose remotely.
+      const message = error instanceof Error && error.message
+        ? error.message
+        : 'Sorry, I encountered an error. Please try again.'
       setMessages(prev => {
         const updated = [...prev]
         const lastMsg = updated[updated.length - 1]
         if (lastMsg.role === 'assistant' && !lastMsg.content) {
-          lastMsg.content = 'Sorry, I encountered an error. Please try again.'
+          lastMsg.content = message
         }
         return updated
       })
       setIsLoading(false)
     }
-  }, [isLoading, isAuthenticated, onNeedAuth, checkForTimers, tryShowNote, messages])
+  }, [isLoading, isAuthenticated, onNeedAuth, handleUiCommand, messages])
 
   const handleSend = useCallback(() => {
     handleSendWithText(input)
@@ -230,8 +176,10 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
 
   return (
     <div className="no-drag w-full h-screen bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700/50 bg-gray-800/50">
+      {/* Header — the drag handle for this window (Cmd/Ctrl+drag anywhere
+          else won't move it; grab here). Buttons stay clickable via the
+          .chat-window-header button no-drag override in index.css. */}
+      <div className="chat-window-header flex items-center justify-between px-4 py-3 border-b border-gray-700/50 bg-gray-800/50 cursor-move">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
             <span className="text-white text-sm font-bold">S</span>
@@ -271,6 +219,16 @@ export default function MiniChat({ onClose, isAuthenticated, onNeedAuth }: MiniC
             </div>
           </div>
         ))}
+        {voiceState && voiceState !== 'idle' && (
+          <div className="flex justify-start">
+            <div className="bg-gray-800 rounded-2xl px-4 py-2 flex items-center gap-2 text-indigo-400">
+              <span>🎤</span>
+              <span className="text-sm">
+                {voiceState === 'speaking' ? 'Speaking…' : voiceState === 'thinking' ? 'Thinking…' : 'Listening…'}
+              </span>
+            </div>
+          </div>
+        )}
         {isLoading && messages[messages.length - 1]?.role === 'assistant' && !messages[messages.length - 1]?.content && (
           <div className="flex justify-start">
             <div className="bg-gray-800 rounded-2xl px-4 py-2">

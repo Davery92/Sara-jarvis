@@ -37,6 +37,13 @@ class WakeSensorConfig:
     wake_train_timeout_seconds: int
     wake_train_allow_simulation_fallback: bool
 
+    # Live audio (non-simulated) capture
+    mic_device: str
+    model_path: str
+    sample_rate: int
+    chunk_size: int
+    silence_rms_threshold: float
+
     @classmethod
     def from_env(cls) -> "WakeSensorConfig":
         return cls(
@@ -66,4 +73,9 @@ class WakeSensorConfig:
                 os.getenv("WAKE_SENSOR_WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK", "true"),
                 True,
             ),
+            mic_device=os.getenv("WAKE_SENSOR_MIC_DEVICE", "AIRHUG"),
+            model_path=os.getenv("WAKE_SENSOR_MODEL_PATH", "models/hey_sara.onnx"),
+            sample_rate=int(os.getenv("WAKE_SENSOR_SAMPLE_RATE", "16000")),
+            chunk_size=int(os.getenv("WAKE_SENSOR_CHUNK_SIZE", "1280")),
+            silence_rms_threshold=float(os.getenv("WAKE_SENSOR_SILENCE_RMS_THRESHOLD", "0.015")),
         )

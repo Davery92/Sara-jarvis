@@ -43,7 +43,7 @@ interface InboxStats {
 }
 
 interface ContentInboxProps {
-  onNavigateToChat?: (inboxItemId: string, title: string) => void;
+  onNavigateToChat?: (inboxItemId: string, title: string, excerpt?: string) => void;
 }
 
 export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
@@ -249,7 +249,8 @@ export default function ContentInbox({ onNavigateToChat }: ContentInboxProps) {
   // Discuss with Sara
   const discussItem = () => {
     if (!selectedItem || !onNavigateToChat) return;
-    onNavigateToChat(selectedItem.id, selectedItem.title || 'Inbox item');
+    const excerpt = (selectedItem.extracted_text || selectedItem.description || '').trim();
+    onNavigateToChat(selectedItem.id, selectedItem.title || 'Inbox item', excerpt);
   };
 
   const timeAgo = (dateStr: string | null) => {

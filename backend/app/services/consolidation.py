@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -877,6 +878,26 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
             except Exception as e:
                 logger.warning(f"[Consolidation] salience_adjustments -> attention_policy wiring failed: {e}")
 
+        # Bridge patterns_noticed prose into structured behavioral_pattern rows
+        # when they name a recurring behavior + time — otherwise the narrative
+        # brain's observations evaporate into the journal and never reach the
+        # structured learning pipeline (Phase 3.4, PHENOMENAL_ASSISTANT_PLAN).
+        if result.patterns_noticed:
+            try:
+                def _stage_sync():
+                    from app.db.base import SessionLocal
+                    db = SessionLocal()
+                    try:
+                        return _stage_narrative_patterns(db, user_id, result.patterns_noticed)
+                    finally:
+                        db.close()
+
+                staged = await asyncio.to_thread(_stage_sync)
+                if staged:
+                    logger.info(f"[Consolidation] Staged {len(staged)} narrative pattern(s) as behavioral_pattern: {staged}")
+            except Exception as e:
+                logger.warning(f"[Consolidation] patterns_noticed -> behavioral_pattern wiring failed: {e}")
+
         # Weekly behavioral calibration (Sundays or every 7th consolidation)
         try:
             now_local = datetime.now(USER_TZ)
@@ -1099,3 +1120,73 @@ For research_proposals: Cross-reference the PKG Interests with Recent Conversati
 
 # Module-level singleton
 consolidation_engine = ConsolidationEngine()
+
+
+# Matches "7am", "7:30 am", "19:00", "around 9pm", etc. Deliberately simple —
+# this is a low-effort bridge, not a full NLP time extractor.
+_TIME_RE = re.compile(
+    r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_time_hhmm(sentence: str) -> Optional[str]:
+    """Best-effort 'HH:MM' extraction from a free-text pattern description."""
+    m = _TIME_RE.search(sentence)
+    if not m:
+        return None
+    if m.group(4) is not None:  # 24h form: HH:MM
+        return f"{int(m.group(4)):02d}:{m.group(5)}"
+    hour = int(m.group(1))
+    minute = m.group(2) or "00"
+    meridiem = (m.group(3) or "").lower()
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23):
+        return None
+    return f"{hour:02d}:{minute}"
+
+
+def _stage_narrative_patterns(db, user_id: str, patterns_noticed: List[str]) -> List[str]:
+    """Stage patterns_noticed entries that name a recurring behavior + time as
+    `behavioral_pattern` rows in 'learning' status, deduped against existing
+    patterns via find_similar_pattern. Sync — runs in a thread from _apply_results."""
+    import asyncio as _asyncio
+    from app.services.behavioral_pattern_service import (
+        behavioral_pattern_service, TriggerType, ActionType, PatternCategory,
+    )
+
+    async def _stage_all() -> List[str]:
+        staged = []
+        for sentence in patterns_noticed[:5]:
+            time_str = _extract_time_hhmm(sentence)
+            if not time_str:
+                continue
+
+            trigger_conditions = {"time": time_str}
+            try:
+                existing = await behavioral_pattern_service.find_similar_pattern(
+                    db, user_id, TriggerType.TIME, trigger_conditions, ActionType.SUGGESTION,
+                )
+                if existing:
+                    continue
+
+                await behavioral_pattern_service.create_pattern(
+                    db=db,
+                    user_id=user_id,
+                    trigger_type=TriggerType.TIME,
+                    trigger_conditions=trigger_conditions,
+                    action_type=ActionType.SUGGESTION,
+                    action_payload={"note": "Staged from consolidation narrative pattern"},
+                    description=sentence[:500],
+                    source_context="consolidation.patterns_noticed",
+                    category=PatternCategory.OTHER,
+                )
+                staged.append(sentence[:80])
+            except Exception as e:
+                logger.debug(f"[Consolidation] narrative pattern staging failed for one entry: {e}")
+        return staged
+
+    return _asyncio.run(_stage_all())

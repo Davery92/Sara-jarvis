@@ -2,6 +2,7 @@
 Device Commands API Routes
 WebSocket and HTTP endpoints for cross-device command routing
 """
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, List
@@ -24,6 +25,11 @@ from app.services.machine_registry import machine_registry_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+# Last-known media_state per user, so heartbeats only trigger a Jetson relay
+# on an actual change (B2.4) — best-effort/in-process, fine for a soft
+# ambient-sensitivity heuristic.
+_media_state_cache: dict = {}
 
 
 # Request/Response models
@@ -162,6 +168,18 @@ async def device_websocket(
                     active_app=active_app
                 )
 
+                # Ambient-aware wake threshold (B2.4): relay a media_state
+                # change to the Jetson so it can boost its wake/barge-in
+                # sensitivity requirements while music/video is playing.
+                media_state = bool(data.get("media_state", False))
+                if _media_state_cache.get(user_id) != media_state:
+                    _media_state_cache[user_id] = media_state
+                    try:
+                        from app.routes.sensory import relay_media_state
+                        asyncio.ensure_future(relay_media_state(media_state))
+                    except Exception as e:
+                        logger.debug(f"media_state relay skipped: {e}")
+
                 # Acknowledge heartbeat
                 await websocket.send_json({
                     "type": "heartbeat_ack",
@@ -169,7 +187,7 @@ async def device_websocket(
                 })
 
             elif msg_type == "command_result":
-                # Log command result
+                # Log and resolve any pending send_command_and_wait() future
                 command_id = data.get("command_id")
                 success = data.get("success", False)
                 error = data.get("error")
@@ -177,6 +195,12 @@ async def device_websocket(
                     f"Command {command_id} result from {device_id}: "
                     f"success={success}, error={error}"
                 )
+                if command_id:
+                    command_router.resolve_command_result(command_id, {
+                        "success": success,
+                        "result": data.get("result"),
+                        "error": error,
+                    })
 
             elif msg_type == "screenshot_ready":
                 # Device has a screenshot ready to upload
@@ -233,6 +257,20 @@ async def device_websocket(
                 except Exception as e:
                     logger.warning(f"Failed to publish activity_state from {device_id}: {e}")
 
+            elif msg_type == "playback_state":
+                # Local TTS playback state from a sidecar SPEAK command.
+                # Relay as a voice_state event to this user's other connected
+                # devices so multi-device HUDs mirror the speaking orb (A3).
+                is_playing = bool((data.get("data") or {}).get("is_playing"))
+                try:
+                    await command_router.push_event(
+                        user_id,
+                        event="voice_state",
+                        data={"state": "speaking" if is_playing else "idle", "device_id": device_id},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to relay playback_state from {device_id}: {e}")
+
             else:
                 logger.warning(f"Unknown message type from {device_id}: {msg_type}")
 
@@ -267,6 +305,9 @@ async def send_command(
     - take_screenshot: Request a screenshot. Payload: {"analyze": bool, "analyze_prompt": "..."}
     - speak: Speak text via TTS. Payload: {"text": "..."}
     - show_notification: Show a notification. Payload: {"title": "...", "message": "..."}
+    - open_overlay: Open an overlay window. Payload: {"kind": "...", "payload": {...}}
+    - record_voice_note: Ask the device to start recording a voice note. Payload: {}
+    - cancel_speech: Stop any in-progress TTS playback. Payload: {}
     """
     user_id = current_user.id
 
@@ -285,6 +326,17 @@ async def send_command(
     )
 
     success = await command_router.send_command(db, user_id, command)
+
+    # CANCEL_SPEECH is a "stop everywhere" gesture (B2.6) — always also try
+    # the Jetson's separate control channel, regardless of whether a WS-
+    # connected desktop picked it up (fire-and-forget: a Jetson that's
+    # offline or not in use just silently ignores this).
+    if command_type == CommandType.CANCEL_SPEECH:
+        try:
+            from app.routes.sensory import request_jetson_stop
+            asyncio.ensure_future(request_jetson_stop())
+        except Exception as e:
+            logger.debug(f"Jetson stop relay skipped: {e}")
 
     if success:
         target = request.target_device_id or "active device"
@@ -405,6 +457,24 @@ async def get_active_device(
     return {"device_id": None, "message": "No active device"}
 
 
+@router.get("/presence")
+async def get_device_presence(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Unified "where is David active right now" answer (A7) — combines
+    desktop heartbeats, iOS/web foreground presence, Jetson desk presence,
+    and location into one resolved snapshot. Used for chat context, overlay
+    routing, and voice-note device selection so every caller agrees.
+    """
+    from app.services.device_presence import resolve as resolve_presence
+    from dataclasses import asdict
+
+    presence = await resolve_presence(db, str(current_user.id))
+    return asdict(presence)
+
+
 @router.post("/register")
 async def register_device(
     request: Request,
@@ -414,6 +484,7 @@ async def register_device(
     platform: Optional[str] = None,
     os_version: Optional[str] = None,
     agent_version: Optional[str] = None,
+    capabilities: Optional[List[str]] = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -433,6 +504,15 @@ async def register_device(
 
     # Desktop/headless agent flow
     if resolved_device_id and resolved_hostname and resolved_platform:
+        # Capabilities actually used by the caller (A3): overlays, tts, mic,
+        # screenshot, actuators, multi_monitor. Accepted as repeated query
+        # params (?capabilities=screenshot&capabilities=mic) or a JSON body
+        # list. Falls back to the historical default set for agents that
+        # haven't been updated to report them yet.
+        resolved_capabilities = capabilities or body.get("capabilities")
+        if not resolved_capabilities:
+            resolved_capabilities = ["screenshot", "wake_word", "commands"]
+
         machine = await machine_registry_service.register_machine(
             db=db,
             user_id=user_id,
@@ -440,7 +520,7 @@ async def register_device(
             hostname=resolved_hostname,
             platform=resolved_platform,
             os_version=os_version,
-            capabilities=["screenshot", "wake_word", "commands"],
+            capabilities=resolved_capabilities,
             agent_version=agent_version,
         )
 
@@ -627,6 +707,59 @@ async def update_device_name(
         "success": True,
         "device_id": device_id,
         "friendly_name": body.friendly_name
+    }
+
+
+class UpdateDeviceConfigRequest(BaseModel):
+    """Desktop settings panel toggles (A9) — all fields optional/partial."""
+    screenshot_enabled: Optional[bool] = None
+    screenshot_interval_seconds: Optional[int] = None
+    clipboard_enabled: Optional[bool] = None
+    terminal_enabled: Optional[bool] = None
+    file_access_enabled: Optional[bool] = None
+
+
+@router.patch("/{device_id}/config")
+async def update_device_config(
+    device_id: str,
+    body: UpdateDeviceConfigRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update capture/privacy configuration for a device (desktop Settings > Privacy tab)."""
+    machine = await machine_registry_service.get_machine_by_device_id(db, device_id)
+    if not machine or machine.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    updated = await machine_registry_service.update_machine_config(
+        db, device_id,
+        screenshot_enabled=body.screenshot_enabled,
+        screenshot_interval_seconds=body.screenshot_interval_seconds,
+        clipboard_enabled=body.clipboard_enabled,
+        terminal_enabled=body.terminal_enabled,
+        file_access_enabled=body.file_access_enabled,
+    )
+
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update device config")
+
+    # Push live so a connected sidecar applies it immediately, not just on
+    # its next reconnect.
+    if body.screenshot_enabled is not None or body.screenshot_interval_seconds is not None:
+        await command_router.send_config_update(
+            device_id,
+            screenshot_enabled=body.screenshot_enabled,
+            screenshot_interval_seconds=body.screenshot_interval_seconds,
+        )
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "screenshot_enabled": updated.screenshot_enabled,
+        "screenshot_interval_seconds": updated.screenshot_interval_seconds,
+        "clipboard_enabled": updated.clipboard_enabled,
+        "terminal_enabled": updated.terminal_enabled,
+        "file_access_enabled": updated.file_access_enabled,
     }
 
 

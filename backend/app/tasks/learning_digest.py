@@ -13,12 +13,24 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 DEFAULT_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+
+
+def _within_last_7_days(iso_timestamp: Optional[str]) -> bool:
+    if not iso_timestamp:
+        return False
+    try:
+        ts = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - ts) <= timedelta(days=7)
+    except ValueError:
+        return False
 
 
 def _run_async(coro):
@@ -111,11 +123,78 @@ async def _send_weekly_digest_async(user_id: str) -> dict:
             "total_rejected": int(pattern_row[2] or 0) if pattern_row else 0,
         }
 
-        if not moves and not promo_stats and pattern_stats["accepted_this_week"] == 0:
+        # ── Rhythm drift week-over-week (daily_rhythm uses a sync session —
+        # bridge it in, same pattern as memory_subscribers' derived refresh) ──
+        rhythm_drifts = []
+        try:
+            import os as _os
+            from sqlalchemy import create_engine as _ce
+            from sqlalchemy.orm import sessionmaker as _sm, Session as _S
+            from app.services.daily_rhythm import get_rhythm_drift
+
+            _db_url = _os.getenv("DATABASE_URL", "")
+            if "+asyncpg" in _db_url:
+                _db_url = _db_url.replace("+asyncpg", "+psycopg")
+            elif "+psycopg" not in _db_url and "postgresql://" in _db_url:
+                _db_url = _db_url.replace("postgresql://", "postgresql+psycopg://")
+            _eng = _ce(_db_url, echo=False)
+            _sess = _sm(_eng, class_=_S, expire_on_commit=False)
+            _sdb = _sess()
+            try:
+                for key in ("wake", "bedtime", "dinner", "gym_window"):
+                    drift = get_rhythm_drift(_sdb, user_id, key)
+                    if drift:
+                        rhythm_drifts.append(drift)
+            finally:
+                _sdb.close()
+                _eng.dispose()
+        except Exception as e:
+            logger.warning(f"[learning_digest] rhythm drift gather failed: {e}")
+
+        # ── Voice/wake-word stats (B3) — dataset growth + training outcomes
+        # this week, straight from the voice control plane's Redis state.
+        voice_stats: Dict[str, Any] = {}
+        try:
+            from app.services.voice.control_plane import list_jobs, get_model_registry as get_voice_model_registry
+
+            recent_voice_jobs = [
+                j for j in list_jobs(limit=100)
+                if j.get("job_type") in ("train_wake_word", "train_speakers")
+                and j.get("status") == "completed"
+                and _within_last_7_days(j.get("updated_at"))
+            ]
+            voice_stats = {
+                "wake_word_trainings_completed": sum(1 for j in recent_voice_jobs if j.get("job_type") == "train_wake_word"),
+                "speaker_trainings_completed": sum(1 for j in recent_voice_jobs if j.get("job_type") == "train_speakers"),
+                "wake_word_active_version": (get_voice_model_registry().get("wake_word") or {}).get("active_version"),
+            }
+        except Exception as e:
+            logger.debug(f"[learning_digest] voice stats gather failed: {e}")
+
+        # ── ML model promotions (C4) — tabular models activated this week.
+        ml_promotions = []
+        try:
+            from app.services.ml.control_plane import get_model_registry as get_ml_model_registry
+
+            ml_registry = get_ml_model_registry()
+            for family, entry in ml_registry.items():
+                if not isinstance(entry, dict):
+                    continue
+                for version in entry.get("versions", []):
+                    if version.get("status") == "active" and _within_last_7_days(version.get("created_at")):
+                        ml_promotions.append({"family": family, "version": version.get("version"), "metrics": version.get("metrics")})
+        except Exception as e:
+            logger.debug(f"[learning_digest] ml promotions gather failed: {e}")
+
+        if (
+            not moves and not promo_stats and pattern_stats["accepted_this_week"] == 0
+            and not rhythm_drifts and not voice_stats.get("wake_word_trainings_completed")
+            and not voice_stats.get("speaker_trainings_completed") and not ml_promotions
+        ):
             logger.info("[learning_digest] nothing to report this week — skipping")
             return {"sent": False, "reason": "nothing_to_report"}
 
-        note = await _craft_digest_note(moves, promo_stats, engagement_stats, pattern_stats)
+        note = await _craft_digest_note(moves, promo_stats, engagement_stats, pattern_stats, rhythm_drifts, voice_stats, ml_promotions)
         if not note:
             return {"sent": False, "reason": "llm_failed"}
 
@@ -125,7 +204,14 @@ async def _send_weekly_digest_async(user_id: str) -> dict:
             INSERT INTO sara_journal (id, user_id, entry_type, content, context, created_at)
             VALUES (:id, :u, 'weekly_digest', :content, CAST(:context AS jsonb), :ts)
         """), {"id": str(uuid.uuid4()), "u": user_id, "content": note,
-               "context": json.dumps({"moves": moves, "promo_stats": promo_stats, "pattern_stats": pattern_stats}),
+               "context": json.dumps({
+                   "moves": moves, "promo_stats": promo_stats, "pattern_stats": pattern_stats,
+                   "rhythm_drifts": [
+                       {**d, "this_week_avg": str(d["this_week_avg"]), "last_week_avg": str(d["last_week_avg"])}
+                       for d in rhythm_drifts
+                   ],
+                   "voice_stats": voice_stats, "ml_promotions": ml_promotions,
+               }),
                "ts": now})
         await db.commit()
 
@@ -137,7 +223,11 @@ async def _send_weekly_digest_async(user_id: str) -> dict:
         return {"sent": True, "moves": len(moves)}
 
 
-async def _craft_digest_note(moves: list, promo_stats: list, engagement_stats: list, pattern_stats: dict) -> str:
+async def _craft_digest_note(
+    moves: list, promo_stats: list, engagement_stats: list, pattern_stats: dict,
+    rhythm_drifts: list = None, voice_stats: Optional[Dict[str, Any]] = None,
+    ml_promotions: Optional[list] = None,
+) -> str:
     """LLM-crafted first-person digest note. enable_thinking off — short output,
     same reasoning as every other short-form background LLM call in this codebase."""
     from app.core.llm import get_background_llm_client
@@ -147,12 +237,22 @@ async def _craft_digest_note(moves: list, promo_stats: list, engagement_stats: l
         "promotions_last_7d": promo_stats,
         "notification_engagement_last_7d": engagement_stats,
         "behavioral_patterns": pattern_stats,
+        "rhythm_drift_this_week": [
+            f"{d['rhythm_key']} shifted {abs(d['delta_minutes'])} min {d['direction']} "
+            f"(was ~{d['last_week_avg']}, now ~{d['this_week_avg']})"
+            for d in (rhythm_drifts or [])
+        ],
+        "voice_wake_word_stats_this_week": voice_stats or {},
+        "ml_model_promotions_this_week": ml_promotions or [],
     }
     prompt = (
         "You are Sara, David's assistant, writing a short first-person weekly self-report "
-        "on what you've learned about when to speak up. Use the data below. Be concrete and "
+        "on what you've learned about when to speak up, how David's daily rhythm (wake/bed/"
+        "meal/gym times) has shifted this week if it has, and any voice/wake-word retraining "
+        "or ML model promotions that happened. Use the data below. Be concrete and "
         "specific (name a domain and what changed), not generic. 2-4 sentences. No greeting, "
-        "no sign-off — just the note.\n\n"
+        "no sign-off — just the note. Omit any category with no data rather than mentioning "
+        "'nothing changed' for it.\n\n"
         f"Data: {json.dumps(facts, default=str)}"
     )
     try:

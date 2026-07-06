@@ -751,12 +751,16 @@ class DayReplayBuilder:
         day_start: datetime,
         day_end: datetime
     ) -> List[DayReplayEvent]:
-        """Get Home Assistant activity for the day, summarized per entity.
+        """Get Home Assistant activity for the day, summarized per entity
+        PER TRANSITION STATE (to_state) — not just "was active this hour".
 
-        One event per entity per day: how often it changed and at which hours.
-        This is the raw material for daily-routine pattern detection (when do
-        doors open, when do lights come on, when is there motion).
-        home_activity_log is house-wide, not per-user.
+        One event per (entity, to_state) per day: how often it transitioned
+        to that state and at which hours. This is the raw material for
+        daily-routine pattern detection, and critically preserves direction
+        — "light turns off around 19:00" is a different, actionable fact
+        from "light turns on around 06:00", not the same "active" blob.
+        `unavailable`/`unknown` are dropped as connectivity noise, not real
+        state transitions. home_activity_log is house-wide, not per-user.
         """
         events = []
         try:
@@ -767,13 +771,15 @@ class DayReplayBuilder:
                     SELECT entity_id,
                            MAX(friendly_name) AS friendly_name,
                            MAX(domain) AS domain,
+                           to_state,
                            COUNT(*) AS change_count,
                            MIN(changed_at AT TIME ZONE 'America/New_York') AS first_change,
                            MAX(changed_at AT TIME ZONE 'America/New_York') AS last_change,
                            ARRAY_AGG(DISTINCT EXTRACT(HOUR FROM changed_at AT TIME ZONE 'America/New_York')::int) AS active_hours
                     FROM home_activity_log
                     WHERE (changed_at AT TIME ZONE 'America/New_York') BETWEEN :day_start AND :day_end
-                    GROUP BY entity_id
+                          AND to_state NOT IN ('unavailable', 'unknown')
+                    GROUP BY entity_id, to_state
                     ORDER BY change_count DESC
                 """),
                 {"day_start": day_start, "day_end": day_end}
@@ -784,11 +790,12 @@ class DayReplayBuilder:
                     timestamp=row.first_change,
                     source=DataSource.HOME,
                     event_type="home_entity_activity",
-                    summary=f"{row.friendly_name or row.entity_id}: {row.change_count} changes",
+                    summary=f"{row.friendly_name or row.entity_id} -> {row.to_state}: {row.change_count} changes",
                     details={
                         "entity_id": row.entity_id,
                         "friendly_name": row.friendly_name,
                         "domain": row.domain,
+                        "to_state": row.to_state,
                         "change_count": row.change_count,
                         "first_change": row.first_change.isoformat(),
                         "last_change": row.last_change.isoformat(),

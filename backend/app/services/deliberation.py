@@ -100,11 +100,22 @@ class DeliberationEngine:
         # 2. Get pending observations
         observations = await get_pending_observations(user_id, min_salience=0.0, limit=15)
 
+        # 2b. Off-rhythm deviations — salience input only, never pushed directly.
+        off_rhythm_flags: List[Dict[str, str]] = []
+        try:
+            from app.db.base import SessionLocal
+            from app.services.daily_rhythm import get_off_rhythm_flags
+            with SessionLocal() as db:
+                off_rhythm_flags = get_off_rhythm_flags(db, user_id, current_place_type=memory.current_place_type)
+        except Exception as e:
+            logger.warning(f"Off-rhythm flag gather failed: {e}")
+
         # 3. Build prompt
         system_msg, user_msg = build_deliberation_prompt(
             memory=memory,
             observations=observations,
             recent_handoff=memory.last_heartbeat_handoff,
+            off_rhythm_flags=off_rhythm_flags,
         )
 
         # 4. LLM call

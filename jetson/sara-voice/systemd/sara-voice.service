@@ -1,0 +1,24 @@
+[Unit]
+Description=Sara Voice + Vision Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david/sara-voice
+ExecStart=/home/david/sara-voice/.venv/bin/python -m sara_voice
+Restart=always
+RestartSec=10
+WatchdogSec=120
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/david/sara-voice/.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sara-voice
+
+[Install]
+WantedBy=multi-user.target

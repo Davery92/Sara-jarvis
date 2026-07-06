@@ -10,6 +10,7 @@ Maintains WebSocket connection to the Sara backend for:
 import asyncio
 import json
 import logging
+import random
 from datetime import datetime
 from typing import Callable, Optional, Any, TYPE_CHECKING
 
@@ -31,15 +32,29 @@ class BackendClient:
     def __init__(
         self,
         config: "SidecarConfig",
-        on_command: Optional[Callable] = None
+        on_command: Optional[Callable] = None,
+        on_event: Optional[Callable] = None,
+        on_config_update: Optional[Callable] = None,
+        on_auth_invalid: Optional[Callable] = None
     ):
         self.config = config
         self.on_command = on_command
+        # Generic backend->device realtime events (hud_state, voice_state,
+        # attention_count, timer_update — A3). Called as on_event(event, data).
+        self.on_event = on_event
+        # Fired whenever a `config` message arrives (initial connect or a
+        # live Settings > Privacy push) — called as on_config_update(data).
+        self.on_config_update = on_config_update
+        # Fired when the backend rejects our token (WS close code 4001) —
+        # retrying with the same token would just loop forever, so this
+        # stops the reconnect loop and asks the UI to prompt for re-login.
+        self.on_auth_invalid = on_auth_invalid
 
         self._ws = None
         self._connected = False
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 60.0
+        self._invalid_token = False
 
     async def connect(self):
         """Connect to the backend WebSocket."""
@@ -47,15 +62,26 @@ class BackendClient:
             logger.error("No auth token configured, cannot connect to backend")
             return
 
-        while True:
+        while not self._invalid_token:
             try:
                 await self._connect_websocket()
             except Exception as e:
                 logger.error(f"WebSocket connection error: {e}")
 
+            if self._invalid_token:
+                logger.error("Backend rejected auth token (4001); stopping reconnect loop")
+                if self.on_auth_invalid:
+                    result = self.on_auth_invalid()
+                    if asyncio.iscoroutine(result):
+                        await result
+                break
+
             if not self._connected:
-                logger.info(f"Reconnecting in {self._reconnect_delay}s...")
-                await asyncio.sleep(self._reconnect_delay)
+                # Full jitter: spreads reconnect storms out (e.g. after a
+                # backend restart, every sidecar doesn't retry in lockstep).
+                delay = self._reconnect_delay * (0.7 + random.random() * 0.6)
+                logger.info(f"Reconnecting in {delay:.1f}s...")
+                await asyncio.sleep(delay)
                 self._reconnect_delay = min(
                     self._reconnect_delay * 2,
                     self._max_reconnect_delay
@@ -88,10 +114,23 @@ class BackendClient:
                 async for message in websocket:
                     await self._handle_message(message)
 
+        except websockets.exceptions.ConnectionClosedError as e:
+            self._connected = False
+            self._ws = None
+            if e.code == 4001:
+                self._invalid_token = True
+            else:
+                raise
         except Exception as e:
             self._connected = False
             self._ws = None
             raise
+
+    # Capabilities this sidecar build actually implements. Checked by
+    # command_router before sending commands that require them (A3) so an
+    # older/lighter sidecar build fails a capability check instead of
+    # silently dropping the command.
+    CAPABILITIES = ["screenshot", "commands", "actuators"]
 
     async def _register_device(self):
         """Register this device with the backend."""
@@ -104,7 +143,8 @@ class BackendClient:
                         "hostname": self.config.hostname,
                         "platform": self.config.platform_name,
                         "os_version": self.config.os_version,
-                        "agent_version": "1.0.0"
+                        "agent_version": "1.0.0",
+                        "capabilities": self.CAPABILITIES,
                     },
                     headers={"Authorization": f"Bearer {self.config.auth_token}"},
                     timeout=10.0
@@ -140,10 +180,29 @@ class BackendClient:
                 if "screenshot_interval" in data:
                     self.config.screenshot_interval = data["screenshot_interval"]
                     logger.info(f"Screenshot interval updated: {data['screenshot_interval']}s")
+                if "screenshot_enabled" in data:
+                    self.config.screenshot_enabled = data["screenshot_enabled"]
+                    logger.info(f"Screenshot enabled updated: {data['screenshot_enabled']}")
+                if self.on_config_update:
+                    if asyncio.iscoroutinefunction(self.on_config_update):
+                        await self.on_config_update(data)
+                    else:
+                        self.on_config_update(data)
 
             elif msg_type == "heartbeat_ack":
                 # Heartbeat acknowledged
                 pass
+
+            elif msg_type == "event":
+                # Generic backend->device realtime event: hud_state,
+                # voice_state, attention_count, timer_update (A3).
+                if self.on_event:
+                    event_name = data.get("event")
+                    event_data = data.get("data", {})
+                    if asyncio.iscoroutinefunction(self.on_event):
+                        await self.on_event(event_name, event_data)
+                    else:
+                        self.on_event(event_name, event_data)
 
             else:
                 logger.debug(f"Unknown message type: {msg_type}")
@@ -173,6 +232,7 @@ class BackendClient:
                 "mouse_events": activity.get("mouse_events", 0),
                 "active_window": activity.get("active_window"),
                 "active_app": activity.get("active_app"),
+                "media_state": activity.get("media_state", False),
                 "timestamp": datetime.utcnow().isoformat()
             }
             await self._ws.send(json.dumps(message))

@@ -42,6 +42,9 @@ class SalienceSubscriber(EventSubscriber):
             EventType.DESKTOP_FOCUS_SPAN,
             EventType.DESKTOP_ACTIVITY_STATE,
             EventType.DESKTOP_SCREEN_CONTENT,
+            # Location
+            EventType.LOCATION_PLACE_ENTERED,
+            EventType.LOCATION_PLACE_EXITED,
             # Chat
             EventType.CHAT_MESSAGE_RECEIVED,
             # Food & health

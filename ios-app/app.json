@@ -20,7 +20,8 @@
         "UIBackgroundModes": [
           "remote-notification",
           "fetch",
-          "processing"
+          "processing",
+          "location"
         ],
         "NSMicrophoneUsageDescription": "Sara needs access to your microphone for voice chat.",
         "NSSpeechRecognitionUsageDescription": "Sara needs access to speech recognition for voice chat.",
@@ -29,6 +30,8 @@
         "NSHealthShareUsageDescription": "Sara reads your health data to provide personalized wellness insights, track your fitness progress, and help you achieve your health goals.",
         "NSHealthUpdateUsageDescription": "Sara can write workout and nutrition data to Apple Health to keep your health records complete.",
         "NSCalendarsUsageDescription": "Sara reads your calendar to show upcoming events and help you stay organized.",
+        "NSLocationWhenInUseUsageDescription": "Sara uses your location to know where you are and give location-aware answers.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Sara uses your location in the background to notice when you arrive at or leave places, so she can trigger location-based reminders like \"remind me to stop by the store when I leave here.\"",
         "ITSAppUsesNonExemptEncryption": false,
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true
@@ -85,6 +88,15 @@
           "NSHealthShareUsageDescription": "Sara reads your health data to provide personalized wellness insights, track your fitness progress, and help you achieve your health goals.",
           "NSHealthUpdateUsageDescription": "Sara can write workout and nutrition data to Apple Health to keep your health records complete.",
           "background": true
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Sara uses your location in the background to notice when you arrive at or leave places, so she can trigger location-based reminders.",
+          "locationWhenInUsePermission": "Sara uses your location to know where you are and give location-aware answers.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
         }
       ]
     ],

@@ -173,3 +173,64 @@ def classify_event(
 def ownership_prefix(ownership: EventOwnership) -> str:
     """Display prefix for event listings: 'Everett: ' or ''."""
     return f"{ownership.label}: " if not ownership.is_self else ""
+
+
+@dataclass
+class AttendanceRole:
+    role: str          # "organizer" | "attendee" | "declined" | "unknown"
+    is_organizer: bool
+    declined: bool
+    attendee_count: int
+    is_broadcast: bool  # large invite list David didn't organize — low-relevance FYI
+    weight: float       # 0-1, how much this event is actually "David's" to prep for
+
+
+_BROADCAST_ATTENDEE_THRESHOLD = 8
+
+
+def attendance_role(
+    organizer: Optional[str],
+    attendees: Optional[list],
+    config: Optional[dict] = None,
+) -> AttendanceRole:
+    """David's relationship to a meeting he's on the calendar for — was he the
+    organizer, an invited attendee, or someone who declined? Distinguishes
+    "David's meeting" from a broadcast invite he's just CC'd on, so prep
+    notifications and brief prioritization don't treat a 40-person all-hands
+    the same as a 1:1 he's running."""
+    config = config or get_config()
+    self_name = (config.get("self_name") or "David").lower()
+    attendees = attendees or []
+    attendee_count = len(attendees)
+
+    is_organizer = bool(organizer) and self_name in organizer.lower()
+
+    declined = False
+    self_found = False
+    for a in attendees:
+        name = (a.get("name") or "") if isinstance(a, dict) else ""
+        email = (a.get("email") or "") if isinstance(a, dict) else ""
+        status = (a.get("status") or "") if isinstance(a, dict) else ""
+        if self_name in name.lower() or self_name in email.lower():
+            self_found = True
+            if status.lower() == "declined":
+                declined = True
+            break
+
+    is_broadcast = (not is_organizer) and attendee_count >= _BROADCAST_ATTENDEE_THRESHOLD
+
+    if declined:
+        role, weight = "declined", 0.0
+    elif is_organizer:
+        role, weight = "organizer", 1.0
+    elif is_broadcast:
+        role, weight = "attendee", 0.3
+    elif self_found or attendee_count > 0:
+        role, weight = "attendee", 0.8
+    else:
+        role, weight = "unknown", 0.8  # no attendee data at all — assume it's David's
+
+    return AttendanceRole(
+        role=role, is_organizer=is_organizer, declined=declined,
+        attendee_count=attendee_count, is_broadcast=is_broadcast, weight=weight,
+    )

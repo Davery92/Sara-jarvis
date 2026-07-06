@@ -32,7 +32,13 @@ html, body, #root {
   -webkit-app-region: no-drag;
 }
 
-/* Chat window should NOT be draggable at all - fully interactive */
+/* Chat window is fully interactive except its header, which is the drag handle */
 .chat-window {
+  -webkit-app-region: no-drag;
+}
+.chat-window-header {
+  -webkit-app-region: drag;
+}
+.chat-window-header button {
   -webkit-app-region: no-drag;
 }

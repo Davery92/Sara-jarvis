@@ -1,0 +1,40 @@
+# Sara Voice + Vision Agent — Jetson Orin Nano
+# Install with: pip install -r requirements.txt
+
+# Core
+pyyaml>=6.0
+numpy>=1.24
+
+# Audio
+sounddevice>=0.4.6
+scipy>=1.11                      # Resampling, spectral processing
+
+# Wake word + VAD (CPU ONNX)
+openwakeword>=0.6.0
+onnxruntime>=1.16                # CPU provider only (NOT onnxruntime-gpu on Jetson)
+torch>=2.0                        # Silero VAD — the ONNX Silero build is broken on Jetson aarch64, see audio/vad.py
+# NOTE: plain `pip install torch` does NOT work on Jetson (no aarch64+CUDA
+# wheel on PyPI) — this box already has NVIDIA's JetPack-built torch
+# installed system-wide. deploy.sh creates the venv with
+# --system-site-packages specifically so this requirement is satisfied by
+# that system install instead of pip trying (and failing) to fetch one.
+
+# Vision
+opencv-python-headless>=4.8      # V4L2 capture, no GUI
+insightface>=0.7.3               # Face detection + recognition
+# Note: TensorRT engine built separately via trtexec
+
+# Networking
+httpx>=0.25                      # Async HTTP client
+websockets>=12.0                 # Desktop bridge WebSocket server
+aiofiles>=23.0
+
+# System
+psutil>=5.9                      # GPU temp, memory monitoring
+pynvml>=11.5                     # NVIDIA GPU monitoring
+
+# Whisper fallback (optional — only if local STT needed)
+# Install whisper-cpp-python separately:
+#   pip install whisper-cpp-python
+# Then download model:
+#   wget -O models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin

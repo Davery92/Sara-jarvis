@@ -192,6 +192,27 @@ This provides:
 - File upload with malware scanning
 - Rate limiting and CORS protection
 
+## 🖥️ Desktop App (sara-desktop) Updates
+
+`electron-updater` polls `https://sara-api.avery.cloud/api/updates/<filename>`, served by
+`backend/app/routes/desktop_updates.py` straight from the `DESKTOP_UPDATES_DIR` (default
+`/updates`) — no auth, generic provider. Publishing a new release means building on **each**
+target OS (PyInstaller and electron-builder do not cross-compile) and copying that platform's
+artifacts into the same shared `/updates` directory:
+
+1. **Windows** (on a Windows machine): `scripts/build-sidecar.ps1` freezes the sidecar to
+   `sidecar/dist-frozen/sidecar.exe`, then `npm run build:win` produces
+   `release/Sara Setup <version>.exe`, `latest.yml`, and `.blockmap`.
+2. **macOS** (on a Mac): `scripts/build-sidecar.sh` freezes the sidecar to
+   `sidecar/dist-frozen/sidecar` (arm64 on Apple Silicon, x64 on Intel), then
+   `npm run build:mac` produces `release/Sara-<version>-mac.zip` and `latest-mac.yml`.
+3. Copy every file electron-updater needs — `latest.yml` + the `.exe`/`.blockmap` from Windows,
+   `latest-mac.yml` + the `.zip` from macOS — into the same `/updates` directory on the backend
+   host. Both platforms' installed apps poll the same endpoint and each only downloads its own
+   `latest*.yml` + matching artifact.
+4. Bump `version` in `sara-desktop/package.json` before building either platform — electron-updater
+   compares against that, not the filename.
+
 ## 🎯 Next Steps
 
 1. **Immediate**: Point sara.avery.cloud to 10.185.1.180:3000

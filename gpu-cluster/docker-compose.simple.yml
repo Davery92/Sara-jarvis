@@ -162,6 +162,55 @@ services:
     restart: unless-stopped
 
   # ============================================
+  # Wake Word Training Worker (optional profile) — Desktop Jarvis Overhaul B3
+  # ============================================
+  wake-training-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.wake-training
+    container_name: wake-training-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - VOICE_INTERNAL_SERVICE=wake-word-training
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}
+      - TRAINING_POLL_INTERVAL_SECONDS=${TRAINING_POLL_INTERVAL_SECONDS:-6}
+      - TRAINING_HEARTBEAT_INTERVAL_SECONDS=${TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - WAKE_TRAINING_AUTO_ACTIVATE=${WAKE_TRAINING_AUTO_ACTIVATE:-false}
+      - WAKE_MODEL_VERSION_PREFIX=${WAKE_MODEL_VERSION_PREFIX:-hey_sara_v}
+      - WAKE_TRAIN_COMMAND=${WAKE_TRAIN_COMMAND:-}
+      - WAKE_TRAIN_TIMEOUT_SECONDS=${WAKE_TRAIN_TIMEOUT_SECONDS:-3600}
+      - WAKE_TRAIN_DATASET_SSH_TARGET=${WAKE_TRAIN_DATASET_SSH_TARGET:-david@jetson.local}
+      - JETSON_WAKE_DATASET_ROOT=${JETSON_WAKE_DATASET_ROOT:-/home/david/data/wake-word-datasets}
+      - WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK=${WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK:-true}
+    volumes:
+      - ~/.ssh:/root/.ssh:ro
+    restart: unless-stopped
+
+  # ============================================
+  # ML Training Worker (optional profile) — Desktop Jarvis Overhaul C2
+  # ============================================
+  ml-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: ml-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - ML_INTERNAL_SERVICE=ml-worker
+      - ML_CONTROL_INTERNAL_TOKEN=${ML_CONTROL_INTERNAL_TOKEN:-${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}}
+      - ML_TRAINING_POLL_INTERVAL_SECONDS=${ML_TRAINING_POLL_INTERVAL_SECONDS:-10}
+      - ML_TRAINING_HEARTBEAT_INTERVAL_SECONDS=${ML_TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - ML_TRAINING_AUTO_ACTIVATE=${ML_TRAINING_AUTO_ACTIVATE:-false}
+      - ML_READONLY_DATABASE_URL=${ML_READONLY_DATABASE_URL:-postgresql://sara:sara123@10.185.1.180:5432/sara_hub}
+      - MINIO_URL=${MINIO_URL:-http://10.185.1.180:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-sara}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
+      - ML_MODEL_BUCKET=${ML_MODEL_BUCKET:-sara-ml-models}
+    restart: unless-stopped
+
+  # ============================================
   # Audio Pipeline Worker
   # ============================================
   audio-worker:

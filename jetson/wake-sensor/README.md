@@ -12,7 +12,10 @@ Responsibilities:
 Current status:
 - Scaffold complete
 - Simulation mode complete (no hardware required)
-- Live audio capture integration pending
+- Live audio capture integration complete (B3) — real mic input via
+  `sounddevice`, `openWakeWord` inference, energy-based utterance boundary
+  detection; NOT yet verified against real Jetson hardware (device was
+  unreachable during this implementation pass)
 - Training-job worker hooks complete (`train_wake_word`)
 - Internal config sync complete (`/api/voice-control/config/internal`)
 - Ambient threshold auto-adjust loop scaffolded (simulation)
@@ -26,7 +29,12 @@ Current status:
 
 2. `simulate=false`:
 - Starts heartbeat loop
-- Placeholder for live audio pipeline extraction (`openWakeWord` + VAD + mic device)
+- Real live audio pipeline: `sounddevice` mic capture (`WAKE_SENSOR_MIC_DEVICE`
+  substring match) → `openWakeWord` inference (`WAKE_SENSOR_MODEL_PATH`) →
+  energy-based silence detection for utterance end (`WAKE_SENSOR_SILENCE_RMS_THRESHOLD`,
+  `silence_ms`). Deliberately lightweight — actual transcription/response
+  still happens downstream in sara-voice; this service is the wake "sensor"
+  layer only.
 
 3. Training worker:
 - Polls control-plane queue for `train_wake_word` jobs
@@ -76,8 +84,9 @@ Headers used:
 
 ## Next Implementation Steps
 
-1. Add real audio input adapter for Jetson mic array.
-2. Integrate `openWakeWord` model loading and thresholding.
-3. Integrate VAD and utterance extraction.
-4. Add wake-word model selection and runtime reload from control-plane config.
-5. Add ambient profiler with periodic calibration events.
+1. ~~Add real audio input adapter for Jetson mic array.~~ Done (B3).
+2. ~~Integrate `openWakeWord` model loading and thresholding.~~ Done (B3).
+3. ~~Integrate VAD and utterance extraction.~~ Done (B3, energy-based rather than Silero — see above).
+4. Add wake-word model selection and runtime reload from control-plane config — config sync already updates `_active_wake_model_version`/thresholds live; reloading the actual ONNX file on a version change (not just the metadata) still needs wiring in `_live_audio_loop`.
+5. Add ambient profiler with periodic calibration events — `_ambient_loop` still simulates the noise floor; wire it to the real mic RMS instead.
+6. Verify end-to-end against real Jetson hardware once reachable.

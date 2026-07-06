@@ -9,7 +9,7 @@ interface InboxWorkspaceViewProps {
   contentInboxStats: any
   attentionUnreadCount: number
   onSelectInboxTab: (tab: 'content' | 'attention') => void
-  onOpenContentChat: (inboxItemId: string, title: string) => void
+  onOpenContentChat: (inboxItemId: string, title: string, excerpt?: string) => void
   onOpenAttentionChat: (prompt: string) => void
   onOpenNote?: (noteId: string) => void
 }

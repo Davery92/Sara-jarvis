@@ -365,7 +365,7 @@ from app.models.background_task import BackgroundTask
 from app.models.context import ContextWindow, ContextMode
 from app.models.dream import DreamInsight
 from app.models.briefing import DailyBriefing, BriefingSettings
-from app.models.intelligence import IntelligenceReport, ProactiveSuggestion, DetectedPattern
+from app.models.intelligence import IntelligenceReport
 from app.models.insight import AutonomousInsight, InsightNudge, ActivitySession, BackgroundSweep
 from app.models.event_outbox import EventOutbox
 from app.models.push_token import PushToken
@@ -5413,6 +5413,14 @@ try:
 except Exception as e:
     logger.warning(f"Assistant inbox routes not available from module: {e}")
 
+# Overlay data endpoints (standalone /overlay/:kind webapp routes)
+try:
+    from app.routes.overlay import router as overlay_router
+    app.include_router(overlay_router)
+    logger.info("✅ Overlay routes loaded from app.routes.overlay")
+except Exception as e:
+    logger.warning(f"Overlay routes not available from module: {e}")
+
 # Folders routes (extracted from main_simple.py)
 try:
     from app.routes.folders import router as folders_router
@@ -5540,6 +5548,22 @@ try:
     logger.info("✅ Voice control routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Voice control routes failed to load: {e}")
+
+# Include ML Control Plane routes (tabular model training/serving orchestration)
+try:
+    from app.routes.ml_control import router as ml_control_router
+    app.include_router(ml_control_router, tags=["ML Control"])
+    logger.info("✅ ML control routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ ML control routes failed to load: {e}")
+
+# Include "Sara's model of you" routes (patterns/rhythm/predictions visibility + feedback)
+try:
+    from app.routes.model_of_you import router as model_of_you_router
+    app.include_router(model_of_you_router, tags=["Model of You"])
+    logger.info("✅ Model-of-you routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Model-of-you routes failed to load: {e}")
 
 # Include Emotion routes (Phase 2)
 try:
@@ -5722,10 +5746,14 @@ except Exception as e:
 from app.routes.core import router as core_router
 from app.routes.downloads import router as downloads_router
 from app.routes.presence import router as presence_router, log_presence
+from app.routes.location import router as location_router
+from app.routes.rhythm import router as rhythm_router
 
 app.include_router(core_router)
 app.include_router(downloads_router)
 app.include_router(presence_router)
+app.include_router(location_router)
+app.include_router(rhythm_router)
 
 # Phase 5: Extracted route modules (batch C — daily brief)
 from app.routes.daily_brief import router as daily_brief_router
@@ -6355,6 +6383,27 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
         async def generate_stream():
             full_response = ""
             try:
+                # UI COMMAND INTERCEPTION (voice has no SSE overlay host, so a
+                # matched command is pushed straight to the active desktop
+                # instead of relying on a client-side ui_command handler).
+                try:
+                    from app.services import ui_intent
+                    _ui = ui_intent.parse_ui_intent(message, allow_screens=False)
+                    if _ui:
+                        _ui_res = ui_intent.resolve_ui_intent(db, user_id, _ui)
+                        logger.info(f"[Voice] UI command: {_ui.get('overlay')} (query={_ui.get('query')})")
+                        _ui_ack = _ui_res["ack"]
+                        if _ui_res.get("command"):
+                            _pushed = await ui_intent.push_overlay_to_desktop(db, user_id, _ui_res["command"])
+                            if _pushed:
+                                _ui_ack = f"{_ui_ack} On your PC."
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'content': _ui_ack})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'content': _ui_ack, 'conversation_id': conversation_id})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+                except Exception as _ui_e:
+                    logger.error(f"[Voice] UI command interception error: {_ui_e}", exc_info=True)
+
                 # Create system prompt with user-local current time
                 user_now = _resolve_prompt_datetime_for_user(db, user.id)
                 soul_content = load_soul_for_prompt(db)
@@ -8733,7 +8782,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     except Exception:
                         pass
 
-                    return _build_activity_context(
+                    ctx = _build_activity_context(
                         activity_state=_act_state, confidence=_act_conf,
                         room=_act_room, interruptibility=_interrupt or 0.5,
                         turn_count=turn_count,
@@ -8741,6 +8790,25 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         memory_nudges=memory_nudges, calibration_data=_cal_data,
                         sara_emotional_tone=_sara_tone, sara_emotional_intensity=_sara_intensity,
                     )
+
+                    if _snap and _snap.current_place and _snap.current_place != "unknown":
+                        loc_line = f"Location: {_snap.current_place}"
+                        if _snap.current_place_type:
+                            loc_line += f" ({_snap.current_place_type})"
+                        if _snap.at_place_since:
+                            try:
+                                since = datetime.fromisoformat(_snap.at_place_since)
+                                mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
+                                if mins >= 1:
+                                    loc_line += f", arrived {mins}m ago" if mins < 120 else f", there since {since.strftime('%-I:%M %p')}"
+                            except Exception:
+                                pass
+                        ctx = (ctx or "") + "\n" + loc_line
+
+                    if _snap and _snap.rhythm_summary:
+                        ctx = (ctx or "") + "\n" + _snap.rhythm_summary
+
+                    return ctx
                 except Exception as e:
                     logger.warning(f"Personality context failed (non-critical): {e}")
                     return None

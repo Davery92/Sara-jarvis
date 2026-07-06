@@ -47,6 +47,31 @@ async def deliver_task_result(
 
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
 
+    # --- Path 0: Active desktop (Desktop Jarvis Overhaul D) — HUD toast
+    # with an "Open report" overlay action beats everything else; it's the
+    # richest surface and doesn't compete with a push buzzing his phone.
+    try:
+        from app.services.command_router import command_router
+
+        if command_router.get_connected_devices(user_id):
+            from app.services.unified_notification import send_notification
+
+            await send_notification(
+                user_id=user_id,
+                title="Background task complete",
+                message=_short_summary(task_query),
+                category="agent_task",
+                topic=f"agent_task:{task_id}",
+                source="task_result_delivery",
+                priority="normal",
+                overlay={"kind": "report", "payload": {"latest": True}},
+                db=db,
+            )
+            logger.info(f"Delivered task {task_id} via desktop toast + report overlay")
+            return
+    except Exception as e:
+        logger.debug(f"Desktop delivery check failed, falling through to SSE/push: {e}")
+
     # When the task produced a report note, the completion push should DEEP-LINK
     # straight to that note on tap. The iOS handler opens the note directly for
     # `research_complete` (navigateToNoteEditor(data.note_id)), whereas

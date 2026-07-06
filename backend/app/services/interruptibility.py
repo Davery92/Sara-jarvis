@@ -92,6 +92,7 @@ def compute_interruptibility(
     calendar_context: Optional[Dict] = None,
     hours_since_last_interaction: Optional[float] = None,
     notification_count_last_hour: int = 0,
+    user_id: Optional[str] = None,
 ) -> InterruptibilityScore:
     """
     Compute interruptibility score from all available signals.
@@ -182,6 +183,32 @@ def compute_interruptibility(
 
     # Determine what would be suppressed
     suppressed = [u.value for u in Urgency if URGENCY_THRESHOLDS[u] > score and u != Urgency.CRITICAL]
+
+    # --- Shadow ML model (C3: interruptibility_v2) ---
+    # Never affects the returned score/channel — just logs a prediction
+    # alongside the heuristic's own outcome so precision@deliver can be
+    # compared once ml_notification_outcome has enough labeled sends to
+    # train on. Promotion (using the model's score instead of the
+    # heuristic's) is a deliberate follow-up change, not automatic.
+    if user_id:
+        try:
+            from app.services.ml import inference as ml_inference
+            now = datetime.now(USER_TZ)
+            ml_inference.predict(
+                "interruptibility_v2",
+                {
+                    "hour": now.hour,
+                    "day_of_week": now.weekday(),
+                    "activity_state": activity.state.value,
+                    "device": "unknown",
+                    "category": "unknown",
+                    "interruptibility_score": score,
+                },
+                user_id=user_id,
+                mode="shadow",
+            )
+        except Exception as e:
+            logger.debug(f"interruptibility_v2 shadow prediction skipped: {e}")
 
     return InterruptibilityScore(
         score=round(score, 3),

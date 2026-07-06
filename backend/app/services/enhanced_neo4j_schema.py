@@ -9,7 +9,7 @@ from datetime import datetime
 
 from .neo4j_service import neo4j_service
 from .content_intelligence import ContentType, ContentChunk, ChunkType
-from .metadata_extractor import ContentMetadata, Entity, Topic, TemporalInfo
+from .metadata_extractor import ContentMetadata, Entity, Topic
 from .tagging_system import Tag, TagCategory, TagPriority
 
 logger = logging.getLogger(__name__)
@@ -263,49 +263,6 @@ class EnhancedNeo4jService:
                 parent_tag=tag.parent_tag,
                 aliases=tag.aliases
             )
-    
-    def _store_temporal_info(self, tx, content_id: str, temporal_info: TemporalInfo):
-        """Store temporal information"""
-        if temporal_info.durations or temporal_info.schedules:
-            temporal_query = """
-            MATCH (content:Content {id: $content_id})
-            CREATE (temporal:TemporalInfo {
-                id: randomUUID(),
-                content_id: $content_id,
-                durations: $durations,
-                schedules: $schedules,
-                created_at: datetime()
-            })
-            CREATE (content)-[:HAS_TEMPORAL_INFO]->(temporal)
-            """
-            
-            tx.run(temporal_query,
-                content_id=content_id,
-                durations=temporal_info.durations,
-                schedules=temporal_info.schedules
-            )
-    
-    def _store_actionable_items(self, tx, content_id: str, actionable_items: List[str]):
-        """Store actionable items as separate nodes"""
-        if actionable_items:
-            action_query = """
-            MATCH (content:Content {id: $content_id})
-            CREATE (action:ActionItem {
-                id: randomUUID(),
-                content_id: $content_id,
-                description: $description,
-                status: 'pending',
-                priority: 'normal',
-                created_at: datetime()
-            })
-            CREATE (content)-[:HAS_ACTION_ITEM]->(action)
-            """
-            
-            for item in actionable_items:
-                tx.run(action_query,
-                    content_id=content_id,
-                    description=item
-                )
     
     # Enhanced query methods
     def find_content_by_tags(self, user_id: str, tag_names: List[str], limit: int = 20) -> List[Dict]:

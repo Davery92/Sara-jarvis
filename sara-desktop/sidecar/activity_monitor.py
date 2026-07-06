@@ -23,6 +23,7 @@ class ActivityMetrics:
     mouse_distance: float = 0.0
     active_window: Optional[str] = None
     active_app: Optional[str] = None
+    is_fullscreen: bool = False
     last_activity_at: float = field(default_factory=time.time)
 
     def reset_counts(self):
@@ -184,8 +185,52 @@ class ActivityMonitor:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
+            self._metrics.is_fullscreen = self._is_window_fullscreen_windows(hwnd)
+
         except Exception as e:
             logger.debug(f"Windows active window error: {e}")
+
+    def _is_window_fullscreen_windows(self, hwnd) -> bool:
+        """Heuristic: the foreground window's rect exactly covers the
+        monitor it's on (borderless or exclusive fullscreen — games,
+        video players in fullscreen, presentation mode)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+
+            window_rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(window_rect)):
+                return False
+
+            MONITOR_DEFAULTTONEAREST = 2
+            monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+            if not monitor:
+                return False
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                return False
+
+            m = info.rcMonitor
+            return (
+                window_rect.left <= m.left
+                and window_rect.top <= m.top
+                and window_rect.right >= m.right
+                and window_rect.bottom >= m.bottom
+            )
+        except Exception:
+            return False
 
     def _update_active_window_macos(self):
         """Get active window on macOS."""
@@ -282,6 +327,7 @@ class ActivityMonitor:
             "mouse_distance": round(self._metrics.mouse_distance, 2),
             "active_window": self._metrics.active_window,
             "active_app": self._metrics.active_app,
+            "is_fullscreen": self._metrics.is_fullscreen,
             "idle_seconds": round(time.time() - self._metrics.last_activity_at, 1),
             "timestamp": datetime.utcnow().isoformat()
         }

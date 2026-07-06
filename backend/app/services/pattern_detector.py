@@ -419,6 +419,20 @@ class PatternDetector:
         # This could analyze habit completion patterns if needed
         return []
 
+    # domain -> {to_state: HA service to call to actually reach that state}.
+    # Only these (domain, to_state) pairs get a real actionable "automation"
+    # payload; anything else (sensors, locks' intermediate states, richer
+    # media_player states, etc.) stays an informational "suggestion" like
+    # before — we only promise an action Sara can actually execute correctly.
+    _CONTROLLABLE_SERVICES = {
+        "light": {"on": "light.turn_on", "off": "light.turn_off"},
+        "switch": {"on": "switch.turn_on", "off": "switch.turn_off"},
+        "lock": {"locked": "lock.lock", "unlocked": "lock.unlock"},
+        "media_player": {"on": "media_player.turn_on", "off": "media_player.turn_off"},
+        "fan": {"on": "fan.turn_on", "off": "fan.turn_off"},
+        "cover": {"open": "cover.open_cover", "closed": "cover.close_cover"},
+    }
+
     async def _detect_home_routine_patterns(
         self,
         db: Session,
@@ -426,14 +440,21 @@ class PatternDetector:
         replays: List[DayReplay]
     ) -> List[Dict[str, Any]]:
         """
-        Detect daily home routines from HA entity activity.
+        Detect daily home routines from HA entity STATE TRANSITIONS.
+
+        Keyed by (entity, to_state) rather than just entity — "the office
+        light turns off around 19:00" and "the office light turns on around
+        06:00" are different facts, not the same "active" blob. This is what
+        makes the resulting pattern promotable into a real standing order
+        (turn off vs. turn on aren't interchangeable) instead of a no-op
+        "suggestion" that just acknowledges itself.
 
         Example: "Side door typically opens around 07:00"
         """
         patterns = []
 
-        # entity_id -> {replay_date -> set(active ET hours)}
-        entity_days: Dict[str, Dict[date, set]] = defaultdict(dict)
+        # (entity_id, to_state) -> {replay_date -> set(ET hours seen)}
+        entity_days: Dict[Tuple[str, str], Dict[date, set]] = defaultdict(dict)
         names: Dict[str, str] = {}
         domains: Dict[str, str] = {}
 
@@ -442,18 +463,20 @@ class PatternDetector:
                 if event.source != DataSource.HOME or event.event_type != "home_entity_activity":
                     continue
                 eid = event.details.get("entity_id")
-                if not eid:
+                to_state = event.details.get("to_state")
+                if not eid or not to_state:
                     continue
-                entity_days[eid][replay.replay_date] = set(event.details.get("active_hours") or [])
+                key = (eid, to_state)
+                entity_days[key][replay.replay_date] = set(event.details.get("active_hours") or [])
                 names[eid] = event.details.get("friendly_name") or eid
                 domains[eid] = event.details.get("domain") or eid.split(".")[0]
 
-        for eid, day_hours in entity_days.items():
+        for (eid, to_state), day_hours in entity_days.items():
             total_days = len(day_hours)
             if total_days < max(self.MIN_OCCURRENCES, 3):
                 continue
 
-            # Count, per hour (±1h smoothing), on how many days it was active
+            # Count, per hour (±1h smoothing), on how many days it transitioned to this state
             hour_day_counts: Dict[int, int] = defaultdict(int)
             for hours in day_hours.values():
                 smoothed = set()
@@ -471,18 +494,42 @@ class PatternDetector:
             best_hour = max(routine_hours, key=lambda h: hour_day_counts[h])
             time_str = f"{best_hour:02d}:00"
             label = names[eid]
-            trigger_conditions = {"time": time_str, "entity_id": eid}
+            domain = domains[eid]
+            trigger_conditions = {"time": time_str, "entity_id": eid, "to_state": to_state}
+
+            service = self._CONTROLLABLE_SERVICES.get(domain, {}).get(to_state)
+            verb = {"on": "turns on", "off": "turns off", "locked": "locks", "unlocked": "unlocks",
+                    "open": "opens", "closed": "closes"}.get(to_state, f"goes to {to_state}")
+            description = f"{label} {verb} around {time_str}"
+
+            action_type = ActionType.AUTOMATION if service else ActionType.SUGGESTION
+            if service:
+                action_payload = {
+                    "entity_id": eid,
+                    "domain": domain,
+                    "service": service,
+                    "observation": description,
+                    "suggest_message": f"{label} usually {verb} around {time_str}. Want me to do that automatically?",
+                }
+            else:
+                action_payload = {
+                    "entity_id": eid,
+                    "domain": domain,
+                    "to_state": to_state,
+                    "observation": description,
+                    "suggest_message": f"{label} usually {verb} around {time_str}.",
+                }
 
             existing_id = await behavioral_pattern_service.find_similar_pattern(
                 db, user_id,
                 TriggerType.TIME,
                 trigger_conditions,
-                ActionType.SUGGESTION
+                action_type,
             )
             if existing_id:
                 for d in sorted(day_hours):
                     await behavioral_pattern_service.add_evidence(
-                        db, existing_id, d, f"{label} active"
+                        db, existing_id, d, f"{label} {verb}"
                     )
                 patterns.append({
                     "type": "existing_updated",
@@ -496,16 +543,11 @@ class PatternDetector:
                 user_id=user_id,
                 trigger_type=TriggerType.TIME,
                 trigger_conditions=trigger_conditions,
-                action_type=ActionType.SUGGESTION,
-                action_payload={
-                    "entity_id": eid,
-                    "domain": domains[eid],
-                    "observation": f"{label} is typically active around {time_str}",
-                    "suggest_message": f"{label} is usually active around {time_str}."
-                },
-                description=f"{label} active around {time_str}",
+                action_type=action_type,
+                action_payload=action_payload,
+                description=description,
                 source_context=(
-                    f"Observed {label} active around {time_str} on "
+                    f"Observed {label} {verb} around {time_str} on "
                     f"{hour_day_counts[best_hour]} of {total_days} days"
                 ),
                 category=PatternCategory.HOME,

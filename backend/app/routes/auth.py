@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import UserCreate, UserLogin, UserResponse, UserUpdate
-from app.core.auth import create_access_token, get_cookie_domain
+from app.core.auth import create_access_token, get_cookie_domain, verify_token
 from app.core.deps import get_current_user
 from app.core.security import rate_limiter
+from fastapi.responses import RedirectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -268,3 +269,38 @@ async def get_token(request: Request, current_user: User = Depends(get_current_u
         raise HTTPException(status_code=401, detail="No token found")
 
     return {"access_token": token, "user_id": current_user.id}
+
+
+@router.get("/token-cookie")
+async def token_cookie_exchange(token: str, request: Request, redirect: str = "/"):
+    """One-time JWT -> httpOnly cookie exchange for Electron overlay windows.
+
+    A plain `BrowserWindow.loadURL()` navigation can't set an Authorization
+    header, so the desktop passes its already-stored JWT as a query param on
+    the first navigation; this sets the normal session cookie and redirects
+    to the real path with the token stripped out of the URL/history.
+    """
+    payload = verify_token(token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Only allow relative, same-origin redirects — never forward to an
+    # external host via this token-bearing endpoint.
+    if not redirect.startswith("/") or redirect.startswith("//") or "://" in redirect:
+        redirect = "/"
+
+    response = RedirectResponse(url=redirect, status_code=302)
+    cookie_domain = get_cookie_domain(request)
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    cookie_kwargs = {
+        "key": "access_token",
+        "value": token,
+        "secure": is_secure,
+        "httponly": True,
+        "samesite": "lax",
+        "max_age": 24 * 7 * 3600,
+    }
+    if cookie_domain:
+        cookie_kwargs["domain"] = cookie_domain
+    response.set_cookie(**cookie_kwargs)
+    return response

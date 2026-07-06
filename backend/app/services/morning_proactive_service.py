@@ -337,10 +337,24 @@ class MorningProactiveService:
             if accepted:
                 # Execute the pattern's action
                 result = await self._execute_pattern_action(db, pattern_id)
+
+                # record_response() flips status to 'confirmed' on acceptance —
+                # promote it to a standing order so it runs on its own from now
+                # on. promote_pattern() no-ops if already promoted.
+                promotion = None
+                try:
+                    from app.services.standing_order_service import standing_order_service
+                    promotion = await standing_order_service.promote_pattern(db, pattern_id)
+                    if promotion:
+                        logger.info(f"Pattern {pattern_id} promoted to standing order #{promotion.get('id')}")
+                except Exception as e:
+                    logger.warning(f"Pattern promotion failed for {pattern_id}: {e}")
+
                 return {
                     "success": True,
                     "action": "accepted",
-                    "execution_result": result
+                    "execution_result": result,
+                    "promotion": promotion,
                 }
             else:
                 return {
@@ -524,106 +538,3 @@ async def run_morning_proactive_check(db: Session, user_id: str) -> Dict[str, An
     Convenience function to run the morning proactive check.
     """
     return await morning_proactive_service.run_morning_check(db, user_id)
-
-
-class MorningProactiveScheduler:
-    """
-    Scheduler that runs the morning proactive check at 9 AM Eastern.
-
-    Checks active behavioral patterns against current conditions and sends
-    personalized iOS push notifications for relevant suggestions.
-    """
-
-    def __init__(self):
-        import pytz
-        self.eastern_tz = pytz.timezone('America/New_York')
-        self.check_time = time(9, 0)  # 9:00 AM Eastern
-        self.is_running = False
-        self.last_check_date = None
-        logger.info("☀️ MorningProactiveScheduler initialized - checks at 9:00 AM Eastern")
-
-    async def start_scheduler(self):
-        """Start the morning proactive scheduler"""
-        import pytz
-        import asyncio
-        from app.db.session import SessionLocal
-        from app.models.user import User
-
-        logger.info("☀️ Starting morning proactive scheduler...")
-
-        while True:
-            try:
-                # Get current time in Eastern timezone
-                utc_now = datetime.now(pytz.UTC)
-                eastern_now = utc_now.astimezone(self.eastern_tz)
-
-                # Check if it's time to run and we haven't run today
-                if self._should_run(eastern_now):
-                    logger.info(f"☀️ Time for morning proactive check! It's {eastern_now.strftime('%I:%M %p')} Eastern")
-                    await self._run_morning_checks()
-                    self.last_check_date = eastern_now.date()
-
-                # Sleep for 15 minutes before checking again
-                await asyncio.sleep(900)  # 15 minutes
-
-            except Exception as e:
-                logger.error(f"❌ Morning proactive scheduler error: {e}")
-                await asyncio.sleep(3600)  # Wait 1 hour on error
-
-    def _should_run(self, eastern_now: datetime) -> bool:
-        """Check if we should run the morning check (Eastern time)"""
-        current_time = eastern_now.time()
-        current_date = eastern_now.date()
-
-        # Check window: 9:00 AM - 10:00 AM Eastern only
-        check_start = time(9, 0)
-        check_end = time(10, 0)
-        is_check_time = check_start <= current_time < check_end
-        havent_run_today = (self.last_check_date is None or self.last_check_date < current_date)
-        not_currently_running = not self.is_running
-
-        if is_check_time and havent_run_today and not_currently_running:
-            logger.info(f"☀️ Morning check conditions met: {eastern_now.strftime('%I:%M %p')} Eastern on {current_date}")
-            return True
-
-        return False
-
-    async def _run_morning_checks(self):
-        """Run the morning proactive checks for all users"""
-        from app.db.session import SessionLocal
-        from app.models.user import User
-
-        if self.is_running:
-            logger.info("☀️ Already running morning checks, skipping")
-            return
-
-        try:
-            self.is_running = True
-            logger.info("☀️ Starting morning proactive checks...")
-
-            db = SessionLocal()
-            try:
-                users = db.query(User).all()
-
-                for user in users:
-                    try:
-                        result = await morning_proactive_service.run_morning_check(db, user.id)
-                        logger.info(f"☀️ Morning check for {user.email}: "
-                                  f"{result.get('suggestions_sent', 0)} suggestions sent")
-                        db.commit()
-                    except Exception as e:
-                        logger.error(f"❌ Morning check failed for user {user.id}: {e}")
-                        db.rollback()
-            finally:
-                db.close()
-
-            logger.info("☀️ Morning proactive checks complete!")
-
-        except Exception as e:
-            logger.error(f"❌ Morning proactive checks failed: {e}")
-        finally:
-            self.is_running = False
-
-
-# Singleton scheduler instance
-morning_proactive_scheduler = MorningProactiveScheduler()

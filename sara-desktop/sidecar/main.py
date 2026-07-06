@@ -54,6 +54,13 @@ class SidecarService:
         self._electron_bridge = None
         self._metrics_collector = metrics_collector if PSUTIL_AVAILABLE else None
         self._focus_tracker = None
+        self._playback_service = None
+        self._voice_recorder = None
+        self._jetson_client = None
+
+        # command_id dedupe ring (A3 idempotency)
+        self._seen_command_ids: set = set()
+        self._seen_command_ids_order: list = []
 
         # Latest browser-extension context: {url, domain, title, received_at}.
         # Used to enrich focus_span payloads when active_app is a browser.
@@ -77,6 +84,9 @@ class SidecarService:
             from backend_client import BackendClient
             from electron_bridge import ElectronBridge
             from focus_tracker import FocusTracker
+            from voice.playback import PlaybackService
+            from voice.recorder import VoiceRecorder
+            from voice.jetson_client import JetsonClient
 
             # Create instances
             self._electron_bridge = ElectronBridge(
@@ -87,8 +97,35 @@ class SidecarService:
 
             self._backend_client = BackendClient(
                 config=config,
-                on_command=self._handle_command
+                on_command=self._handle_command,
+                on_event=self._handle_backend_event,
+                on_config_update=self._handle_config_update,
+                on_auth_invalid=self._handle_auth_invalid
             )
+
+            self._playback_service = PlaybackService(
+                tts_url=config.tts_url,
+                voice=config.tts_voice,
+                speed=config.tts_speed,
+                output_device=config.tts_output_device,
+                on_playback_state=self._on_playback_state,
+            )
+
+            self._voice_recorder = VoiceRecorder(
+                api_url=config.backend_url,
+                auth_token_getter=lambda: config.auth_token,
+                on_level=self._on_recorder_level,
+                on_done=self._on_recorder_done,
+            )
+
+            self._jetson_client = None
+            if config.jetson_host:
+                self._jetson_client = JetsonClient(
+                    host=config.jetson_host,
+                    port=config.jetson_port,
+                    on_voice_state=self._on_jetson_voice_state,
+                    on_transcript=self._on_jetson_transcript,
+                )
 
             self._focus_tracker = FocusTracker(
                 on_focus_span=self._on_focus_span,
@@ -102,7 +139,8 @@ class SidecarService:
 
             self._screenshot_service = ScreenshotService(
                 backend_client=self._backend_client,
-                interval=config.screenshot_interval
+                interval=config.screenshot_interval,
+                enabled=config.screenshot_enabled,
             )
 
             # Start electron bridge FIRST so clients can connect
@@ -127,12 +165,19 @@ class SidecarService:
                 asyncio.create_task(self._heartbeat_loop()),
             ])
 
+            if self._jetson_client:
+                self._tasks.append(asyncio.create_task(self._jetson_client.run()))
+
             # Add metrics loop if psutil is available
             if self._metrics_collector:
                 self._tasks.append(asyncio.create_task(self._metrics_loop()))
                 logger.info("System metrics collection enabled")
             else:
                 logger.warning("psutil not available - system metrics disabled")
+
+            import permissions_macos
+            if permissions_macos.IS_MACOS:
+                self._tasks.append(asyncio.create_task(self._permissions_loop()))
 
             logger.info("All services started successfully")
 
@@ -171,6 +216,10 @@ class SidecarService:
             await self._backend_client.disconnect()
         if self._electron_bridge:
             await self._electron_bridge.stop()
+        if self._playback_service:
+            await self._playback_service.close()
+        if self._jetson_client:
+            await self._jetson_client.stop()
 
         logger.info("Sidecar stopped")
 
@@ -191,11 +240,33 @@ class SidecarService:
                         except Exception:
                             pass
 
+                    try:
+                        import media_state
+                        activity["media_state"] = await media_state.is_media_playing()
+                    except Exception as e:
+                        logger.debug(f"media_state check failed: {e}")
+
                     await self._backend_client.send_heartbeat(activity)
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
             await asyncio.sleep(config.heartbeat_interval)
+
+    async def _send_permissions_report(self):
+        import permissions_macos
+        report = permissions_macos.get_permissions_report()
+        self._schedule_electron_message({"type": "permissions_report", "permissions": report})
+        return report
+
+    async def _permissions_loop(self):
+        """Periodically report macOS permission grant state to Electron for
+        the Settings > Permissions onboarding checklist (A8)."""
+        while self.running:
+            try:
+                await self._send_permissions_report()
+            except Exception as e:
+                logger.error(f"Permissions report error: {e}")
+            await asyncio.sleep(30)
 
     async def _metrics_loop(self):
         """Send periodic full metrics to backend and Electron."""
@@ -280,6 +351,92 @@ class SidecarService:
                 await self._backend_client.send_activity_state(state)
             except Exception as e:
                 logger.error(f"send_activity_state failed: {e}")
+
+    async def _on_playback_state(self, is_playing: bool) -> None:
+        """Forward local TTS playback state so the HUD orb can show 'speaking'
+        and so the backend can relay a voice_state event to other devices."""
+        if self._backend_client and self._backend_client.is_connected:
+            try:
+                await self._backend_client.send_event("playback_state", {"is_playing": is_playing})
+            except Exception as e:
+                logger.error(f"send playback_state failed: {e}")
+
+        self._schedule_electron_message({
+            "type": "voice_state",
+            "state": "speaking" if is_playing else "idle",
+        })
+
+    async def _on_jetson_voice_state(self, state: str) -> None:
+        """Mirror the Jetson's own conversation state on this desktop's orb —
+        the visible confirmation that 'hey Sara' landed even though the
+        conversation is happening on the Jetson, not here."""
+        if self._backend_client and self._backend_client.is_connected:
+            try:
+                await self._backend_client.send_event("voice_state", {"state": state})
+            except Exception as e:
+                logger.error(f"send jetson voice_state failed: {e}")
+        self._schedule_electron_message({"type": "voice_state", "state": state})
+
+    async def _on_jetson_transcript(self, user_text: Optional[str], sara_text: Optional[str]) -> None:
+        """Surface the live Jetson conversation turn in the desktop MiniChat."""
+        self._schedule_electron_message({
+            "type": "jetson_transcript",
+            "user": user_text,
+            "sara": sara_text,
+        })
+
+    async def _on_recorder_level(self, level: float) -> None:
+        """Forward the voice-note mic level meter to Electron for HUD feedback."""
+        self._schedule_electron_message({"type": "voice_note_level", "level": level})
+
+    async def _on_recorder_done(self, result: dict) -> None:
+        """A voice-note recording finished — open the note for review, or
+        tell the user why it didn't produce one."""
+        self._schedule_electron_message({"type": "voice_note_level", "level": 0.0})
+        if result.get("success"):
+            note = result["note"]
+            self._schedule_electron_message({
+                "type": "open_overlay",
+                "kind": "note",
+                "payload": {"note_id": note["id"]},
+            })
+        else:
+            self._schedule_electron_message({
+                "type": "show_notification",
+                "title": "Voice note not saved",
+                "message": result.get("error", "Unknown error"),
+            })
+
+    async def _handle_auth_invalid(self) -> None:
+        """Backend rejected our token — surface a re-login prompt instead of
+        looping silently forever (A10)."""
+        self._schedule_electron_message({"type": "auth_invalid"})
+
+    async def _handle_config_update(self, data: dict) -> None:
+        """Apply a live config push (Settings > Privacy toggles) to the
+        already-running screenshot service without needing a reconnect."""
+        if "screenshot_enabled" in data:
+            if self._screenshot_service:
+                self._screenshot_service.set_enabled(bool(data["screenshot_enabled"]))
+            # HUD camera-off badge (A5) — the orb should be honest about
+            # whether ambient capture is currently on.
+            self._schedule_electron_message({
+                "type": "screenshot_config",
+                "enabled": bool(data["screenshot_enabled"]),
+            })
+        if "screenshot_interval" in data and self._screenshot_service:
+            self._screenshot_service.interval = data["screenshot_interval"]
+
+    async def _handle_backend_event(self, event: str, data: dict) -> None:
+        """Forward a generic backend->device event to Electron for HUD/orb
+        state (hud_state, voice_state, attention_count, timer_update)."""
+        if not event:
+            return
+        self._schedule_electron_message({
+            "type": "backend_event",
+            "event": event,
+            "data": data or {},
+        })
 
     def _get_browser_context(self) -> Optional[dict]:
         """Return the most-recent browser tab context if it's still fresh.
@@ -545,21 +702,74 @@ class SidecarService:
             logger.warning("Shutdown requested by Electron, stopping sidecar")
             asyncio.create_task(self.stop())
 
+        elif msg_type == "record_voice_note":
+            # Local hotkey/HUD trigger (A4) — toggles the same recorder the
+            # backend-driven RECORD_VOICE_NOTE command uses.
+            if self._voice_recorder:
+                self._voice_recorder.toggle()
+
+        elif msg_type == "set_focus_tracking_enabled":
+            if self._focus_tracker:
+                self._focus_tracker.set_enabled(bool(data.get("enabled", True)))
+                logger.info(f"Focus tracking enabled={data.get('enabled', True)}")
+
+        elif msg_type == "set_tts_config":
+            if self._playback_service:
+                self._playback_service.set_voice_config(
+                    voice=data.get("voice"), speed=data.get("speed")
+                )
+                logger.info(f"TTS config updated: voice={data.get('voice')}, speed={data.get('speed')}")
+
+        elif msg_type == "recheck_permissions":
+            await self._send_permissions_report()
+
     async def _handle_command(self, command: dict):
         """Handle a command received from backend."""
         cmd_type = command.get("command_type") or command.get("command")  # Support both keys
         payload = command.get("payload", {})
+        command_id = command.get("command_id")
+
+        # Dedupe replays: a reconnect can cause the backend to redeliver a
+        # command whose result never got acked. Track recent command_ids in
+        # a small bounded ring so we don't execute (e.g. re-speak, re-type)
+        # the same command twice (A3 idempotency).
+        if command_id:
+            if command_id in self._seen_command_ids:
+                logger.info(f"Ignoring duplicate command {command_id} ({cmd_type})")
+                return
+            self._seen_command_ids.add(command_id)
+            self._seen_command_ids_order.append(command_id)
+            if len(self._seen_command_ids_order) > 200:
+                oldest = self._seen_command_ids_order.pop(0)
+                self._seen_command_ids.discard(oldest)
 
         logger.info(f"Received command: {cmd_type}")
 
         if cmd_type == "take_screenshot":
             # Capture screenshot
-            if self._screenshot_service:
-                analyze = payload.get("analyze", False)
-                prompt = payload.get("analyze_prompt")
-                await self._screenshot_service.capture_and_upload(
-                    analyze=analyze,
-                    analyze_prompt=prompt
+            analyze = payload.get("analyze", False)
+            prompt = payload.get("analyze_prompt")
+            return_result = payload.get("return_result", False)
+
+            if not self._screenshot_service:
+                if return_result:
+                    await self._backend_client.send_command_result(
+                        command.get("command_id", "unknown"),
+                        success=False, error="screenshot service not available"
+                    )
+                return
+
+            capture_result = await self._screenshot_service.capture_and_upload(
+                analyze=analyze,
+                analyze_prompt=prompt
+            )
+
+            if return_result:
+                await self._backend_client.send_command_result(
+                    command.get("command_id", "unknown"),
+                    success=capture_result is not None,
+                    result=capture_result,
+                    error=None if capture_result else "capture failed",
                 )
 
         elif cmd_type == "open_url":
@@ -595,7 +805,8 @@ class SidecarService:
                 await self._electron_bridge.send_message({
                     "type": "show_notification",
                     "title": payload.get("title"),
-                    "message": payload.get("message")
+                    "message": payload.get("message"),
+                    "overlay": payload.get("overlay"),
                 })
 
         elif cmd_type == "open_workspace":
@@ -626,6 +837,59 @@ class SidecarService:
                 logger.warning("type_into_window: missing 'title_match' or 'text'")
             else:
                 self._type_into_window(title_match, text)
+
+        elif cmd_type == "speak":
+            command_id = command.get("command_id", "unknown")
+            text = payload.get("text")
+            if not text:
+                logger.warning("speak: missing 'text' payload")
+                if self._backend_client:
+                    await self._backend_client.send_command_result(
+                        command_id, success=False, error="missing 'text' payload"
+                    )
+                return
+            if not self._playback_service:
+                if self._backend_client:
+                    await self._backend_client.send_command_result(
+                        command_id, success=False, error="playback service not available"
+                    )
+                return
+            try:
+                played = await self._playback_service.speak(text)
+                if self._backend_client:
+                    await self._backend_client.send_command_result(
+                        command_id, success=played,
+                        error=None if played else "synthesis produced no audio",
+                    )
+            except Exception as e:
+                logger.error(f"speak failed: {e}")
+                if self._backend_client:
+                    await self._backend_client.send_command_result(
+                        command_id, success=False, error=str(e)
+                    )
+
+        elif cmd_type == "cancel_speech":
+            if self._playback_service:
+                self._playback_service.cancel()
+            if self._jetson_client:
+                await self._jetson_client.stop_playback()
+            logger.info("Speech cancelled")
+
+        elif cmd_type == "open_overlay":
+            if self._electron_bridge:
+                await self._electron_bridge.send_message({
+                    "type": "open_overlay",
+                    "kind": payload.get("kind"),
+                    "payload": payload.get("payload", {}),
+                })
+
+        elif cmd_type == "record_voice_note":
+            # Backend decided THIS desktop should capture the voice note
+            # (device_presence resolver — A7). The sidecar owns the mic, so
+            # it records directly rather than bouncing the request to
+            # Electron (which has no mic access of its own).
+            if self._voice_recorder:
+                self._voice_recorder.toggle()
 
         elif cmd_type == "get_metrics":
             # Return current system metrics

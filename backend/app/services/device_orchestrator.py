@@ -318,18 +318,27 @@ class DeviceOrchestrator:
     ) -> Optional[str]:
         """
         Build a device awareness context string for injection into the system prompt.
-        Tells Sara which devices David has and which is active.
+        Tells Sara which devices David has and which is active, plus (A7) the
+        unified presence line — the same "where is David" answer every other
+        consumer (overlay routing, voice-note device selection) uses.
         """
+        presence_line = None
+        try:
+            from app.services.device_presence import resolve as resolve_presence, format_context_line
+            presence_line = format_context_line(await resolve_presence(db, user_id))
+        except Exception as e:
+            logger.warning(f"device_presence context line failed: {e}")
+
         try:
             profiles = await self.get_device_profiles(db, user_id)
-            if not profiles:
-                return None
-
             online = [p for p in profiles if p.is_online]
-            if not online:
-                return None
+
+            if not profiles or not online:
+                return presence_line
 
             lines = ["[Device awareness — route content to the right device when relevant]"]
+            if presence_line:
+                lines.append(presence_line)
             lines.append(f"David has {len(profiles)} devices ({len(online)} online):")
 
             for p in sorted(profiles, key=lambda x: x.is_online, reverse=True):
@@ -356,6 +365,7 @@ class DeviceOrchestrator:
             except Exception:
                 pass
             logger.warning(f"Device context generation failed: {e}")
+            return presence_line
             return None
 
 

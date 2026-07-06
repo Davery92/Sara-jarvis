@@ -16,7 +16,6 @@ import redis.asyncio as aioredis
 from app.core.timezone import now as local_now
 
 from app.db.session import SessionLocal
-from app.models.user import User
 from app.models.episode import Episode
 from app.services.content_intelligence import content_intelligence, ContentType
 from app.services.metadata_extractor import metadata_extractor
@@ -28,6 +27,7 @@ logger = logging.getLogger(__name__)
 DREAM_LOCK_KEY = "sara:dream_scheduler_lock"
 DREAM_LOCK_TTL = 120  # seconds
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
 
 RELEASE_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -124,24 +124,21 @@ class NightlyDreamService:
             self.is_dreaming = True
             logger.info("🌙 Starting nightly dream cycle...")
             
-            # Get all users for processing
-            db = SessionLocal()
-            users = db.query(User).all()
-            db.close()
-            
+            # Solo-user deployment: HA/workout/location events aren't user-scoped,
+            # so looping all app_user rows (including test accounts) cloned David's
+            # home patterns onto every test account. Scope to the real user only.
             eastern_yesterday = (
                 datetime.now(pytz.UTC).astimezone(self.eastern_tz) - timedelta(days=1)
             ).date()
 
-            for user in users:
-                await self._process_user_daily_conversations(user.id)
-                await self._consolidate_inbox_items(user.id)
-                # Pattern detection learns from HA/workout/meal data, so it must
-                # run even on days with no chat — _process_user_daily_conversations
-                # returns early when there were no conversations yesterday.
-                await self._run_full_day_replay_and_pattern_detection(
-                    user.id, eastern_yesterday
-                )
+            await self._process_user_daily_conversations(SOLO_USER_ID)
+            await self._consolidate_inbox_items(SOLO_USER_ID)
+            # Pattern detection learns from HA/workout/meal data, so it must
+            # run even on days with no chat — _process_user_daily_conversations
+            # returns early when there were no conversations yesterday.
+            await self._run_full_day_replay_and_pattern_detection(
+                SOLO_USER_ID, eastern_yesterday
+            )
 
             logger.info("🌙 Nightly dream cycle complete!")
             

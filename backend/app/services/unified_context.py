@@ -48,6 +48,14 @@ class UnifiedContextSnapshot:
     mood: Optional[str] = None
     in_flow_state: bool = False
 
+    # ── Location ──
+    current_place: Optional[str] = None  # classified place name, or "unknown"
+    current_place_type: Optional[str] = None  # home/work/gym/client_site/store/other
+    at_place_since: Optional[str] = None  # ISO timestamp of arrival at current_place
+    last_location_at: Optional[str] = None  # ISO timestamp of last location report
+    location_latitude: Optional[float] = None
+    location_longitude: Optional[float] = None
+
     # ── Environment ──
     home_occupied: bool = True
     active_rooms: Optional[List[str]] = None
@@ -59,6 +67,9 @@ class UnifiedContextSnapshot:
     next_event_title: Optional[str] = None
     next_event_minutes_away: Optional[int] = None
     events_today_count: int = 0
+
+    # ── Daily Rhythm (learned model of David's typical day) ──
+    rhythm_summary: Optional[str] = None  # "Rhythm: wake ~5:42, gym ~13:10, ... (weekday)"
 
     # ── Agent Memory ──
     last_heartbeat_at: Optional[str] = None

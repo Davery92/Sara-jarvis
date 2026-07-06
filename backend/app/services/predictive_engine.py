@@ -35,6 +35,31 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
     if current_hour < 7 or current_hour > 22:
         return predictions
 
+    # C3: next_block model — replaces the SQL heuristics below once trained
+    # with confidence >= threshold. No model exists yet (no supervised
+    # activity-vocabulary label source), so this is a no-op today — kept
+    # here so promotion is a data problem, not a wiring problem.
+    try:
+        from app.services.ml import inference as ml_inference
+        next_block = ml_inference.predict_multiclass(
+            "next_block",
+            {"hour": current_hour, "day_of_week": now.weekday()},
+            user_id=user_id,
+        )
+        if next_block:
+            label, confidence, version = next_block
+            if confidence >= 0.65:
+                predictions.append({
+                    "type": "next_block_prediction",
+                    "title": "Coming up",
+                    "message": f"You're likely to be doing: {label}",
+                    "confidence": confidence,
+                    "priority": "low",
+                    "source": f"ml:next_block@{version}",
+                })
+    except Exception as e:
+        logger.debug(f"next_block prediction skipped: {e}")
+
     async with async_session() as db:
         # 1. Day-of-week habit patterns from calendar history
         try:
@@ -167,6 +192,76 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Travel prediction failed: {e}")
 
+        # 5. High-confidence learned behavioral patterns whose usual time is
+        # approaching. Capped to 1/tick and skips patterns morning_proactive_service
+        # already suggested in the last 24h, so the two pattern-driven surfacing
+        # paths don't double-nag about the same thing.
+        try:
+            result = await db.execute(text("""
+                SELECT description, trigger_conditions, confidence
+                FROM behavioral_pattern
+                WHERE user_id = :uid
+                  AND status IN ('active', 'confirmed')
+                  AND confidence >= 0.8
+                  AND trigger_type = 'time'
+                  AND (last_suggested_at IS NULL OR last_suggested_at < NOW() - INTERVAL '24 hours')
+            """), {"uid": user_id})
+            patterns = result.fetchall()
+
+            now_minutes = current_hour * 60 + now.minute
+            best = None
+            for description, trigger_conditions, confidence in patterns:
+                pattern_time = (trigger_conditions or {}).get("time")
+                if not pattern_time:
+                    continue
+                try:
+                    p_hour, p_minute = (int(x) for x in pattern_time.split(":")[:2])
+                except (ValueError, AttributeError):
+                    continue
+                minutes_until = (p_hour * 60 + p_minute) - now_minutes
+                if 0 < minutes_until <= 45 and (best is None or minutes_until < best[0]):
+                    best = (minutes_until, description, confidence)
+
+            if best:
+                minutes_until, description, confidence = best
+                predictions.append({
+                    "type": "learned_pattern",
+                    "title": "Usual pattern coming up",
+                    "message": f"{description} — usually around this time (learned pattern, {confidence:.0%} confidence).",
+                    "confidence": min(0.85, confidence),
+                    "priority": "low",
+                })
+        except Exception as e:
+            logger.debug(f"Behavioral pattern prediction failed: {e}")
+
+        # 6. Daily Rhythm windows opening soon (wake/gym/meal/winddown/bedtime).
+        try:
+            import asyncio
+            from app.services.daily_rhythm import get_upcoming_rhythm_window
+
+            def _fetch_sync():
+                from app.db.base import SessionLocal
+                sdb = SessionLocal()
+                try:
+                    return get_upcoming_rhythm_window(sdb, user_id, now=now, within_minutes=45)
+                finally:
+                    sdb.close()
+
+            upcoming = await asyncio.to_thread(_fetch_sync)
+            if upcoming:
+                predictions.append({
+                    "type": "rhythm_window",
+                    "title": "Rhythm window opening",
+                    "message": (
+                        f"Your {upcoming['label']} is usually in about {upcoming['minutes_until']} min "
+                        f"({upcoming['confidence']:.0%} confidence, learned rhythm)."
+                    ),
+                    "confidence": min(0.75, upcoming["confidence"]),
+                    "priority": "low",
+                })
+        except Exception as e:
+            logger.debug(f"Rhythm window prediction failed: {e}")
+
     return predictions[:6]  # Max 6 predictions per check
 
 
@@ -185,7 +280,7 @@ async def send_predictions(user_id: str):
                 priority=pred.get("priority", "low"),
                 category="checkin",
                 topic=f"prediction:{hash(pred['title']) % 100000}",
-                source="predictive_engine",
+                source=pred.get("source", "predictive_engine"),
             )
 
     # Inject predictions into daily brief context layer

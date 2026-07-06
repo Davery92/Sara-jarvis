@@ -475,7 +475,10 @@ class ToolIntentClassifier:
             'send notification', 'send a notification', 'notify', 'notification',
             'open on my', 'open url on', 'open this on', 'on my computer',
             'on my desktop', 'on my pc', 'screenshot', 'take screenshot',
-            'connected devices', 'what devices', 'list devices', 'show devices'
+            'connected devices', 'what devices', 'list devices', 'show devices',
+            'what am i looking at', "what's on my screen", 'whats on my screen',
+            "what's this on my screen", 'on my screen', 'my screen',
+            'look at my screen', 'see my screen'
         ],
         'WORKSPACE': [
             'map', 'maps', 'mindmap', 'mind map', 'flowchart', 'flow chart',

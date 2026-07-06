@@ -101,6 +101,23 @@ interface DatasetRecordingStatus {
   message?: string
 }
 
+// Guided recording session (B3) — cycles through natural-speech variations
+// instead of asking for 25 identical repetitions, so the resulting model
+// generalizes across distance/volume/background conditions.
+const WAKE_SESSION_TARGET = 25
+const WAKE_PROMPT_VARIATIONS = [
+  'Say it naturally, like you would to get her attention',
+  'Say it from across the room',
+  'Say it quietly, like you would at night',
+  'Say it with music or the TV on in the background',
+  'Say it while walking past, not facing the mic',
+]
+
+const WAKE_PHRASE_PRESETS: Array<{ label: string; phrase: string; datasetPrefix: string }> = [
+  { label: 'Hey Sara', phrase: 'hey sara', datasetPrefix: 'hey_sara' },
+  { label: 'Sara Stop', phrase: 'sara stop', datasetPrefix: 'sara_stop' },
+]
+
 const tabs: Array<{ id: ControlTab; label: string }> = [
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'wake-word', label: 'Wake Word Lab' },
@@ -152,6 +169,8 @@ const SensoryControlPlane: React.FC = () => {
   const [speakerRecordDuration, setSpeakerRecordDuration] = useState<number>(8)
   const [speakerRecordId, setSpeakerRecordId] = useState<string>('david')
   const [wakeSamples, setWakeSamples] = useState<DatasetSample[]>([])
+  const [wakeNegativeSamples, setWakeNegativeSamples] = useState<DatasetSample[]>([])
+  const [wakePromptIndex, setWakePromptIndex] = useState<number>(0)
   const [speakerSamples, setSpeakerSamples] = useState<DatasetSample[]>([])
   const [datasetRecordingStatus, setDatasetRecordingStatus] = useState<DatasetRecordingStatus | null>(null)
 
@@ -192,6 +211,7 @@ const SensoryControlPlane: React.FC = () => {
     const datasetId = normalizeIdentifier(datasetIdRaw)
     if (!datasetId) {
       setWakeSamples([])
+      setWakeNegativeSamples([])
       return
     }
     try {
@@ -200,6 +220,13 @@ const SensoryControlPlane: React.FC = () => {
     } catch (error) {
       console.warn('Failed to load wake dataset samples', error)
       setWakeSamples([])
+    }
+    try {
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/samples?kind=negative`)
+      setWakeNegativeSamples(Array.isArray(data.samples) ? data.samples : [])
+    } catch (error) {
+      console.warn('Failed to load wake negative samples', error)
+      setWakeNegativeSamples([])
     }
   }, [normalizeIdentifier, request])
 
@@ -460,6 +487,62 @@ const SensoryControlPlane: React.FC = () => {
     }
   }, [normalizeIdentifier, refreshDatasetViews, request, wakeDatasetId])
 
+  const startWakeNegativeRecording = useCallback(async (durationSeconds: number) => {
+    const datasetId = normalizeIdentifier(wakeDatasetId)
+    if (!datasetId) {
+      setMessage('Wake dataset ID is required to record clips')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      setWakeDatasetId(datasetId)
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/start-recording`, {
+        method: 'POST',
+        body: JSON.stringify({
+          duration_seconds: durationSeconds,
+          kind: 'negative',
+          prompt: 'Ambient room noise — talk, play music/TV, or just leave it running',
+        }),
+      })
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to start negative recording'))
+      }
+      setMessage(`Ambient negative recording started (${durationSeconds}s)`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to start negative recording')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, wakeDatasetId])
+
+  const clearWakeNegativeSamples = useCallback(async () => {
+    const datasetId = normalizeIdentifier(wakeDatasetId)
+    if (!datasetId) {
+      setMessage('Wake dataset ID is required')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      const data = await request(`/api/sensory/datasets/${encodeURIComponent(datasetId)}/wake-word/samples?kind=negative`, {
+        method: 'DELETE',
+      })
+      if (data.status === 'error') {
+        throw new Error(String(data.message || 'Unable to clear negative samples'))
+      }
+      setMessage(`Cleared ${String(data.deleted_count || 0)} negative samples`)
+      await refreshDatasetViews()
+    } catch (error) {
+      console.error(error)
+      setMessage('Failed to clear negative samples')
+    } finally {
+      setBusy(false)
+    }
+  }, [normalizeIdentifier, refreshDatasetViews, request, wakeDatasetId])
+
   const clearSpeakerDatasetSamples = useCallback(async () => {
     const datasetId = normalizeIdentifier(speakerDatasetId)
     const speakerId = normalizeIdentifier(speakerRecordId)
@@ -668,6 +751,22 @@ const SensoryControlPlane: React.FC = () => {
       {activeTab === 'wake-word' && (
         <div className={cardClass}>
           <div className="mb-2 text-sm font-semibold text-white">Wake Word Retraining</div>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            {WAKE_PHRASE_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                onClick={() => {
+                  setWakePhrase(preset.phrase)
+                  if (!wakeDatasetId) setWakeDatasetId(preset.datasetPrefix)
+                }}
+                className={`rounded px-3 py-1 text-xs ${
+                  wakePhrase === preset.phrase ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
           <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-2">
             <input
               value={wakePhrase}
@@ -696,6 +795,27 @@ const SensoryControlPlane: React.FC = () => {
               Active model: {models?.wake_word?.active_version || 'unknown'}
             </div>
           </div>
+
+          <div className="mb-3 rounded bg-gray-900 px-3 py-2">
+            <div className="flex items-center justify-between text-xs text-gray-400">
+              <span>Guided session — positive clips</span>
+              <span className="text-cyan-300">{Math.min(wakeSamples.length, WAKE_SESSION_TARGET)} of {WAKE_SESSION_TARGET}</span>
+            </div>
+            <div className="mt-1 h-1.5 w-full rounded bg-gray-800">
+              <div
+                className="h-1.5 rounded bg-cyan-600 transition-all"
+                style={{ width: `${Math.min(100, (wakeSamples.length / WAKE_SESSION_TARGET) * 100)}%` }}
+              />
+            </div>
+            <div className="mt-2 text-sm text-white">"{wakePhrase || 'hey sara'}" — {WAKE_PROMPT_VARIATIONS[wakePromptIndex]}</div>
+            <button
+              onClick={() => setWakePromptIndex((i) => (i + 1) % WAKE_PROMPT_VARIATIONS.length)}
+              className="mt-1 text-[11px] text-gray-500 hover:text-gray-300"
+            >
+              Next variation ↻
+            </button>
+          </div>
+
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               onClick={startWakeDatasetRecording}
@@ -747,6 +867,64 @@ const SensoryControlPlane: React.FC = () => {
               ))}
             </div>
           )}
+
+          <div className="mt-4 border-t border-gray-800 pt-3">
+            <div className="mb-1 text-xs font-semibold text-gray-300">
+              Ambient negatives — room noise, music/TV, and Sara's own voice (hard negatives against self-trigger)
+            </div>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => startWakeNegativeRecording(60)}
+                disabled={busy || !normalizedWakeDatasetId}
+                className="rounded bg-blue-800 px-3 py-1 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                Record 1 min
+              </button>
+              <button
+                onClick={() => startWakeNegativeRecording(600)}
+                disabled={busy || !normalizedWakeDatasetId}
+                className="rounded bg-blue-800 px-3 py-1 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                Record 10 min
+              </button>
+              <button
+                onClick={clearWakeNegativeSamples}
+                disabled={busy || !normalizedWakeDatasetId}
+                className="rounded bg-gray-700 px-3 py-1 text-sm text-white hover:bg-gray-600 disabled:opacity-50"
+              >
+                Clear Negatives
+              </button>
+            </div>
+            <div className="text-xs text-gray-400">
+              Negative clips: {wakeNegativeSamples.length}
+            </div>
+          </div>
+
+          <div className="mt-4 border-t border-gray-800 pt-3">
+            <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-gray-300">
+              Live test — detections stream from the Jetson in real time
+              <span className={`inline-block h-1.5 w-1.5 rounded-full ${streamConnected ? 'bg-green-500' : 'bg-gray-600'}`} />
+            </div>
+            <div className="max-h-32 space-y-1 overflow-y-auto rounded bg-gray-900 p-2">
+              {recentEvents.filter((e) => e.event_type === 'wake.detected').length === 0 && (
+                <div className="text-xs text-gray-500">Say the wake phrase near a live Jetson to see detections here.</div>
+              )}
+              {recentEvents.filter((e) => e.event_type === 'wake.detected').slice(0, 15).map((event) => {
+                const confidence = Number(event.payload?.confidence ?? 0)
+                const threshold = Number(event.payload?.threshold ?? 0)
+                const passed = confidence >= threshold
+                return (
+                  <div key={event.stream_id || event.event_id || `${event.timestamp}`} className="flex items-center justify-between text-[11px]">
+                    <span className="text-gray-400">{(event.payload?.keyword as string) || wakePhrase}</span>
+                    <span className={passed ? 'text-green-400' : 'text-yellow-500'}>
+                      {confidence.toFixed(3)} / {threshold.toFixed(3)}
+                    </span>
+                    <span className="text-gray-600">{event.timestamp || ''}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         </div>
       )}
 

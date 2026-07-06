@@ -14,6 +14,7 @@ import FloatingAssistant from './sara/FloatingAssistant';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
+import { isLocationTrackingEnabled, startTracking as startLocationTracking, resyncGeofences } from '../services/locationTracking';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
 import { navigateToChat } from '../services/navigation';
 import apiClient from '../services/api';
@@ -128,6 +129,19 @@ export const AuthenticatedOverlays: React.FC = () => {
       }
     };
 
+    // Resume location tracking if the user previously enabled it
+    const initLocationTracking = async () => {
+      try {
+        const enabled = await isLocationTrackingEnabled();
+        if (enabled) {
+          await startLocationTracking();
+          console.log('[AuthenticatedOverlays] Location tracking resumed');
+        }
+      } catch (error) {
+        console.log('[AuthenticatedOverlays] Failed to resume location tracking:', error);
+      }
+    };
+
     // Sync iOS calendar on app open
     const syncIOSCalendar = async () => {
       if (Platform.OS !== 'ios') return;
@@ -190,6 +204,7 @@ export const AuthenticatedOverlays: React.FC = () => {
     // Run all initializations
     initNotifications();
     initBackgroundHealthSync();
+    initLocationTracking();
     syncHealth();
     syncIOSCalendar();
     logPresence('app_open');
@@ -209,6 +224,8 @@ export const AuthenticatedOverlays: React.FC = () => {
         consumeSiriPrompt();
         // Sync badge to real unread count when app comes to foreground
         syncBadge();
+        // Keep native geofence regions current with armed triggers/places
+        resyncGeofences();
       }
     });
 

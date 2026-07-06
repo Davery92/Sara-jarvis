@@ -594,7 +594,8 @@ class BehavioralPatternService:
         try:
             outcome = "accepted" if accepted else "rejected"
 
-            # Update suggestion log
+            # Update suggestion log. Postgres UPDATE doesn't support ORDER BY/LIMIT
+            # directly — target the latest unresolved row via a subquery instead.
             db.execute(
                 text("""
                     UPDATE pattern_suggestion_log
@@ -602,10 +603,12 @@ class BehavioralPatternService:
                         user_response = :user_response,
                         responded_at = NOW(),
                         action_taken = :action_taken
-                    WHERE pattern_id = :pattern_id
-                      AND outcome IS NULL
-                    ORDER BY suggested_at DESC
-                    LIMIT 1
+                    WHERE id = (
+                        SELECT id FROM pattern_suggestion_log
+                        WHERE pattern_id = :pattern_id AND outcome IS NULL
+                        ORDER BY suggested_at DESC
+                        LIMIT 1
+                    )
                 """),
                 {
                     "pattern_id": pattern_id,
@@ -718,6 +721,11 @@ class BehavioralPatternService:
         # they concern the same entity — otherwise every light active at the
         # same hour collapses into one pattern.
         if cond1.get("entity_id") != cond2.get("entity_id"):
+            return False
+
+        # A light turning ON and the same light turning OFF are different
+        # patterns even at the same entity/hour — never merge across direction.
+        if cond1.get("to_state") != cond2.get("to_state"):
             return False
 
         # For weather triggers, check if thresholds are close

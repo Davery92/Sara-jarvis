@@ -6,6 +6,10 @@ from app.tools.notes import (
     NotesFindSimilarTool, NotesMergeTool, NotesListFoldersTool, NotesCreateFolderTool,
 )
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
+from app.tools.location import (
+    LocationReminderCreateTool, LocationReminderListTool, LocationReminderCancelTool,
+    PlacesSaveTool, PlacesListTool, PlacesDeleteTool,
+)
 from app.tools.daily_tasks import DailyTaskCreateTool, DailyTaskListTool, DailyTaskCompleteTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool, CalendarSetRecurringTool
@@ -407,6 +411,14 @@ class ToolRegistry:
             RemindersCreateTool(),
             RemindersListTool(),
             RemindersCancelTool(),
+
+            # Location — location-triggered reminders + saved places
+            LocationReminderCreateTool(),
+            LocationReminderListTool(),
+            LocationReminderCancelTool(),
+            PlacesSaveTool(),
+            PlacesListTool(),
+            PlacesDeleteTool(),
 
             # Daily Tasks
             DailyTaskCreateTool(),

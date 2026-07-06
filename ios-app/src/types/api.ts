@@ -167,8 +167,10 @@ export interface CalendarEvent {
 
 export interface IngredientItem {
   name: string;
-  quantity: number;
-  unit: string;
+  // Null when Sara couldn't parse a freeform ingredient line (e.g. "3/4 cup
+  // mayonnaise" pasted from a recipe) into structured quantity/unit.
+  quantity: number | null;
+  unit: string | null;
   calories?: number;
   protein?: number;
   carbs?: number;

@@ -11,6 +11,9 @@ import { apiClient, AISettingsUpdate, TokenStats, Device, AutonomyFlags, Autonom
 import { APP_CONFIG } from '../config'
 import SchedulesSection from '../components/SchedulesSection'
 import TunablesSection from '../components/TunablesSection'
+import PlacesSection from '../components/PlacesSection'
+import RhythmSection from '../components/RhythmSection'
+import { PatternsContent } from '../components/overlay/OverlayContent'
 
 interface MorningBriefSummary {
   id: string
@@ -565,6 +568,15 @@ function DesktopAppDownloads() {
           </div>
         )}
       </div>
+    </section>
+  )
+}
+
+function ModelOfYouSection() {
+  return (
+    <section className="mt-12">
+      <SectionHeading label="Intelligence — Sara's model of you" />
+      <PatternsContent />
     </section>
   )
 }
@@ -1154,6 +1166,16 @@ export default function Settings() {
         {/* Behavior Tunables (cooldowns, deliberation thresholds, brief tone) */}
         <section className="mt-12">
           <TunablesSection />
+        </section>
+
+        {/* Places & location-triggered reminders */}
+        <section className="mt-12">
+          <PlacesSection />
+        </section>
+
+        {/* Daily Rhythm Engine — learned model of David's typical day */}
+        <section className="mt-12">
+          <RhythmSection />
         </section>
 
         {/* Autonomy Feature Flag Status */}
@@ -1952,6 +1974,9 @@ export default function Settings() {
 
         {/* Brief Archive */}
         <SaraBriefArchive />
+
+        {/* Sara's model of you (Desktop Jarvis Overhaul C4) */}
+        <ModelOfYouSection />
 
         {/* Developer Tools */}
         <section className="mt-12">

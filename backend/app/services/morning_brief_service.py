@@ -715,7 +715,7 @@ Synthesized summary:"""
             # doesn't belong in the morning brief schedule. Workouts get
             # surfaced through the dedicated fitness section instead.
             result = db.execute(text("""
-                SELECT title, start_time, end_time, location, all_day, ios_calendar_name
+                SELECT title, start_time, end_time, location, all_day, ios_calendar_name, attendees, organizer
                 FROM calendar_event
                 WHERE user_id = :user_id
                   AND start_time >= :start_of_day
@@ -734,13 +734,21 @@ Synthesized summary:"""
                 "end_of_day": end_of_day
             })
 
-            from app.services.calendar_ownership import classify_event, ownership_prefix
+            from app.services.calendar_ownership import classify_event, ownership_prefix, attendance_role
 
             events = []
             for row in result.fetchall():
+                # Skip events David declined — showing them as "today's schedule" is misleading.
+                role = attendance_role(row.organizer, row.attendees)
+                if role.declined:
+                    continue
+
                 ownership = classify_event(row.title, row.ios_calendar_name)
+                title = f"{ownership_prefix(ownership)}{row.title}"
+                if role.is_broadcast:
+                    title += " (FYI)"
                 events.append(CalendarEvent(
-                    title=f"{ownership_prefix(ownership)}{row.title}",
+                    title=title,
                     starts_at=row.start_time.strftime("%H:%M") if row.start_time and not row.all_day else ("All day" if row.all_day else ""),
                     ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
                     location=row.location,
@@ -1024,6 +1032,21 @@ Synthesized summary:"""
                 logger.info(f"Morning brief: {count} PKG items need review, note added to context")
         except Exception as e:
             logger.debug(f"Morning brief: PKG review check failed: {e}")
+
+        # Rhythm deviation note — only surfaced when today is actually off,
+        # not a daily nag. get_off_rhythm_flags covers gym/bedtime; the wake
+        # comparison is brief-specific (compares "now" to the usual window).
+        try:
+            from app.services.daily_rhythm import get_off_rhythm_flags, get_wake_deviation_note
+            rhythm_notes = []
+            wake_note = get_wake_deviation_note(db, user_id)
+            if wake_note:
+                rhythm_notes.append(wake_note)
+            rhythm_notes += [f["message"] for f in get_off_rhythm_flags(db, user_id)]
+            if rhythm_notes:
+                context_content = (context_content or "") + "\n\nRhythm note: " + " ".join(rhythm_notes)
+        except Exception as e:
+            logger.debug(f"Morning brief: rhythm check failed: {e}")
 
         from app.services.tunables import get_tunable_str
         tone_directive = get_tunable_str(

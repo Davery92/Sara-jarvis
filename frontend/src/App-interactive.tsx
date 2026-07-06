@@ -593,8 +593,15 @@ function App() {
             onOrchestratorBack={() => navigateToView('settings')}
             inboxTab={inboxTab}
             onSelectInboxTab={setInboxTab}
-            onOpenContentChat={(inboxItemId, title) => {
-              setMessage(`Let's talk about this: ${title}`)
+            onOpenContentChat={(inboxItemId, title, excerpt) => {
+              const trimmed = (excerpt || '').trim()
+              const clipped = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
+              const itemName = (title || '').trim() || 'this'
+              setMessage(
+                clipped
+                  ? `Let's talk about this: "${itemName}"\n\n${clipped}`
+                  : `Let's talk about this: ${itemName}`
+              )
               setChatMessages([])
               navigateToView('chat')
               ;(window as any).__inboxItemId = inboxItemId

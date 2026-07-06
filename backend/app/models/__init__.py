@@ -18,7 +18,7 @@ from .background_task import BackgroundTask
 from .context import ContextWindow, ContextMode
 from .dream import DreamInsight
 from .briefing import DailyBriefing, BriefingSettings
-from .intelligence import IntelligenceReport, ProactiveSuggestion, DetectedPattern
+from .intelligence import IntelligenceReport
 from .insight import AutonomousInsight, InsightNudge, ActivitySession, BackgroundSweep
 from .event_outbox import EventOutbox
 from .push_token import PushToken
@@ -54,3 +54,6 @@ from .code_session import CodeSession
 from .managed_host import ManagedHost
 from .progress_photo import ProgressPhoto
 from .person import Person
+from .location import KnownPlace, LocationTrigger, LocationEvent
+from .rhythm import DailyRhythm
+from .ml import DesktopFocusSpan, VoiceInteractionLog, MLFeatureDaily, MLNotificationOutcome, MLPredictionLog, MLModelVersion

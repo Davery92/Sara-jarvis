@@ -328,6 +328,56 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
     except Exception as e:
         logger.warning(f"[DerivedRefresh] Body state failed: {e}")
 
+    # 1b. Rhythm deviations — reuses the same sync session pattern as body
+    # state. Emits a CONTEXT_UPDATED event (modest salience, see salience.py)
+    # only the first time a given rhythm_key deviates today — anti-nag guard.
+    try:
+        import os as _os2
+        from sqlalchemy import create_engine as _ce2
+        from sqlalchemy.orm import sessionmaker as _sm2, Session as _S2
+
+        _db_url2 = _os2.getenv("DATABASE_URL", "")
+        if "+asyncpg" in _db_url2:
+            _db_url2 = _db_url2.replace("+asyncpg", "+psycopg")
+        elif "+psycopg" not in _db_url2 and "postgresql://" in _db_url2:
+            _db_url2 = _db_url2.replace("postgresql://", "postgresql+psycopg://")
+
+        _eng2 = _ce2(_db_url2, echo=False)
+        _sess2 = _sm2(_eng2, class_=_S2, expire_on_commit=False)
+        try:
+            _db2 = _sess2()
+            try:
+                from app.services.daily_rhythm import get_off_rhythm_flags
+                from app.services.working_memory import read_memory
+
+                memory = await read_memory(user_id)
+                flags = get_off_rhythm_flags(_db2, user_id, current_place_type=memory.current_place_type)
+
+                if flags:
+                    from app.services.unified_context import _get_redis
+                    from app.services.event_bus import emit_event, EventType
+                    from app.core.timezone import today as local_today
+
+                    r = await _get_redis()
+                    today_str = local_today().isoformat()
+                    for flag in flags:
+                        dedup_key = f"sara:rhythm_deviation_emitted:{user_id}:{flag['key']}:{today_str}"
+                        newly_set = await r.set(dedup_key, "1", ex=60 * 60 * 30, nx=True)
+                        if newly_set:  # NX SET returns truthy only the first time today for this key
+                            await emit_event(
+                                EventType.CONTEXT_UPDATED,
+                                user_id,
+                                payload={"rhythm_deviation": True, "key": flag["key"], "message": flag["message"]},
+                                source="daily_rhythm",
+                            )
+                    updated["rhythm_deviation"] = [f["key"] for f in flags]
+            finally:
+                _db2.close()
+        finally:
+            _eng2.dispose()
+    except Exception as e:
+        logger.warning(f"[DerivedRefresh] Rhythm deviation failed: {e}")
+
     # 2. Activity state recomputation (in-memory singleton, no DB)
     try:
         from app.services.activity_state_machine import activity_state_machine

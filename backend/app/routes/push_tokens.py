@@ -280,6 +280,27 @@ async def notification_feedback(
 
         db.commit()
 
+        # Bridge to the behavioral-pattern suggestion pipeline: morning_proactive_service
+        # tags pattern-suggestion pushes with topic="pattern_suggestion:{pattern_id}:{date}",
+        # but nothing was ever calling back into record_response() when David acted on one —
+        # so times_accepted/status='confirmed' (and the standing-order promotion it gates)
+        # never fired in production. 'engaged' = accepted; 'dismissed'/'dislike' = rejected.
+        try:
+            topic_row = db.execute(text("SELECT topic FROM notification_log WHERE id=:id"),
+                                   {"id": notification_id}).fetchone()
+            if topic_row and topic_row.topic and topic_row.topic.startswith("pattern_suggestion:"):
+                pattern_id = topic_row.topic.split(":")[1]
+                if action in ("engaged", "dismissed", "dislike"):
+                    from app.services.morning_proactive_service import morning_proactive_service
+                    await morning_proactive_service.handle_suggestion_response(
+                        db=db,
+                        pattern_id=pattern_id,
+                        accepted=(action == "engaged"),
+                        user_response=request.response_text,
+                    )
+        except Exception as e:
+            logger.warning(f"[pattern-suggestion] response bridge failed: {e}")
+
         # Phase 3 (THE SYSTEM): feed engagement into the attention learner in real
         # time, per (domain × current context). Never block feedback recording.
         try:

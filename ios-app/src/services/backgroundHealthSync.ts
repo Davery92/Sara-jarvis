@@ -107,6 +107,14 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
     const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
     const hour = now.getHours();
     const hrvSamples = await healthKitService.getHRVSamples(fourHoursAgo, now);
+    if (hrvSamples.length === 0) {
+      // HRV/continuous heart rate only get generated while an Apple Watch is
+      // actively worn — unlike steps/sleep which the phone alone can supply.
+      // A sustained run of these zero-sample logs (not a single quiet night)
+      // points at the watch, not the sync path — check Health app charts
+      // directly on the phone before assuming a code regression.
+      console.log('[BackgroundHealth] 0 HRV samples in last 4h — watch may be unworn/unpaired');
+    }
     for (const sample of hrvSamples) {
       const sampleHour = new Date(sample.startDate).getHours();
       const context = sampleHour >= 0 && sampleHour < 4
@@ -150,6 +158,9 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
     //    Decimate large series to ~120 samples to avoid payload bloat while preserving
     //    enough density to detect spikes/drops (≈1 sample/2min over 4h).
     const hrSamples = await healthKitService.getHeartRateSamples(fourHoursAgo, now);
+    if (hrSamples.length === 0) {
+      console.log('[BackgroundHealth] 0 heart_rate samples in last 4h — watch may be unworn/unpaired');
+    }
     const hrSelected = decimateSamples(hrSamples, 120);
     for (const sample of hrSelected) {
       metrics.push({
@@ -476,6 +487,15 @@ TaskManager.defineTask(HEALTH_SYNC_TASK, async () => {
       await healthSyncService.forceSync();
     } catch (e) {
       console.log('[BackgroundHealth] Recovery sync error (non-fatal):', e);
+    }
+
+    // Piggyback a geofence resync so armed location triggers/places stay
+    // current without a dedicated background task of their own.
+    try {
+      const { resyncGeofences } = await import('./locationTracking');
+      await resyncGeofences();
+    } catch (e) {
+      console.log('[BackgroundHealth] Geofence resync error (non-fatal):', e);
     }
 
     await recordSyncAttempt(success, metrics.length);

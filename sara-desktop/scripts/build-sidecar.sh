@@ -27,20 +27,21 @@ fi
 # Activate virtual environment
 source "$VENV_DIR/bin/activate"
 
-# Install dependencies
+# Install dependencies from requirements.txt so every platform gets exactly
+# what main.py actually imports (voice module deps on all platforms, pyobjc
+# only where the "; sys_platform == 'darwin'" marker matches).
 echo "Installing dependencies..."
 pip install --upgrade pip
-
-# Install sidecar dependencies (no voice/wake word features)
-pip install pynput mss Pillow websockets httpx numpy pyinstaller
+pip install -r "$SIDECAR_DIR/requirements.txt"
 
 # Build with PyInstaller
 echo "Building executable..."
 cd "$SIDECAR_DIR"
 pyinstaller --clean sidecar.spec
 
-# Copy to release location
-DIST_DIR="$PROJECT_DIR/release/sidecar"
+# Copy to the location electron-builder's extraResources reads from
+# (package.json: extraResources.from = "sidecar/dist-frozen").
+DIST_DIR="$SIDECAR_DIR/dist-frozen"
 mkdir -p "$DIST_DIR"
 
 if [ "$(uname)" == "Darwin" ]; then

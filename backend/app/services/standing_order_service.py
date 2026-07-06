@@ -50,7 +50,7 @@ class StandingOrderService:
         action_type: str,
         action_config: Dict,
         source: str = "user",
-        pattern_id: Optional[int] = None,
+        pattern_id: Optional[str] = None,
         condition: Optional[Any] = None,
     ) -> Dict:
         """
@@ -63,7 +63,7 @@ class StandingOrderService:
             action_type: home_control, notification, reminder
             action_config: Action-specific params (e.g., {"service": "lock.lock", "entity_id": "lock.front_door"})
             source: "user" (David created), "pattern" (promoted from detected pattern), "sara" (Sara suggested)
-            pattern_id: FK to behavioral_pattern if promoted from pattern
+            pattern_id: FK (uuid string) to behavioral_pattern if promoted from pattern
         """
         from sqlalchemy import text
 
@@ -625,15 +625,24 @@ class StandingOrderService:
         except Exception as e:
             return {"success": False, "reason": str(e)}
 
-    async def promote_pattern(self, db, pattern_id: int) -> Optional[Dict]:
+    async def promote_pattern(self, db, pattern_id: str) -> Optional[Dict]:
         """
-        Promote a behavioral pattern to a standing order.
-        Called when David accepts the same suggestion 3+ times.
+        Promote a confirmed behavioral pattern to a standing order.
+        Called when David accepts a pattern suggestion (record_response sets
+        status='confirmed' on first acceptance — see behavioral_pattern_service).
+        No-ops if this pattern was already promoted (checked by pattern_id on
+        an existing active standing order).
         """
         from sqlalchemy import text
 
+        already = db.execute(text("""
+            SELECT id FROM standing_order WHERE pattern_id = :id AND status != 'cancelled'
+        """), {"id": pattern_id}).fetchone()
+        if already:
+            return None
+
         pattern = db.execute(text("""
-            SELECT id, pattern_type, trigger_type, trigger_config, action_config,
+            SELECT id, category, trigger_type, trigger_conditions, action_type, action_payload,
                    description, confidence
             FROM behavioral_pattern
             WHERE id = :id AND status = 'confirmed'
@@ -642,17 +651,17 @@ class StandingOrderService:
         if not pattern:
             return None
 
-        config = pattern.trigger_config if isinstance(pattern.trigger_config, dict) else json.loads(pattern.trigger_config or "{}")
-        action = pattern.action_config if isinstance(pattern.action_config, dict) else json.loads(pattern.action_config or "{}")
+        trigger_config = pattern.trigger_conditions if isinstance(pattern.trigger_conditions, dict) else json.loads(pattern.trigger_conditions or "{}")
+        action_config = pattern.action_payload if isinstance(pattern.action_payload, dict) else json.loads(pattern.action_payload or "{}")
 
         return await self.create_order(
             db=db,
             user_id=DAVID_USER_ID,
-            description=pattern.description or f"Auto: {pattern.pattern_type}",
+            description=pattern.description or f"Auto: {pattern.category}",
             trigger_type=pattern.trigger_type or "time",
-            trigger_config=config,
-            action_type=action.get("action_type", "home_control"),
-            action_config=action,
+            trigger_config=trigger_config,
+            action_type=pattern.action_type or action_config.get("action_type", "home_control"),
+            action_config=action_config,
             source="pattern",
             pattern_id=pattern_id,
         )

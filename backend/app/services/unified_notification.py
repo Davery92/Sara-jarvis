@@ -6,8 +6,11 @@ Replaces scattered push implementations across heartbeat, subconscious,
 proactive, and anticipation services.
 """
 
+import asyncio
 import logging
 import inspect
+import json
+import os
 import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -145,6 +148,26 @@ async def _check_notification_ban(
     if category.lower() in prefs["disabled_categories"]:
         return f"User disabled category: {category}"
 
+    # C3 rhythm_forecaster: a high day-level anomaly score means today
+    # deviates from David's norm — routine-based nudges assume a normal
+    # day, so quiet them rather than nag about a routine that doesn't
+    # apply today. Only gates routine/habit-style categories, never
+    # meeting/urgent/general sends.
+    if category.lower() in ("checkin", "followup") and db:
+        try:
+            from app.db.base import SessionLocal
+            from app.services.daily_rhythm import compute_daily_anomaly_score
+
+            def _check_anomaly():
+                with SessionLocal() as sync_db:
+                    return compute_daily_anomaly_score(sync_db, user_id)
+
+            anomaly = await asyncio.to_thread(_check_anomaly)
+            if anomaly and anomaly["anomaly_score"] >= 0.8:
+                return f"Anomalous day (score={anomaly['anomaly_score']}) — quieting routine nudges"
+        except Exception as e:
+            logger.debug(f"anomaly check skipped: {e}")
+
     # Static ban list + user custom phrases
     return is_notification_banned(
         title=title,
@@ -170,6 +193,7 @@ async def send_notification(
     _bypass_desktop: bool = False,
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
+    overlay: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Send a notification through the unified pipeline with topic-based dedup.
@@ -187,6 +211,8 @@ async def send_notification(
         db: AsyncSession (required for dedup checks)
         _bypass_attention: Internal flag to prevent recursion from route_through_attention_queue
         _attention_item_id: Attention item FK to link in notification_log
+        overlay: Optional {"kind": "report", "payload": {...}} — when set, the
+            desktop toast becomes clickable and opens that overlay (A2).
 
     Returns:
         Dict with {sent: bool, reason: str, ...}
@@ -232,6 +258,7 @@ async def send_notification(
             _bypass_desktop=_bypass_desktop,
             _attention_item_id=_attention_item_id,
             extra_push_data=extra_push_data,
+            overlay=overlay,
         )
         # AsyncSession does not auto-commit — if we opened this session
         # ourselves, the caller isn't going to commit for us, so the
@@ -268,6 +295,7 @@ async def _send_notification_impl(
     _bypass_desktop: bool = False,
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
+    overlay: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     # ── Engagement-based priority adjustment ──
     # If David consistently ignores a category, lower priority; if he engages, boost
@@ -370,9 +398,12 @@ async def _send_notification_impl(
             try:
                 connected = command_router.get_connected_devices(user_id)
                 if connected:
+                    notif_payload = {"title": title, "message": message, "priority": priority, "source": source}
+                    if overlay:
+                        notif_payload["overlay"] = overlay
                     cmd = CommandMessage(
                         command_type=CommandType.SHOW_NOTIFICATION,
-                        payload={"title": title, "message": message, "priority": priority, "source": source}
+                        payload=notif_payload
                     )
                     desktop_sent = await command_router.send_command(ws_db, user_id, cmd)
                     if desktop_sent:
@@ -638,7 +669,7 @@ async def send_notification_with_interruptibility(
 
     # Get current interruptibility
     current_activity = activity_state_machine.current
-    interruptibility = compute_interruptibility(activity=current_activity)
+    interruptibility = compute_interruptibility(activity=current_activity, user_id=user_id)
     decision = interruptibility.delivery_decision(urgency_enum)
 
     if decision == "deliver":
@@ -653,6 +684,15 @@ async def send_notification_with_interruptibility(
         result["urgency"] = urgency
         result["interruptibility"] = interruptibility.score
         result["queued"] = False
+
+        # D: Jetson-present + high urgency + high interruptibility → also
+        # speak a one-liner, capped 3/day. Desktop/push above already
+        # covers the visual delivery; this adds voice on top when David is
+        # near the Jetson and nothing richer (active desktop, phone chat)
+        # is in use.
+        if urgency_enum in (Urgency.URGENT, Urgency.IMPORTANT) and interruptibility.score >= 0.7:
+            asyncio.ensure_future(_maybe_speak_via_jetson(user_id, title, message))
+
         return result
 
     elif decision == "queue":
@@ -705,6 +745,45 @@ async def send_notification_with_interruptibility(
         }
 
 
+JETSON_SPEAK_DAILY_CAP = 3
+JETSON_SPEAK_COUNT_KEY = "sara:jetson_speak_count:{user_id}:{date}"
+
+
+async def _maybe_speak_via_jetson(user_id: str, title: str, message: str) -> None:
+    """D: speak a proactive one-liner through the Jetson when it's the
+    active surface (device_presence resolved "jetson" — desk presence +
+    online, with no richer active desktop/phone-chat signal) and today's
+    spoken-proactivity cap hasn't been hit."""
+    try:
+        from app.services.device_presence import resolve as resolve_presence
+        from app.db.base import SessionLocal
+
+        with SessionLocal() as sync_db:
+            presence = await resolve_presence(sync_db, user_id)
+        if presence.active_device_id != "jetson":
+            return
+
+        import redis.asyncio as aioredis
+        from app.core.timezone import now as local_now
+
+        redis_client = aioredis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        key = JETSON_SPEAK_COUNT_KEY.format(user_id=user_id, date=local_now().date().isoformat())
+        count = await redis_client.incr(key)
+        if count == 1:
+            await redis_client.expire(key, 90000)  # a little over 24h, clock-skew safe
+        await redis_client.aclose()
+
+        if count > JETSON_SPEAK_DAILY_CAP:
+            logger.info(f"Jetson speak skipped — daily cap ({JETSON_SPEAK_DAILY_CAP}) reached")
+            return
+
+        from app.routes.sensory import speak_via_jetson
+        spoken_text = f"{title}. {message}" if message and message != title else title
+        await speak_via_jetson(spoken_text)
+    except Exception as e:
+        logger.debug(f"Jetson proactive speak skipped: {e}")
+
+
 async def flush_notification_queue(
     user_id: str,
     db: Optional[AsyncSession] = None,
@@ -719,7 +798,7 @@ async def flush_notification_queue(
     from app.services.activity_state_machine import activity_state_machine
 
     current_activity = activity_state_machine.current
-    interruptibility = compute_interruptibility(activity=current_activity)
+    interruptibility = compute_interruptibility(activity=current_activity, user_id=user_id)
 
     deliverable = notification_queue.flush_deliverable(interruptibility.score)
 
@@ -787,6 +866,37 @@ async def route_through_attention_queue(
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
             _bypass_attention=True,
         )
+
+    # Time-based cooldown against recycled attention items. The DB unique
+    # constraint on (user_id, dedupe_key) only blocks while status is
+    # 'new'/'sent' — once the user reads or archives an item, the same
+    # dedupe_key opens right back up, so a 15-min sweep (e.g. proactive
+    # checkins) recreates a "new" item and re-broadcasts to the desktop
+    # every cycle even though nothing new actually happened. Apply the same
+    # per-category cooldown here that _check_dedup enforces on direct sends.
+    if priority not in ("urgent", "critical"):
+        effective_cooldown = _cooldown_for(category)
+        if effective_cooldown > 0:
+            recent = await _db_execute(db, text("""
+                SELECT COUNT(*) FROM autonomy_attention_item
+                WHERE user_id = :user_id AND category = :category
+                  AND created_at > NOW() - MAKE_INTERVAL(secs => :cooldown_secs)
+            """), {
+                "user_id": user_id,
+                "category": category,
+                "cooldown_secs": effective_cooldown * 3600,
+            })
+            if (recent.scalar() or 0) > 0:
+                logger.info(
+                    f"Attention queue item suppressed by category cooldown: "
+                    f"category={category} cooldown={effective_cooldown}h title={title[:60]}"
+                )
+                await _log_notification(
+                    db, user_id, dedupe_key or f"{category}:{_hash_topic(title, message)}",
+                    category, title, message, priority, source, None,
+                    effective_cooldown, sent=False, dedup_blocked=True,
+                )
+                return {"sent": False, "reason": "attention_cooldown", "routed_through_attention": True}
 
     from app.services.autonomy.attention_queue import attention_queue
 
@@ -894,6 +1004,29 @@ def _normalize_priority(priority: Optional[str]) -> str:
     return mapping.get(value, "normal")
 
 
+def _chat_seed_text(title: str, message: str) -> str:
+    """Build the substance of a notification for a chat prefill.
+
+    Title is often just a generic bucket label (e.g. "Rhythm window opening",
+    "Usual pattern coming up") while the actual specifics live in `message`.
+    Dropping `message` is what produced prompts like "help me with your
+    upcoming routine" that carry no real content.
+    """
+    title = (title or "").strip()
+    message = (message or "").strip()
+    if message and message.lower() != title.lower():
+        return message
+    return title
+
+
+def _reply_prompt(title: str, message: str) -> str:
+    """Prefill that quotes the notification's actual content and leaves room
+    for the user to acknowledge, reinforce, or give a follow-up instruction —
+    instead of a canned "help me with X" restating the generic title."""
+    seed = _chat_seed_text(title, message)
+    return f'Re: "{seed}"\n\n'
+
+
 def _default_attention_actions(
     title: str,
     message: str,
@@ -915,7 +1048,7 @@ def _default_attention_actions(
             {"id": "snooze_30m", "label": "Snooze 30m", "kind": "snooze", "minutes": 30},
         ])
     elif category == "checkin":
-        actions.append({"id": "reply", "label": "Reply to Sara", "kind": "chat", "prompt": f"Help me handle this: {title}"})
+        actions.append({"id": "reply", "label": "Reply to Sara", "kind": "chat", "prompt": _reply_prompt(title, message)})
         actions.append({"id": "snooze_1h", "label": "Snooze 1h", "kind": "snooze", "minutes": 60})
         has_chat = True
     elif category == "reminder":
@@ -930,31 +1063,31 @@ def _default_attention_actions(
             actions.append({"id": "open_link", "label": "Open link", "kind": "open_url", "url": item_url})
         actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
     elif category == "security":
-        actions.append({"id": "details", "label": "Details", "kind": "chat", "prompt": f"Tell me more about this security event: {title}"})
+        actions.append({"id": "details", "label": "Details", "kind": "chat", "prompt": f"Tell me more about this security event: {_chat_seed_text(title, message)}"})
         has_chat = True
     elif category == "home":
-        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": f"Help me with this home event: {title}"})
+        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": _reply_prompt(title, message)})
         has_chat = True
     elif category in ("health", "fitness", "wellness"):
-        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": f"Help me with: {title}"})
+        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": _reply_prompt(title, message)})
         actions.append({"id": "remind_later", "label": "Remind me later", "kind": "add_reminder", "default_minutes": 120})
         has_chat = True
     elif category == "weather":
         actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
     elif category == "deferred_action":
-        actions.append({"id": "do_now", "label": "Do now", "kind": "chat", "prompt": f"Let's do this now: {title}"})
+        actions.append({"id": "do_now", "label": "Do now", "kind": "chat", "prompt": f"Let's do this now: {_chat_seed_text(title, message)}"})
         actions.append({"id": "snooze_1h", "label": "Snooze 1h", "kind": "snooze", "minutes": 60})
         actions.append({"id": "set_reminder", "label": "Set reminder", "kind": "add_reminder", "default_minutes": 60})
         has_chat = True
     else:
         # general / unknown
-        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": f"Help me handle this: {title}"})
+        actions.append({"id": "discuss", "label": "Discuss", "kind": "chat", "prompt": _reply_prompt(title, message)})
         actions.append({"id": "remind_me", "label": "Remind me", "kind": "add_reminder", "default_minutes": 60})
         has_chat = True
 
     # Universal tail: Ask Sara (if no chat action yet) + Done
     if not has_chat:
-        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": f"Help me with: {title}"})
+        actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": _reply_prompt(title, message)})
     actions.append({"id": "done", "label": "Done", "kind": "complete"})
 
     return actions
@@ -1080,7 +1213,79 @@ async def _log_notification(
         "attention_item_id": attention_item_id,
     })
     row = result.fetchone()
-    return row[0] if row else None
+    notification_log_id = row[0] if row else None
+
+    if sent and notification_log_id:
+        await _record_ml_notification_features(db, user_id, str(notification_log_id), category)
+
+    return notification_log_id
+
+
+async def _record_ml_notification_features(db: AsyncSession, user_id: str, notification_log_id: str, category: str) -> None:
+    """Capture features-at-send-time for ml_notification_outcome (C1/C3).
+    The `outcome`/`outcome_latency_seconds` columns start NULL and are
+    back-filled later by app.tasks.ml.sync_notification_outcomes once the
+    user has opened/dismissed/ignored it — notification_log's own
+    engaged/dismissed_at/read_at columns are the source of truth for that."""
+    try:
+        from app.services.activity_state_machine import activity_state_machine
+        from app.services.interruptibility import compute_interruptibility
+        from zoneinfo import ZoneInfo
+        import uuid as _uuid
+
+        now = datetime.now(ZoneInfo("America/New_York"))
+        current_activity = activity_state_machine.current
+        interruptibility = compute_interruptibility(activity=current_activity, user_id=user_id)
+
+        # C3: notification_value shadow prediction — same features, framed as
+        # "will this specific send be engaged with" rather than "is now a
+        # good moment in general." Shares the same label source
+        # (ml_notification_outcome) as interruptibility_v2.
+        try:
+            from app.services.ml import inference as ml_inference
+            ml_inference.predict(
+                "notification_value",
+                {
+                    "hour": now.hour,
+                    "day_of_week": now.weekday(),
+                    "activity_state": current_activity.state.value,
+                    "device": "unknown",
+                    "category": category,
+                    "interruptibility_score": interruptibility.score,
+                },
+                user_id=user_id,
+                mode="shadow",
+            )
+        except Exception as e:
+            logger.debug(f"notification_value shadow prediction skipped: {e}")
+
+        await _db_execute(db, text("""
+            INSERT INTO ml_notification_outcome
+            (id, user_id, notification_log_id, sent_at, hour, day_of_week,
+             activity_state, interruptibility_score, category, features)
+            VALUES
+            (:id, :user_id, :notification_log_id, NOW(), :hour, :day_of_week,
+             :activity_state, :interruptibility_score, :category, CAST(:features AS jsonb))
+        """), {
+            "id": str(_uuid.uuid4()),
+            "user_id": user_id,
+            "notification_log_id": notification_log_id,
+            "hour": now.hour,
+            "day_of_week": now.weekday(),
+            "activity_state": current_activity.state.value,
+            "interruptibility_score": interruptibility.score,
+            "category": category,
+            "features": json.dumps({
+                "hour": now.hour,
+                "day_of_week": now.weekday(),
+                "activity_state": current_activity.state.value,
+                "interruptibility_score": interruptibility.score,
+                "category": category,
+                "device": "unknown",
+            }),
+        })
+    except Exception as e:
+        logger.debug(f"ml_notification_outcome capture skipped: {e}")
 
 
 async def _get_unread_badge(db: AsyncSession, user_id: str) -> Optional[int]:

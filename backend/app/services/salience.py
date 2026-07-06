@@ -78,6 +78,10 @@ W_EMOTIONAL_RELEVANCE = 0.20
 W_ACCUMULATION = 0.10
 W_STALENESS = 0.10
 
+# Rhythm deviation floor — modest on its own, but stacks with staleness/accumulation
+# to tip deliberation. Never a hard trigger by itself (see daily_rhythm.get_off_rhythm_flags).
+RHYTHM_DEVIATION_FLOOR = 0.4
+
 
 def _parse_utc_iso(iso_str: str) -> datetime:
     """Parse an ISO timestamp, ensuring it's tz-aware UTC."""
@@ -194,6 +198,14 @@ class SalienceScorer:
         if etype in (EventType.WORKOUT_LOGGED, EventType.WORKOUT_COMPLETED):
             return 0.4
 
+        # Location transitions — a place change is novel; arriving home after
+        # a long absence is the most novel of all.
+        if etype in (EventType.LOCATION_PLACE_ENTERED, EventType.LOCATION_PLACE_EXITED):
+            place_type = event.payload.get("place_type", "")
+            if etype == EventType.LOCATION_PLACE_ENTERED and place_type == "home":
+                return 0.7
+            return 0.4
+
         return 0.1
 
     def _score_emotional_relevance(self, event: Event, memory: UnifiedContextSnapshot) -> float:
@@ -221,6 +233,13 @@ class SalienceScorer:
 
         # Health data
         if etype == EventType.HEALTH_DATA_SYNCED:
+            return 0.3
+
+        # Location — where David is matters, especially arriving/leaving home
+        if etype in (EventType.LOCATION_PLACE_ENTERED, EventType.LOCATION_PLACE_EXITED):
+            place_type = event.payload.get("place_type", "")
+            if place_type == "home":
+                return 0.5
             return 0.3
 
         return 0.1
@@ -271,6 +290,11 @@ class SalienceScorer:
         # Timer completion: floor at 0.5
         if etype == EventType.TIMER_COMPLETED:
             return max(score, 0.5)
+
+        # Rhythm deviation (daily_rhythm derived signal): modest floor so it
+        # can tip deliberation when combined with other signals, never alone.
+        if etype == EventType.CONTEXT_UPDATED and event.payload.get("rhythm_deviation"):
+            return max(score, RHYTHM_DEVIATION_FLOOR)
 
         return score
 
@@ -348,6 +372,8 @@ class SalienceScorer:
             EventType.WORKOUT_LOGGED: lambda: f"Workout: {payload.get('type', 'exercise')}",
             EventType.WORKOUT_COMPLETED: lambda: f"Workout completed: {payload.get('type', 'exercise')}",
             EventType.ACTIVITY_STATE_CHANGED: lambda: f"Activity: {payload.get('state', 'unknown')}",
+            EventType.LOCATION_PLACE_ENTERED: lambda: f"David arrived at {payload.get('label', 'a place')}",
+            EventType.LOCATION_PLACE_EXITED: lambda: f"David left {payload.get('label', 'a place')}",
             EventType.DESKTOP_FOCUS_SPAN: lambda: _describe_focus_span(payload),
             EventType.DESKTOP_ACTIVITY_STATE: lambda: (
                 f"Desktop activity → {payload.get('state', 'unknown')}"
@@ -359,6 +385,10 @@ class SalienceScorer:
             EventType.GOAL_MILESTONE_REACHED: lambda: f"Milestone! {payload.get('goal_name', '')}: {payload.get('milestone', '')}",
             EventType.GOAL_COMPLETED: lambda: f"Goal completed: {payload.get('goal_name', '')}",
             EventType.HEALTH_DATA_SYNCED: lambda: f"Health data synced",
+            EventType.CONTEXT_UPDATED: lambda: (
+                payload.get("message", "Context updated") if payload.get("rhythm_deviation")
+                else "Context updated"
+            ),
         }
 
         formatter = descriptions.get(etype)
@@ -401,6 +431,7 @@ class SalienceScorer:
             EventType.GOAL_MILESTONE_REACHED: "goals",
             EventType.GOAL_COMPLETED: "goals",
             EventType.GOAL_PROGRESS_LOGGED: "goals",
+            EventType.CONTEXT_UPDATED: "rhythm",
         }
         return categories.get(etype, "general")
 

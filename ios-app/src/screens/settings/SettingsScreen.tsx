@@ -31,6 +31,7 @@ import SchedulesSection from '../../components/settings/SchedulesSection';
 import TunablesSection from '../../components/settings/TunablesSection';
 import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
 import { iosCalendarSyncService, IOSCalendar } from '../../services/iosCalendarSync';
+import { isLocationTrackingEnabled, setLocationTrackingEnabled } from '../../services/locationTracking';
 
 type Props = MainTabScreenProps<'Settings'>;
 
@@ -58,6 +59,7 @@ export default function SettingsScreen({ navigation }: Props) {
 
   // Calendar sync states (iOS only)
   const [calendarSyncEnabled, setCalendarSyncEnabled] = useState(false);
+  const [locationTrackingEnabled, setLocationTrackingEnabledState] = useState(false);
   const [iosCalendars, setIosCalendars] = useState<IOSCalendar[]>([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
   const [lastCalendarSync, setLastCalendarSync] = useState<Date | null>(null);
@@ -114,6 +116,7 @@ export default function SettingsScreen({ navigation }: Props) {
     if (Platform.OS === 'ios') {
       loadCalendarSyncSettings();
     }
+    loadLocationTrackingSettings();
   }, []);
 
   const loadCodexOAuthStatus = async () => {
@@ -190,6 +193,27 @@ export default function SettingsScreen({ navigation }: Props) {
             },
           },
         ]
+      );
+    }
+  };
+
+  const loadLocationTrackingSettings = async () => {
+    try {
+      const enabled = await isLocationTrackingEnabled();
+      setLocationTrackingEnabledState(enabled);
+    } catch (error) {
+      console.error('Failed to load location tracking settings:', error);
+    }
+  };
+
+  const handleLocationTrackingToggle = async (enabled: boolean) => {
+    setLocationTrackingEnabledState(enabled);
+    const ok = await setLocationTrackingEnabled(enabled);
+    if (enabled && !ok) {
+      setLocationTrackingEnabledState(false);
+      Alert.alert(
+        'Location Access Required',
+        'Please enable location access in Settings for Sara to give location-based reminders.'
       );
     }
   };
@@ -910,6 +934,27 @@ export default function SettingsScreen({ navigation }: Props) {
 
       {/* Behavior Tunables (cooldowns, ACS thresholds, brief tone) */}
       <TunablesSection />
+
+      {/* Location Awareness (iOS only) */}
+      {Platform.OS === 'ios' && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Location</Text>
+
+          <View style={styles.settingRow}>
+            <View style={styles.settingLabelContainer}>
+              <Text style={styles.settingLabel}>Location Awareness</Text>
+              <Text style={styles.settingHint}>
+                Let Sara know where you are and trigger reminders when you arrive at or leave places
+              </Text>
+            </View>
+            <Switch
+              value={locationTrackingEnabled}
+              onValueChange={handleLocationTrackingToggle}
+              trackColor={{ false: colors.background, true: colors.primary }}
+            />
+          </View>
+        </View>
+      )}
 
       {/* Calendar Sync Section (iOS only) */}
       {Platform.OS === 'ios' && (

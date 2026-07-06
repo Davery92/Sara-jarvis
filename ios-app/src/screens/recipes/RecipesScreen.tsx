@@ -49,7 +49,10 @@ export default function RecipesScreen({ navigation }: Props) {
 
   const handleRecipePress = (recipe: Recipe) => {
     const ingredientsList = recipe.ingredients
-      .map((ing, i) => `${i + 1}. ${ing.name} - ${ing.quantity} ${ing.unit}`)
+      .map((ing, i) => {
+        const amount = ing.quantity != null && ing.unit ? ` - ${ing.quantity} ${ing.unit}` : '';
+        return `${i + 1}. ${ing.name}${amount}`;
+      })
       .join('\n');
 
     const nutritionInfo = recipe.calories

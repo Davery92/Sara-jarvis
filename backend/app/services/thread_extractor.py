@@ -139,6 +139,7 @@ class ThreadExtractor:
                 ],
                 temperature=0.3,
                 max_tokens=500,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
 
             content = response["choices"][0]["message"].get("content", "")
@@ -234,6 +235,7 @@ class ThreadExtractor:
                 ],
                 temperature=0.2,
                 max_tokens=200,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
 
             content = response["choices"][0]["message"].get("content", "")

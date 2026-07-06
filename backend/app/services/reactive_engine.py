@@ -391,6 +391,15 @@ class ReactiveEngine:
         except Exception as e:
             logger.warning(f"SalienceSubscriber failed to init: {e}")
 
+        # ML persistence subscriber — durable focus-span/voice-interaction
+        # history for the feature store (Desktop Jarvis Overhaul C1)
+        try:
+            from app.services.ml_persistence_subscriber import MLPersistenceSubscriber
+            self.ml_persistence = MLPersistenceSubscriber()
+            self.subscribers.append(self.ml_persistence)
+        except Exception as e:
+            logger.warning(f"MLPersistenceSubscriber failed to init: {e}")
+
     async def start(self):
         """Register all subscribers with the event bus."""
         for sub in self.subscribers:

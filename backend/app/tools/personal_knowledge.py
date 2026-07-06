@@ -110,7 +110,12 @@ class RememberAboutDavidTool(BaseTool):
         return (
             "Explicitly store a fact about David in Sara's personal knowledge graph. "
             "Use when David says 'remember that I...' or when Sara notices something "
-            "important about David that should be remembered."
+            "important about David that should be remembered. "
+            "Do NOT use fact_type='Place' for a physical location Sara should recognize by "
+            "GPS or use for location-triggered reminders (e.g. 'remember this place as home', "
+            "'when I leave the office...') — that needs actual coordinates, which this tool "
+            "does not capture. Use places_save for those instead; reserve this tool's 'Place' "
+            "type for places David just mentions in passing without needing geofencing."
         )
 
     @property

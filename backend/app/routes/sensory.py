@@ -37,7 +37,7 @@ import os
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Service endpoints
-JETSON_IP = os.getenv("JETSON_IP", "10.185.1.155")
+JETSON_IP = os.getenv("JETSON_IP", "10.185.1.84")
 JETSON_SSH_USER = os.getenv("JETSON_SSH_USER", "david")
 JETSON_SSH_TARGET = f"{JETSON_SSH_USER}@{JETSON_IP}"
 
@@ -416,6 +416,7 @@ async def get_recent_audio_events(
 class RecordingRequest(BaseModel):
     duration_seconds: int = 10  # How long to record
     prompt: Optional[str] = None  # What the user should say
+    kind: str = "positive"  # "positive" (wake phrase) | "negative" (ambient/hard-negative) — wake-word only
 
 
 class EnrollmentStatus(BaseModel):
@@ -464,8 +465,14 @@ def _normalize_identifier(raw_value: str, field_name: str) -> str:
     return value
 
 
-def _dataset_sample_dir(dataset_id: str, family: str, speaker_id: Optional[str] = None) -> str:
+def _dataset_sample_dir(dataset_id: str, family: str, speaker_id: Optional[str] = None, kind: str = "positive") -> str:
     if family == "wake_word":
+        # Positive samples stay flat in the dataset dir (unchanged — avoids
+        # any migration for datasets recorded before negative support
+        # existed); negatives (ambient noise, hard negatives against
+        # self-trigger) live in their own subdirectory.
+        if kind == "negative":
+            return os.path.join(WAKE_DATASET_ROOT, dataset_id, "negative")
         return os.path.join(WAKE_DATASET_ROOT, dataset_id)
     if family == "speakers":
         if not speaker_id:
@@ -512,11 +519,20 @@ def _is_active_recording(state: Optional[Dict[str, object]]) -> bool:
 
 
 def _clear_sample_dir(sample_dir: str) -> int:
+    """Delete only the .wav files directly in sample_dir, then the directory
+    itself if it's now empty. NOT a recursive rmtree — wake-word "positive"
+    samples live in the same parent directory as the "negative" subfolder,
+    and clearing one kind must never take the other down with it."""
     if not os.path.exists(sample_dir):
         return 0
-    deleted = len([f for f in os.listdir(sample_dir) if f.endswith(".wav")])
-    shutil.rmtree(sample_dir)
-    return deleted
+    wav_files = [f for f in os.listdir(sample_dir) if f.endswith(".wav")]
+    for filename in wav_files:
+        os.remove(os.path.join(sample_dir, filename))
+    try:
+        os.rmdir(sample_dir)  # only succeeds if now empty (e.g. no negative/ subdir left behind)
+    except OSError:
+        pass
+    return len(wav_files)
 
 
 async def _run_command(*args: str) -> tuple[int, str, str]:
@@ -537,8 +553,11 @@ async def _sync_wake_sample_to_jetson(
     dataset_id: str,
     remote_tmp_file: str,
     filename: str,
+    kind: str = "positive",
 ) -> None:
     remote_dataset_dir = f"{JETSON_WAKE_DATASET_ROOT}/{dataset_id}"
+    if kind == "negative":
+        remote_dataset_dir += "/negative"
     remote_target_path = f"{remote_dataset_dir}/{filename}"
     command = (
         f"mkdir -p {shlex.quote(remote_dataset_dir)} && "
@@ -593,8 +612,9 @@ async def _record_dataset_clip_on_jetson(
     redis_client,
     speaker_id: Optional[str] = None,
     prompt: Optional[str] = None,
+    kind: str = "positive",
 ) -> None:
-    sample_dir = _dataset_sample_dir(dataset_id, family, speaker_id=speaker_id)
+    sample_dir = _dataset_sample_dir(dataset_id, family, speaker_id=speaker_id, kind=kind)
     os.makedirs(sample_dir, exist_ok=True)
 
     existing = [f for f in os.listdir(sample_dir) if f.endswith(".wav")]
@@ -603,6 +623,8 @@ async def _record_dataset_clip_on_jetson(
     file_prefix = f"{family}_{dataset_id}"
     if speaker_id:
         file_prefix += f"_{speaker_id}"
+    if kind == "negative":
+        file_prefix += "_negative"
     filename = f"{file_prefix}_{sample_num:03d}_{timestamp}.wav"
     local_file = os.path.join(sample_dir, filename)
     remote_tmp_file = f"/tmp/{filename}"
@@ -664,7 +686,7 @@ async def _record_dataset_clip_on_jetson(
 
         # Keep datasets where training workers expect them.
         if family == "wake_word":
-            await _sync_wake_sample_to_jetson(dataset_id, remote_tmp_file, filename)
+            await _sync_wake_sample_to_jetson(dataset_id, remote_tmp_file, filename, kind=kind)
         elif family == "speakers" and speaker_id:
             await _sync_speaker_sample_to_gpu(dataset_id, speaker_id, local_file, filename)
 
@@ -738,6 +760,7 @@ async def start_wake_dataset_recording(
         if _is_active_recording(active_dataset_state) or _is_active_recording(active_enrollment_state):
             return {"status": "error", "message": "A recording is already in progress"}
 
+        kind = "negative" if request.kind == "negative" else "positive"
         asyncio.create_task(
             _record_dataset_clip_on_jetson(
                 dataset_id=normalized_dataset_id,
@@ -745,12 +768,14 @@ async def start_wake_dataset_recording(
                 duration_seconds=duration,
                 redis_client=r,
                 prompt=request.prompt,
+                kind=kind,
             )
         )
         return {
             "status": "started",
             "dataset_id": normalized_dataset_id,
             "family": "wake_word",
+            "kind": kind,
             "duration_seconds": duration,
         }
     except HTTPException:
@@ -806,15 +831,19 @@ async def start_speaker_dataset_recording(
 @router.get("/datasets/{dataset_id}/wake-word/samples")
 async def get_wake_dataset_samples(
     dataset_id: str,
+    kind: str = "positive",
     current_user=Depends(get_current_user),
 ):
-    """List wake-word dataset clips recorded via Jetson."""
+    """List wake-word dataset clips recorded via Jetson. `kind=negative`
+    lists the ambient/hard-negative recordings instead of wake phrases."""
     normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
-    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word")
+    resolved_kind = "negative" if kind == "negative" else "positive"
+    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word", kind=resolved_kind)
     samples = _list_sample_files(sample_dir)
     return {
         "dataset_id": normalized_dataset_id,
         "family": "wake_word",
+        "kind": resolved_kind,
         "samples": samples,
         "count": len(samples),
     }
@@ -847,20 +876,32 @@ async def get_speaker_dataset_samples(
 @router.delete("/datasets/{dataset_id}/wake-word/samples")
 async def clear_wake_dataset_samples(
     dataset_id: str,
+    kind: str = "positive",
     current_user=Depends(get_current_user),
 ):
-    """Clear all wake-word samples for one dataset."""
+    """Clear wake-word samples for one dataset. `kind=negative` clears only
+    the ambient/hard-negative recordings, leaving wake-phrase positives (or
+    vice versa) untouched."""
     normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
-    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word")
+    resolved_kind = "negative" if kind == "negative" else "positive"
+    sample_dir = _dataset_sample_dir(normalized_dataset_id, "wake_word", kind=resolved_kind)
     deleted_count = _clear_sample_dir(sample_dir)
 
     remote_dataset_dir = f"{JETSON_WAKE_DATASET_ROOT}/{normalized_dataset_id}"
+    if resolved_kind == "negative":
+        remote_dataset_dir += "/negative"
+        remote_clear_command = f"rm -rf {shlex.quote(remote_dataset_dir)}"
+    else:
+        # Positive samples are flat files in the dataset dir — remove only
+        # the .wav files, not the directory (the negative/ subdir lives
+        # alongside them and must survive a "clear positives" call).
+        remote_clear_command = f"find {shlex.quote(remote_dataset_dir)} -maxdepth 1 -name '*.wav' -delete"
     clear_code, _, clear_stderr = await _run_command(
         "ssh",
         "-o",
         "ConnectTimeout=5",
         JETSON_SSH_TARGET,
-        f"rm -rf {shlex.quote(remote_dataset_dir)}",
+        remote_clear_command,
     )
     warnings: List[str] = []
     if clear_code != 0:
@@ -870,6 +911,7 @@ async def clear_wake_dataset_samples(
         "status": "success",
         "dataset_id": normalized_dataset_id,
         "family": "wake_word",
+        "kind": resolved_kind,
         "deleted_count": deleted_count,
         "warnings": warnings,
     }
@@ -1260,6 +1302,62 @@ async def set_voice_listening(
         return {"status": "error", "message": str(e)}
 
 
+async def request_jetson_stop() -> bool:
+    """Relay a CANCEL_SPEECH request to the Jetson's desktop_bridge control
+    channel (B2.6) — same connect-send-disconnect pattern as
+    set_voice_listening. Returns True if the message was sent (the Jetson
+    doesn't ack this one; the stop takes effect immediately on its side)."""
+    try:
+        uri = f"ws://{JETSON_IP}:8765"
+        async with websockets.connect(uri, close_timeout=5) as ws:
+            await ws.send(json.dumps({"type": "request_stop"}))
+        return True
+    except Exception as e:
+        logger.debug(f"Jetson stop relay failed (may simply be offline): {e}")
+        return False
+
+
+async def speak_via_jetson(text: str) -> bool:
+    """Relay a proactive spoken one-liner to the Jetson (Desktop Jarvis
+    Overhaul D) — same connect-send-disconnect pattern as
+    request_jetson_stop(). The Jetson declines to actually speak if it's
+    mid-conversation; the caller's own urgency/interruptibility/daily-cap
+    gating (see unified_notification.py) is the real gate, this is just
+    the relay."""
+    try:
+        uri = f"ws://{JETSON_IP}:8765"
+        async with websockets.connect(uri, close_timeout=5) as ws:
+            await ws.send(json.dumps({"type": "speak_proactive", "text": text}))
+        return True
+    except Exception as e:
+        logger.debug(f"Jetson proactive speak relay failed (may simply be offline): {e}")
+        return False
+
+
+@router.post("/voice-agent/stop")
+async def stop_voice_agent_speech(
+    current_user=Depends(get_current_user)
+):
+    """Halt any in-progress Jetson TTS playback (CANCEL_SPEECH from any
+    surface — desktop hotkey/HUD, webapp/iOS mute)."""
+    sent = await request_jetson_stop()
+    return {"status": "success" if sent else "unreachable"}
+
+
+async def relay_media_state(playing: bool) -> bool:
+    """Relay a desktop media_state change to the Jetson (B2.4) so it can
+    boost wake-word/barge-in sensitivity requirements while music/video is
+    playing, instead of treating it as a quiet room."""
+    try:
+        uri = f"ws://{JETSON_IP}:8765"
+        async with websockets.connect(uri, close_timeout=5) as ws:
+            await ws.send(json.dumps({"type": "media_state", "playing": playing}))
+        return True
+    except Exception as e:
+        logger.debug(f"Jetson media_state relay failed (may simply be offline): {e}")
+        return False
+
+
 @router.get("/voice-agent/listening")
 async def get_voice_listening(current_user=Depends(get_current_user)):
     """Get current wake word listening status from Jetson voice agent."""
@@ -1546,4 +1644,35 @@ async def report_conversation_ended(
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Conversation end report failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+class WatchdogPausedEvent(BaseModel):
+    reason: str = "unknown"
+    source: str = "jetson_voice"
+
+
+@router.post("/voice/watchdog-paused")
+async def report_watchdog_paused(
+    event: WatchdogPausedEvent,
+    current_user=Depends(get_current_user),
+):
+    """Jetson conversation watchdog tripped (B2.7 loop breaker) — several
+    turns in a row with no verified-David speech, or too many turns too
+    fast. Surface it as a desktop toast rather than silently looping."""
+    try:
+        from app.services.unified_notification import send_notification
+        await send_notification(
+            user_id=current_user.id,
+            title="Voice paused",
+            message="I kept hearing audio that didn't sound like you. Tap to resume.",
+            priority="normal",
+            category="system_health",
+            source="jetson_voice_watchdog",
+            topic=f"voice_watchdog:{event.reason}",
+            cooldown_hours=0.25,
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Watchdog-paused report failed: {e}")
         return {"status": "error", "message": str(e)}

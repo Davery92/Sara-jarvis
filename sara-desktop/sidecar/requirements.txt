@@ -18,5 +18,19 @@ psutil>=5.9.0
 pyperclip>=1.8.2
 pygetwindow>=0.0.9
 
+# Voice module: local TTS playback, mic capture (A3/A6)
+sounddevice>=0.4.6
+numpy>=1.26.0
+
+# macOS permission detection (A8) — Screen Recording, Accessibility, Microphone
+pyobjc-core>=10.1; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.1; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10.1; sys_platform == "darwin"
+pyobjc-framework-AVFoundation>=10.1; sys_platform == "darwin"
+
+# Windows media-session detection (A6/B2.4) — "is music/video playing" for
+# the Jetson's ambient wake-threshold boost
+winsdk>=1.0.0; sys_platform == "win32"
+
 # For packaging
 pyinstaller>=6.0.0

@@ -5,6 +5,7 @@ Runs every 30 minutes to provide proactive assistance and awareness.
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -12,7 +13,6 @@ from sqlalchemy import and_, or_
 import pytz
 
 from app.db.session import SessionLocal
-from app.models.user import User
 from app.models.episode import Episode
 # Import Timer and Reminder from main_simple where the actual database schema is defined
 import sys
@@ -24,6 +24,8 @@ from app.services.tagging_system import smart_tagger
 from app.services.enhanced_neo4j_schema import enhanced_neo4j
 
 logger = logging.getLogger(__name__)
+
+SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
 
 class ContextualAwarenessService:
     """Provides contextual awareness and proactive monitoring for Sara"""
@@ -50,20 +52,10 @@ class ContextualAwarenessService:
 
                 logger.info(f"🔮 Running awareness check at {eastern_now.strftime('%I:%M %p')} Eastern")
 
-                # Get all users for monitoring — run in thread to avoid blocking event loop
-                def _get_user_ids():
-                    db = SessionLocal()
-                    try:
-                        return [u.id for u in db.query(User).all()]
-                    finally:
-                        db.close()
+                # Solo-user deployment — avoid fanning this out across test accounts.
+                await asyncio.to_thread(self._monitor_user_context_sync, SOLO_USER_ID, eastern_now)
 
-                user_ids = await asyncio.to_thread(_get_user_ids)
-
-                for user_id in user_ids:
-                    await asyncio.to_thread(self._monitor_user_context_sync, user_id, eastern_now)
-
-                logger.info(f"✅ Awareness check complete for {len(user_ids)} users")
+                logger.info("✅ Awareness check complete")
 
                 # Sleep for 30 minutes
                 await asyncio.sleep(self.check_interval)

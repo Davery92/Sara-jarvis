@@ -4,8 +4,9 @@ import MiniChat from './components/MiniChat'
 import SettingsModal from './components/SettingsModal'
 import NoteViewer from './components/NoteViewer'
 import TimerFloat from './components/TimerFloat'
+import QuickNoteFloat from './components/QuickNoteFloat'
 
-export type ViewType = 'circle' | 'chat' | 'note' | 'timer' | 'settings'
+export type ViewType = 'circle' | 'chat' | 'note' | 'timer' | 'settings' | 'quicknote'
 
 // Get view type from URL query parameter
 function getViewType(): ViewType {
@@ -15,6 +16,7 @@ function getViewType(): ViewType {
   if (view === 'note') return 'note'
   if (view === 'timer') return 'timer'
   if (view === 'settings') return 'settings'
+  if (view === 'quicknote') return 'quicknote'
   return 'circle'
 }
 
@@ -48,6 +50,13 @@ function App() {
 
         // Listen for settings request
         window.electronAPI.onOpenSettings(() => {
+          setShowSettings(true)
+        })
+
+        // Backend rejected our token — force the settings panel open to
+        // the Account tab instead of leaving the desktop silently stuck.
+        window.electronAPI.onAuthInvalid(() => {
+          setIsAuthenticated(false)
           setShowSettings(true)
         })
       }
@@ -88,6 +97,10 @@ function App() {
   if (viewType === 'note') {
     // Note viewer window
     return <NoteViewer />
+  }
+
+  if (viewType === 'quicknote') {
+    return <QuickNoteFloat />
   }
 
   if (viewType === 'timer') {

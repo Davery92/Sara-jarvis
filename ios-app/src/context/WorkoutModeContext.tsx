@@ -313,6 +313,14 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     } catch (err: any) {
       console.error('Failed to complete workout:', err);
       setError(err.message);
+      // David tried to end the workout — even though the server call failed,
+      // the Live Activity must not keep ticking as if it's still in progress
+      // (the session-effect's endEvent only fires when `session` clears,
+      // which doesn't happen on this error path).
+      if (workoutActivityRef.current) {
+        endEvent(workoutActivityRef.current);
+        workoutActivityRef.current = null;
+      }
       return {};
     } finally {
       setIsLoading(false);
@@ -329,6 +337,10 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     } catch (err: any) {
       console.error('Failed to abandon workout:', err);
       setError(err.message);
+      if (workoutActivityRef.current) {
+        endEvent(workoutActivityRef.current);
+        workoutActivityRef.current = null;
+      }
     } finally {
       setIsLoading(false);
     }

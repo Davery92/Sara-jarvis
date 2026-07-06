@@ -44,18 +44,35 @@ def _read_heartbeat_rules() -> str:
         return "(HEARTBEAT.md not found — use conservative defaults)"
 
 
-def _format_memory_whiteboard(memory: UnifiedContextSnapshot) -> str:
+def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: Optional[List[dict]] = None) -> str:
     """Format working memory as a concise whiteboard for the LLM."""
     now = datetime.now(USER_TZ)
     lines = []
 
     lines.append(f"Current time: {now.strftime('%A %B %d, %I:%M %p %Z')}")
+    if memory.rhythm_summary:
+        lines.append(memory.rhythm_summary)
+    if off_rhythm_flags:
+        lines.append("Off-rhythm right now: " + "; ".join(f["message"] for f in off_rhythm_flags))
 
     # Activity & presence
     lines.append(f"\n## David Right Now")
     lines.append(f"Activity: {memory.activity_state} (confidence: {memory.activity_confidence:.0%})")
     if memory.room:
         lines.append(f"Room: {memory.room}")
+    if memory.current_place and memory.current_place != "unknown":
+        loc = f"Location: {memory.current_place}"
+        if memory.current_place_type:
+            loc += f" ({memory.current_place_type})"
+        if memory.at_place_since:
+            try:
+                since = datetime.fromisoformat(memory.at_place_since)
+                mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
+                if mins >= 1:
+                    loc += f", arrived {mins}m ago" if mins < 120 else f", there since {since.strftime('%-I:%M %p')}"
+            except Exception:
+                pass
+        lines.append(loc)
     lines.append(f"Interruptibility: {memory.interruptibility:.0%}")
     lines.append(f"Hours since last chat: {memory.hours_since_last_chat:.1f}")
     if memory.last_chat_topic:
@@ -252,6 +269,7 @@ def build_deliberation_prompt(
     memory: UnifiedContextSnapshot,
     observations: List[Observation],
     recent_handoff: Optional[str] = None,
+    off_rhythm_flags: Optional[List[dict]] = None,
 ) -> Tuple[str, str]:
     """
     Build the system and user messages for deliberation.
@@ -354,7 +372,7 @@ Respond with ONLY valid JSON in this exact format:
 - Late night: auto-off lights, check locks
 - All actions must have a clear reason"""
 
-    whiteboard = _format_memory_whiteboard(memory)
+    whiteboard = _format_memory_whiteboard(memory, off_rhythm_flags)
     obs_text = _format_observations(observations)
 
     now = datetime.now(USER_TZ)

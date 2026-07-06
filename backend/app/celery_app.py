@@ -75,6 +75,12 @@ celery_app = Celery(
         "app.tasks.morning_proactive",
         "app.tasks.dispatch_watchdog",
         "app.tasks.learning_digest",
+        "app.tasks.location",
+        "app.tasks.travel_nudge",
+        "app.tasks.daily_rhythm",
+        "app.tasks.notification_tuner",
+        "app.tasks.system_wiring_check",
+        "app.tasks.ml",
     ]
 )
 
@@ -137,6 +143,7 @@ celery_app.conf.task_routes = {
     "app.tasks.health_weekly.*": {"queue": "cognitive"},
     "app.tasks.health_baselines.*": {"queue": "health"},
     "app.tasks.sara_self_queue.*": {"queue": "cognitive"},
+    "app.tasks.ml.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities

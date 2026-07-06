@@ -50,6 +50,19 @@ class SidecarConfig:
         # Heartbeat
         self.heartbeat_interval: int = 10  # seconds
 
+        # Voice (SPEAK command / local TTS playback — A3/A6)
+        self.tts_url: str = os.getenv("SARA_TTS_URL", "http://10.185.1.9:8880")
+        self.tts_voice: str = os.getenv("SARA_TTS_VOICE", "af_heart")
+        self.tts_speed: float = float(os.getenv("SARA_TTS_SPEED", "1.0"))
+        self.tts_output_device: Optional[str] = os.getenv("SARA_TTS_OUTPUT_DEVICE")  # substring match, None = system default
+
+        # Jetson bridge — only connects when set (home network); empty disables it.
+        # Default matches david-jetson (Orin Nano) at 10.185.1.84 — only takes
+        # effect when running the sidecar standalone outside Electron, which
+        # always passes SARA_JETSON_HOST explicitly (see main.ts).
+        self.jetson_host: str = os.getenv("SARA_JETSON_HOST", "10.185.1.84")
+        self.jetson_port: int = int(os.getenv("SARA_JETSON_PORT", "8765"))
+
         # Paths
         self.settings_file: Path = Path.home() / ".sara" / "sidecar-settings.json"
 

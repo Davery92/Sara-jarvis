@@ -57,6 +57,12 @@ build/
 sara-desktop/sidecar/.venv/
 sara-desktop/sidecar/venv/
 
+# Jetson sara-voice: model binaries and venv are deployed separately, not committed
+jetson/sara-voice/.venv/
+jetson/sara-voice/models/*.onnx
+jetson/sara-voice/models/*.bin
+jetson/sara-voice/models/*.npy
+
 # Large build files
 backend/static/downloads/*.zip
 backend/static/downloads/*.exe

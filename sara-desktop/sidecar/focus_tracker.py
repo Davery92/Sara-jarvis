@@ -173,12 +173,21 @@ class FocusTracker:
         self._current: Optional[_Span] = None
         self._state: Optional[str] = None
         self._state_since: float = time.time()
+        self._enabled = True
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Toggle focus tracking on/off (desktop Settings > Privacy tab)."""
+        self._enabled = enabled
+        if not enabled:
+            self._current = None
 
     async def on_tick(self, summary: dict) -> None:
         """
         Called once per activity_monitor report interval. `summary` is the dict
         returned by ActivityMonitor.get_activity_summary().
         """
+        if not self._enabled:
+            return
         now = time.time()
         app = summary.get("active_app")
         window = summary.get("active_window")

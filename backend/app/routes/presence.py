@@ -182,7 +182,7 @@ async def report_desktop_activity(
     try:
         from app.services.context_writer import update_fields
         import asyncio
-        asyncio.ensure_future(update_fields(str(current_user.id), {
+        asyncio.ensure_future(update_fields(str(current_user.id), source="desktop_agent", **{
             "desktop_active_app": app,
             "desktop_active_window": window_title[:100] if window_title else "",
             "desktop_idle_seconds": idle_seconds,
@@ -203,71 +203,13 @@ class LocationUpdate(BaseModel):
 @router.post("/location")
 async def report_location(
     data: LocationUpdate,
+    db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """
-    Report significant location change from iOS.
-
-    Battery-efficient — only called on significant moves (iOS CLLocationManager).
-    Classifies location against known PKG_Place nodes.
+    Legacy significant-location-change endpoint. New iOS builds should use
+    POST /api/location/report instead — kept here so old app builds keep working.
     """
-    classified_place = data.label or "unknown"
-
-    # Try to classify against PKG places
-    try:
-        from app.services.personal_knowledge_graph import personal_kg
-        if personal_kg._ensure_driver():
-            with personal_kg.driver.session() as session:
-                result = session.run("""
-                    MATCH (p:PKG_Place)
-                    WHERE p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-                    WITH p,
-                         point.distance(
-                             point({latitude: $lat, longitude: $lon}),
-                             point({latitude: p.latitude, longitude: p.longitude})
-                         ) AS dist
-                    WHERE dist < 500
-                    RETURN p.value AS name, p.place_type AS place_type, dist
-                    ORDER BY dist ASC
-                    LIMIT 1
-                """, {"lat": data.latitude, "lon": data.longitude})
-                row = result.single()
-                if row:
-                    classified_place = row["name"] or row["place_type"] or classified_place
-                    logger.info(f"Location classified as: {classified_place} ({row['dist']:.0f}m)")
-    except Exception as e:
-        logger.debug(f"PKG place classification failed: {e}")
-
-    # Update unified context
-    try:
-        from app.services.context_writer import update_fields
-        import asyncio
-        asyncio.ensure_future(update_fields(str(current_user.id), {
-            "current_location": classified_place,
-            "location_latitude": data.latitude,
-            "location_longitude": data.longitude,
-        }))
-    except Exception:
-        pass
-
-    # Feed activity state machine
-    try:
-        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
-        if classified_place.lower() in ("gym", "planet fitness", "crossfit"):
-            activity_state_machine.process_signal(ActivitySignal(
-                signal_type="device",
-                source="ios_location",
-                value="gym_arrival",
-                metadata={"place": classified_place},
-            ))
-        elif classified_place.lower() in ("home",):
-            activity_state_machine.process_signal(ActivitySignal(
-                signal_type="device",
-                source="ios_location",
-                value="home_arrival",
-                metadata={"place": classified_place},
-            ))
-    except Exception:
-        pass
-
-    return {"ok": True, "classified_place": classified_place}
+    from app.services.location_service import process_report
+    result = await process_report(db, current_user.id, data.latitude, data.longitude, data.accuracy, "ios_significant")
+    return {"ok": True, "classified_place": result.get("classified_place") or data.label or "unknown"}

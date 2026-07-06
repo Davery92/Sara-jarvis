@@ -15,32 +15,11 @@ from app.models.context import ContextMode
 from app.models import Episode, Note
 from app.models.calendar_event import CalendarEvent
 from app.models.doc import Document
-from app.models.intelligence import IntelligenceReport, ProactiveSuggestion, DetectedPattern
+from app.models.intelligence import IntelligenceReport
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _priority_to_label(priority: object) -> str:
-    """Normalize numeric or string priority to low/medium/high."""
-    if isinstance(priority, str):
-        lowered = priority.strip().lower()
-        if lowered in {"low", "medium", "high"}:
-            return lowered
-        if lowered.isdigit():
-            priority = int(lowered)
-        else:
-            return "medium"
-    try:
-        value = int(priority)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return "medium"
-    if value >= 8:
-        return "high"
-    if value <= 3:
-        return "low"
-    return "medium"
 
 
 # ===================== DAILY BRIEFINGS =====================
@@ -288,85 +267,3 @@ async def generate_report_route(data: dict, db: Session = Depends(get_db), curre
         logger.error(f"Error generating intelligence report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ===================== SUGGESTIONS =====================
-
-@router.get("/api/suggestions")
-async def get_suggestions(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get proactive suggestions"""
-    try:
-        user_id = current_user.id
-        suggestions = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.user_id == user_id,
-            ProactiveSuggestion.status == "pending"
-        ).order_by(ProactiveSuggestion.created_at.desc()).limit(10).all()
-
-        return [{
-            "id": s.id,
-            "title": s.title,
-            "description": s.description,
-            "category": s.category,
-            "priority": _priority_to_label(s.priority),
-            "priority_value": s.priority,
-            "confidence": s.confidence,
-            "status": s.status,
-            "created_at": s.created_at.isoformat() if s.created_at else None
-        } for s in suggestions]
-    except Exception as e:
-        logger.error(f"Error getting suggestions: {e}")
-        return []
-
-
-@router.patch("/api/suggestions/{suggestion_id}")
-async def update_suggestion(suggestion_id: int, data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Update suggestion status"""
-    try:
-        user_id = current_user.id
-        status = data.get("status", "pending")
-
-        suggestion = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.id == suggestion_id,
-            ProactiveSuggestion.user_id == user_id
-        ).first()
-
-        if suggestion:
-            suggestion.status = status
-            actioned_at = datetime.now() if status in ["accepted", "dismissed"] else None
-            suggestion.actioned_at = actioned_at
-            suggestion.accepted_at = actioned_at if status == "accepted" else None
-            suggestion.dismissed_at = actioned_at if status == "dismissed" else None
-            db.commit()
-            return {"id": suggestion_id, "status": status}
-
-        raise HTTPException(status_code=404, detail="Suggestion not found")
-    except Exception as e:
-        logger.error(f"Error updating suggestion: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ===================== PATTERNS =====================
-
-@router.get("/api/detected-patterns")
-async def get_patterns(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get detected patterns"""
-    try:
-        user_id = current_user.id
-        patterns = db.query(DetectedPattern).filter(
-            DetectedPattern.user_id == user_id
-        ).order_by(DetectedPattern.confidence.desc()).limit(10).all()
-
-        return [{
-            "id": p.id,
-            "pattern_type": p.pattern_type,
-            "title": p.title,
-            "description": p.description,
-            "confidence": p.confidence,
-            "frequency": p.frequency,
-            "data_points": p.data_points,
-            "first_detected": p.first_detected.isoformat() if p.first_detected else None,
-            "created_at": p.created_at.isoformat() if p.created_at else None
-        } for p in patterns]
-    except Exception as e:
-        logger.error(f"Error getting patterns: {e}")
-        return []
