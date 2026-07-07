@@ -203,7 +203,10 @@ class AttentionQueueService:
             conditions.append("status = :status")
             params["status"] = status
         else:
-            conditions.append("status NOT IN ('archived', 'dropped', 'completed')")
+            # 'snoozed' ("Not now") must stay out of the default view until a
+            # context change flips it back to 'sent' — otherwise it never
+            # actually leaves the inbox, defeating the point of snoozing it.
+            conditions.append("status NOT IN ('archived', 'dropped', 'completed', 'snoozed')")
 
         where = " AND ".join(conditions)
 
@@ -561,6 +564,61 @@ class AttentionQueueService:
             await self._log_action(db, item_id, action_id, kind, "Completed")
             return {"success": success, "action_id": action_id, "kind": kind, "status": "completed"}
 
+        if kind == "stop_these":
+            # SARA_UNLEASHED Phase T.4: the correction channel available at
+            # the moment of annoyance, not just in the Sunday digest — the
+            # strongest negative theta nudge (same "stop" outcome the digest
+            # itself applies), for THIS category at THIS moment's context.
+            try:
+                from app.services.attention_learning import apply_engagement, _domain
+                from app.services.subconscious import resolve_context
+                from app.services.activity_state_machine import activity_state_machine
+
+                domain = _domain(item.get("category") or "general")
+                context = resolve_context(getattr(activity_state_machine.current.state, "value", None))
+                result = apply_engagement(db, item["user_id"], domain, context, "stop")
+            except Exception as e:
+                logger.warning(f"stop_these theta nudge failed (archiving anyway): {e}")
+                result = None
+            success = await self.mark_archived(db=db, item_id=item_id, user_id=user_id)
+            await self._log_action(db, item_id, action_id, kind, "Stop these — theta nudged down")
+            return {
+                "success": success,
+                "action_id": action_id,
+                "kind": kind,
+                "message": "Got it — fewer of these.",
+                "theta": result,
+            }
+
+        if kind == "not_now":
+            # SARA_UNLEASHED Phase T.4: re-surfaces the SAME item at the next
+            # context change instead of a fixed timer or a duplicate. Status
+            # 'snoozed' falls outside the (user_id, dedupe_key) partial unique
+            # index (scoped to new/sent), so nothing blocks it from
+            # reappearing once _handle_activity_state_changed flips it back.
+            try:
+                from app.services.subconscious import resolve_context
+                from app.services.activity_state_machine import activity_state_machine
+                current_context = resolve_context(getattr(activity_state_machine.current.state, "value", None))
+            except Exception:
+                current_context = "available"
+
+            conditions = ["id = :id", "status NOT IN ('archived', 'dropped', 'completed')"]
+            params: Dict[str, Any] = {"id": item_id, "context": current_context}
+            if user_id:
+                conditions.append("user_id = :user_id")
+                params["user_id"] = user_id
+            where = " AND ".join(conditions)
+            await _exec(db, text(f"""
+                UPDATE autonomy_attention_item
+                SET status = 'snoozed',
+                    payload = jsonb_set(COALESCE(payload, '{{}}'::jsonb), '{{snoozed_from_context}}', to_jsonb(CAST(:context AS text))),
+                    updated_at = NOW()
+                WHERE {where}
+            """), params)
+            await self._log_action(db, item_id, action_id, kind, f"Not now (context={current_context})")
+            return {"success": True, "action_id": action_id, "kind": kind, "message": "Okay, I'll bring this back up later."}
+
         if kind == "open_url":
             url = str(action.get("url") or params.get("url") or "")
             await self.mark_engaged(db=db, item_id=item_id, user_id=user_id)
@@ -602,6 +660,12 @@ class AttentionQueueService:
                 "type": "chat",
                 "prompt": prompt,
                 "title": str(item.get("title") or ""),
+                # SARA_UNLEASHED Phase T.4: lets the chat turn carry the
+                # original item as context instead of restarting cold —
+                # the caller threads this through to /chat/stream so the
+                # reply continues the conversation the item started.
+                "item_id": item_id,
+                "category": str(item.get("category") or ""),
             }
             if note_context:
                 directive["note_id"] = note_context["note_id"]
@@ -696,12 +760,24 @@ class AttentionQueueService:
             })
             await _exec(db, text("""
                 UPDATE autonomy_attention_item
-                SET action_history = COALESCE(action_history, '[]'::jsonb) || :entry::jsonb,
+                SET action_history = COALESCE(action_history, '[]'::jsonb) || CAST(:entry AS jsonb),
                     updated_at = NOW()
                 WHERE id = CAST(:id AS uuid)
             """), {"id": item_id, "entry": entry})
         except Exception as e:
-            logger.debug(f"Failed to log action on attention item {item_id}: {e}")
+            # SARA_UNLEASHED Phase T.4 finding: this used to be `:entry::jsonb`
+            # — the same `::type` + named-bind-parameter conflict as the
+            # pgvector `::vector` gotcha (gotcha_pgvector_cast). That silently
+            # threw here, and because nothing rolled back afterward, it
+            # poisoned the whole transaction for every statement that ran
+            # after it in the same request — including the mark_archived/
+            # mark_completed/reminder-creation writes from run_action, which
+            # is why every quick action (Done, Archive, Snooze, ...) reported
+            # success=True while never actually persisting. Re-raise instead
+            # of swallowing so a real failure here is visible, not silently
+            # eaten while poisoning everything downstream.
+            logger.error(f"Failed to log action on attention item {item_id}: {e}")
+            raise
 
     async def _propagate_feedback(self, db, item_id: str, action: str) -> None:
         """Propagate attention item feedback to linked notification_log entries."""

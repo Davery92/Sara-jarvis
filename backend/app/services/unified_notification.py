@@ -1148,6 +1148,15 @@ def _default_attention_actions(
         actions.append({"id": "ask_sara", "label": "Ask Sara", "kind": "chat", "prompt": _reply_prompt(title, message)})
     actions.append({"id": "done", "label": "Done", "kind": "complete"})
 
+    # SARA_UNLEASHED Phase T.4: the triad every proactive item gets, on top
+    # of whatever category-specific actions above already serve as "do it".
+    # "Not now" re-surfaces THIS item at the next context change instead of
+    # spawning a duplicate or a fixed-timer snooze. "Stop these" is the
+    # correction channel that used to only exist in the Sunday digest —
+    # available at the moment of annoyance instead of a week later.
+    actions.append({"id": "not_now", "label": "Not now", "kind": "not_now"})
+    actions.append({"id": "stop_these", "label": "Stop these", "kind": "stop_these"})
+
     return actions
 
 

@@ -688,9 +688,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           }),
           conversation_id: currentConversationId,
           model: selectedModel,
-          ephemeral: isEphemeral
+          ephemeral: isEphemeral,
+          // SARA_UNLEASHED Phase T.4: one-shot — a reply from the attention
+          // inbox carries the original item's id so the conversation
+          // continues instead of restarting cold. Cleared immediately so it
+          // only applies to this one outgoing turn.
+          ...((window as any).__attentionItemId
+            ? { attention_item_id: (window as any).__attentionItemId }
+            : {}),
         })
       })
+      ;(window as any).__attentionItemId = undefined
 
       console.log('📤 Sending request with conversation_id:', currentConversationId)
 

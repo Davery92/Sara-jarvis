@@ -9087,6 +9087,32 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception as e:
                     logger.warning(f"⚠️ Inbox context injection failed (non-critical): {e}")
 
+            # ATTENTION ITEM CONTEXT (SARA_UNLEASHED Phase T.4): a reply to a
+            # proactive item carries the item's id so the conversation
+            # continues instead of restarting cold. run_action's "chat" kind
+            # already marks the item engaged the moment the button is
+            # tapped — this is belt-and-suspenders for any caller that skips
+            # that endpoint, plus the actual context injection.
+            if request.attention_item_id:
+                try:
+                    attn_row = db.execute(text("""
+                        SELECT title, body, category FROM autonomy_attention_item
+                        WHERE id = CAST(:id AS uuid) AND user_id = :uid
+                    """), {"id": request.attention_item_id, "uid": current_user.id}).fetchone()
+                    if attn_row:
+                        attn_ctx = (
+                            f"\n\n## The proactive item this reply continues\n"
+                            f"**{attn_row.title}** ({attn_row.category})\n{attn_row.body or ''}"
+                        )
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + attn_ctx)
+                        from app.services.autonomy.attention_queue import attention_queue
+                        await attention_queue.mark_engaged(db=db, item_id=request.attention_item_id, user_id=str(current_user.id))
+                        db.commit()
+                        logger.info(f"📥 Injected attention item context: {attn_row.title}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Attention item context injection failed (non-critical): {e}")
+
             # NOTE CONTEXT: Inject note content when discussing a note/report from iOS.
             if request.note_id:
                 try:

@@ -94,6 +94,36 @@ async def _handle_activity_state_changed(event: Event):
         activity_confidence=payload.get("confidence", 0.5),
         room=payload.get("room"),
     )
+    await _resurface_snoozed_items(event.user_id, payload.get("state", "UNKNOWN"))
+
+
+async def _resurface_snoozed_items(user_id: str, new_state: str) -> None:
+    """SARA_UNLEASHED Phase T.4: 'Not now' items come back at the NEXT
+    context change, not on a fixed timer and not as a duplicate. Flips
+    status back to 'sent' only for items snoozed from a DIFFERENT context
+    than the one David just entered — snoozing during 'focused' and
+    immediately re-checking while still 'focused' must not instantly
+    resurface the same item."""
+    try:
+        from sqlalchemy import text as _text
+        from app.services.subconscious import resolve_context
+        from app.db.session import get_async_session_factory
+
+        current_context = resolve_context(new_state)
+        factory = get_async_session_factory()
+        async with factory() as db:
+            result = await db.execute(_text("""
+                UPDATE autonomy_attention_item
+                SET status = 'sent', updated_at = NOW()
+                WHERE user_id = :uid
+                  AND status = 'snoozed'
+                  AND COALESCE(payload->>'snoozed_from_context', '') != :ctx
+            """), {"uid": user_id, "ctx": current_context})
+            await db.commit()
+            if result.rowcount:
+                logger.info(f"Resurfaced {result.rowcount} snoozed attention item(s) on context change -> {current_context}")
+    except Exception as e:
+        logger.debug(f"Snoozed-item resurface check failed: {e}")
 
 
 async def _handle_interruptibility_changed(event: Event):
