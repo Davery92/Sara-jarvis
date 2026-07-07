@@ -157,6 +157,18 @@ All test data (2 recipes, 1 food_log row) created during verification was delete
 
 Deltas from plan: U7-3 uses an additive shadow column instead of converting `exercise_id` in place (documented above). U7-4 gained a `for_exercise_name` param beyond the plan's literal `?movement=` spec — needed so the iOS picker doesn't have to know the movement-pattern taxonomy itself.
 
+## Phase U.7 follow-up — movement classifier bug (found via real usage) — 2026-07-07
+
+David reported the actual live symptom: the Flat DB Bench picker was showing flies, incline presses, and rear-delt work — not just flat-bench variants. Root-caused to two stacked bugs in `exercise_library_seed.classify()`:
+
+1. **Rule ordering**: the generic `horizontal_press` rule's `fly` keyword was checked *before* the more specific `shoulder_isolation` (lateral raise / rear delt) rule, so "Rear Delt Fly" — a completely different muscle group and movement direction — was being swept into the bench-press bucket on the word "fly" alone.
+2. **A second, independent regex bug**: `\bflyes?\b` was intended to match "fly" or "flyes" but `es?` means a mandatory "e" + optional "s" — it actually matches "flye"/"flyes", never bare "fly". So "Fly machine" matched *nothing* and fell through to `other` instead of being grouped with the other fly variants at all.
+
+Fixed: reordered rules (shoulder_isolation before the fly catch-all), corrected the regex (`\bfly\b|\bflyes\b|\bflies\b`), and split flies into their own `chest_fly` movement pattern entirely — separate from `horizontal_press`, since a fly (isolation, horizontal adduction) and a press (a push) are different movements even though both hit the chest. Added `reclassify_all()` since the seeder skips existing rows by name — a classifier fix alone doesn't reach already-seeded data without an explicit re-pass.
+
+Verified live: `SELECT name, movement_pattern FROM exercise_library` now shows `chest_fly` = {Cable Flyes, Fly machine, Machine Chest Fly}, `shoulder_isolation` = {Cable Lateral Raise, Lat Raise, Rear Delt Fly}, `horizontal_press` = {Barbell or Machine Chest Press, Flat Bench Press, Flat DB Bench, ISO bench press} — no cross-contamination. Re-ran the exact call the iOS picker makes (`GET /api/fitness/exercises?for_exercise_name=Flat%20DB%20Bench`): returns only `ISO bench press, Barbell or Machine Chest Press, Flat Bench Press, Flat DB Bench` — matching what David actually asked for.
+
+
 
 
 

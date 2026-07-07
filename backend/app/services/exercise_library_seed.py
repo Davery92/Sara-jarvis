@@ -23,14 +23,24 @@ _MOVEMENT_RULES: List[Tuple[str, str]] = [
     (r"deadlift|hip hinge|kettlebell swing", "hinge"),
     (r"incline.*press|incline.*bench", "incline_press"),
     (r"overhead press|shoulder press", "vertical_press"),
-    (r"bench|chest press|chest fly|fly", "horizontal_press"),
+    # Lateral raise / rear delt must precede the generic "fly" catch below —
+    # "Rear Delt Fly" was matching the horizontal_press rule's bare "fly"
+    # keyword first, dumping a rear-delt isolation move in with flat bench
+    # press variants. This is exactly the bug that made the Flat Bench
+    # picker show flyes and rear delt alongside real press variants.
+    (r"lateral raise|lat raise|rear delt", "shoulder_isolation"),
+    # Flies are their own movement — a fundamentally different motion
+    # (horizontal adduction, isolation) from a press (a push), even though
+    # both hit the chest. Keeping them separate is what makes "what did I
+    # do last time on flat bench" show ONLY flat-bench press variants.
+    (r"chest fly|pec dec|\bfly\b|\bflyes\b|\bflies\b", "chest_fly"),
+    (r"bench|chest press", "horizontal_press"),
     (r"pulldown|pull-?up|vertical pull|pullover", "vertical_pull"),
     (r"\brow\b", "horizontal_pull"),
     (r"leg curl|let curl", "leg_isolation"),
     (r"leg extension", "leg_isolation"),
     (r"\bcurl\b", "arm_isolation"),
     (r"pushdown|skull crusher|triceps", "arm_isolation"),
-    (r"lateral raise|lat raise|rear delt", "shoulder_isolation"),
     (r"shrug", "trap_isolation"),
     (r"crunch|\bab\b", "core"),
 ]
@@ -63,6 +73,33 @@ def classify(name: str) -> Tuple[str, str]:
     equipment = "/".join(equipment_tags) if equipment_tags else "other"
 
     return movement, equipment
+
+
+async def reclassify_all() -> Dict[str, int]:
+    """Recompute movement_pattern/equipment for every existing exercise_library
+    row against the current classify() rules. Needed because seed_from_workout_log
+    skips rows that already exist by name — a classifier rule fix (like the
+    "fly" keyword swallowing rear-delt/lateral-raise moves) would otherwise
+    never reach already-seeded rows."""
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+
+    factory = get_async_session_factory()
+    changed = 0
+    async with factory() as db:
+        rows = (await db.execute(text("SELECT id, name, movement_pattern FROM exercise_library"))).fetchall()
+        for ex_id, name, old_movement in rows:
+            new_movement, new_equipment = classify(name)
+            if new_movement != old_movement:
+                await db.execute(text("""
+                    UPDATE exercise_library
+                    SET movement_pattern = :movement, equipment_required = CAST(:equipment AS json), updated_at = NOW()
+                    WHERE id = :id
+                """), {"id": ex_id, "movement": new_movement, "equipment": f'["{new_equipment}"]'})
+                changed += 1
+        await db.commit()
+    logger.info(f"exercise_library reclassify: changed={changed}/{len(rows)}")
+    return {"changed": changed, "total": len(rows)}
 
 
 async def seed_from_workout_log(user_id: str) -> Dict[str, int]:
