@@ -133,6 +133,63 @@ async def bump_person_mention(db: AsyncSession, user_id: str, canonical_name: st
     return person_id
 
 
+async def bump_meeting_attendees(db: AsyncSession, user_id: str, attendees: list) -> int:
+    """SARA_UNLEASHED Phase D.5: when a meeting genuinely ends, its attendees
+    get an interaction bump (last_interaction_kind='meeting'). Distinct from
+    person_service_sync.link_attendees_to_people, which only bumps at
+    calendar-SYNC time if the event already happened to be in the past at
+    that moment — most meetings sync BEFORE they happen, so that path alone
+    would rarely fire the bump for a real meeting. Call this from the
+    ended-meeting scan instead, when the event has actually just concluded.
+    Returns the number of attendees bumped."""
+    now = datetime.now(timezone.utc)
+    bumped = 0
+    for attendee in attendees or []:
+        email = (attendee.get("email") or "").strip().lower()
+        name = (attendee.get("name") or "").strip()
+        if not email or is_bulk_sender(email):
+            continue
+        canonical_name = name or email.split("@")[0]
+
+        row = (await db.execute(text("""
+            SELECT id, canonical_name, emails, aliases, last_interaction_at FROM person
+            WHERE user_id = :uid AND emails @> CAST(:email_json AS jsonb) LIMIT 1
+        """), {"uid": user_id, "email_json": _to_jsonb([email])})).fetchone()
+        if not row:
+            row = (await db.execute(text("""
+                SELECT id, canonical_name, emails, aliases, last_interaction_at FROM person
+                WHERE user_id = :uid AND canonical_name = :name LIMIT 1
+            """), {"uid": user_id, "name": canonical_name})).fetchone()
+
+        if row:
+            person_id, existing_name, emails, aliases, prior_last_interaction_at = row
+            emails = emails or []
+            aliases = aliases or []
+            if email not in emails:
+                emails = emails + [email]
+            if canonical_name != existing_name and canonical_name not in aliases:
+                aliases = aliases + [canonical_name]
+            await db.execute(text("""
+                UPDATE person SET emails = CAST(:emails AS jsonb), aliases = CAST(:aliases AS jsonb),
+                    last_interaction_at = :now, last_interaction_kind = 'meeting',
+                    interaction_count = interaction_count + 1, updated_at = :now
+                WHERE id = :id
+            """), {"emails": _to_jsonb(emails), "aliases": _to_jsonb(aliases), "now": now, "id": person_id})
+            await _bump_cadence(db, user_id, person_id, prior_last_interaction_at, now)
+        else:
+            person_id = str(uuid.uuid4())
+            await db.execute(text("""
+                INSERT INTO person (id, user_id, canonical_name, emails, aliases,
+                    first_seen_at, last_interaction_at, last_interaction_kind,
+                    interaction_count, mention_count, created_at, updated_at)
+                VALUES (:id, :uid, :name, CAST(:emails AS jsonb), '[]'::jsonb, :now, :now, 'meeting', 1, 0, :now, :now)
+                ON CONFLICT (user_id, canonical_name) DO NOTHING
+            """), {"id": person_id, "uid": user_id, "name": canonical_name,
+                   "emails": _to_jsonb([email]), "now": now})
+        bumped += 1
+    return bumped
+
+
 async def _bump_cadence(db: AsyncSession, user_id: str, person_id: str,
                          prior_last_interaction_at, now: datetime) -> None:
     """EWMA of the gap (in hours) between this person's interactions — feeds

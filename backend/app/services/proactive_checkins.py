@@ -173,7 +173,7 @@ async def scan_ended_meetings(user_id: str) -> dict:
     created = 0
     async with factory() as db:
         rows = (await db.execute(text("""
-            SELECT id, title, start_time, end_time
+            SELECT id, title, start_time, end_time, attendees
             FROM calendar_event
             WHERE user_id = :uid
               AND all_day = FALSE
@@ -193,10 +193,16 @@ async def scan_ended_meetings(user_id: str) -> dict:
             return {"scanned": 0, "created": 0}
 
         from app.services.thread_manager import create_thread
+        from app.services.person_service import bump_meeting_attendees
 
         for ev in rows:
             title = (ev.title or "your meeting").strip()
+
             # Dedup: skip if we already opened a follow-up for this event recently.
+            # This same check gates the D.5 attendee bump below — the scan runs
+            # every 10 min with a 25-min lookback, so a single meeting can appear
+            # across 2-3 scan cycles; without this gate the bump (and
+            # interaction_count) would fire multiple times for one meeting.
             exists = (await db.execute(text("""
                 SELECT 1 FROM followup_thread
                 WHERE user_id = :uid
@@ -207,6 +213,18 @@ async def scan_ended_meetings(user_id: str) -> dict:
             """), {"uid": user_id, "evkey": f"%event:{ev.id}%"})).fetchone()
             if exists:
                 continue
+
+            # SARA_UNLEASHED Phase D.5: bump attendees now that the meeting has
+            # genuinely concluded — link_attendees_to_people (calendar sync
+            # time) only bumps if the event was already in the past AT SYNC
+            # TIME, which most real meetings aren't (they sync before they
+            # happen). This is the hook that actually fires for a normal
+            # "meeting happened today" case.
+            try:
+                if ev.attendees:
+                    await bump_meeting_attendees(db, user_id, ev.attendees)
+            except Exception as e:
+                logger.debug(f"Meeting attendee bump failed for event {ev.id}: {e}")
 
             await create_thread(
                 user_id=user_id,

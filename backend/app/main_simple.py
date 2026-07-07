@@ -2846,6 +2846,14 @@ class SimpleLLMClient:
                                 await process_message_for_pkg(user_id, content)
                             except Exception:
                                 pass  # Non-critical
+
+                            # SARA_UNLEASHED Phase D.3: bump known-person mentions
+                            # in real time instead of waiting for consolidation.
+                            try:
+                                from app.services.pkg_realtime_extractor import bump_mentioned_people
+                                await bump_mentioned_people(user_id, content)
+                            except Exception:
+                                pass  # Non-critical
             finally:
                 db.close()
 

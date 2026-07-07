@@ -74,6 +74,74 @@ def extract_realtime_facts(message: str) -> List[Dict[str, Any]]:
     return facts
 
 
+_MENTION_STOPWORDS = {
+    "the", "and", "for", "our", "your", "team", "support", "info", "sales",
+    "hello", "hi", "sincerely", "regards", "thanks", "thank", "best", "dear",
+}
+
+
+def _mentions_name(message: str, name: str) -> bool:
+    """True if `name`'s first token appears as a genuine reference in
+    `message` — a mid-sentence capitalized word, not just a lowercase
+    substring hit. Without this, a person named "The Quo Team" (a real row
+    from the D.1 email-history seed) matches on the ordinary word "the" in
+    ANY message, since its first token is "the" — this caught that exact
+    bug during testing before it shipped."""
+    first_token = name.split()[0].strip() if name else ""
+    if len(first_token) < 3 or first_token.lower() in _MENTION_STOPWORDS:
+        return False
+    # Sentence-initial capitalization is orthographic, not a signal — require
+    # the match at a NON-initial word position (same reasoning as
+    # deliberation_gate._has_proper_noun, which caught an analogous bug
+    # earlier this session).
+    words = re.findall(r"[A-Za-z']+", message)
+    for word in words[1:]:
+        if word.lower() == first_token.lower() and word[0].isupper():
+            return True
+    return False
+
+
+async def bump_mentioned_people(user_id: str, message: str) -> int:
+    """SARA_UNLEASHED Phase D.3: bump a known person's mention_count/
+    last_interaction_at the moment their name appears in chat, instead of
+    waiting for the 2x-daily consolidation pass (pkg_extractor.deep_extract/
+    lightweight_extract already do this bump — just too slowly for
+    'reconnect_overdue' to reflect today's conversation). Deliberately
+    cheap: a name-list match against people already in the `person` table,
+    not LLM extraction — that stays the periodic pass's job. Returns the
+    number of people bumped."""
+    if not message or len(message) < 3:
+        return 0
+
+    try:
+        from sqlalchemy import text
+        from app.db.session import get_async_session_factory
+        from app.services.person_service import bump_person_mention
+
+        factory = get_async_session_factory()
+        bumped = 0
+        async with factory() as db:
+            rows = (await db.execute(text("""
+                SELECT canonical_name, aliases FROM person WHERE user_id = :uid
+            """), {"uid": user_id})).fetchall()
+
+            seen_this_message = set()
+            for canonical_name, aliases in rows:
+                if canonical_name in seen_this_message:
+                    continue
+                candidates = [canonical_name] + list(aliases or [])
+                if any(_mentions_name(message, c) for c in candidates if c):
+                    await bump_person_mention(db, user_id, canonical_name)
+                    seen_this_message.add(canonical_name)
+                    bumped += 1
+            if bumped:
+                await db.commit()
+        return bumped
+    except Exception as e:
+        logger.debug(f"Real-time person mention bump failed: {e}")
+        return 0
+
+
 async def process_message_for_pkg(user_id: str, message: str):
     """
     Process a user message for real-time PKG updates.

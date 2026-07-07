@@ -362,6 +362,124 @@ async def _sync_emails_async():
 
 
 @celery_app.task(
+    name="app.tasks.email_sync.sync_sent_items",
+    bind=True,
+    queue="low_priority",
+    max_retries=2,
+)
+def sync_sent_items(self):
+    """SARA_UNLEASHED Phase D.2: sync the Sent folder so the person layer
+    sees who David wrote to, not just who wrote to him. Unlocks reply-latency
+    ("Jim wrote 3 days ago, you haven't answered") — inbound-only analysis
+    can never produce that signal. Does not store full sent-item rows in the
+    `email` table (that model's shape is inbound-oriented); only upserts
+    each recipient as a person with direction='email_out'."""
+    try:
+        result = asyncio.get_event_loop().run_until_complete(_sync_sent_items_async())
+        logger.info(f"Sent-items sync complete: {result}")
+        return result
+    except RuntimeError:
+        result = asyncio.run(_sync_sent_items_async())
+        logger.info(f"Sent-items sync complete: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Sent-items sync failed: {e}")
+        raise self.retry(countdown=120, exc=e)
+
+
+async def _sync_sent_items_async():
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy import select
+
+    from app.services.msgraph_service import get_msgraph_service
+    from app.services.person_service import upsert_person_from_email
+    from app.models.email import EmailSyncState
+    from app.core.config import settings
+
+    database_url = os.getenv("DATABASE_URL", "")
+    if database_url.startswith("postgresql://"):
+        async_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+    elif database_url.startswith("postgresql+psycopg://"):
+        async_url = database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    else:
+        async_url = database_url
+
+    engine = create_async_engine(async_url, echo=False)
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    user_id = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+    total_recipients = 0
+    total_sent = 0
+    total_errors = 0
+
+    try:
+        msgraph = get_msgraph_service()
+        async with async_session() as db:
+            for mailbox in settings.msgraph_mailboxes:
+                # Distinct sync-state key ("::sent") so this shares the
+                # EmailSyncState table without colliding with the inbound
+                # sync's own per-mailbox row.
+                state_key = f"{mailbox}::sent"
+                try:
+                    result = await db.execute(
+                        select(EmailSyncState).where(
+                            EmailSyncState.user_id == user_id,
+                            EmailSyncState.mailbox == state_key,
+                        )
+                    )
+                    sync_state = result.scalar_one_or_none()
+                    since = sync_state.last_sync_at if sync_state and sync_state.last_sync_at else (
+                        local_now() - timedelta(hours=24)
+                    )
+
+                    sent_emails = await msgraph.get_emails(mailbox, since=since, top=50, folder="sentitems")
+                    total_sent += len(sent_emails)
+
+                    latest_at = since
+                    for sent in sent_emails:
+                        if sent.received_at and sent.received_at > latest_at:
+                            latest_at = sent.received_at
+                        for recipient in (sent.to_recipients or []) + (sent.cc_recipients or []):
+                            r_email = (recipient.get("email") or "").strip()
+                            if not r_email:
+                                continue
+                            try:
+                                person_id = await upsert_person_from_email(
+                                    db, user_id, r_email, recipient.get("name"),
+                                    direction="email_out",
+                                )
+                                if person_id:
+                                    total_recipients += 1
+                            except Exception as e:
+                                logger.warning(f"[sent-sync] person upsert failed for {r_email}: {e}")
+
+                    if sync_state:
+                        sync_state.last_sync_at = latest_at
+                        sync_state.last_sync_count = len(sent_emails)
+                    else:
+                        sync_state = EmailSyncState(
+                            user_id=user_id, mailbox=state_key,
+                            last_sync_at=latest_at, last_sync_count=len(sent_emails), last_sync_errors=0,
+                        )
+                        db.add(sync_state)
+                    await db.commit()
+                except Exception as e:
+                    logger.error(f"Sent-items sync failed for {mailbox}: {e}")
+                    total_errors += 1
+                    continue
+
+        return {
+            "timestamp": local_now().isoformat(),
+            "sent_items_seen": total_sent,
+            "recipients_upserted": total_recipients,
+            "errors": total_errors,
+        }
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(
     name="app.tasks.email_sync.analyze_recent_emails",
     bind=True,
     queue="cognitive"
