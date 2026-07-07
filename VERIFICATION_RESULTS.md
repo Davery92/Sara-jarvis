@@ -168,6 +168,19 @@ Fixed: reordered rules (shoulder_isolation before the fly catch-all), corrected 
 
 Verified live: `SELECT name, movement_pattern FROM exercise_library` now shows `chest_fly` = {Cable Flyes, Fly machine, Machine Chest Fly}, `shoulder_isolation` = {Cable Lateral Raise, Lat Raise, Rear Delt Fly}, `horizontal_press` = {Barbell or Machine Chest Press, Flat Bench Press, Flat DB Bench, ISO bench press} — no cross-contamination. Re-ran the exact call the iOS picker makes (`GET /api/fitness/exercises?for_exercise_name=Flat%20DB%20Bench`): returns only `ISO bench press, Barbell or Machine Chest Press, Flat Bench Press, Flat DB Bench` — matching what David actually asked for.
 
+## Phase T.3 — Collapse five suppression layers into two (overlap week started, not yet cut over) — 2026-07-07
+
+Per the plan's own mandate, this is **not a same-session cutover** — it requires a week of parallel old/new logging before the legacy layers can be safely retired. What's actually done this session:
+
+| Step | Status | Evidence |
+|------|--------|----------|
+| Delete the inline priority-adjuster | **PASS — confirmed dead first, then removed** | Verified before deleting: `route_through_attention_queue`'s buzz decision treats `normal`/`low` identically (both fall through to the same 30-day-engagement check), so a block that only ever toggled `normal`↔`low` had stopped changing real behavior the moment Phase A shipped. Removed from `_send_notification_impl`. |
+| `category_limits` dict → DB-backed tunables | **PASS — proven live** | Migration 094 seeds `notify.category_limit.<category>.{max_count,window_hours}` with the exact same 8 categories and values as the old Python dict (verified: `home`=3/6h, `checkin`=1/6h, etc., read back correctly as native JSON int/float, not double-encoded strings). `_check_dedup` now reads from tunables instead of a hardcoded dict. |
+| `notify.legacy_limits` overlap gate | **PASS — proven live, default ON (zero behavior change)** | Both `notification_tuner`'s suppress/double_cooldown check and the category-limit check still fully enforce by default. Verified: a real `_check_dedup` call for `checkin` (already at its 1-per-6h cap) still returned `blocked=True` — identical to pre-T.3 behavior. |
+| Divergence logging (`limit_divergence`) | **PASS — proven live, already surfaced a real finding** | Both legacy paths now log a `limit_divergence` line comparing their verdict against the learned buzz decision. Live test 1 (real data, no synthetic setup): the category-limit check for `checkin` logged `old_action=block ... learned_layer_would_push=True` — a genuine disagreement, meaning the old hard cap is currently being more conservative on check-ins than the new engagement-based layer would be, worth watching over the coming week. Live test 2 (synthetic Redis tuner decision, cleaned up via TTL): confirmed the `notification_tuner` path logs and enforces identically. |
+
+**What this is NOT**: `notification_tuner.py` is not deleted, `category_limits`' *enforcement* hasn't moved anywhere, and nothing has been cut over. That's intentional — the plan explicitly calls this the riskiest of the three phases and mandates the week of parallel logging specifically so a wrong call here doesn't reintroduce notification spam or silence in either direction. **Next step (after ~1 week):** review `docker logs jarvis-backend-1 | grep limit_divergence` for the categories that matter, and if divergences are rare/reasonable, flip `notify.legacy_limits` to `false` via `/api/settings/tunables` — at that point the legacy checks stop enforcing (still log) and only the gate + learned layer decide. Full code deletion of `notification_tuner.py` and the now-inert category-limit block should follow only after that.
+
 
 
 

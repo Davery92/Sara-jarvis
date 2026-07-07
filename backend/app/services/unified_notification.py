@@ -300,37 +300,33 @@ async def _send_notification_impl(
     overlay: Optional[Dict[str, Any]] = None,
     _skip_phrasing: bool = False,
 ) -> Dict[str, Any]:
-    # ── Engagement-based priority adjustment ──
-    # If David consistently ignores a category, lower priority; if he engages, boost
-    if db and category not in ("system_health", "security"):
-        try:
-            eng_result = await db.execute(text("""
-                SELECT count(*) FILTER (WHERE sent = true) as sent,
-                       count(*) FILTER (WHERE engaged = true) as engaged
-                FROM notification_log
-                WHERE user_id = :uid AND category = :cat
-                  AND sent_at > NOW() - INTERVAL '14 days'
-            """), {"uid": user_id, "cat": category})
-            eng_row = eng_result.fetchone()
-            if eng_row and eng_row[0] >= 5:  # Only adjust after 5+ sends
-                eng_rate = eng_row[1] / eng_row[0]
-                if eng_rate < 0.10 and priority in ("normal", "low"):
-                    priority = "low"  # Demote rarely-engaged categories
-                    logger.debug(f"Notification priority demoted for {category} (engagement={eng_rate:.0%})")
-                elif eng_rate > 0.60 and priority == "low":
-                    priority = "normal"  # Promote highly-engaged categories
-        except Exception:
-            pass  # Don't block notifications on analytics failure
+    # SARA_UNLEASHED Phase T.3: the inline engagement-priority-adjuster that
+    # used to live here is deleted — it only ever toggled between "normal"
+    # and "low", and since route_through_attention_queue's learned buzz
+    # decision (Phase A.3) treats normal/low identically (both fall through
+    # to the same 30-day-engagement check), this toggle stopped changing
+    # actual behavior the moment Phase A shipped. Confirmed dead in effect,
+    # not just dead in theory, before removing.
 
-    # ── Notification tuner check: suppress categories with very low engagement ──
+    # ── Notification tuner check (legacy layer, overlap week — see T.3) ──
+    # Still enforces by default (notify.legacy_limits=True) while its
+    # decisions are logged against what the learned layer would have done,
+    # so divergences are visible before this layer is retired for real.
     try:
         from app.services.notification_tuner import get_tuning_for_category
+        from app.services.tunables import get_tunable_bool
         tuning_action = get_tuning_for_category(user_id, category)
-        if tuning_action == "suppress" and priority not in ("urgent", "critical"):
-            logger.info(f"Notification suppressed by tuner: {category} | title={title[:60]}")
-            return {"sent": False, "reason": "tuner_suppressed", "category": category}
-        elif tuning_action == "double_cooldown":
-            cooldown_hours = (cooldown_hours or _cooldown_for(category)) * 2
+        legacy_active = get_tunable_bool("notify.legacy_limits", True)
+        if tuning_action in ("suppress", "double_cooldown"):
+            await _log_limit_divergence(
+                db, user_id, category, "notification_tuner", tuning_action, priority,
+            )
+        if legacy_active:
+            if tuning_action == "suppress" and priority not in ("urgent", "critical"):
+                logger.info(f"Notification suppressed by tuner: {category} | title={title[:60]}")
+                return {"sent": False, "reason": "tuner_suppressed", "category": category}
+            elif tuning_action == "double_cooldown":
+                cooldown_hours = (cooldown_hours or _cooldown_for(category)) * 2
     except Exception:
         pass
 
@@ -1176,6 +1172,33 @@ def _build_attention_payload(
     return merged
 
 
+_CATEGORY_LIMIT_CATEGORIES = (
+    "home", "security", "checkin", "weather", "health", "fitness", "wellness", "acs_discovery",
+)
+
+
+async def _log_limit_divergence(
+    db: Optional[AsyncSession], user_id: str, category: str, source: str, old_action: str, priority: str,
+) -> None:
+    """SARA_UNLEASHED Phase T.3 overlap-week safety check. Every time a legacy
+    suppression layer (notification_tuner or the category-limit dict) would
+    act, also read what the learned layer (30-day engagement, same signal
+    _learned_buzz_decision uses) currently says for this category, and log
+    both side by side as `limit_divergence`. This is the record a future
+    session reviews before flipping `notify.legacy_limits` off for good —
+    the log line format is deliberately grep-friendly (`grep limit_divergence`)."""
+    if db is None:
+        return
+    try:
+        would_push = await _learned_buzz_decision(db, user_id, category)
+        logger.warning(
+            f"limit_divergence: source={source} category={category} "
+            f"old_action={old_action} priority={priority} learned_layer_would_push={would_push}"
+        )
+    except Exception as e:
+        logger.debug(f"limit_divergence logging failed: {e}")
+
+
 async def _check_dedup(
     db: AsyncSession,
     user_id: str,
@@ -1200,21 +1223,16 @@ async def _check_dedup(
     if count > 0:
         return True
 
-    # Category-level rate limit: prevent LLM from varying topic names for the same issue
-    # Extract category prefix from topic (e.g. "home" from "home:ecobee_xyz")
+    # Category-level rate limit: prevent LLM from varying topic names for the same issue.
+    # SARA_UNLEASHED Phase T.3: values now live in tunable_setting (migration 094)
+    # instead of a Python literal — same defaults, but inspectable/editable like
+    # every other tunable, and the natural seed for the learned layer that's meant
+    # to eventually absorb this responsibility (attention_policy.surface_budget).
     category = topic.split(":")[0] if ":" in topic else topic
-    category_limits = {
-        "home": (3, 6.0),          # max 3 per 6 hours
-        "security": (4, 6.0),      # max 4 per 6 hours
-        "checkin": (1, 6.0),       # max 1 per 6 hours
-        "weather": (2, 8.0),       # max 2 per 8 hours
-        "health": (1, 24.0),       # max 1 per 24 hours
-        "fitness": (1, 24.0),      # max 1 per 24 hours
-        "wellness": (1, 24.0),     # max 1 per 24 hours
-        "acs_discovery": (1, 4.0), # max 1 per 4 hours — finalization consolidates
-    }
-    if include_category_limits and category in category_limits:
-        max_count, window_hours = category_limits[category]
+    if include_category_limits and category in _CATEGORY_LIMIT_CATEGORIES:
+        from app.services.tunables import get_tunable_int, get_tunable_float, get_tunable_bool
+        max_count = get_tunable_int(f"notify.category_limit.{category}.max_count", 3)
+        window_hours = get_tunable_float(f"notify.category_limit.{category}.window_hours", 6.0)
         result = await _db_execute(db, text("""
             SELECT COUNT(*) FROM notification_log
             WHERE user_id = :user_id
@@ -1228,8 +1246,11 @@ async def _check_dedup(
         })
         cat_count = result.scalar() or 0
         if cat_count >= max_count:
-            logger.info(f"Category rate limit hit: {category} sent {cat_count}/{max_count} in {window_hours}h")
-            return True
+            legacy_active = get_tunable_bool("notify.legacy_limits", True)
+            await _log_limit_divergence(db, user_id, category, "category_limit", "block", "n/a")
+            if legacy_active:
+                logger.info(f"Category rate limit hit: {category} sent {cat_count}/{max_count} in {window_hours}h")
+                return True
 
     return False
 
