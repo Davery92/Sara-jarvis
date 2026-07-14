@@ -34,6 +34,7 @@ DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 # Redis key holding the last-known set of degraded subsystems, so we can diff
 # tick-over-tick and only surface transitions.
 _STATE_KEY = "system:interoception_state"
+_ANNOUNCED_KEY = "system:interoception_announced"  # subsystems with an open, delivered alert
 _STATE_TTL = 7 * 24 * 3600  # a week; refreshed every tick
 
 # A subsystem is "failed" at these heartbeat statuses (WARNING is too noisy).
@@ -89,6 +90,37 @@ async def _save_state(r, state: Dict[str, str]) -> None:
         await r.set(_STATE_KEY, json.dumps(state), ex=_STATE_TTL)
     except Exception as e:
         logger.debug(f"[body_sense] could not save state: {e}")
+
+
+# Subsystems whose degradation alert was actually DELIVERED to David (an "open,
+# announced incident"). Only these get an all-clear on recovery — so David is
+# never left hanging by an alert that had no close, and never confused by an
+# all-clear for a problem he was never told about.
+async def _load_announced(r) -> set:
+    try:
+        h = await r.hgetall(_ANNOUNCED_KEY)
+        return set(h.keys()) if h else set()
+    except Exception:
+        return set()
+
+
+async def _mark_announced(r, subsystems) -> None:
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc).isoformat()
+        for s in subsystems:
+            await r.hset(_ANNOUNCED_KEY, s, now)
+        await r.expire(_ANNOUNCED_KEY, _STATE_TTL)
+    except Exception as e:
+        logger.debug(f"[body_sense] mark_announced failed: {e}")
+
+
+async def _clear_announced(r, subsystems) -> None:
+    try:
+        for s in subsystems:
+            await r.hdel(_ANNOUNCED_KEY, s)
+    except Exception as e:
+        logger.debug(f"[body_sense] clear_announced failed: {e}")
 
 
 async def _check_daemon() -> Optional[str]:
@@ -186,6 +218,7 @@ async def reflect(report: Dict[str, Any], user_id: str = DAVID_USER_ID) -> Dict[
 
     # 2. Persist current state immediately so a crash mid-alert can't loop.
     await _save_state(r, current)
+    announced = await _load_announced(r)
 
     result = {
         "current": sorted(current_keys),
@@ -195,26 +228,48 @@ async def reflect(report: Dict[str, Any], user_id: str = DAVID_USER_ID) -> Dict[
         "alerts": [],
     }
 
-    # 3. Degradation transition — a body/vital just went dark.
+    # 3. Degradation transition — a body/vital just went dark. Remember which
+    #    ones we actually reached David about, so we know to close them later.
     if newly_failed:
         worst = "critical" if any(current.get(s) == "critical" for s in newly_failed) else "error"
-        await _emit_and_alert(
+        delivered = await _emit_and_alert(
             user_id=user_id,
             kind="degraded",
             subsystems={s: current[s] for s in newly_failed},
             severity=worst,
             result=result,
         )
+        if delivered:
+            await _mark_announced(r, newly_failed)
 
-    # 4. Recovery transition — a body/vital came back.
+    # 4. Recovery transition — a body/vital came back. Push an all-clear ONLY
+    #    for incidents David was actually alerted about (no orphan "recovered"
+    #    for a degradation he never saw). The event still fires for all of them
+    #    (kernel awareness); only the push is gated.
     if recovered:
-        await _emit_and_alert(
-            user_id=user_id,
-            kind="recovered",
-            subsystems={s: prior.get(s, "error") for s in recovered},
-            severity="normal",
-            result=result,
-        )
+        to_close = {s for s in recovered if s in announced}
+        silent = set(recovered) - to_close
+        if to_close:
+            await _emit_and_alert(
+                user_id=user_id, kind="recovered",
+                subsystems={s: prior.get(s, "error") for s in to_close},
+                severity="normal", result=result, notify=True,
+            )
+        if silent:
+            await _emit_and_alert(
+                user_id=user_id, kind="recovered",
+                subsystems={s: prior.get(s, "error") for s in silent},
+                severity="normal", result=result, notify=False,
+            )
+        await _clear_announced(r, recovered)
+
+    # Reconcile: `announced` must only ever hold currently-degraded subsystems.
+    # Self-heals any entry left behind by a restart race (a transient blip that
+    # got announced but whose recovery transition was never cleanly processed),
+    # so a stale entry can't linger for its 7-day TTL.
+    stale = (await _load_announced(r)) - current_keys
+    if stale:
+        await _clear_announced(r, stale)
 
     try:
         await r.close()
@@ -235,8 +290,10 @@ async def _emit_and_alert(
     subsystems: Dict[str, str],
     severity: str,
     result: Dict[str, Any],
-) -> None:
-    """Publish the interoception event AND send the composed human alert."""
+    notify: bool = True,
+) -> bool:
+    """Publish the interoception event, and (when notify) send the composed
+    human alert. Returns True iff a push was actually delivered to David."""
     summary = _summarize(subsystems)
     impacts = [_label(s)[1] for s in subsystems]
     impact_str = impacts[0] if impacts else ""
@@ -265,6 +322,10 @@ async def _emit_and_alert(
     except Exception as e:
         logger.warning(f"[body_sense] failed to publish {kind} event: {e}")
 
+    # Event-only path (e.g. an un-announced recovery): no push, just awareness.
+    if not notify:
+        return False
+
     # --- Composed human alert through the one attention economy ---
     try:
         from app.services.unified_notification import send_notification
@@ -272,13 +333,20 @@ async def _emit_and_alert(
             title = "Heads up — I'm degraded"
             message = f"{summary} went dark just now — {impact_str}."
             priority = "critical" if severity == "critical" else "high"
+            # Degradations keep the 0.5h system_health cooldown (anti-nag).
+            cooldown_hours = None
         else:
-            title = "Back to normal"
-            message = f"{summary} recovered — I'm whole again."
-            priority = "normal"
+            title = "All clear"
+            message = f"{summary} is back — I'm whole again. That was a brief blip."
+            # The all-clear MUST reach David: it closes an alert he already saw.
+            # (1) cooldown_hours=0 so it isn't killed by the degradation's own
+            #     0.5h system_health cooldown (they fire minutes apart).
+            # (2) "high" so it actually delivers instead of being filed as a
+            #     silent inbox item (gotcha_attention_queue_priority_push).
+            priority = "high"
+            cooldown_hours = 0.0
 
-        # Stable topic per subsystem-set so dedup + the 0.5h system_health
-        # cooldown catch any residual repeat even though transitions are rare.
+        # Stable topic per subsystem-set so an exact repeat still dedups.
         topic = f"interoception:{kind}:{'_'.join(sorted(subsystems.keys()))}"
         res = await send_notification(
             user_id=user_id,
@@ -288,10 +356,13 @@ async def _emit_and_alert(
             topic=topic,
             category="system_health",
             source="interoception",
+            cooldown_hours=cooldown_hours,
         )
         result["alerts"].append({"kind": kind, "sent": res.get("sent"), "reason": res.get("reason")})
+        return bool(res.get("sent"))
     except Exception as e:
         logger.warning(f"[body_sense] failed to send {kind} alert: {e}")
+        return False
 
 
 async def current_self_status(user_id: str = DAVID_USER_ID) -> Dict[str, Any]:
