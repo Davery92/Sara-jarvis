@@ -4,7 +4,7 @@ MemoryTrace is a deprecated legacy model. All chat interactions are stored
 as Episode records with pgvector embeddings.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
@@ -106,6 +106,31 @@ async def create_episode(payload: EpisodeCreate, current_user=Depends(get_curren
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to store episode: {e}")
+
+
+@router.get("/verification-question")
+async def verification_question(current_user=Depends(get_current_user)):
+    """ONE_MIND §3.4 — the ripest unverified fact as one natural yes/no
+    question (or null). Marks it asked (anti-nag cooldown + daily cap)."""
+    from app.services.fact_verification import pick_question, count_unverified
+    q = await pick_question(user_id=str(current_user.id))
+    total = await count_unverified()
+    return {"question": q, "unverified_remaining": total}
+
+
+@router.post("/verification-answer")
+async def verification_answer(
+    payload: Dict[str, Any] = Body(...),
+    current_user=Depends(get_current_user),
+):
+    """Record David's answer: confirmed → the fact graduates to the confirmed
+    tier; denied → it is retired."""
+    pkg_id = (payload.get("pkg_id") or "").strip()
+    if not pkg_id:
+        raise HTTPException(status_code=400, detail="pkg_id required")
+    confirmed = bool(payload.get("confirmed"))
+    from app.services.fact_verification import record_answer
+    return await record_answer(str(current_user.id), pkg_id, confirmed)
 
 
 @router.get("/unified-recall")

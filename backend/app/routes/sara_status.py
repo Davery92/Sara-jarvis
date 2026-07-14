@@ -471,6 +471,25 @@ async def get_sara_brief(
         except Exception as e:
             logger.debug(f"Brief learning section failed: {e}")
 
+        # --- Fact verification (ONE_MIND §3.4): one gentle memory-check in the
+        # evening recap. Displayed (mark_asked=False) so it persists until David
+        # answers; answering hits /api/memory/verification-answer to graduate or
+        # retire the fact. ---
+        if time_period in ("evening", "night"):
+            try:
+                from app.services.fact_verification import pick_question
+                vq = await pick_question(user_id=user_id, mark_asked=False)
+                if vq:
+                    result["brief_sections"].append({
+                        "type": "verification",
+                        "title": "Quick memory check",
+                        "priority": "low",
+                        "content": vq["question"],
+                        "data": {"pkg_id": vq["pkg_id"], "fact": vq["fact"]},
+                    })
+            except Exception as e:
+                logger.debug(f"Brief verification section failed: {e}")
+
         # --- Suggested actions based on time of day ---
         if time_period == "morning":
             result["suggested_actions"] = [
