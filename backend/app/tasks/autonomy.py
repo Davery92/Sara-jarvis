@@ -429,6 +429,35 @@ async def _memory_consolidation_async():
         # rating and exploration terms stay at 0 forever.
         rating_stats = await asyncio.to_thread(_consolidate_ratings_sync)
 
+        # H4 (Brain Alignment): forgetting. Compress old, low-importance,
+        # never-retrieved episodes into semantic summaries + PKG facts.
+        # Deletion is gated behind memory.forgetting_delete_enabled (dry-run
+        # until the golden retrieval set proves recall holds).
+        try:
+            from app.services.memory_compaction import compact_old_memories
+            compaction_stats = await compact_old_memories()
+        except Exception as e:
+            logger.warning(f"Memory compaction failed: {e}")
+            compaction_stats = {"error": str(e)}
+
+        # H7 (Brain Alignment): the persona evolves. Revive the reflection loop
+        # and relationship arc, graduate well-evidenced PKG facts into soul
+        # proposals, and auto-approve stale style proposals.
+        persona_stats = {}
+        try:
+            from app.services.persona_evolution import (
+                run_reflection_and_relationship, graduate_facts_to_proposals,
+                auto_approve_style_proposals,
+            )
+            persona_stats["reflection"] = await run_reflection_and_relationship()
+            persona_stats["graduation"] = await graduate_facts_to_proposals()
+            from app.db.session import SessionLocal as _SL
+            with _SL() as _sdb:
+                persona_stats["style_auto_approved"] = auto_approve_style_proposals(_sdb)
+        except Exception as e:
+            logger.warning(f"Persona evolution failed: {e}")
+            persona_stats["error"] = str(e)
+
         return {
             "timestamp": local_now().isoformat(),
             "episodes_today": episode_count,
@@ -436,6 +465,8 @@ async def _memory_consolidation_async():
             "actions_cleaned": cleaned,
             "importance_rescoring": rescore_stats,
             "rating_consolidation": rating_stats,
+            "memory_compaction": compaction_stats,
+            "persona_evolution": persona_stats,
         }
     finally:
         await coordinator.release_exclusive("reflection", "nightly-consolidation")
@@ -458,6 +489,13 @@ def weekly_learning_digest(self):
         result = _run_async(
             _learning_digest_async()
         )
+        # H7.6 (Brain Alignment): Sara's weekly self-narrative — what she learned,
+        # what she changed about herself, what she got wrong.
+        try:
+            from app.services.persona_evolution import write_self_narrative
+            _run_async(write_self_narrative())
+        except Exception as e:
+            logger.warning(f"Weekly self-narrative failed: {e}")
         logger.info(f"Learning digest complete: {result}")
         return result
     except Exception as e:
@@ -985,8 +1023,8 @@ def home_state_hourly_summary(self):
         )
         return result
     except Exception as e:
-        logger.warning(f"Home state summary failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"Home state summary failed: {e}", exc_info=True)
+        raise self.retry(countdown=60, exc=e)
 
 
 async def _home_state_summary_async():
@@ -1061,8 +1099,8 @@ async def _home_state_summary_async():
             "rooms": list(rooms_active),
         }
     except Exception as e:
-        logger.warning(f"Home state summary async failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"Home state summary async failed: {e}", exc_info=True)
+        raise
 
 
 # ── Daily Autonomy Digest ──
@@ -1202,8 +1240,10 @@ async def _autonomy_retention_async():
                 WHERE created_at < NOW() - INTERVAL '90 days'
             """))
             results["action_traces_deleted"] = r.rowcount
+            await db.commit()
         except Exception as e:
             results["action_traces_error"] = str(e)
+            await db.rollback()
 
         # Attention items: delete archived older than 30 days (Phase 2)
         try:
@@ -1222,8 +1262,9 @@ async def _autonomy_retention_async():
                   AND created_at < NOW() - INTERVAL '7 days'
             """))
             results["attention_stale_archived"] = r.rowcount
+            await db.commit()
         except Exception:
-            pass  # Table may not exist yet (Phase 2)
+            await db.rollback()  # Table may not exist yet (Phase 2)
 
         # Missions: delete terminal states older than 180 days (Phase 2)
         try:
@@ -1233,8 +1274,9 @@ async def _autonomy_retention_async():
                   AND completed_at < NOW() - INTERVAL '180 days'
             """))
             results["missions_deleted"] = r.rowcount
+            await db.commit()
         except Exception:
-            pass  # Table may not exist yet
+            await db.rollback()  # Table may not exist yet
 
         # Policy candidates: auto-expire new after 14 days, delete decided after 30 days (Phase 3)
         try:
@@ -1252,8 +1294,9 @@ async def _autonomy_retention_async():
                   AND updated_at < NOW() - INTERVAL '30 days'
             """))
             results["candidates_deleted"] = r.rowcount
+            await db.commit()
         except Exception:
-            pass  # Table may not exist yet
+            await db.rollback()  # Table may not exist yet
 
         # Standing-order action_ledger: retain 90 days so pattern promotion
         # can see a reasonable history, drop older rows so the table doesn't
@@ -1266,11 +1309,11 @@ async def _autonomy_retention_async():
                 WHERE executed_at < NOW() - INTERVAL '90 days'
             """))
             results["action_ledger_deleted"] = r.rowcount
+            await db.commit()
         except Exception as e:
             # Table may not exist yet on a very old DB.
             results["action_ledger_error"] = str(e)
-
-        await db.commit()
+            await db.rollback()
 
     # Episode embedding backfill — several ingestion paths (fitness_food,
     # pi_dashboard_voice, api, learning_chat) insert rows with NULL
@@ -1319,25 +1362,33 @@ async def _backfill_episode_embeddings(limit: int = 500) -> int:
             )
         ).fetchall()
 
-        for row in rows:
-            try:
-                vec = await svc.generate_embedding(row.content)
-            except Exception:
-                continue
-            if not vec:
-                continue
-            await db.execute(
-                text(
-                    """
-                    UPDATE episode
-                    SET embedding = CAST(:qvec AS vector)
-                    WHERE id = :id
-                    """
-                ),
-                {"id": row.id, "qvec": str(vec)},
-            )
+    # Each row gets its own session/transaction so one embedding-service
+    # timeout or write failure doesn't roll back everything already filled
+    # in this batch.
+    for row in rows:
+        try:
+            vec = await svc.generate_embedding(row.content)
+        except Exception:
+            continue
+        if not vec:
+            continue
+        try:
+            async with factory() as db:
+                await db.execute(
+                    text(
+                        """
+                        UPDATE episode
+                        SET embedding = CAST(:qvec AS vector)
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": row.id, "qvec": str(vec)},
+                )
+                await db.commit()
             filled += 1
-        await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to write backfilled embedding for episode {row.id}: {e}")
+            continue
 
     return filled
 
@@ -1392,33 +1443,14 @@ def trigger_deliberation(self, user_id: str = None):
 
 
 async def _deliberation_async(user_id: str):
-    from app.services.autonomy.coordination import get_coordinator
+    # ONE_MIND §3.3: ambient cognition now flows through the one kernel entry
+    # point (state + wake-reason), which delegates to this same deliberation
+    # engine + gate. Behaviour is unchanged; the kernel is where later phases
+    # fold the check-in / anticipation / idle / daemon loops in as wake-reasons
+    # instead of parallel selves.
+    from app.services.kernel import ambient_turn, WakeReason
 
-    coordinator = get_coordinator()
-    if not await coordinator.acquire_exclusive("deliberation", "heavy_llm"):
-        return {"skipped": "exclusive_group_busy"}
-
-    try:
-        from app.services.salience import salience_scorer
-        # Double-check should_deliberate (may have been consumed since trigger)
-        if not await salience_scorer.should_deliberate(user_id):
-            return {"skipped": "below_threshold"}
-
-        from app.services.deliberation import deliberation_engine
-        from app.services.deliberation_gate import process_deliberation_result
-
-        result = await deliberation_engine.run(user_id)
-        summary = await process_deliberation_result(result, user_id)
-        return {
-            "status": "completed",
-            "thought": result.thought[:200],
-            "notifications": summary["notifications_sent"],
-            "home_actions": summary["home_actions_executed"],
-            "observations_consumed": summary["observations_consumed"],
-            "duration": result.duration_seconds,
-        }
-    finally:
-        await coordinator.release_exclusive("heavy_llm", "deliberation")
+    return await ambient_turn(user_id, wake_reason=WakeReason.PROMOTED_EVENT)
 
 
 @celery_app.task(
@@ -1595,12 +1627,35 @@ async def _consolidation_async():
     try:
         from app.services.consolidation import consolidation_engine
         result = await consolidation_engine.run(DEFAULT_USER_ID)
+
+        # Cross-domain correlation discovery (health x behavior x productivity)
+        # has a fully-built producer in pattern_correlation_service but nothing
+        # ever called it — it was written for a standalone worker process that
+        # was never deployed, so correlation_pattern sat at 0 rows even though
+        # routes/patterns.py and tools/patterns.py were built to read from it.
+        # Piggyback on this same 2x-daily slot rather than stand up a new job.
+        correlation_result = {"error": "not_run"}
+        try:
+            from app.db.session import SessionLocal
+            from app.services.pattern_correlation_service import pattern_correlation_service
+            sync_db = SessionLocal()
+            try:
+                correlation_result = await pattern_correlation_service.run_discovery(
+                    sync_db, DEFAULT_USER_ID, lookback_days=30
+                )
+            finally:
+                sync_db.close()
+        except Exception as e:
+            logger.warning(f"Correlation pattern discovery failed: {e}")
+            correlation_result = {"error": str(e)}
+
         return {
             "status": "completed",
             "patterns": len(result.patterns_noticed),
             "pkg_extractions": len(result.pkg_extractions),
             "journal_written": bool(result.journal_entry),
             "duration": result.duration_seconds,
+            "correlation_discovery": correlation_result,
         }
     finally:
         await coordinator.release_exclusive("heavy_llm", "consolidation")

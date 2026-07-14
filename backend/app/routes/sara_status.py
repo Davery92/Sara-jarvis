@@ -298,6 +298,7 @@ async def get_sara_brief(
             "emotional_state": "neutral",
             "latest_thought": None,
             "watching_for": None,
+            "kernel_state": "ambient",
         },
         "self_status": {"healthy": True, "degraded": []},
     }
@@ -313,6 +314,16 @@ async def get_sara_brief(
             raw = journal.content or ""
             result["sara_status"]["latest_thought"] = _extract_latest_thought(raw)
             result["sara_status"]["watching_for"] = _extract_watching_for(raw)
+
+        # --- Kernel state: the one mind's live state (ONE_MIND §3.3/§3.9) ---
+        # Drives the honest orb — ambient/focused/dreaming reflect real cognition,
+        # not a decoration.
+        try:
+            from app.services.kernel import get_state as kernel_get_state
+            ks = await kernel_get_state(user_id)
+            result["sara_status"]["kernel_state"] = ks.get("state") or "ambient"
+        except Exception as e:
+            logger.debug(f"Brief kernel_state failed: {e}")
 
         # --- Interoception: her own body (ONE_MIND §3.1) ---
         # The greeting references her real self-state — if a body/vital is
