@@ -549,8 +549,12 @@ class MemoryService:
             )
             return results
 
-        # Get db session - support both init patterns
-        if hasattr(self, 'db'):
+        # Get db session - support both init patterns. NOTE: __init__ always
+        # sets self.db (to None on the factory path), so the old
+        # `hasattr(self, 'db')` guard was always True and crashed with
+        # `NoneType has no attribute 'execute'` whenever the service was
+        # created with a db_session_factory. Check for a real session instead.
+        if getattr(self, 'db', None) is not None:
             db = self.db
             should_close = False
         elif self.SessionLocal:

@@ -108,6 +108,23 @@ async def create_episode(payload: EpisodeCreate, current_user=Depends(get_curren
         raise HTTPException(status_code=500, detail=f"Failed to store episode: {e}")
 
 
+@router.get("/unified-recall")
+async def unified_recall(
+    q: str = Query(...),
+    k: int = Query(10, ge=1, le=50),
+    kinds: Optional[str] = Query(None, description="comma-separated: episode,note,document,summary,fact,person,thread"),
+    current_user=Depends(get_current_user),
+):
+    """ONE_MIND §3.4 — the one recall API. Fans out across episodes, notes,
+    documents, summaries, facts (PKG), people, and open threads, returning
+    traces on one shape with one provenance and one graduated confidence scale
+    (observed → inferred → confirmed). This is the recall-paths=1 path callers
+    migrate onto so no subsystem keeps a private view of the truth."""
+    from app.services.memory_recall import recall as unified
+    kind_list = [s.strip() for s in kinds.split(",")] if kinds else None
+    return await unified(user_id=str(current_user.id), query=q, k=k, kinds=kind_list)
+
+
 @router.get("/recall")
 async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
                  time_window: Optional[str] = Query(None),
