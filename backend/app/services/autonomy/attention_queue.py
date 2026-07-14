@@ -26,6 +26,40 @@ async def _exec(db, stmt, params=None):
     return result
 
 
+# ONE_MIND §3.5 / Phase 2: the affordance triad every proactive item must
+# carry — "do it" (the caller's own actions), "not now" (re-surface at the
+# next context change), "stop these" (the correction channel at the moment of
+# annoyance, strongest θ nudge). "stop these" used to be attached only by
+# unified_notification's send path, so the ~80% of items created directly via
+# create_item (check-ins, deliberation, calendar-prep, digests, nudges…) had
+# no way for David to teach θ. Injecting here — the single chokepoint every
+# attention item passes through — makes the triad truly universal.
+_TRIAD = [
+    {"id": "not_now", "label": "Not now", "kind": "not_now"},
+    {"id": "stop_these", "label": "Stop these", "kind": "stop_these"},
+]
+
+
+def _ensure_affordances(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a payload dict guaranteed to carry the not_now + stop_these
+    affordances, preserving any caller-supplied actions (which serve as the
+    'do it' options). Idempotent: dedups by action kind so items that already
+    came through the unified send path aren't doubled."""
+    payload = dict(payload) if isinstance(payload, dict) else {}
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        actions = []
+    present_kinds = {
+        str(a.get("kind", "")).strip().lower()
+        for a in actions if isinstance(a, dict)
+    }
+    for aff in _TRIAD:
+        if aff["kind"] not in present_kinds:
+            actions.append(dict(aff))
+    payload["actions"] = actions
+    return payload
+
+
 class AttentionQueueService:
     """CRUD + delivery logic for the attention queue."""
 
@@ -93,6 +127,11 @@ class AttentionQueueService:
         command to any connected desktop devices so the user is notified
         without polling the webapp. Best-effort — failures are swallowed.
         """
+        # Every proactive item carries the affordance triad (do it / not now /
+        # stop these) so every tap can feed θ — regardless of which code path
+        # created it. See _ensure_affordances.
+        payload = _ensure_affordances(payload)
+
         new_item_id: Optional[str] = None
         try:
             result = await _exec(db, text("""
@@ -343,6 +382,21 @@ class AttentionQueueService:
                 WHERE {where}
             """), params)
             await self._propagate_feedback(db, item_id, action="engaged")
+            try:
+                row = (await _exec(db, text("""
+                    SELECT payload FROM autonomy_attention_item
+                    WHERE id = CAST(:id AS uuid)
+                """), {"id": item_id})).fetchone()
+                payload = row.payload if row else None
+                if isinstance(payload, dict) and payload.get("stimulus_key"):
+                    from app.services.habituation import note_engagement
+                    await note_engagement(
+                        db,
+                        payload.get("generator") or payload.get("source") or "unknown",
+                        payload["stimulus_key"],
+                    )
+            except Exception as e:
+                logger.debug(f"Habituation engagement note skipped: {e}")
             return True
         except Exception as e:
             logger.error(f"Failed to mark attention item engaged: {e}")
