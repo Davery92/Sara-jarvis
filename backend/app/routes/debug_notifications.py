@@ -21,6 +21,32 @@ router = APIRouter()
 DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
 
+@router.get("/debug/voice-register")
+async def voice_register(
+    days: int = 7,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Style-contract linter over the last N days of sent notifications
+    (ONE_MIND Phase 3 acceptance: "one register"). Reports a register_score
+    (fraction of items that read as Sara's one voice) and the specific leaks —
+    shouts, template tells, monologue scaffolding, robotic status lines."""
+    from app.services.voice_linter import lint_rows
+
+    rows = db.execute(text("""
+        SELECT title, message, category, source
+        FROM notification_log
+        WHERE sent = true
+          AND sent_at > NOW() - (:days || ' days')::interval
+        ORDER BY sent_at DESC
+        LIMIT 2000
+    """), {"days": days}).mappings().all()
+
+    report = lint_rows([dict(r) for r in rows])
+    report["period_days"] = days
+    return report
+
+
 @router.get("/debug/notification-funnel")
 async def notification_funnel(
     hours: int = 24,
