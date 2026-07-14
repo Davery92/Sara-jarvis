@@ -3,9 +3,9 @@ User Settings API Routes
 Manage user preferences for vision, screenshots, desktop agent, notification preferences, etc.
 """
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
@@ -82,6 +82,29 @@ def get_or_create_settings(db: Session, user_id: str) -> UserSettings:
         db.refresh(settings)
 
     return settings
+
+
+@router.get("/llm-capabilities")
+async def llm_capabilities(current_user: User = Depends(get_current_user)):
+    """ONE_MIND §3.7 — the auditable class→model map behind the model broker.
+    Callers declare a capability class; this shows what each resolves to."""
+    from app.services.llm_broker import all_capabilities
+    return {"capabilities": all_capabilities()}
+
+
+@router.post("/llm-rename-model")
+async def llm_rename_model(
+    payload: Dict[str, str] = Body(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Rename a model everywhere it's referenced in app_settings, in one call
+    (ONE_MIND §3.7 acceptance: "model rename = one action")."""
+    old = (payload.get("old") or "").strip()
+    new = (payload.get("new") or "").strip()
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="both 'old' and 'new' are required")
+    from app.services.llm_broker import rename_model
+    return rename_model(old, new)
 
 
 @router.get("")
