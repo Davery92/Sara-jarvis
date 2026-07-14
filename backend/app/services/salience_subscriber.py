@@ -39,6 +39,9 @@ class SalienceSubscriber(EventSubscriber):
             EventType.HOME_STATE_CHANGED,
             # Activity
             EventType.ACTIVITY_STATE_CHANGED,
+            EventType.APP_SESSION_STARTED,
+            EventType.APP_VIEW_CHANGED,
+            EventType.APP_SESSION_ENDED,
             EventType.DESKTOP_FOCUS_SPAN,
             EventType.DESKTOP_ACTIVITY_STATE,
             EventType.DESKTOP_SCREEN_CONTENT,
@@ -66,6 +69,9 @@ class SalienceSubscriber(EventSubscriber):
             EventType.GOAL_MILESTONE_REACHED,
             EventType.GOAL_COMPLETED,
             EventType.GOAL_PROGRESS_LOGGED,
+            # Interoception — Sara's own body (ONE_MIND §3.1)
+            EventType.SYSTEM_HEALTH_DEGRADED,
+            EventType.SYSTEM_HEALTH_RECOVERED,
         )
 
     async def handle_event(self, event: Event) -> None:

@@ -299,6 +299,7 @@ async def get_sara_brief(
             "latest_thought": None,
             "watching_for": None,
         },
+        "self_status": {"healthy": True, "degraded": []},
     }
 
     try:
@@ -312,6 +313,27 @@ async def get_sara_brief(
             raw = journal.content or ""
             result["sara_status"]["latest_thought"] = _extract_latest_thought(raw)
             result["sara_status"]["watching_for"] = _extract_watching_for(raw)
+
+        # --- Interoception: her own body (ONE_MIND §3.1) ---
+        # The greeting references her real self-state — if a body/vital is
+        # down, she says so at the top of the brief instead of pretending
+        # she's whole. Only surfaced when actually degraded.
+        try:
+            from app.services.body_sense import current_self_status
+            self_status = await current_self_status(user_id)
+            result["self_status"] = self_status
+            if not self_status.get("healthy") and self_status.get("degraded"):
+                degraded = self_status["degraded"]
+                names = ", ".join(d["name"] for d in degraded)
+                result["brief_sections"].insert(0, {
+                    "type": "self_status",
+                    "title": "I'm running degraded",
+                    "priority": "high",
+                    "content": f"{names} — {degraded[0]['impact']}.",
+                    "data": {"degraded": degraded},
+                })
+        except Exception as e:
+            logger.debug(f"Brief self_status section failed: {e}")
 
         # --- Activity state + interruptibility ---
         try:

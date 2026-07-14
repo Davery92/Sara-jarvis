@@ -234,51 +234,41 @@ def system_heartbeat(self) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Failed to store health status: {e}")
 
-    # Alert on error/critical — push notification to David
-    if health_report["overall_status"] in (HealthStatus.ERROR, HealthStatus.CRITICAL):
-        failed_checks = [
-            name for name, check in health_report["checks"].items()
-            if check["status"] in (HealthStatus.ERROR, HealthStatus.CRITICAL)
-        ]
-        _send_health_alert(failed_checks, health_report["overall_status"])
+    # Interoception (ONE_MIND §3.1): feed this health report — plus daemon
+    # liveness and host reachability — into Sara's own body-sense. It emits
+    # SYSTEM_HEALTH_DEGRADED/RECOVERED events onto the salience pipeline and
+    # sends the composed, cooldown-gated alert through the one attention
+    # economy. Runs on EVERY tick (not just error) so recovery transitions and
+    # daemon/host checks are caught even when the local checks are green.
+    _run_body_sense(health_report)
 
     logger.info(f"System heartbeat: {health_report['overall_status']}")
 
     return health_report
 
 
-def _send_health_alert(failed_checks: list, severity: str):
-    """Send push notification for health failures."""
+def _run_body_sense(health_report: dict):
+    """Drive Sara's interoception from the heartbeat's health report."""
     import asyncio
+    import os
     try:
-        from app.services.unified_notification import send_notification
-        solo_user_id = os.getenv("SOLO_USER_ID", "")
-        if not solo_user_id:
-            return
+        from app.services.body_sense import reflect
+        user_id = os.getenv("SOLO_USER_ID", "") or "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
-        title = f"System health: {severity.upper()}"
-        message = f"Failed checks: {', '.join(failed_checks)}"
-
-        async def _send():
-            await send_notification(
-                user_id=solo_user_id,
-                title=title,
-                message=message,
-                priority="urgent" if severity == HealthStatus.CRITICAL else "high",
-                category="system_health",
-                topic=f"health:{','.join(sorted(failed_checks))}",
-                source="health_monitor",
-            )
+        async def _go():
+            await reflect(health_report, user_id=user_id)
 
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.ensure_future(_send())
+                asyncio.ensure_future(_go())
             else:
-                loop.run_until_complete(_send())
+                loop.run_until_complete(_go())
         except RuntimeError:
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(_send())
-            loop.close()
+            try:
+                loop.run_until_complete(_go())
+            finally:
+                loop.close()
     except Exception as e:
-        logger.warning(f"Failed to send health alert: {e}")
+        logger.warning(f"Body-sense reflection failed: {e}")

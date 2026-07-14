@@ -107,6 +107,11 @@ class EventType(str, Enum):
     # Chat events
     CHAT_MESSAGE_RECEIVED = "chat.message_received"
 
+    # App activity events (web/iOS presence — contact, not conversation)
+    APP_SESSION_STARTED = "app.session_started"   # first visible heartbeat after app_active was false
+    APP_VIEW_CHANGED = "app.view_changed"          # view changed AND >=2 min dwell in the new view
+    APP_SESSION_ENDED = "app.session_ended"        # reaper detected all clients gone
+
     # Agent task events
     AGENT_TASK_PROGRESS = "agent_task.progress"
     AGENT_TASK_COMPLETED = "agent_task.completed"
@@ -129,6 +134,14 @@ class EventType(str, Enum):
     # System events
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"
+
+    # Interoception — Sara's sense of her own body (ONE_MIND §3.1).
+    # Her own bodies (hosts), jobs, and vital signs become events on the same
+    # afferent pathway as everything else, so a self-failure is *noticed* and
+    # *spoken about in one voice* instead of pushed as a raw alert nobody reads.
+    # Fired on state transitions only (degraded ⇄ recovered), never per-tick.
+    SYSTEM_HEALTH_DEGRADED = "system.health_degraded"
+    SYSTEM_HEALTH_RECOVERED = "system.health_recovered"
 
 
 class Event(BaseModel):

@@ -152,6 +152,12 @@ class SalienceScorer:
             if etype == EventType.CONTEXT_UPDATED:
                 return min(1.0, 1.0 - (memory.next_event_minutes_away / 30))
 
+        # Interoception — a degraded body is urgent; recovery less so.
+        if etype == EventType.SYSTEM_HEALTH_DEGRADED:
+            return 0.9
+        if etype == EventType.SYSTEM_HEALTH_RECOVERED:
+            return 0.3
+
         # Timer completion
         if etype == EventType.TIMER_COMPLETED:
             return 0.7
@@ -169,6 +175,13 @@ class SalienceScorer:
         # Security events are always novel
         if etype in (EventType.HOME_DOOR_CHANGED, EventType.HOME_ANOMALY_DETECTED):
             return 0.8
+
+        # Interoception — a body/vital going dark (or recovering) is maximally
+        # novel: it is, by construction, a break from the expected baseline.
+        if etype == EventType.SYSTEM_HEALTH_DEGRADED:
+            return 0.95
+        if etype == EventType.SYSTEM_HEALTH_RECOVERED:
+            return 0.6
 
         # Chat message after long silence
         if etype == EventType.CHAT_MESSAGE_RECEIVED:
@@ -198,6 +211,16 @@ class SalienceScorer:
         if etype in (EventType.WORKOUT_LOGGED, EventType.WORKOUT_COMPLETED):
             return 0.4
 
+        # App activity — ambient contact, low novelty. Enriches the observation
+        # window (Sara can see "he opened the app at 2:10, 40 min in fitness")
+        # but never a deliberation trigger on its own.
+        if etype == EventType.APP_SESSION_STARTED:
+            return 0.5 if event.payload.get("first_of_day") else 0.3
+        if etype == EventType.APP_SESSION_ENDED:
+            return 0.4
+        if etype == EventType.APP_VIEW_CHANGED:
+            return 0.2
+
         # Location transitions — a place change is novel; arriving home after
         # a long absence is the most novel of all.
         if etype in (EventType.LOCATION_PLACE_ENTERED, EventType.LOCATION_PLACE_EXITED):
@@ -215,6 +238,14 @@ class SalienceScorer:
         # Security events — always high emotional relevance
         if etype in (EventType.HOME_DOOR_CHANGED, EventType.HOME_ANOMALY_DETECTED):
             return 0.9
+
+        # Interoception — Sara's own degradation matters to her *and* to David
+        # (his assistant just lost a faculty). Recovery is reassuring, lower.
+        if etype == EventType.SYSTEM_HEALTH_DEGRADED:
+            severity = event.payload.get("severity", "error")
+            return 0.95 if severity == "critical" else 0.85
+        if etype == EventType.SYSTEM_HEALTH_RECOVERED:
+            return 0.4
 
         # Chat topics matching Sara's focus or curiosities
         if etype == EventType.CHAT_MESSAGE_RECEIVED:
@@ -257,8 +288,12 @@ class SalienceScorer:
         return 0.1
 
     def _score_staleness(self, event: Event, memory: UnifiedContextSnapshot) -> float:
-        """How stale is Sara's awareness? Long silence = higher salience for everything."""
+        """How stale is Sara's awareness? Long silence = higher salience for everything.
+        Silence means no contact at all — being active in the app resets the
+        'world is stale' pressure just like a chat does."""
         hours_since_chat = memory.hours_since_last_chat or 0.0
+        hours_since_app = memory.hours_since_app_activity if memory.hours_since_app_activity is not None else 999.0
+        hours_since_chat = min(hours_since_chat, hours_since_app)
 
         # Hours since last deliberation
         hours_since_deliberation = 0.0
@@ -287,9 +322,25 @@ class SalienceScorer:
                 return max(score, 0.85)
             return max(score, 0.7)
 
+        # Interoception: a self-failure must always land in the observation log
+        # (and rank near the top) so the greeting and the next ambient turn both
+        # see it. Recovery gets a modest floor.
+        if etype == EventType.SYSTEM_HEALTH_DEGRADED:
+            severity = event.payload.get("severity", "error")
+            return max(score, 0.95 if severity == "critical" else 0.9)
+        if etype == EventType.SYSTEM_HEALTH_RECOVERED:
+            return max(score, 0.5)
+
         # Timer completion: floor at 0.5
         if etype == EventType.TIMER_COMPLETED:
             return max(score, 0.5)
+
+        # App session start/end: modest floor so they land in the observation
+        # log as ambient context. Well under the deliberation threshold (1.5).
+        if etype == EventType.APP_SESSION_STARTED:
+            return max(score, 0.45 if event.payload.get("first_of_day") else 0.35)
+        if etype == EventType.APP_SESSION_ENDED:
+            return max(score, 0.35)
 
         # Rhythm deviation (daily_rhythm derived signal): modest floor so it
         # can tip deliberation when combined with other signals, never alone.
@@ -385,9 +436,25 @@ class SalienceScorer:
             EventType.GOAL_MILESTONE_REACHED: lambda: f"Milestone! {payload.get('goal_name', '')}: {payload.get('milestone', '')}",
             EventType.GOAL_COMPLETED: lambda: f"Goal completed: {payload.get('goal_name', '')}",
             EventType.HEALTH_DATA_SYNCED: lambda: f"Health data synced",
+            EventType.APP_SESSION_STARTED: lambda: (
+                f"David opened the app ({payload.get('platform', 'app')}, {payload.get('view', 'app')} view)"
+            ),
+            EventType.APP_VIEW_CHANGED: lambda: f"David moved to the {payload.get('view', 'app')} view",
+            EventType.APP_SESSION_ENDED: lambda: (
+                "David closed the app"
+                + (f" after {payload.get('duration_minutes')}m" if payload.get("duration_minutes") else "")
+                + (f" (today: {payload.get('views_today')})" if payload.get("views_today") else "")
+            ),
             EventType.CONTEXT_UPDATED: lambda: (
                 payload.get("message", "Context updated") if payload.get("rhythm_deviation")
                 else "Context updated"
+            ),
+            EventType.SYSTEM_HEALTH_DEGRADED: lambda: (
+                f"My own body degraded: {payload.get('summary', 'a subsystem')} "
+                f"went dark ({payload.get('impact', 'part of me is impaired')})"
+            ),
+            EventType.SYSTEM_HEALTH_RECOVERED: lambda: (
+                f"My own body recovered: {payload.get('summary', 'a subsystem')} is back"
             ),
         }
 
@@ -425,6 +492,9 @@ class SalienceScorer:
             EventType.NOTE_CREATED: "knowledge",
             EventType.NOTE_UPDATED: "knowledge",
             EventType.ACTIVITY_STATE_CHANGED: "activity",
+            EventType.APP_SESSION_STARTED: "activity",
+            EventType.APP_VIEW_CHANGED: "activity",
+            EventType.APP_SESSION_ENDED: "activity",
             EventType.DESKTOP_FOCUS_SPAN: "activity",
             EventType.DESKTOP_ACTIVITY_STATE: "activity",
             EventType.DESKTOP_SCREEN_CONTENT: "activity",
@@ -432,6 +502,8 @@ class SalienceScorer:
             EventType.GOAL_COMPLETED: "goals",
             EventType.GOAL_PROGRESS_LOGGED: "goals",
             EventType.CONTEXT_UPDATED: "rhythm",
+            EventType.SYSTEM_HEALTH_DEGRADED: "interoception",
+            EventType.SYSTEM_HEALTH_RECOVERED: "interoception",
         }
         return categories.get(etype, "general")
 
